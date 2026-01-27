@@ -1,0 +1,3 @@
+[submodule "readability-js"]
+	path = readability-js
+	url = https://github.com/mozilla/readability.git
