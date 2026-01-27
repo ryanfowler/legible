@@ -1,6 +1,6 @@
 //! Metadata extraction from HTML documents.
 
-use crate::constants::{HTML_ESCAPE_MAP, TITLE_SEPARATORS, regexps};
+use crate::constants::{HTML_ESCAPE_MAP, regexps};
 use crate::scoring::get_inner_text;
 use dom_query::Document;
 use once_cell::sync::Lazy;
@@ -242,26 +242,19 @@ pub fn get_article_title(doc: &Document) -> String {
         s.split_whitespace().count()
     }
 
-    // Build regex for title separators
-    let separator_pattern = format!(r"\s[{}]\s", TITLE_SEPARATORS);
-    let separator_regex = Regex::new(&separator_pattern).unwrap();
-
-    if separator_regex.is_match(&cur_title) {
+    if regexps::TITLE_SEPARATOR.is_match(&cur_title) {
         // Check for hierarchical separators
-        let hierarchical_regex = Regex::new(r"\s[\\/>\u{00BB}]\s").unwrap();
-        title_had_hierarchical_separators = hierarchical_regex.is_match(&cur_title);
+        title_had_hierarchical_separators = regexps::TITLE_HIERARCHICAL.is_match(&cur_title);
 
         // Find all separators and split at the last one
-        let matches: Vec<_> = separator_regex.find_iter(&orig_title).collect();
+        let matches: Vec<_> = regexps::TITLE_SEPARATOR.find_iter(&orig_title).collect();
         if let Some(last_match) = matches.last() {
             cur_title = orig_title[..last_match.start()].to_string();
         }
 
         // If the resulting title is too short, remove the first part instead
         if word_count(&cur_title) < 3 {
-            let first_part_regex =
-                Regex::new(&format!(r"^[^{}]*[{}]", TITLE_SEPARATORS, TITLE_SEPARATORS)).unwrap();
-            cur_title = first_part_regex.replace(&orig_title, "").to_string();
+            cur_title = regexps::TITLE_FIRST_PART.replace(&orig_title, "").to_string();
         }
     } else if cur_title.contains(": ") {
         // Check if we have a heading containing this exact string
@@ -305,8 +298,7 @@ pub fn get_article_title(doc: &Document) -> String {
     // If we now have 4 words or fewer and conditions are met, use original title
     let cur_title_word_count = word_count(&cur_title);
     if cur_title_word_count <= 4 {
-        let separator_only_regex = Regex::new(&format!(r"\s[{}]\s", TITLE_SEPARATORS)).unwrap();
-        let orig_without_separators = separator_only_regex.replace_all(&orig_title, "");
+        let orig_without_separators = regexps::TITLE_SEPARATOR.replace_all(&orig_title, "");
         let orig_word_count = word_count(&orig_without_separators);
 
         if !title_had_hierarchical_separators || cur_title_word_count != orig_word_count - 1 {

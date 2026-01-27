@@ -172,6 +172,21 @@ pub mod regexps {
     pub static IMAGE_SRC: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)\S*\s*$").unwrap()
     });
+
+    /// Matches title separators surrounded by whitespace.
+    pub static TITLE_SEPARATOR: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\s[\|\-–—\\\/>»]\s").unwrap()
+    });
+
+    /// Matches hierarchical title separators (/, >, »).
+    pub static TITLE_HIERARCHICAL: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\s[\\/>\u{00BB}]\s").unwrap()
+    });
+
+    /// Matches the first part of a title up to and including a separator.
+    pub static TITLE_FIRST_PART: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^[^\|\-–—\\\/>»]*[\|\-–—\\\/>»]").unwrap()
+    });
 }
 
 /// Roles that indicate unlikely content areas.
