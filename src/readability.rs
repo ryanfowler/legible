@@ -5,7 +5,7 @@ use crate::cleaning::{
     fix_lazy_images, mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
     unwrap_noscript_images,
 };
-use crate::constants::{DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps};
+use crate::constants::{ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps};
 use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select};
 use crate::error::{ReadabilityError, Result};
 use crate::metadata::{
@@ -506,9 +506,29 @@ impl Readability {
 
             // Get the article node ID to use
             let article_node_id = if needed_to_create_top_candidate {
+                // No siblings to gather when we created a synthetic candidate from body
                 self.doc.select("body").nodes().first().map(|n| n.id)
             } else {
-                Some(top_candidate_id)
+                // Gather siblings and potentially create container DIV
+                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+                let sibling_ids = self.gather_siblings(top_candidate_id, &all_nodes);
+
+                if sibling_ids.len() == 1 && sibling_ids[0] == top_candidate_id {
+                    // Only the top candidate qualifies, use it directly
+                    Some(top_candidate_id)
+                } else if sibling_ids.is_empty() {
+                    // No siblings qualified (shouldn't happen since top candidate always included)
+                    Some(top_candidate_id)
+                } else {
+                    // Create container DIV and move siblings into it
+                    if let Some(top_candidate) =
+                        all_nodes.iter().find(|n| n.id == top_candidate_id)
+                    {
+                        self.create_article_container(top_candidate, &sibling_ids, &all_nodes)
+                    } else {
+                        Some(top_candidate_id)
+                    }
+                }
             };
 
             let article_node_id = article_node_id.ok_or(ReadabilityError::NoContent)?;
@@ -627,6 +647,136 @@ impl Readability {
             }
 
             return Err(ReadabilityError::NoContent);
+        }
+    }
+
+    /// Gather sibling nodes of the top candidate that should be included in the article.
+    /// Returns a list of NodeIds that should be included.
+    fn gather_siblings(&self, top_candidate_id: NodeId, all_nodes: &[Node<'_>]) -> Vec<NodeId> {
+        let top_candidate = match all_nodes.iter().find(|n| n.id == top_candidate_id) {
+            Some(tc) => tc,
+            None => return vec![top_candidate_id],
+        };
+
+        let parent = match top_candidate.parent() {
+            Some(p) => p,
+            None => return vec![top_candidate_id],
+        };
+
+        // Calculate sibling score threshold
+        let top_score = self.node_data.get_content_score(&top_candidate_id);
+        let sibling_score_threshold = (10.0_f64).max(top_score * 0.2);
+
+        // Get top candidate's class for bonus calculation
+        let top_class = top_candidate
+            .attr("class")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let mut siblings_to_include = Vec::new();
+
+        // Iterate through parent's element children
+        for sibling in parent.element_children() {
+            let mut should_append = false;
+
+            if sibling.id == top_candidate_id {
+                // Always include the top candidate itself
+                should_append = true;
+            } else {
+                let mut content_bonus = 0.0;
+
+                // Give a bonus if sibling and top candidate have the same non-empty class
+                let sibling_class = sibling
+                    .attr("class")
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                if !sibling_class.is_empty() && sibling_class == top_class {
+                    content_bonus = top_score * 0.2;
+                }
+
+                // Check if sibling has a readability score that qualifies
+                if self.node_data.has(&sibling.id) {
+                    let sibling_score = self.node_data.get_content_score(&sibling.id);
+                    if sibling_score + content_bonus >= sibling_score_threshold {
+                        should_append = true;
+                    }
+                }
+
+                // Special case for P elements without scores
+                if !should_append {
+                    if let Some(tag) = get_tag_name(&sibling) {
+                        if tag == "P" {
+                            let link_density = get_link_density(&sibling);
+                            let node_content = get_inner_text(&sibling, true);
+                            let node_length = node_content.len();
+
+                            if node_length > 80 && link_density < 0.25 {
+                                should_append = true;
+                            } else if node_length < 80
+                                && node_length > 0
+                                && link_density == 0.0
+                                && regexps::SENTENCE_END.is_match(&node_content)
+                            {
+                                should_append = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if should_append {
+                self.log(&format!("Appending sibling node: {:?}", sibling.id));
+                siblings_to_include.push(sibling.id);
+            }
+        }
+
+        siblings_to_include
+    }
+
+    /// Create a container DIV and move the gathered siblings into it.
+    /// Returns the NodeId of the new container.
+    fn create_article_container(
+        &self,
+        top_candidate: &Node<'_>,
+        sibling_ids: &[NodeId],
+        all_nodes: &[Node<'_>],
+    ) -> Option<NodeId> {
+        let parent = top_candidate.parent()?;
+
+        // Create a new DIV element as container
+        let container = self.doc.tree.new_element("div");
+        let container_id = container.id;
+
+        // Find the first sibling to insert before
+        let first_sibling = sibling_ids
+            .first()
+            .and_then(|id| all_nodes.iter().find(|n| &n.id == id))?;
+
+        // Insert container before the first sibling
+        first_sibling.insert_before(&container);
+
+        // Move each qualifying sibling into the container
+        for sibling_id in sibling_ids {
+            if let Some(sibling) = all_nodes.iter().find(|n| &n.id == sibling_id) {
+                // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
+                if let Some(tag) = get_tag_name(sibling) {
+                    if !ALTER_TO_DIV_EXCEPTIONS.contains(tag.as_str()) {
+                        self.log(&format!("Altering sibling {} to div", tag));
+                        sibling.rename("div");
+                    }
+                }
+
+                // Append to container
+                container.append_child(sibling);
+            }
+        }
+
+        // Verify we added the container to the parent
+        if parent.element_children().iter().any(|c| c.id == container_id) {
+            Some(container_id)
+        } else {
+            // Container insertion failed, return top candidate
+            Some(top_candidate.id)
         }
     }
 
