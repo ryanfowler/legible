@@ -339,6 +339,18 @@ impl Readability {
                         if !elements_to_score.contains(&node.id) {
                             elements_to_score.push(node.id);
                         }
+                    } else {
+                        // DIV stays as DIV - add any P children to elements_to_score
+                        // (these may have been created by wrap_phrasing_content_in_p)
+                        // This mimics JS behavior where tree walker visits children
+                        for child in node.element_children() {
+                            if let Some(child_tag) = get_tag_name(&child)
+                                && child_tag == "P"
+                                && !elements_to_score.contains(&child.id)
+                            {
+                                elements_to_score.push(child.id);
+                            }
+                        }
                     }
                 }
             }
