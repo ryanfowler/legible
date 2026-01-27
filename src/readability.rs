@@ -601,17 +601,18 @@ impl Readability {
                 Some(top_candidate_id)
             } else {
                 // Gather siblings and potentially create container DIV
+                // Like JS, we always create a container and move siblings into it
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
                 let sibling_ids = self.gather_siblings(top_candidate_id, &all_nodes);
 
-                if sibling_ids.len() == 1 && sibling_ids[0] == top_candidate_id {
-                    // Only the top candidate qualifies, use it directly
-                    Some(top_candidate_id)
-                } else if sibling_ids.is_empty() {
+                if sibling_ids.is_empty() {
                     // No siblings qualified (shouldn't happen since top candidate always included)
+                    // Fall back to using top candidate directly
                     Some(top_candidate_id)
                 } else {
                     // Create container DIV and move siblings into it
+                    // This includes the case of a single sibling - we still need a container
+                    // so that the wrapper div is added correctly
                     if let Some(top_candidate) = all_nodes.iter().find(|n| n.id == top_candidate_id)
                     {
                         self.create_article_container(top_candidate, &sibling_ids, &all_nodes)
@@ -644,6 +645,38 @@ impl Readability {
                 );
 
                 // Re-fetch the article node after prep_article mutated the DOM
+                let all_nodes_after: Vec<_> = self.doc.select("*").nodes().to_vec();
+                let article_node = all_nodes_after
+                    .into_iter()
+                    .find(|n| n.id == article_node_id)
+                    .ok_or(ReadabilityError::NoContent)?;
+
+                // Add readability-page-1 wrapper div
+                // In JS: if neededToCreateTopCandidate, set id/class on topCandidate
+                //        else create wrapper div, move children into it, append to articleContent
+                // Since both cases result in articleContent.innerHTML starting with
+                // <div id="readability-page-1" class="page">, we create a wrapper in all cases.
+                if needed_to_create_top_candidate {
+                    // Set id/class directly on the synthetic container
+                    article_node.set_attr("id", "readability-page-1");
+                    article_node.set_attr("class", "page");
+                } else {
+                    // Create wrapper div and move all children into it
+                    let wrapper = self.doc.tree.new_element("div");
+                    wrapper.set_attr("id", "readability-page-1");
+                    wrapper.set_attr("class", "page");
+
+                    // Move all children of article_node into wrapper
+                    let children: Vec<_> = article_node.children();
+                    for child in children {
+                        wrapper.append_child(&child);
+                    }
+
+                    // Append wrapper to article_node
+                    article_node.append_child(&wrapper);
+                }
+
+                // Re-fetch the article node after wrapping
                 let all_nodes_after: Vec<_> = self.doc.select("*").nodes().to_vec();
                 let article_node = all_nodes_after
                     .into_iter()
@@ -1013,7 +1046,40 @@ impl Readability {
             clean_classes(node, &self.options.classes_to_preserve);
         }
 
+        // Escape < and > in attribute values to match browser serialization
+        self.escape_attribute_values(node);
+
         node.inner_html().to_string()
+    }
+
+    /// Escape < and > characters inside attribute values.
+    /// Browser innerHTML serialization escapes these characters, but dom_query doesn't.
+    fn escape_attribute_values(&self, node: &Node<'_>) {
+        // Collect all elements first to avoid borrow issues
+        let elements: Vec<_> = node.descendants_it().filter(|n| n.is_element()).collect();
+
+        for element in elements {
+            // Collect attribute info
+            let attrs_to_fix: Vec<_> = element
+                .attrs()
+                .into_iter()
+                .filter_map(|attr| {
+                    let name = attr.name.local.to_string();
+                    let value = attr.value.to_string();
+                    if value.contains('<') || value.contains('>') {
+                        Some((name, value))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Now modify attributes
+            for (name, value) in attrs_to_fix {
+                let escaped = value.replace('<', "&lt;").replace('>', "&gt;");
+                element.set_attr(&name, &escaped);
+            }
+        }
     }
 
     /// Convert relative URIs to absolute.

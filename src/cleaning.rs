@@ -746,11 +746,22 @@ pub fn simplify_nested_elements(article_content: &Node<'_>) {
             if has_single_tag_inside_element(&node, "DIV")
                 || has_single_tag_inside_element(&node, "SECTION")
             {
-                // Unwrap the single child
+                // Replace node with its single child, copying attributes from node to child
                 let children = node.element_children();
                 if let Some(child) = children.first() {
-                    let child_html = child.inner_html();
-                    node.set_html(child_html.as_ref());
+                    // Copy all attributes from node to child (like JS does)
+                    for attr in node.attrs() {
+                        let name = attr.name.local.to_string();
+                        let value = attr.value.to_string();
+                        // Only copy if child doesn't already have this attribute
+                        if child.attr(&name).is_none() {
+                            child.set_attr(&name, &value);
+                        }
+                    }
+
+                    // Replace node with child in the DOM tree
+                    node.insert_after(child);
+                    node.remove_from_parent();
                 }
             }
         }
