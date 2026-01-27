@@ -204,15 +204,34 @@ impl Readability {
                 self.article_lang = Some(lang.to_string());
             }
 
-            // Track nodes to remove
-            let mut nodes_to_remove: Vec<NodeId> = Vec::new();
+            // Track nodes to remove (use HashSet for efficient lookup)
+            let mut nodes_to_remove: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
             let mut should_remove_title_header = true;
+
+            // Helper to check if any ancestor is scheduled for removal
+            fn has_ancestor_scheduled_for_removal(
+                node: &Node<'_>,
+                to_remove: &std::collections::HashSet<NodeId>,
+            ) -> bool {
+                let mut parent = node.parent();
+                while let Some(p) = parent {
+                    if to_remove.contains(&p.id) {
+                        return true;
+                    }
+                    parent = p.parent();
+                }
+                false
+            }
 
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
 
             for node in &all_nodes {
-                if nodes_to_remove.contains(&node.id) {
+                // Skip if this node or any ancestor is scheduled for removal
+                if nodes_to_remove.contains(&node.id)
+                    || has_ancestor_scheduled_for_removal(node, &nodes_to_remove)
+                {
                     continue;
                 }
 
@@ -227,7 +246,7 @@ impl Readability {
                 // Check visibility
                 if !is_probably_visible(node) {
                     self.log(&format!("Removing hidden node - {}", match_string));
-                    nodes_to_remove.push(node.id);
+                    nodes_to_remove.insert(node.id);
                     continue;
                 }
 
@@ -241,7 +260,7 @@ impl Readability {
                         .map(|s| s.as_ref() == "dialog")
                         .unwrap_or(false)
                 {
-                    nodes_to_remove.push(node.id);
+                    nodes_to_remove.insert(node.id);
                     continue;
                 }
 
@@ -257,7 +276,7 @@ impl Readability {
                         .cloned();
                     let byline_node = itemprop_name.as_ref().unwrap_or(node);
                     self.article_byline = Some(byline_node.text().trim().to_string());
-                    nodes_to_remove.push(node.id);
+                    nodes_to_remove.insert(node.id);
                     continue;
                 }
 
@@ -269,7 +288,7 @@ impl Readability {
                         self.article_title.trim()
                     ));
                     should_remove_title_header = false;
-                    nodes_to_remove.push(node.id);
+                    nodes_to_remove.insert(node.id);
                     continue;
                 }
 
@@ -283,7 +302,7 @@ impl Readability {
                         && tag_name != "A"
                     {
                         self.log(&format!("Removing unlikely candidate - {}", match_string));
-                        nodes_to_remove.push(node.id);
+                        nodes_to_remove.insert(node.id);
                         continue;
                     }
 
@@ -294,7 +313,7 @@ impl Readability {
                             "Removing content with role {} - {}",
                             role, match_string
                         ));
-                        nodes_to_remove.push(node.id);
+                        nodes_to_remove.insert(node.id);
                         continue;
                     }
                 }
@@ -305,7 +324,7 @@ impl Readability {
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
                 ) && is_element_without_content(node)
                 {
-                    nodes_to_remove.push(node.id);
+                    nodes_to_remove.insert(node.id);
                     continue;
                 }
 
@@ -563,10 +582,17 @@ impl Readability {
                     initialize_node(tc, &mut self.node_data, self.flags);
                 }
 
+                // Walk up the tree looking for a better parent.
+                // JavaScript comment: "Because of our bonus system, parents of candidates
+                // might have scores themselves. They get half of the node. There won't be
+                // nodes with higher scores than our topCandidate, but if we see the score
+                // going *up* in the first few steps up the tree, that's a decent sign that
+                // there might be more content lurking in other places that we want to unify in."
                 if let Some(ref tc) = top_candidate {
                     let mut parent = tc.parent();
                     let top_score = self.node_data.get_content_score(&tc.id);
                     let score_threshold = top_score / 3.0;
+                    let mut last_score = top_score;
 
                     while let Some(p) = parent {
                         if let Some(ptag) = get_tag_name(&p)
@@ -576,13 +602,16 @@ impl Readability {
                         }
 
                         if let Some(parent_data) = self.node_data.get(&p.id) {
-                            if parent_data.content_score < score_threshold {
+                            let parent_score = parent_data.content_score;
+                            if parent_score < score_threshold {
                                 break;
                             }
-                            if parent_data.content_score > top_score {
+                            // If score is increasing, we found a better parent
+                            if parent_score > last_score {
                                 top_candidate = Some(p);
                                 break;
                             }
+                            last_score = parent_score;
                         }
 
                         parent = p.parent();
