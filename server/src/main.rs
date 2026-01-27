@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
 use axum::{
-    Form,
     Router,
+    extract::Query,
     http::StatusCode,
     response::{Html, IntoResponse},
-    routing::{get, post},
+    routing::get,
 };
 use legible::Readability;
 use serde::Deserialize;
@@ -23,7 +23,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/extract", post(extract));
+        .route("/article", get(article));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
@@ -41,12 +41,12 @@ async fn index() -> Html<&'static str> {
 }
 
 #[derive(Deserialize)]
-struct ExtractForm {
+struct ArticleQuery {
     url: String,
 }
 
-async fn extract(Form(form): Form<ExtractForm>) -> impl IntoResponse {
-    let url = form.url.trim();
+async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
+    let url = query.url.trim();
 
     // Validate URL
     if url.is_empty() {
@@ -515,7 +515,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="container">
         <h1>Legible Reader</h1>
         <p class="tagline">Extract clean, readable articles from any webpage</p>
-        <form action="/extract" method="POST">
+        <form action="/article" method="GET">
             <input
                 type="url"
                 name="url"
