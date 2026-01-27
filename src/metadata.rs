@@ -294,7 +294,7 @@ pub fn get_article_title(doc: &Document) -> String {
                 }
             }
         }
-    } else if cur_title.len() > 150 || cur_title.len() < 15 {
+    } else if cur_title.chars().count() > 150 || cur_title.chars().count() < 15 {
         // Title too long or short, try H1
         let h1s = doc.select("h1");
         if h1s.length() == 1

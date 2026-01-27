@@ -75,7 +75,7 @@ pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
 pub fn get_link_density(node: &Node<'_>) -> f64 {
     use crate::dom::node_select;
 
-    let text_length = get_inner_text(node, true).len();
+    let text_length = get_inner_text(node, true).chars().count();
     if text_length == 0 {
         return 0.0;
     }
@@ -90,7 +90,7 @@ pub fn get_link_density(node: &Node<'_>) -> f64 {
         } else {
             1.0
         };
-        link_length += get_inner_text(link, true).len() as f64 * coefficient;
+        link_length += get_inner_text(link, true).chars().count() as f64 * coefficient;
     }
 
     link_length / text_length as f64
@@ -100,7 +100,7 @@ pub fn get_link_density(node: &Node<'_>) -> f64 {
 pub fn get_text_density(node: &Node<'_>, tags: &[&str]) -> f64 {
     use crate::dom::node_select;
 
-    let text_length = get_inner_text(node, true).len();
+    let text_length = get_inner_text(node, true).chars().count();
     if text_length == 0 {
         return 0.0;
     }
@@ -109,7 +109,7 @@ pub fn get_text_density(node: &Node<'_>, tags: &[&str]) -> f64 {
     let selector = tags.join(",");
 
     for child in node_select(node, &selector).nodes().iter() {
-        children_length += get_inner_text(child, true).len();
+        children_length += get_inner_text(child, true).chars().count();
     }
 
     children_length as f64 / text_length as f64
@@ -354,7 +354,7 @@ pub fn is_valid_byline(node: &Node<'_>, match_string: &str) -> bool {
         && rel.as_ref() == "author"
     {
         let text = node.text().trim().to_string();
-        return !text.is_empty() && text.len() < 100;
+        return !text.is_empty() && text.chars().count() < 100;
     }
 
     // Check itemprop containing "author"
@@ -362,13 +362,13 @@ pub fn is_valid_byline(node: &Node<'_>, match_string: &str) -> bool {
         && itemprop.as_ref().contains("author")
     {
         let text = node.text().trim().to_string();
-        return !text.is_empty() && text.len() < 100;
+        return !text.is_empty() && text.chars().count() < 100;
     }
 
     // Check byline pattern in class/id
     if regexps::BYLINE.is_match(match_string) {
         let text = node.text().trim().to_string();
-        return !text.is_empty() && text.len() < 100;
+        return !text.is_empty() && text.chars().count() < 100;
     }
 
     false

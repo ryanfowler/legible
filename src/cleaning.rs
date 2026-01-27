@@ -345,11 +345,11 @@ fn should_remove_conditionally(
         let list_nodes = node_select(node, "ul, ol");
         let mut list_length = 0;
         for list in list_nodes.nodes().iter() {
-            list_length += get_inner_text(list, true).len();
+            list_length += get_inner_text(list, true).chars().count();
         }
         let inner_text = get_inner_text(node, true);
         if !inner_text.is_empty() {
-            list_length as f64 / inner_text.len() as f64 > 0.9
+            list_length as f64 / inner_text.chars().count() as f64 > 0.9
         } else {
             false
         }
@@ -410,7 +410,7 @@ fn should_remove_conditionally(
         return true;
     }
 
-    let content_length = inner_text.len();
+    let content_length = inner_text.chars().count();
     let link_density = get_link_density(node);
 
     let textish_tags = [

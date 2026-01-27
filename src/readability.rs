@@ -400,7 +400,8 @@ impl Readability {
                 };
 
                 let inner_text = get_inner_text(&node, true);
-                if inner_text.len() < 25 {
+                let inner_text_len = inner_text.chars().count();
+                if inner_text_len < 25 {
                     continue;
                 }
 
@@ -413,7 +414,7 @@ impl Readability {
                 // Calculate content score
                 let mut content_score = 1.0;
                 content_score += get_comma_count(&node) as f64;
-                content_score += (inner_text.len() / 100).min(3) as f64;
+                content_score += (inner_text_len / 100).min(3) as f64;
 
                 // Score ancestors
                 for (level, ancestor) in ancestors.iter().enumerate() {
@@ -733,7 +734,7 @@ impl Readability {
                     .ok_or(ReadabilityError::NoContent)?;
 
                 let text_content = get_inner_text(&article_node, true);
-                let text_length = text_content.len();
+                let text_length = text_content.chars().count();
 
                 if text_length < self.options.char_threshold {
                     self.attempts.push(AttemptResult {
@@ -881,7 +882,7 @@ impl Readability {
                 {
                     let link_density = get_link_density(&sibling);
                     let node_content = get_inner_text(&sibling, true);
-                    let node_length = node_content.len();
+                    let node_length = node_content.chars().count();
 
                     if (node_length > 80 && link_density < 0.25)
                         || (node_length < 80
