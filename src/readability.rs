@@ -443,14 +443,42 @@ impl Readability {
             }
 
             // Get top candidate
-            let (top_candidate_id, needed_to_create_top_candidate) = if top_candidates.is_empty() {
-                let body = self.doc.select("body");
-                if let Some(body_node) = body.nodes().first() {
-                    initialize_node(body_node, &mut self.node_data, self.flags);
-                    (Some(body_node.id), true)
-                } else {
-                    return Err(ReadabilityError::NoBody);
+            // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
+            let body = self.doc.select("body");
+            let body_node = body.nodes().first().ok_or(ReadabilityError::NoBody)?;
+            let body_id = body_node.id;
+
+            let needs_synthetic_candidate = top_candidates.is_empty()
+                || top_candidates
+                    .first()
+                    .map(|(id, _)| *id == body_id)
+                    .unwrap_or(false);
+
+            let (top_candidate_id, needed_to_create_top_candidate) = if needs_synthetic_candidate {
+                // Move all of the page's children into a new DIV
+                // (like JS: create DIV, move everything into it, append to page)
+                let container = self.doc.tree.new_element("div");
+                let container_id = container.id;
+
+                // Collect all body children first to avoid mutation while iterating
+                let children: Vec<_> = body_node.children();
+
+                // Move all children (including text nodes) into the container
+                for child in children {
+                    self.log(&format!(
+                        "Moving child out: {:?}",
+                        get_tag_name(&child).unwrap_or_default()
+                    ));
+                    container.append_child(&child);
                 }
+
+                // Append the container to body
+                body_node.append_child(&container);
+
+                // Initialize the new container node
+                initialize_node(&container, &mut self.node_data, self.flags);
+
+                (Some(container_id), true)
             } else {
                 let top_id = top_candidates[0].0;
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
@@ -568,8 +596,9 @@ impl Readability {
 
             // Get the article node ID to use
             let article_node_id = if needed_to_create_top_candidate {
-                // No siblings to gather when we created a synthetic candidate from body
-                self.doc.select("body").nodes().first().map(|n| n.id)
+                // No siblings to gather when we created a synthetic candidate
+                // Use the container DIV we created (already stored in top_candidate_id)
+                Some(top_candidate_id)
             } else {
                 // Gather siblings and potentially create container DIV
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
