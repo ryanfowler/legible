@@ -5,7 +5,9 @@ use crate::cleaning::{
     fix_lazy_images, mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
     unwrap_noscript_images,
 };
-use crate::constants::{ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps};
+use crate::constants::{
+    ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
+};
 use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select};
 use crate::error::{ReadabilityError, Result};
 use crate::metadata::{
@@ -454,9 +456,69 @@ impl Readability {
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
                 let mut top_candidate = all_nodes.iter().find(|n| n.id == top_id).cloned();
 
+                // Alternative candidate ancestors logic:
+                // Find a better top candidate node if it contains (at least three) nodes
+                // which belong to top_candidates array and whose scores are close to the
+                // current top_candidate score.
+                if let Some(ref tc) = top_candidate {
+                    let top_score = top_candidates[0].1;
+
+                    // Collect ancestor lists for candidates with score >= 75% of top score
+                    let mut alternative_candidate_ancestors: Vec<Vec<NodeId>> = Vec::new();
+                    for &(candidate_id, candidate_score) in top_candidates.iter().skip(1) {
+                        if candidate_score / top_score >= 0.75
+                            && let Some(candidate_node) =
+                                all_nodes.iter().find(|n| n.id == candidate_id)
+                        {
+                            let ancestors: Vec<NodeId> = get_ancestors(candidate_node, 0)
+                                .iter()
+                                .map(|n| n.id)
+                                .collect();
+                            alternative_candidate_ancestors.push(ancestors);
+                        }
+                    }
+
+                    const MINIMUM_TOPCANDIDATES: usize = 3;
+                    if alternative_candidate_ancestors.len() >= MINIMUM_TOPCANDIDATES {
+                        let mut parent = tc.parent();
+                        while let Some(p) = parent {
+                            if let Some(ptag) = get_tag_name(&p)
+                                && ptag == "BODY"
+                            {
+                                break;
+                            }
+
+                            let mut lists_containing_this_ancestor = 0;
+                            for ancestor_list in &alternative_candidate_ancestors {
+                                if ancestor_list.contains(&p.id) {
+                                    lists_containing_this_ancestor += 1;
+                                }
+                                // Early exit optimization (matches JS behavior)
+                                if lists_containing_this_ancestor >= MINIMUM_TOPCANDIDATES {
+                                    break;
+                                }
+                            }
+
+                            if lists_containing_this_ancestor >= MINIMUM_TOPCANDIDATES {
+                                top_candidate = Some(p);
+                                break;
+                            }
+
+                            parent = p.parent();
+                        }
+                    }
+                }
+
+                // Ensure new top candidate has readability data initialized
+                if let Some(ref tc) = top_candidate
+                    && !self.node_data.has(&tc.id)
+                {
+                    initialize_node(tc, &mut self.node_data, self.flags);
+                }
+
                 if let Some(ref tc) = top_candidate {
                     let mut parent = tc.parent();
-                    let top_score = self.node_data.get_content_score(&top_id);
+                    let top_score = self.node_data.get_content_score(&tc.id);
                     let score_threshold = top_score / 3.0;
 
                     while let Some(p) = parent {
@@ -521,8 +583,7 @@ impl Readability {
                     Some(top_candidate_id)
                 } else {
                     // Create container DIV and move siblings into it
-                    if let Some(top_candidate) =
-                        all_nodes.iter().find(|n| n.id == top_candidate_id)
+                    if let Some(top_candidate) = all_nodes.iter().find(|n| n.id == top_candidate_id)
                     {
                         self.create_article_container(top_candidate, &sibling_ids, &all_nodes)
                     } else {
@@ -703,23 +764,21 @@ impl Readability {
                 }
 
                 // Special case for P elements without scores
-                if !should_append {
-                    if let Some(tag) = get_tag_name(&sibling) {
-                        if tag == "P" {
-                            let link_density = get_link_density(&sibling);
-                            let node_content = get_inner_text(&sibling, true);
-                            let node_length = node_content.len();
+                if !should_append
+                    && let Some(tag) = get_tag_name(&sibling)
+                    && tag == "P"
+                {
+                    let link_density = get_link_density(&sibling);
+                    let node_content = get_inner_text(&sibling, true);
+                    let node_length = node_content.len();
 
-                            if node_length > 80 && link_density < 0.25 {
-                                should_append = true;
-                            } else if node_length < 80
-                                && node_length > 0
-                                && link_density == 0.0
-                                && regexps::SENTENCE_END.is_match(&node_content)
-                            {
-                                should_append = true;
-                            }
-                        }
+                    if (node_length > 80 && link_density < 0.25)
+                        || (node_length < 80
+                            && node_length > 0
+                            && link_density == 0.0
+                            && regexps::SENTENCE_END.is_match(&node_content))
+                    {
+                        should_append = true;
                     }
                 }
             }
@@ -759,11 +818,11 @@ impl Readability {
         for sibling_id in sibling_ids {
             if let Some(sibling) = all_nodes.iter().find(|n| &n.id == sibling_id) {
                 // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
-                if let Some(tag) = get_tag_name(sibling) {
-                    if !ALTER_TO_DIV_EXCEPTIONS.contains(tag.as_str()) {
-                        self.log(&format!("Altering sibling {} to div", tag));
-                        sibling.rename("div");
-                    }
+                if let Some(tag) = get_tag_name(sibling)
+                    && !ALTER_TO_DIV_EXCEPTIONS.contains(tag.as_str())
+                {
+                    self.log(&format!("Altering sibling {} to div", tag));
+                    sibling.rename("div");
                 }
 
                 // Append to container
@@ -772,7 +831,11 @@ impl Readability {
         }
 
         // Verify we added the container to the parent
-        if parent.element_children().iter().any(|c| c.id == container_id) {
+        if parent
+            .element_children()
+            .iter()
+            .any(|c| c.id == container_id)
+        {
             Some(container_id)
         } else {
             // Container insertion failed, return top candidate
