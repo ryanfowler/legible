@@ -15,7 +15,7 @@ use crate::options::Options;
 use crate::scoring::{
     get_comma_count, get_inner_text, get_link_density, has_child_block_element,
     has_single_tag_inside_element, initialize_node, is_element_without_content,
-    is_phrasing_content, is_probably_visible, is_valid_byline,
+    is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
 };
 use dom_query::{Document, Node, NodeId};
 use regex::Regex;
@@ -315,7 +315,7 @@ impl Readability {
                 // Process DIVs - wrap phrasing content in P tags
                 if tag_name == "DIV" {
                     // First, wrap any loose phrasing content in P tags
-                    Self::wrap_phrasing_content_in_p(node);
+                    wrap_phrasing_content_in_p(node);
 
                     // Now check if DIV should be converted or scored
                     if has_single_tag_inside_element(node, "P") && get_link_density(node) < 0.25 {
@@ -627,69 +627,6 @@ impl Readability {
             }
 
             return Err(ReadabilityError::NoContent);
-        }
-    }
-
-    /// Wrap consecutive phrasing content nodes inside a DIV into P elements.
-    fn wrap_phrasing_content_in_p(div: &Node<'_>) {
-        let children: Vec<_> = div.children();
-        let mut i = 0;
-
-        while i < children.len() {
-            let child = &children[i];
-
-            // If this is phrasing content, collect consecutive phrasing content nodes
-            if is_phrasing_content(child) {
-                let mut phrasing_nodes = Vec::new();
-                let mut j = i;
-
-                // Collect all consecutive phrasing content
-                while j < children.len() && is_phrasing_content(&children[j]) {
-                    phrasing_nodes.push(j);
-                    j += 1;
-                }
-
-                // Only wrap if we collected content (not just whitespace)
-                let has_content = phrasing_nodes.iter().any(|&idx| {
-                    let n = &children[idx];
-                    if n.is_text() {
-                        !regexps::WHITESPACE.is_match(n.text().as_ref())
-                    } else {
-                        true
-                    }
-                });
-
-                if has_content && !phrasing_nodes.is_empty() {
-                    // Create a P element and wrap the content
-                    // Build HTML for the phrasing content
-                    let mut html = String::from("<p>");
-                    for &idx in &phrasing_nodes {
-                        let n = &children[idx];
-                        if n.is_text() {
-                            html.push_str(n.text().as_ref());
-                        } else {
-                            html.push_str(&n.html());
-                        }
-                    }
-                    html.push_str("</p>");
-
-                    // Remove the original nodes and insert the P
-                    // We need to do this carefully to avoid invalidating references
-                    if let Some(first_node) = children.get(phrasing_nodes[0]) {
-                        first_node.before_html(html.as_str());
-                        // Remove the original nodes
-                        for &idx in phrasing_nodes.iter().rev() {
-                            if let Some(n) = children.get(idx) {
-                                n.remove_from_parent();
-                            }
-                        }
-                    }
-                }
-
-                i = j;
-            } else {
-                i += 1;
-            }
         }
     }
 

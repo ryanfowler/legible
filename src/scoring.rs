@@ -160,6 +160,92 @@ pub fn is_phrasing_content(node: &Node<'_>) -> bool {
     false
 }
 
+/// Wrap consecutive phrasing content in a DIV with P tags.
+/// This handles cases where text is placed directly inside DIVs without P tags.
+pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
+    let children: Vec<_> = div.children();
+    let mut i = 0;
+
+    while i < children.len() {
+        let child = &children[i];
+
+        // If this is phrasing content, collect consecutive phrasing content nodes
+        if is_phrasing_content(child) {
+            let mut phrasing_nodes = Vec::new();
+            let mut j = i;
+
+            // Collect all consecutive phrasing content
+            while j < children.len() && is_phrasing_content(&children[j]) {
+                phrasing_nodes.push(j);
+                j += 1;
+            }
+
+            // Only wrap if we collected content (not just whitespace)
+            let has_content = phrasing_nodes.iter().any(|&idx| {
+                let n = &children[idx];
+                if n.is_text() {
+                    !regexps::WHITESPACE.is_match(n.text().as_ref())
+                } else {
+                    true
+                }
+            });
+
+            if has_content && !phrasing_nodes.is_empty() {
+                // Trim leading whitespace nodes
+                while !phrasing_nodes.is_empty() {
+                    let first_idx = phrasing_nodes[0];
+                    if is_whitespace(&children[first_idx]) {
+                        phrasing_nodes.remove(0);
+                    } else {
+                        break;
+                    }
+                }
+
+                // Trim trailing whitespace nodes
+                while !phrasing_nodes.is_empty() {
+                    let last_idx = *phrasing_nodes.last().unwrap();
+                    if is_whitespace(&children[last_idx]) {
+                        phrasing_nodes.pop();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Only wrap if we still have content after trimming
+                if !phrasing_nodes.is_empty() {
+                    // Build HTML for the phrasing content
+                    let mut html = String::from("<p>");
+                    for &idx in &phrasing_nodes {
+                        let n = &children[idx];
+                        if n.is_text() {
+                            html.push_str(n.text().as_ref());
+                        } else {
+                            html.push_str(&n.html());
+                        }
+                    }
+                    html.push_str("</p>");
+
+                    // Insert the P element before the first phrasing node
+                    if let Some(first_node) = children.get(phrasing_nodes[0]) {
+                        first_node.before_html(html.as_str());
+                    }
+
+                    // Remove the original phrasing nodes (in reverse order to maintain indices)
+                    for &idx in phrasing_nodes.iter().rev() {
+                        if let Some(n) = children.get(idx) {
+                            n.remove_from_parent();
+                        }
+                    }
+                }
+            }
+
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Check if an element has no content.
 pub fn is_element_without_content(node: &Node<'_>) -> bool {
     use crate::dom::node_select;

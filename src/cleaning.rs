@@ -64,14 +64,14 @@ fn replace_brs(elem: &Node<'_>) {
 
         // Remove consecutive BR elements after this one
         while let Some(ref n) = next {
-            if let Some(tag) = get_tag_name(n) {
-                if tag == "BR" {
-                    replaced = true;
-                    let next_sibling = next_element(n);
-                    n.remove_from_parent();
-                    next = next_sibling;
-                    continue;
-                }
+            if let Some(tag) = get_tag_name(n)
+                && tag == "BR"
+            {
+                replaced = true;
+                let next_sibling = next_element(n);
+                n.remove_from_parent();
+                next = next_sibling;
+                continue;
             }
             break;
         }
@@ -86,18 +86,14 @@ fn replace_brs(elem: &Node<'_>) {
             let mut next = p.next_sibling();
             while let Some(n) = next {
                 // If we hit another BR followed by BR, stop
-                if n.is_element() {
-                    if let Some(tag) = get_tag_name(&n) {
-                        if tag == "BR" {
-                            if let Some(next_elem) = next_element(&n) {
-                                if let Some(next_tag) = get_tag_name(&next_elem) {
-                                    if next_tag == "BR" {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if n.is_element()
+                    && let Some(tag) = get_tag_name(&n)
+                    && tag == "BR"
+                    && let Some(next_elem) = next_element(&n)
+                    && let Some(next_tag) = get_tag_name(&next_elem)
+                    && next_tag == "BR"
+                {
+                    break;
                 }
 
                 // If this is not phrasing content, stop
@@ -113,22 +109,22 @@ fn replace_brs(elem: &Node<'_>) {
 
             // Trim trailing whitespace text nodes from the P
             loop {
-                if let Some(last) = p.children().last() {
-                    if last.is_text() && regexps::WHITESPACE.is_match(last.text().as_ref()) {
-                        last.remove_from_parent();
-                        continue;
-                    }
+                if let Some(last) = p.children().last()
+                    && last.is_text()
+                    && regexps::WHITESPACE.is_match(last.text().as_ref())
+                {
+                    last.remove_from_parent();
+                    continue;
                 }
                 break;
             }
 
             // If the P is inside another P, convert the parent to DIV
-            if let Some(parent) = p.parent() {
-                if let Some(parent_tag) = get_tag_name(&parent) {
-                    if parent_tag == "P" {
-                        parent.rename("div");
-                    }
-                }
+            if let Some(parent) = p.parent()
+                && let Some(parent_tag) = get_tag_name(&parent)
+                && parent_tag == "P"
+            {
+                parent.rename("div");
             }
         }
     }
