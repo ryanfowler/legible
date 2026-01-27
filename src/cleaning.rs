@@ -31,6 +31,21 @@ pub fn prep_document(doc: &Document) {
     }
 }
 
+/// Remove comment nodes from an element and its descendants.
+/// In JavaScript Readability, comment nodes are never added to the DOM during parsing.
+/// Since dom_query/html5ever keeps comment nodes, we need to remove them to match JS behavior.
+pub fn remove_comments(node: &Node<'_>) {
+    // Collect all comment nodes (nodes that are neither elements nor text)
+    let comments: Vec<_> = node
+        .descendants_it()
+        .filter(|n| !n.is_element() && !n.is_text())
+        .collect();
+
+    for comment in comments {
+        comment.remove_from_parent();
+    }
+}
+
 /// Get the next element node, skipping whitespace text nodes.
 fn next_element<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     let mut next = node.next_sibling();

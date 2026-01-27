@@ -2,8 +2,8 @@
 
 use crate::cleaning::{
     clean, clean_classes, clean_conditionally, clean_headers, clean_matched_nodes, clean_styles,
-    fix_lazy_images, mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
-    unwrap_noscript_images,
+    fix_lazy_images, mark_data_tables, prep_document, remove_comments, remove_scripts,
+    simplify_nested_elements, unwrap_noscript_images,
 };
 use crate::constants::{
     ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
@@ -1065,6 +1065,10 @@ impl Readability {
         if !self.options.keep_classes {
             clean_classes(node, &self.options.classes_to_preserve);
         }
+
+        // Remove HTML comment nodes - JS Readability never adds them to the DOM,
+        // so we need to remove them to match the expected output
+        remove_comments(node);
 
         // Escape < and > in attribute values to match browser serialization
         self.escape_attribute_values(node);
