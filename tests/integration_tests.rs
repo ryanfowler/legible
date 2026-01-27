@@ -26,7 +26,7 @@ struct ExpectedMetadata {
 
 fn get_test_pages_dir() -> std::path::PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    Path::new(manifest_dir).join("readability-js/test/test-pages")
+    Path::new(manifest_dir).join("tests/readability-js/test/test-pages")
 }
 
 fn normalize_whitespace(s: &str) -> String {
