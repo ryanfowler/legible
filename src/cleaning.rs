@@ -262,24 +262,26 @@ pub fn clean_conditionally(
         return;
     }
 
+    // Collect elements first, then process in reverse order like JS does.
+    // Important: We evaluate and remove one at a time so that removing a
+    // nested element affects the counts for parent elements.
     let elements: Vec<_> = node_select(node, tag).nodes().to_vec();
-    let to_remove: Vec<_> = elements
-        .iter()
-        .filter(|elem| {
-            should_remove_conditionally(
-                elem,
-                tag,
-                flags,
-                allowed_video_regex,
-                store,
-                link_density_modifier,
-            )
-        })
-        .map(|e| e.id)
-        .collect();
 
-    for elem in elements {
-        if to_remove.contains(&elem.id) {
+    // Process in reverse order (back to front) like JavaScript
+    for elem in elements.into_iter().rev() {
+        // Skip if element was already removed (e.g., its parent was removed)
+        if elem.parent().is_none() {
+            continue;
+        }
+
+        if should_remove_conditionally(
+            &elem,
+            tag,
+            flags,
+            allowed_video_regex,
+            store,
+            link_density_modifier,
+        ) {
             elem.remove_from_parent();
         }
     }
