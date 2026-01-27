@@ -122,11 +122,14 @@ impl Readability {
         // Unwrap images from noscript tags
         unwrap_noscript_images(&self.doc);
 
+        // Get article title early (needed for JSON-LD disambiguation)
+        let article_title = get_article_title(&self.doc);
+
         // Extract JSON-LD metadata before removing scripts
         let json_ld = if self.options.disable_json_ld {
             Metadata::default()
         } else {
-            get_json_ld(&self.doc)
+            get_json_ld(&self.doc, &article_title)
         };
 
         // Remove scripts
@@ -135,8 +138,8 @@ impl Readability {
         // Prepare document
         prep_document(&self.doc);
 
-        // Get article title
-        self.article_title = get_article_title(&self.doc);
+        // Store article title
+        self.article_title = article_title;
 
         // Get metadata
         self.metadata = get_article_metadata(&self.doc, &json_ld, &self.article_title);
@@ -309,10 +312,22 @@ impl Readability {
                     elements_to_score.push(node.id);
                 }
 
-                // Convert DIVs with only phrasing content to P
+                // Process DIVs - wrap phrasing content in P tags
                 if tag_name == "DIV" {
+                    // First, wrap any loose phrasing content in P tags
+                    Self::wrap_phrasing_content_in_p(node);
+
+                    // Now check if DIV should be converted or scored
                     if has_single_tag_inside_element(node, "P") && get_link_density(node) < 0.25 {
-                        elements_to_score.push(node.id);
+                        // Sites like http://mobile.slate.com enclose each paragraph with a DIV
+                        // element. DIVs with only a P element inside and no text content can be
+                        // safely converted into plain P elements to avoid confusing the scoring
+                        // algorithm with DIVs with are, in practice, paragraphs.
+                        if let Some(p_child) = node.element_children().first() {
+                            let p_id = p_child.id;
+                            node.replace_with(p_child);
+                            elements_to_score.push(p_id);
+                        }
                     } else if !has_child_block_element(node) {
                         node.rename("p");
                         elements_to_score.push(node.id);
@@ -594,7 +609,7 @@ impl Readability {
                     }
                 }
 
-                // Extract excerpt BEFORE post-processing modifies the DOM
+                // Extract excerpt from the first paragraph
                 let excerpt = node_select(&article_node, "p")
                     .nodes()
                     .first()
@@ -612,6 +627,69 @@ impl Readability {
             }
 
             return Err(ReadabilityError::NoContent);
+        }
+    }
+
+    /// Wrap consecutive phrasing content nodes inside a DIV into P elements.
+    fn wrap_phrasing_content_in_p(div: &Node<'_>) {
+        let children: Vec<_> = div.children();
+        let mut i = 0;
+
+        while i < children.len() {
+            let child = &children[i];
+
+            // If this is phrasing content, collect consecutive phrasing content nodes
+            if is_phrasing_content(child) {
+                let mut phrasing_nodes = Vec::new();
+                let mut j = i;
+
+                // Collect all consecutive phrasing content
+                while j < children.len() && is_phrasing_content(&children[j]) {
+                    phrasing_nodes.push(j);
+                    j += 1;
+                }
+
+                // Only wrap if we collected content (not just whitespace)
+                let has_content = phrasing_nodes.iter().any(|&idx| {
+                    let n = &children[idx];
+                    if n.is_text() {
+                        !regexps::WHITESPACE.is_match(n.text().as_ref())
+                    } else {
+                        true
+                    }
+                });
+
+                if has_content && !phrasing_nodes.is_empty() {
+                    // Create a P element and wrap the content
+                    // Build HTML for the phrasing content
+                    let mut html = String::from("<p>");
+                    for &idx in &phrasing_nodes {
+                        let n = &children[idx];
+                        if n.is_text() {
+                            html.push_str(n.text().as_ref());
+                        } else {
+                            html.push_str(&n.html());
+                        }
+                    }
+                    html.push_str("</p>");
+
+                    // Remove the original nodes and insert the P
+                    // We need to do this carefully to avoid invalidating references
+                    if let Some(first_node) = children.get(phrasing_nodes[0]) {
+                        first_node.before_html(html.as_str());
+                        // Remove the original nodes
+                        for &idx in phrasing_nodes.iter().rev() {
+                            if let Some(n) = children.get(idx) {
+                                n.remove_from_parent();
+                            }
+                        }
+                    }
+                }
+
+                i = j;
+            } else {
+                i += 1;
+            }
         }
     }
 

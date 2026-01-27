@@ -70,7 +70,7 @@ pub fn unescape_html_entities(s: &str) -> String {
 }
 
 /// Extract JSON-LD metadata from the document.
-pub fn get_json_ld(doc: &Document) -> Metadata {
+pub fn get_json_ld(doc: &Document, article_title: &str) -> Metadata {
     let mut metadata = Metadata::default();
 
     let scripts = doc.select("script[type='application/ld+json']");
@@ -178,8 +178,18 @@ pub fn get_json_ld(doc: &Document) -> Metadata {
 
         metadata.title = match (name, headline) {
             (Some(n), Some(h)) if n != h => {
-                // Both exist and differ - prefer headline as it's usually the article title
-                Some(h.trim().to_string())
+                // Both exist and differ - check which one matches the HTML title better.
+                // Some sites put their site name in "name" and the article title in "headline"
+                // (e.g., aktualne.cz), while others like Wikipedia put the article title in
+                // "name" and a description in "headline".
+                let name_matches = text_similarity(n, article_title) > 0.75;
+                let headline_matches = text_similarity(h, article_title) > 0.75;
+
+                if headline_matches && !name_matches {
+                    Some(h.trim().to_string())
+                } else {
+                    Some(n.trim().to_string())
+                }
             }
             (Some(n), _) => Some(n.trim().to_string()),
             (_, Some(h)) => Some(h.trim().to_string()),
@@ -189,12 +199,16 @@ pub fn get_json_ld(doc: &Document) -> Metadata {
         // Extract author/byline
         if let Some(author) = parsed.get("author") {
             if let Some(author_name) = author.get("name").and_then(|v| v.as_str()) {
-                metadata.byline = Some(author_name.trim().to_string());
+                let trimmed = author_name.trim();
+                if !trimmed.is_empty() {
+                    metadata.byline = Some(trimmed.to_string());
+                }
             } else if let Value::Array(authors) = author {
                 let names: Vec<String> = authors
                     .iter()
                     .filter_map(|a| a.get("name").and_then(|v| v.as_str()))
                     .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
                     .collect();
                 if !names.is_empty() {
                     metadata.byline = Some(names.join(", "));

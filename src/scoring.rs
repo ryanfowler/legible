@@ -116,9 +116,11 @@ pub fn get_text_density(node: &Node<'_>, tags: &[&str]) -> f64 {
 }
 
 /// Get the comma count in an element's text.
+/// Returns comma count + 1 to match JS split().length behavior.
 pub fn get_comma_count(node: &Node<'_>) -> usize {
     let text = get_inner_text(node, true);
-    regexps::COMMAS.find_iter(&text).count()
+    // JS uses split(commas).length which returns segments (commas + 1)
+    regexps::COMMAS.find_iter(&text).count() + 1
 }
 
 /// Check if a node is whitespace.

@@ -4,7 +4,6 @@ use legible::Readability;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,90 +182,5 @@ fn text_similarity(a: &str, b: &str) -> f64 {
     intersection as f64 / union as f64
 }
 
-#[test]
-fn test_all_readability_test_cases() {
-    let test_pages_dir = get_test_pages_dir();
-
-    if !test_pages_dir.exists() {
-        panic!(
-            "Test pages directory not found at {:?}. Make sure the readability-js submodule is initialized.",
-            test_pages_dir
-        );
-    }
-
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut failures: Vec<(String, String)> = Vec::new();
-
-    for entry in WalkDir::new(&test_pages_dir)
-        .min_depth(1)
-        .max_depth(1)
-        .sort_by_file_name()
-    {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-
-        if path.is_dir() {
-            let test_name = path.file_name().unwrap().to_str().unwrap();
-
-            match run_test_case(path) {
-                Ok(()) => {
-                    passed += 1;
-                    println!("PASS: {}", test_name);
-                }
-                Err(e) => {
-                    failed += 1;
-                    println!("FAIL: {} - {}", test_name, e);
-                    failures.push((test_name.to_string(), e));
-                }
-            }
-        }
-    }
-
-    println!("\n========================================");
-    println!("Results: {} passed, {} failed", passed, failed);
-    println!("========================================\n");
-
-    if !failures.is_empty() {
-        println!("Failed tests:");
-        for (name, reason) in &failures {
-            println!("  - {}: {}", name, reason);
-        }
-    }
-
-    // For now, we don't fail the test suite - we're tracking progress
-    // Uncomment below to require all tests to pass:
-    // assert!(failures.is_empty(), "Some tests failed");
-}
-
-// Individual test cases for debugging
-
-#[test]
-fn test_simple_article() {
-    let test_dir = get_test_pages_dir().join("001");
-    if test_dir.exists()
-        && let Err(e) = run_test_case(&test_dir)
-    {
-        panic!("Test 001 failed: {}", e);
-    }
-}
-
-#[test]
-fn test_basic_tags_cleaning() {
-    let test_dir = get_test_pages_dir().join("basic-tags-cleaning");
-    if test_dir.exists()
-        && let Err(e) = run_test_case(&test_dir)
-    {
-        panic!("basic-tags-cleaning failed: {}", e);
-    }
-}
-
-#[test]
-fn test_metadata_preferred() {
-    let test_dir = get_test_pages_dir().join("003-metadata-preferred");
-    if test_dir.exists()
-        && let Err(e) = run_test_case(&test_dir)
-    {
-        panic!("003-metadata-preferred failed: {}", e);
-    }
-}
+// Include generated test functions for each test case
+include!(concat!(env!("OUT_DIR"), "/generated_tests.rs"));

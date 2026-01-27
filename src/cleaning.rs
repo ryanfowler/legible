@@ -6,7 +6,7 @@ use crate::constants::{
 use crate::dom::{NodeDataStore, get_tag_name, node_select};
 use crate::scoring::{
     get_class_weight, get_inner_text, get_link_density, get_text_density,
-    has_single_tag_inside_element, is_element_without_content,
+    has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
 use dom_query::{Document, Node};
 use regex::Regex;
@@ -31,42 +31,105 @@ pub fn prep_document(doc: &Document) {
     }
 }
 
+/// Get the next element node, skipping whitespace text nodes.
+fn next_element<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let mut next = node.next_sibling();
+    while let Some(ref n) = next {
+        if n.is_element() {
+            return next;
+        }
+        if n.is_text() && !regexps::WHITESPACE.is_match(n.text().as_ref()) {
+            return None;
+        }
+        next = n.next_sibling();
+    }
+    None
+}
+
 /// Replace multiple <br> elements with <p> tags.
+/// Consecutive BRs (with optional whitespace between) are converted to paragraph breaks.
+/// Following phrasing content is moved into the new P until we hit a block element
+/// or another BR pair.
 fn replace_brs(elem: &Node<'_>) {
     let brs: Vec<_> = node_select(elem, "br").nodes().to_vec();
 
     for br in brs {
-        let mut next: Option<Node<'_>> = br.next_sibling();
+        // Check if this BR has been removed (as part of a previous BR chain)
+        if br.parent().is_none() {
+            continue;
+        }
+
+        let mut next = next_element(&br);
         let mut replaced = false;
 
-        // Remove consecutive BR elements
+        // Remove consecutive BR elements after this one
         while let Some(ref n) = next {
-            if n.is_element()
-                && let Some(tag) = get_tag_name(n)
-                && tag == "BR"
-            {
-                replaced = true;
-                let next_sibling: Option<Node<'_>> = n.next_sibling();
-                n.remove_from_parent();
-                next = next_sibling;
-                continue;
-            }
-
-            // Skip whitespace-only text nodes
-            if n.is_text() {
-                let text = n.text();
-                if regexps::WHITESPACE.is_match(text.as_ref()) {
-                    next = n.next_sibling();
+            if let Some(tag) = get_tag_name(n) {
+                if tag == "BR" {
+                    replaced = true;
+                    let next_sibling = next_element(n);
+                    n.remove_from_parent();
+                    next = next_sibling;
                     continue;
                 }
             }
-
             break;
         }
 
+        // If we found consecutive BRs, replace this BR with a P and move following content into it
         if replaced {
-            // Rename BR to P
+            // Rename the BR to P
             br.rename("p");
+            let p = br;
+
+            // Move following phrasing content into the P
+            let mut next = p.next_sibling();
+            while let Some(n) = next {
+                // If we hit another BR followed by BR, stop
+                if n.is_element() {
+                    if let Some(tag) = get_tag_name(&n) {
+                        if tag == "BR" {
+                            if let Some(next_elem) = next_element(&n) {
+                                if let Some(next_tag) = get_tag_name(&next_elem) {
+                                    if next_tag == "BR" {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If this is not phrasing content, stop
+                if !is_phrasing_content(&n) {
+                    break;
+                }
+
+                // Move this node into the P
+                let sibling = n.next_sibling();
+                p.append_child(&n);
+                next = sibling;
+            }
+
+            // Trim trailing whitespace text nodes from the P
+            loop {
+                if let Some(last) = p.children().last() {
+                    if last.is_text() && regexps::WHITESPACE.is_match(last.text().as_ref()) {
+                        last.remove_from_parent();
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            // If the P is inside another P, convert the parent to DIV
+            if let Some(parent) = p.parent() {
+                if let Some(parent_tag) = get_tag_name(&parent) {
+                    if parent_tag == "P" {
+                        parent.rename("div");
+                    }
+                }
+            }
         }
     }
 }
