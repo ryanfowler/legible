@@ -5,7 +5,7 @@ use crate::dom::get_tag_name;
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
 use dom_query::{Document, NodeId};
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 /// Check if a document is probably readerable without parsing the whole thing.
 ///
@@ -47,12 +47,13 @@ pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) ->
         }
 
         // Check class/id against unlikely patterns
-        let class = node
-            .attr("class")
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let id = node.attr("id").map(|s| s.to_string()).unwrap_or_default();
-        let match_string = format!("{} {}", class, id);
+        // Build match_string for regex - allocation is needed for the combined string
+        let match_string = match (node.attr("class"), node.attr("id")) {
+            (Some(class), Some(id)) => format!("{} {}", class.as_ref(), id.as_ref()),
+            (Some(class), None) => format!("{} ", class.as_ref()),
+            (None, Some(id)) => format!(" {}", id.as_ref()),
+            (None, None) => String::from(" "),
+        };
 
         if regexps::UNLIKELY_CANDIDATES.is_match(&match_string)
             && !regexps::OK_MAYBE_ITS_A_CANDIDATE.is_match(&match_string)

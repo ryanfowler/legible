@@ -83,12 +83,10 @@ pub fn get_link_density(node: &Node<'_>) -> f64 {
     let mut link_length = 0.0;
 
     for link in node_select(node, "a").nodes().iter() {
-        let href = link.attr("href").map(|s| s.to_string()).unwrap_or_default();
-        // Hash URLs count less
-        let coefficient = if regexps::HASH_URL.is_match(&href) {
-            0.3
-        } else {
-            1.0
+        // Check href directly without allocating a new String
+        let coefficient = match link.attr("href") {
+            Some(href) if regexps::HASH_URL.is_match(href.as_ref()) => 0.3,
+            _ => 1.0,
         };
         link_length += get_inner_text(link, true).chars().count() as f64 * coefficient;
     }

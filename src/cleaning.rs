@@ -188,8 +188,9 @@ pub fn clean(node: &Node<'_>, tag: &str, allowed_video_regex: &Regex) {
 
 /// Remove presentational styles from an element and its children.
 pub fn clean_styles(node: &Node<'_>) {
+    // Use eq_ignore_ascii_case to avoid allocation (Phase 4.1)
     if let Some(tag) = get_tag_name(node)
-        && tag.to_lowercase() == "svg"
+        && tag.eq_ignore_ascii_case("SVG")
     {
         return;
     }
@@ -303,30 +304,23 @@ fn should_remove_conditionally(
         return false;
     }
 
-    // Check if inside a data table
-    let mut parent = node.parent();
-    while let Some(p) = parent {
-        if let Some(ptag) = get_tag_name(&p)
-            && ptag == "TABLE"
-            && let Some(is_data_table) = store.is_data_table(&p.id)
-            && is_data_table
-        {
-            return false;
-        }
-        parent = p.parent();
-    }
-
-    // Check if inside code element
+    // Combined parent chain walk for data table and code checks (Phase 4.2)
+    // This single walk checks multiple conditions instead of walking ancestors twice
     let mut parent = node.parent();
     let mut depth = 0;
     while let Some(p) = parent {
-        if depth > 3 {
-            break;
-        }
-        if let Some(ptag) = get_tag_name(&p)
-            && ptag == "CODE"
-        {
-            return false;
+        if let Some(ptag) = get_tag_name(&p) {
+            // Check if inside a data table (no depth limit)
+            if ptag == "TABLE"
+                && let Some(is_data_table) = store.is_data_table(&p.id)
+                && is_data_table
+            {
+                return false;
+            }
+            // Check if inside code element (depth limit of 3)
+            if depth <= 3 && ptag == "CODE" {
+                return false;
+            }
         }
         parent = p.parent();
         depth += 1;
@@ -797,9 +791,13 @@ where
             continue;
         }
 
-        let class = n.attr("class").map(|s| s.to_string()).unwrap_or_default();
-        let id = n.attr("id").map(|s| s.to_string()).unwrap_or_default();
-        let match_string = format!("{} {}", class, id);
+        // Build match_string for filter - allocation is needed for the combined string
+        let match_string = match (n.attr("class"), n.attr("id")) {
+            (Some(class), Some(id)) => format!("{} {}", class.as_ref(), id.as_ref()),
+            (Some(class), None) => format!("{} ", class.as_ref()),
+            (None, Some(id)) => format!(" {}", id.as_ref()),
+            (None, None) => String::from(" "),
+        };
 
         if filter(&n, &match_string) {
             n.remove_from_parent();

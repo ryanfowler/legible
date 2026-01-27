@@ -20,6 +20,7 @@ use crate::scoring::{
     is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
 };
 use dom_query::{Document, Node, NodeId};
+use hashbrown::{HashMap, HashSet};
 use regex::Regex;
 use url::Url;
 
@@ -195,7 +196,8 @@ impl Readability {
             let strip_unlikely_candidates = self.flag_is_active(FLAG_STRIP_UNLIKELYS);
 
             // First, node prepping
-            let mut elements_to_score: Vec<NodeId> = Vec::new();
+            // Use HashSet for O(1) membership checks (Phase 1.2)
+            let mut elements_to_score: HashSet<NodeId> = HashSet::new();
 
             // Get the HTML element for language
             if let Some(html) = self.doc.select("html").nodes().first()
@@ -205,14 +207,13 @@ impl Readability {
             }
 
             // Track nodes to remove (use HashSet for efficient lookup)
-            let mut nodes_to_remove: std::collections::HashSet<NodeId> =
-                std::collections::HashSet::new();
+            let mut nodes_to_remove: HashSet<NodeId> = HashSet::new();
             let mut should_remove_title_header = true;
 
             // Helper to check if any ancestor is scheduled for removal
             fn has_ancestor_scheduled_for_removal(
                 node: &Node<'_>,
-                to_remove: &std::collections::HashSet<NodeId>,
+                to_remove: &HashSet<NodeId>,
             ) -> bool {
                 let mut parent = node.parent();
                 while let Some(p) = parent {
@@ -236,12 +237,13 @@ impl Readability {
                 }
 
                 let tag_name = get_tag_name(node).unwrap_or_default();
-                let class = node
-                    .attr("class")
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                let id = node.attr("id").map(|s| s.to_string()).unwrap_or_default();
-                let match_string = format!("{} {}", class, id);
+                // Build match_string for regex matching - allocation is needed for the combined string
+                let match_string = match (node.attr("class"), node.attr("id")) {
+                    (Some(class), Some(id)) => format!("{} {}", class.as_ref(), id.as_ref()),
+                    (Some(class), None) => format!("{} ", class.as_ref()),
+                    (None, Some(id)) => format!(" {}", id.as_ref()),
+                    (None, None) => String::from(" "),
+                };
 
                 // Check visibility
                 if !is_probably_visible(node) {
@@ -328,11 +330,9 @@ impl Readability {
                     continue;
                 }
 
-                // Add to elements to score (avoid duplicates)
-                if DEFAULT_TAGS_TO_SCORE.contains(tag_name.as_str())
-                    && !elements_to_score.contains(&node.id)
-                {
-                    elements_to_score.push(node.id);
+                // Add to elements to score (HashSet handles duplicates automatically)
+                if DEFAULT_TAGS_TO_SCORE.contains(tag_name.as_str()) {
+                    elements_to_score.insert(node.id);
                 }
 
                 // Process DIVs - wrap phrasing content in P tags
@@ -349,15 +349,11 @@ impl Readability {
                         if let Some(p_child) = node.element_children().first() {
                             let p_id = p_child.id;
                             node.replace_with(p_child);
-                            if !elements_to_score.contains(&p_id) {
-                                elements_to_score.push(p_id);
-                            }
+                            elements_to_score.insert(p_id);
                         }
                     } else if !has_child_block_element(node) {
                         node.rename("p");
-                        if !elements_to_score.contains(&node.id) {
-                            elements_to_score.push(node.id);
-                        }
+                        elements_to_score.insert(node.id);
                     } else {
                         // DIV stays as DIV - add any P children to elements_to_score
                         // (these may have been created by wrap_phrasing_content_in_p)
@@ -365,9 +361,8 @@ impl Readability {
                         for child in node.element_children() {
                             if let Some(child_tag) = get_tag_name(&child)
                                 && child_tag == "P"
-                                && !elements_to_score.contains(&child.id)
                             {
-                                elements_to_score.push(child.id);
+                                elements_to_score.insert(child.id);
                             }
                         }
                     }
@@ -375,11 +370,17 @@ impl Readability {
             }
 
             // Remove marked nodes
+            // Build node index once for O(1) lookups (Phase 1.1)
             {
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+                let node_index: HashMap<NodeId, usize> = all_nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.id, i))
+                    .collect();
                 for node_id in &nodes_to_remove {
-                    if let Some(node) = all_nodes.iter().find(|n| &n.id == node_id) {
-                        node.remove_from_parent();
+                    if let Some(&idx) = node_index.get(node_id) {
+                        all_nodes[idx].remove_from_parent();
                     }
                 }
             }
@@ -387,10 +388,17 @@ impl Readability {
             // Score elements
             let mut candidates: Vec<NodeId> = Vec::new();
 
+            // Build node index once for O(1) lookups during scoring (Phase 1.1)
+            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+            let node_index: HashMap<NodeId, usize> = all_nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.id, i))
+                .collect();
+
             for node_id in &elements_to_score {
-                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let node = match all_nodes.iter().find(|n| &n.id == node_id) {
-                    Some(n) => *n,
+                let node = match node_index.get(node_id).map(|&i| all_nodes[i]) {
+                    Some(n) => n,
                     None => continue,
                 };
 
@@ -445,12 +453,20 @@ impl Readability {
             }
 
             // Find top candidates
-            let mut top_candidates: Vec<(NodeId, f64)> = Vec::new();
+            // Collect all scores first, then sort once at the end (Phase 3.2)
+            let mut all_candidate_scores: Vec<(NodeId, f64)> = Vec::with_capacity(candidates.len());
+
+            // Build node index for candidate lookups (Phase 1.1)
+            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+            let node_index: HashMap<NodeId, usize> = all_nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.id, i))
+                .collect();
 
             for candidate_id in &candidates {
-                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let candidate = match all_nodes.iter().find(|n| &n.id == candidate_id) {
-                    Some(c) => *c,
+                let candidate = match node_index.get(candidate_id).map(|&i| all_nodes[i]) {
+                    Some(c) => c,
                     None => continue,
                 };
 
@@ -464,21 +480,15 @@ impl Readability {
 
                 self.log(&format!("Candidate with score {:.2}", final_score));
 
-                let mut inserted = false;
-                for i in 0..self.options.nb_top_candidates.min(top_candidates.len() + 1) {
-                    if i >= top_candidates.len() || final_score > top_candidates[i].1 {
-                        top_candidates.insert(i, (*candidate_id, final_score));
-                        inserted = true;
-                        break;
-                    }
-                }
-                if !inserted && top_candidates.len() < self.options.nb_top_candidates {
-                    top_candidates.push((*candidate_id, final_score));
-                }
-                if top_candidates.len() > self.options.nb_top_candidates {
-                    top_candidates.pop();
-                }
+                all_candidate_scores.push((*candidate_id, final_score));
             }
+
+            // Sort by score descending and take top N (Phase 3.2 - O(n log n) vs O(n²))
+            all_candidate_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top_candidates: Vec<(NodeId, f64)> = all_candidate_scores
+                .into_iter()
+                .take(self.options.nb_top_candidates)
+                .collect();
 
 
             // Get top candidate
@@ -520,8 +530,14 @@ impl Readability {
                 (Some(container_id), true)
             } else {
                 let top_id = top_candidates[0].0;
+                // Build node index for O(1) lookups (Phase 1.1)
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let mut top_candidate = all_nodes.iter().find(|n| n.id == top_id).cloned();
+                let node_index: HashMap<NodeId, usize> = all_nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.id, i))
+                    .collect();
+                let mut top_candidate = node_index.get(&top_id).map(|&i| all_nodes[i]);
 
                 // Alternative candidate ancestors logic:
                 // Find a better top candidate node if it contains (at least three) nodes
@@ -534,10 +550,10 @@ impl Readability {
                     let mut alternative_candidate_ancestors: Vec<Vec<NodeId>> = Vec::new();
                     for &(candidate_id, candidate_score) in top_candidates.iter().skip(1) {
                         if candidate_score / top_score >= 0.75
-                            && let Some(candidate_node) =
-                                all_nodes.iter().find(|n| n.id == candidate_id)
+                            && let Some(&idx) = node_index.get(&candidate_id)
                         {
-                            let ancestors: Vec<NodeId> = get_ancestors(candidate_node, 0)
+                            let candidate_node = all_nodes[idx];
+                            let ancestors: Vec<NodeId> = get_ancestors(&candidate_node, 0)
                                 .iter()
                                 .map(|n| n.id)
                                 .collect();
@@ -652,7 +668,13 @@ impl Readability {
             } else {
                 // Gather siblings and potentially create container DIV
                 // Like JS, we always create a container and move siblings into it
+                // Build node index for O(1) lookups (Phase 1.1)
                 let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+                let node_index: HashMap<NodeId, usize> = all_nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.id, i))
+                    .collect();
                 let sibling_ids = self.gather_siblings(top_candidate_id, &all_nodes);
 
                 if sibling_ids.is_empty() {
@@ -663,8 +685,8 @@ impl Readability {
                     // Create container DIV and move siblings into it
                     // This includes the case of a single sibling - we still need a container
                     // so that the wrapper div is added correctly
-                    if let Some(top_candidate) = all_nodes.iter().find(|n| n.id == top_candidate_id)
-                    {
+                    if let Some(&idx) = node_index.get(&top_candidate_id) {
+                        let top_candidate = &all_nodes[idx];
                         self.create_article_container(top_candidate, &sibling_ids, &all_nodes)
                     } else {
                         Some(top_candidate_id)
@@ -674,9 +696,14 @@ impl Readability {
 
             let article_node_id = article_node_id.ok_or(ReadabilityError::NoContent)?;
 
-            // Get article node by ID
+            // Get article node by ID using HashMap for O(1) lookup (Phase 1.1)
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let article_node = all_nodes.into_iter().find(|n| n.id == article_node_id);
+            let node_index: HashMap<NodeId, usize> = all_nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.id, i))
+                .collect();
+            let article_node = node_index.get(&article_node_id).map(|&i| all_nodes[i]);
 
             // Prepare article content
             if let Some(article_node) = article_node {
@@ -695,10 +722,16 @@ impl Readability {
                 );
 
                 // Re-fetch the article node after prep_article mutated the DOM
+                // Use HashMap for O(1) lookup (Phase 1.1)
                 let all_nodes_after: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let article_node = all_nodes_after
-                    .into_iter()
-                    .find(|n| n.id == article_node_id)
+                let node_index: HashMap<NodeId, usize> = all_nodes_after
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.id, i))
+                    .collect();
+                let article_node = node_index
+                    .get(&article_node_id)
+                    .map(|&i| all_nodes_after[i])
                     .ok_or(ReadabilityError::NoContent)?;
 
                 // Add readability-page-1 wrapper div
@@ -727,10 +760,16 @@ impl Readability {
                 }
 
                 // Re-fetch the article node after wrapping
+                // Use HashMap for O(1) lookup (Phase 1.1)
                 let all_nodes_after: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let article_node = all_nodes_after
-                    .into_iter()
-                    .find(|n| n.id == article_node_id)
+                let node_index: HashMap<NodeId, usize> = all_nodes_after
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.id, i))
+                    .collect();
+                let article_node = node_index
+                    .get(&article_node_id)
+                    .map(|&i| all_nodes_after[i])
                     .ok_or(ReadabilityError::NoContent)?;
 
                 let text_content = get_inner_text(&article_node, true);
@@ -789,11 +828,18 @@ impl Readability {
                 }
 
                 // Find dir attribute from ancestors
+                // Use HashMap for O(1) lookup (Phase 1.1)
                 {
                     let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                    if let Some(tc) = all_nodes.iter().find(|n| n.id == top_candidate_id) {
-                        let ancestors = get_ancestors(tc, 0);
-                        for ancestor in std::iter::once(*tc).chain(ancestors) {
+                    let node_index: HashMap<NodeId, usize> = all_nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, n)| (n.id, i))
+                        .collect();
+                    if let Some(&idx) = node_index.get(&top_candidate_id) {
+                        let tc = all_nodes[idx];
+                        let ancestors = get_ancestors(&tc, 0);
+                        for ancestor in std::iter::once(tc).chain(ancestors) {
                             if let Some(dir) = ancestor.attr("dir") {
                                 self.article_dir = Some(dir.to_string());
                                 break;
@@ -1244,11 +1290,20 @@ fn get_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
     ancestors
 }
 
-/// Escape HTML special characters.
+/// Escape HTML special characters using single-pass with pre-allocated buffer (Phase 2.2).
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    // Estimate capacity: worst case every char needs escaping (5 chars for &#39;)
+    // but usually only a few chars need escaping, so start with original length + some buffer
+    let mut result = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#39;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
