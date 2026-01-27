@@ -309,8 +309,10 @@ impl Readability {
                     continue;
                 }
 
-                // Add to elements to score
-                if DEFAULT_TAGS_TO_SCORE.contains(tag_name.as_str()) {
+                // Add to elements to score (avoid duplicates)
+                if DEFAULT_TAGS_TO_SCORE.contains(tag_name.as_str())
+                    && !elements_to_score.contains(&node.id)
+                {
                     elements_to_score.push(node.id);
                 }
 
@@ -328,11 +330,15 @@ impl Readability {
                         if let Some(p_child) = node.element_children().first() {
                             let p_id = p_child.id;
                             node.replace_with(p_child);
-                            elements_to_score.push(p_id);
+                            if !elements_to_score.contains(&p_id) {
+                                elements_to_score.push(p_id);
+                            }
                         }
                     } else if !has_child_block_element(node) {
                         node.rename("p");
-                        elements_to_score.push(node.id);
+                        if !elements_to_score.contains(&node.id) {
+                            elements_to_score.push(node.id);
+                        }
                     }
                 }
             }
@@ -441,6 +447,7 @@ impl Readability {
                     top_candidates.pop();
                 }
             }
+
 
             // Get top candidate
             // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
@@ -569,22 +576,23 @@ impl Readability {
                         parent = p.parent();
                     }
 
-                    let mut current = top_candidate;
-                    while let Some(c) = current {
-                        if let Some(p) = c.parent() {
+                    // If the top candidate is the only child, use parent instead.
+                    // This will help sibling joining logic when adjacent content
+                    // is actually located in parent's sibling node.
+                    if let Some(ref mut tc) = top_candidate {
+                        let mut parent_of_tc = tc.parent();
+                        while let Some(p) = parent_of_tc {
                             if let Some(ptag) = get_tag_name(&p)
                                 && ptag == "BODY"
                             {
                                 break;
                             }
                             if p.element_children().len() == 1 {
-                                current = Some(p);
+                                *tc = p;
+                                parent_of_tc = tc.parent();
                             } else {
-                                top_candidate = current;
                                 break;
                             }
-                        } else {
-                            break;
                         }
                     }
                 }
