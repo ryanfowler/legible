@@ -11,20 +11,8 @@ pub mod flags {
     pub const FLAG_CLEAN_CONDITIONALLY: u32 = 0x4;
 }
 
-/// Node type constants matching the DOM spec.
-pub mod node_type {
-    pub const ELEMENT_NODE: u32 = 1;
-    pub const TEXT_NODE: u32 = 3;
-}
-
 /// Default configuration values.
 pub mod defaults {
-    /// Max number of nodes supported by this parser. Default: 0 (no limit)
-    pub const DEFAULT_MAX_ELEMS_TO_PARSE: usize = 0;
-
-    /// The number of top candidates to consider when analysing competition.
-    pub const DEFAULT_N_TOP_CANDIDATES: usize = 5;
-
     /// The default number of chars an article must have to return a result.
     pub const DEFAULT_CHAR_THRESHOLD: usize = 500;
 }
@@ -61,25 +49,12 @@ pub mod regexps {
         Regex::new(r"(?i)-ad-|hidden|^hid$| hid$| hid |^hid |banner|combx|comment|com-|contact|footer|gdpr|masthead|media|meta|outbrain|promo|related|scroll|share|shoutbox|sidebar|skyscraper|sponsor|shopping|tags|widget").unwrap()
     });
 
-    /// Matches extraneous elements.
-    pub static EXTRANEOUS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)print|archive|comment|discuss|e[\-]?mail|share|reply|all|login|sign|single|utility").unwrap()
-    });
-
     /// Matches byline patterns.
-    pub static BYLINE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)byline|author|dateline|writtenby|p-author").unwrap()
-    });
-
-    /// Matches font tags for replacement.
-    pub static REPLACE_FONTS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)<(\/?)font[^>]*>").unwrap()
-    });
+    pub static BYLINE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)byline|author|dateline|writtenby|p-author").unwrap());
 
     /// Matches multiple whitespace characters.
-    pub static NORMALIZE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\s{2,}").unwrap()
-    });
+    pub static NORMALIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s{2,}").unwrap());
 
     /// Matches video hosting URLs.
     pub static VIDEOS: Lazy<Regex> = Lazy::new(|| {
@@ -87,49 +62,28 @@ pub mod regexps {
     });
 
     /// Matches share-related elements.
-    pub static SHARE_ELEMENTS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)(\b|_)(share|sharedaddy)(\b|_)").unwrap()
-    });
-
-    /// Matches next page links.
-    pub static NEXT_LINK: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)(next|weiter|continue|>([^\|]|$)|»([^\|]|$))").unwrap()
-    });
-
-    /// Matches previous page links.
-    pub static PREV_LINK: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)(prev|earl|old|new|<|«)").unwrap()
-    });
+    pub static SHARE_ELEMENTS: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)(\b|_)(share|sharedaddy)(\b|_)").unwrap());
 
     /// Tokenizes text on word boundaries.
-    pub static TOKENIZE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\W+").unwrap()
-    });
+    pub static TOKENIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\W+").unwrap());
 
     /// Matches whitespace-only strings.
-    pub static WHITESPACE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^\s*$").unwrap()
-    });
+    pub static WHITESPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*$").unwrap());
 
     /// Matches strings with content (non-whitespace at end).
-    pub static HAS_CONTENT: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\S$").unwrap()
-    });
+    pub static HAS_CONTENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\S$").unwrap());
 
     /// Matches hash URLs.
-    pub static HASH_URL: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^#.+").unwrap()
-    });
+    pub static HASH_URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"^#.+").unwrap());
 
     /// Matches srcset URL patterns.
-    pub static SRCSET_URL: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap()
-    });
+    pub static SRCSET_URL: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap());
 
     /// Matches base64 data URLs.
-    pub static B64_DATA_URL: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)^data:\s*([^\s;,]+)\s*;\s*base64\s*,").unwrap()
-    });
+    pub static B64_DATA_URL: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)^data:\s*([^\s;,]+)\s*;\s*base64\s*,").unwrap());
 
     /// Matches commas in various scripts.
     /// See: https://en.wikipedia.org/wiki/Comma#Comma_variants
@@ -145,7 +99,10 @@ pub mod regexps {
 
     /// Matches ad-related words.
     pub static AD_WORDS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?iu)^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|广告|Реклама|Anuncio)$").unwrap()
+        Regex::new(
+            r"(?iu)^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|广告|Реклама|Anuncio)$",
+        )
+        .unwrap()
     });
 
     /// Matches loading indicator words.
@@ -154,39 +111,31 @@ pub mod regexps {
     });
 
     /// Matches sentence-ending periods.
-    pub static SENTENCE_END: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\.( |$)").unwrap()
-    });
+    pub static SENTENCE_END: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.( |$)").unwrap());
 
     /// Matches image file extensions in strings.
-    pub static IMAGE_EXTENSION: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)\.(jpg|jpeg|png|webp)").unwrap()
-    });
+    pub static IMAGE_EXTENSION: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)").unwrap());
 
     /// Matches image srcset patterns.
-    pub static IMAGE_SRCSET: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\s+\d").unwrap()
-    });
+    pub static IMAGE_SRCSET: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\s+\d").unwrap());
 
     /// Matches single image URL patterns.
-    pub static IMAGE_SRC: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)\S*\s*$").unwrap()
-    });
+    pub static IMAGE_SRC: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)\S*\s*$").unwrap());
 
     /// Matches title separators surrounded by whitespace.
-    pub static TITLE_SEPARATOR: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\s[\|\-–—\\\/>»]\s").unwrap()
-    });
+    pub static TITLE_SEPARATOR: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\s[\|\-–—\\\/>»]\s").unwrap());
 
     /// Matches hierarchical title separators (/, >, »).
-    pub static TITLE_HIERARCHICAL: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\s[\\/>\u{00BB}]\s").unwrap()
-    });
+    pub static TITLE_HIERARCHICAL: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\s[\\/>\u{00BB}]\s").unwrap());
 
     /// Matches the first part of a title up to and including a separator.
-    pub static TITLE_FIRST_PART: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^[^\|\-–—\\\/>»]*[\|\-–—\\\/>»]").unwrap()
-    });
+    pub static TITLE_FIRST_PART: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"^[^\|\-–—\\\/>»]*[\|\-–—\\\/>»]").unwrap());
 }
 
 /// Roles that indicate unlikely content areas.
@@ -207,10 +156,20 @@ pub static UNLIKELY_ROLES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 
 /// Block-level elements that cause DIV to P conversion.
 pub static DIV_TO_P_ELEMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["BLOCKQUOTE", "DL", "DIV", "IMG", "OL", "P", "PRE", "TABLE", "UL"]
-        .iter()
-        .copied()
-        .collect()
+    [
+        "BLOCKQUOTE",
+        "DL",
+        "DIV",
+        "IMG",
+        "OL",
+        "P",
+        "PRE",
+        "TABLE",
+        "UL",
+    ]
+    .iter()
+    .copied()
+    .collect()
 });
 
 /// Elements that should not be converted to DIV during sibling joining.
@@ -240,12 +199,8 @@ pub static PRESENTATIONAL_ATTRIBUTES: Lazy<Vec<&'static str>> = Lazy::new(|| {
 });
 
 /// Elements with deprecated size attributes to remove.
-pub static DEPRECATED_SIZE_ATTRIBUTE_ELEMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["TABLE", "TH", "TD", "HR", "PRE"]
-        .iter()
-        .copied()
-        .collect()
-});
+pub static DEPRECATED_SIZE_ATTRIBUTE_ELEMS: Lazy<HashSet<&'static str>> =
+    Lazy::new(|| ["TABLE", "TH", "TD", "HR", "PRE"].iter().copied().collect());
 
 /// Phrasing content elements.
 /// Note: CANVAS, IFRAME, SVG, VIDEO are excluded as they tend to be removed.
@@ -261,9 +216,6 @@ pub static PHRASING_ELEMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     .collect()
 });
 
-/// Classes that readability sets itself and should be preserved.
-pub static CLASSES_TO_PRESERVE: Lazy<Vec<&'static str>> = Lazy::new(|| vec!["page"]);
-
 /// HTML entity map for unescaping.
 pub static HTML_ESCAPE_MAP: Lazy<std::collections::HashMap<&'static str, &'static str>> =
     Lazy::new(|| {
@@ -275,6 +227,3 @@ pub static HTML_ESCAPE_MAP: Lazy<std::collections::HashMap<&'static str, &'stati
         map.insert("apos", "'");
         map
     });
-
-/// Title separator characters for splitting titles.
-pub const TITLE_SEPARATORS: &str = r"\|\-–—\\\/>»";

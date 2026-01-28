@@ -1,12 +1,10 @@
 //! DOM abstraction layer for working with HTML documents.
 
-pub mod manipulation;
-pub mod node;
-pub mod traversal;
+mod node;
+mod traversal;
 
-pub use manipulation::*;
 pub use node::*;
-pub use traversal::*;
+pub use traversal::{get_tag_name, has_ancestor_tag};
 
 use dom_query::{Node, Selection};
 

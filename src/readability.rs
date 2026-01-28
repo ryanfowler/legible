@@ -25,6 +25,12 @@ use regex::Regex;
 use url::Url;
 
 /// The extracted article content.
+///
+/// # Security
+///
+/// The [`content`](Article::content) field contains unsanitized HTML extracted from the
+/// source document. Before rendering this HTML in a browser or other context where scripts
+/// could execute, you should sanitize it using a library like [`ammonia`](https://docs.rs/ammonia).
 #[derive(Debug, Clone)]
 pub struct Article {
     /// The article title.
@@ -36,6 +42,9 @@ pub struct Article {
     /// The document language.
     pub lang: Option<String>,
     /// The article content as HTML.
+    ///
+    /// **Warning:** This HTML is unsanitized and may contain malicious scripts or other
+    /// dangerous content. Always sanitize before rendering (e.g., with the `ammonia` crate).
     pub content: String,
     /// The article content as plain text.
     pub text_content: String,
@@ -110,7 +119,9 @@ impl Readability {
     }
 
     /// Parse the document and extract the article content.
-    pub fn parse(&mut self) -> Result<Article> {
+    ///
+    /// This method consumes the `Readability` instance.
+    pub fn parse(mut self) -> Result<Article> {
         // Check element count limit
         if self.options.max_elems_to_parse > 0 {
             let count = self.doc.select("*").length();

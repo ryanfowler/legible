@@ -2,60 +2,6 @@
 
 use dom_query::Node;
 
-/// Get the next node in a depth-first traversal.
-///
-/// # Arguments
-/// * `node` - The current node
-/// * `ignore_self_and_kids` - If true, skip this node's children and find the next sibling/uncle
-///
-/// This matches the JavaScript `_getNextNode` function.
-pub fn get_next_node<'a>(node: &Node<'a>, ignore_self_and_kids: bool) -> Option<Node<'a>> {
-    // First check for kids if those aren't being ignored
-    if !ignore_self_and_kids
-        && let Some(first_child) = node.first_element_child()
-    {
-        return Some(first_child);
-    }
-
-    // Then for siblings...
-    if let Some(next_sibling) = node.next_element_sibling() {
-        return Some(next_sibling);
-    }
-
-    // And finally, move up the parent chain *and* find a sibling
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if let Some(next_sibling) = parent.next_element_sibling() {
-            return Some(next_sibling);
-        }
-        current = parent.parent();
-    }
-
-    None
-}
-
-/// Get all ancestors of a node up to a maximum depth.
-///
-/// # Arguments
-/// * `node` - The starting node
-/// * `max_depth` - Maximum number of ancestors to return (0 means unlimited)
-pub fn get_node_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
-    let mut ancestors = Vec::new();
-    let mut current = node.parent();
-    let mut depth = 0;
-
-    while let Some(parent) = current {
-        ancestors.push(parent);
-        depth += 1;
-        if max_depth > 0 && depth >= max_depth {
-            break;
-        }
-        current = parent.parent();
-    }
-
-    ancestors
-}
-
 /// Check if a node has an ancestor with the given tag name.
 ///
 /// # Arguments

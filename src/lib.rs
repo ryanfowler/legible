@@ -6,10 +6,17 @@
 //! stripping away navigation, ads, and other non-content elements to produce clean,
 //! readable article content.
 //!
+//! ## Security
+//!
+//! The extracted HTML content is **unsanitized** and may contain malicious scripts or
+//! other dangerous content from the source document. Before rendering this HTML in a
+//! browser or other context where scripts could execute, you should sanitize it using
+//! a library like [`ammonia`](https://docs.rs/ammonia).
+//!
 //! ## Quick Start
 //!
 //! ```rust
-//! use legible::{Readability, Options};
+//! use legible::Readability;
 //!
 //! let html = r#"
 //!     <html>
@@ -28,7 +35,7 @@
 //!     </html>
 //! "#;
 //!
-//! let mut readability = Readability::new(html, Some("https://example.com"), None);
+//! let readability = Readability::new(html, Some("https://example.com"), None);
 //! match readability.parse() {
 //!     Ok(article) => {
 //!         println!("Title: {}", article.title);
@@ -52,17 +59,16 @@
 //! }
 //! ```
 
-pub mod cleaning;
-pub mod constants;
-pub mod dom;
-pub mod error;
-pub mod metadata;
-pub mod options;
-pub mod readability;
-pub mod readerable;
-pub mod scoring;
+mod cleaning;
+mod constants;
+mod dom;
+mod error;
+mod metadata;
+mod options;
+mod readability;
+mod readerable;
+mod scoring;
 
-// Re-export main types for convenience
 pub use error::{ReadabilityError, Result};
 pub use options::{Options, ReaderableOptions};
 pub use readability::{Article, Readability};

@@ -133,7 +133,7 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
     };
 
     // Parse with Readability
-    let mut readability = Readability::new(&html, Some(url), None);
+    let readability = Readability::new(&html, Some(url), None);
     let article = match readability.parse() {
         Ok(a) => a,
         Err(_) => {

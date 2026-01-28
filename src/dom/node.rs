@@ -11,11 +11,6 @@ pub struct ReadabilityData {
 }
 
 impl ReadabilityData {
-    /// Create a new ReadabilityData with zero score.
-    pub fn new() -> Self {
-        Self { content_score: 0.0 }
-    }
-
     /// Create a new ReadabilityData with an initial score.
     pub fn with_score(score: f64) -> Self {
         Self {
@@ -63,11 +58,6 @@ impl NodeDataStore {
         self.data.contains_key(node_id)
     }
 
-    /// Initialize readability data for a node if it doesn't exist.
-    pub fn init_if_missing(&mut self, node_id: NodeId) -> &mut ReadabilityData {
-        self.data.entry(node_id).or_default()
-    }
-
     /// Get the content score for a node.
     pub fn get_content_score(&self, node_id: &NodeId) -> f64 {
         self.data
@@ -96,15 +86,5 @@ impl NodeDataStore {
     pub fn clear(&mut self) {
         self.data.clear();
         self.data_tables.clear();
-    }
-
-    /// Transfer data from one node to another (used when replacing nodes).
-    pub fn transfer(&mut self, from: &NodeId, to: NodeId) {
-        if let Some(data) = self.data.remove(from) {
-            self.data.insert(to, data);
-        }
-        if let Some(is_data_table) = self.data_tables.remove(from) {
-            self.data_tables.insert(to, is_data_table);
-        }
     }
 }

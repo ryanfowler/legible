@@ -57,7 +57,7 @@ Tests run against Mozilla's official Readability.js test suite (git submodule at
 use legible::{Readability, Options, is_probably_readerable};
 
 // Full extraction
-let mut readability = Readability::new(html, Some("https://example.com"), None);
+let readability = Readability::new(html, Some("https://example.com"), None);
 let article = readability.parse()?;  // Returns Article with title, content, text_content, byline, excerpt, etc.
 
 // Quick check without full parsing
