@@ -9,7 +9,7 @@ use crate::constants::{
     ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
 };
 use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select_matcher};
-use crate::error::{ReadabilityError, Result};
+use crate::error::{Error, Result};
 use crate::metadata::{
     Metadata, get_article_metadata, get_article_title, get_json_ld, text_similarity,
 };
@@ -34,12 +34,11 @@ use url::Url;
 /// # Example
 ///
 /// ```rust
-/// use legible::Readability;
+/// use legible::parse;
 ///
 /// let html = "<html><body><article><h1>Title</h1><p>Content...</p></article></body></html>";
-/// let readability = Readability::new(html, None, None);
 ///
-/// if let Ok(article) = readability.parse() {
+/// if let Ok(article) = parse(html, None, None) {
 ///     println!("Title: {}", article.title);
 ///     println!("Author: {:?}", article.byline);
 ///     println!("HTML length: {} bytes", article.content.len());
@@ -113,40 +112,9 @@ pub struct Article {
 
 /// The Readability parser for extracting article content from HTML.
 ///
-/// This is the main entry point for content extraction. Create a new instance with
-/// [`Readability::new()`], then call [`parse()`](Readability::parse) to extract the article.
-///
-/// # Example
-///
-/// ```rust
-/// use legible::Readability;
-///
-/// let html = r#"
-///     <html><body>
-///         <nav>Navigation</nav>
-///         <article>
-///             <h1>Article Title</h1>
-///             <p>Article content goes here...</p>
-///         </article>
-///     </body></html>
-/// "#;
-///
-/// let readability = Readability::new(html, Some("https://example.com"), None);
-/// let article = readability.parse().expect("Failed to extract article");
-///
-/// println!("Title: {}", article.title);
-/// println!("Content: {}", article.content);
-/// ```
-///
-/// # URL Resolution
-///
-/// If a base URL is provided, relative URLs in the extracted content (links, images, etc.)
-/// are converted to absolute URLs.
-///
-/// # Configuration
-///
-/// See [`Options`] for available configuration options.
-pub struct Readability<'a> {
+/// This is an internal implementation detail. Use the public [`parse()`](crate::parse)
+/// function instead.
+pub(crate) struct Readability<'a> {
     doc: Document,
     original_html: &'a str,
     options: Options,
@@ -206,32 +174,7 @@ struct ArticleContent {
 
 impl<'a> Readability<'a> {
     /// Create a new Readability parser for the given HTML.
-    ///
-    /// # Arguments
-    ///
-    /// * `html` - The HTML content to parse
-    /// * `url` - Optional base URL for resolving relative links. If provided, relative URLs
-    ///   in the extracted content will be converted to absolute URLs.
-    /// * `options` - Optional [`Options`] to customize parsing behavior
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use legible::{Readability, Options};
-    ///
-    /// let html = "<html><body><article>Content...</article></body></html>";
-    ///
-    /// // Basic usage
-    /// let readability = Readability::new(html, None, None);
-    ///
-    /// // With URL for resolving relative links
-    /// let readability = Readability::new(html, Some("https://example.com/article"), None);
-    ///
-    /// // With custom options
-    /// let options = Options::new().char_threshold(250);
-    /// let readability = Readability::new(html, Some("https://example.com"), Some(options));
-    /// ```
-    pub fn new(html: &'a str, url: Option<&str>, options: Option<Options>) -> Self {
+    pub(crate) fn new(html: &'a str, url: Option<&str>, options: Option<Options>) -> Self {
         let doc = Document::from(html);
         let options = options.unwrap_or_default();
 
@@ -265,42 +208,17 @@ impl<'a> Readability<'a> {
     }
 
     /// Parse the document and extract the article content.
-    ///
-    /// This method consumes the `Readability` instance and returns an [`Article`]
-    /// containing the extracted content and metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The provided URL is invalid ([`ReadabilityError::InvalidUrl`])
-    /// - The document has no `<body>` element ([`ReadabilityError::NoBody`])
-    /// - No article content could be extracted ([`ReadabilityError::NoContent`])
-    /// - The document exceeds `max_elems_to_parse` ([`ReadabilityError::TooManyElements`])
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use legible::Readability;
-    ///
-    /// let html = "<html><body><article><p>Content...</p></article></body></html>";
-    /// let readability = Readability::new(html, None, None);
-    ///
-    /// match readability.parse() {
-    ///     Ok(article) => println!("Extracted: {}", article.title),
-    ///     Err(e) => eprintln!("Extraction failed: {}", e),
-    /// }
-    /// ```
-    pub fn parse(mut self) -> Result<Article> {
+    pub(crate) fn parse(mut self) -> Result<Article> {
         // Check for URL parsing error
         if let Some(e) = self.url_error {
-            return Err(ReadabilityError::InvalidUrl(e));
+            return Err(Error::InvalidUrl(e));
         }
 
         // Check element count limit
         if self.options.max_elems_to_parse > 0 {
             let count = self.doc.select("*").length();
             if count > self.options.max_elems_to_parse {
-                return Err(ReadabilityError::TooManyElements(
+                return Err(Error::TooManyElements(
                     count,
                     self.options.max_elems_to_parse,
                 ));
@@ -370,7 +288,7 @@ impl<'a> Readability<'a> {
     fn grab_article(&mut self) -> Result<ArticleContent> {
         let body = self.doc.select_matcher(&self.selectors.body);
         if body.length() == 0 {
-            return Err(ReadabilityError::NoBody);
+            return Err(Error::NoBody);
         }
 
         loop {
@@ -678,7 +596,7 @@ impl<'a> Readability<'a> {
             // Get top candidate
             // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
             let body = self.doc.select_matcher(&self.selectors.body);
-            let body_node = body.nodes().first().ok_or(ReadabilityError::NoBody)?;
+            let body_node = body.nodes().first().ok_or(Error::NoBody)?;
             let body_id = body_node.id;
 
             let needs_synthetic_candidate = top_candidates.is_empty()
@@ -835,7 +753,7 @@ impl<'a> Readability<'a> {
                 (top_candidate.map(|tc| tc.id), false)
             };
 
-            let top_candidate_id = top_candidate_id.ok_or(ReadabilityError::NoContent)?;
+            let top_candidate_id = top_candidate_id.ok_or(Error::NoContent)?;
 
             // Get the article node ID to use
             let article_node_id = if needed_to_create_top_candidate {
@@ -873,7 +791,7 @@ impl<'a> Readability<'a> {
                 }
             };
 
-            let article_node_id = article_node_id.ok_or(ReadabilityError::NoContent)?;
+            let article_node_id = article_node_id.ok_or(Error::NoContent)?;
 
             // Get article node directly by ID - O(1) instead of rebuilding full index
             let article_node = self.doc.tree.get(&article_node_id);
@@ -901,7 +819,7 @@ impl<'a> Readability<'a> {
                     .doc
                     .tree
                     .get(&article_node_id)
-                    .ok_or(ReadabilityError::NoContent)?;
+                    .ok_or(Error::NoContent)?;
 
                 // Add readability-page-1 wrapper div
                 // In JS: if neededToCreateTopCandidate, set id/class on topCandidate
@@ -933,7 +851,7 @@ impl<'a> Readability<'a> {
                     .doc
                     .tree
                     .get(&article_node_id)
-                    .ok_or(ReadabilityError::NoContent)?;
+                    .ok_or(Error::NoContent)?;
 
                 let text_content = get_inner_text(&article_node, true);
                 let text_length = text_content.chars().count();
@@ -955,7 +873,7 @@ impl<'a> Readability<'a> {
                             .sort_by(|a, b| b.text_length.cmp(&a.text_length));
 
                         if self.attempts.is_empty() || self.attempts[0].text_length == 0 {
-                            return Err(ReadabilityError::NoContent);
+                            return Err(Error::NoContent);
                         }
 
                         // Use the best attempt - set its content as body and extract text/excerpt
@@ -987,7 +905,7 @@ impl<'a> Readability<'a> {
                             });
                         }
 
-                        return Err(ReadabilityError::NoContent);
+                        return Err(Error::NoContent);
                     }
 
                     // Reparse document from original HTML for retry
@@ -1023,7 +941,7 @@ impl<'a> Readability<'a> {
                 });
             }
 
-            return Err(ReadabilityError::NoContent);
+            return Err(Error::NoContent);
         }
     }
 
@@ -1469,7 +1387,7 @@ impl<'a> Readability<'a> {
 
         // Verify body exists
         if self.doc.select_matcher(&self.selectors.body).length() == 0 {
-            return Err(ReadabilityError::NoBody);
+            return Err(Error::NoBody);
         }
 
         // Reset state that could have been set during failed attempt

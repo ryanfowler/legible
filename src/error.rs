@@ -4,26 +4,24 @@ use thiserror::Error;
 
 /// Errors that can occur during article parsing.
 ///
-/// These errors are returned by [`Readability::parse()`](crate::Readability::parse) when
-/// content extraction fails.
+/// These errors are returned by [`parse()`](crate::parse) when content extraction fails.
 ///
 /// # Example
 ///
 /// ```rust
-/// use legible::{Readability, ReadabilityError};
+/// use legible::{parse, Error};
 ///
 /// let html = "<html><body></body></html>";
-/// let readability = Readability::new(html, None, None);
 ///
-/// match readability.parse() {
+/// match parse(html, None, None) {
 ///     Ok(article) => println!("Success: {}", article.title),
-///     Err(ReadabilityError::NoContent) => println!("No article content found"),
-///     Err(ReadabilityError::NoBody) => println!("Document has no body"),
+///     Err(Error::NoContent) => println!("No article content found"),
+///     Err(Error::NoBody) => println!("Document has no body"),
 ///     Err(e) => println!("Other error: {}", e),
 /// }
 /// ```
 #[derive(Error, Debug)]
-pub enum ReadabilityError {
+pub enum Error {
     /// The document contains too many elements to parse safely.
     ///
     /// This error is returned when the document exceeds the `max_elems_to_parse` limit
@@ -45,11 +43,11 @@ pub enum ReadabilityError {
 
     /// URL parsing error.
     ///
-    /// This error is returned when the URL provided to [`Readability::new()`](crate::Readability::new)
+    /// This error is returned when the URL provided to [`parse()`](crate::parse)
     /// is invalid and cannot be parsed.
     #[error("Invalid URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
 }
 
 /// Result type alias for readability operations.
-pub type Result<T> = std::result::Result<T, ReadabilityError>;
+pub type Result<T> = std::result::Result<T, Error>;

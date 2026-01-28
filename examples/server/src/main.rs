@@ -7,7 +7,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use legible::Readability;
+use legible::parse;
 use serde::Deserialize;
 
 mod ssrf;
@@ -133,8 +133,7 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
     };
 
     // Parse with Readability
-    let readability = Readability::new(&html, Some(url), None);
-    let article = match readability.parse() {
+    let article = match parse(&html, Some(url), None) {
         Ok(a) => a,
         Err(_) => {
             return (

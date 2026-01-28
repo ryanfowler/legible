@@ -21,7 +21,7 @@ legible = "0.1"
 ### Basic Extraction
 
 ```rust
-use legible::Readability;
+use legible::parse;
 
 let html = r#"
     <html>
@@ -37,8 +37,7 @@ let html = r#"
     </html>
 "#;
 
-let readability = Readability::new(html, Some("https://example.com"), None);
-match readability.parse() {
+match parse(html, Some("https://example.com"), None) {
     Ok(article) => {
         println!("Title: {}", article.title);
         println!("Content: {}", article.content);
@@ -82,14 +81,14 @@ The `Article` struct contains:
 Use the `Options` builder to customize parsing behavior:
 
 ```rust
-use legible::{Readability, Options};
+use legible::{parse, Options};
 
 let options = Options::new()
     .char_threshold(250)        // Minimum article length (default: 500)
     .keep_classes(true)         // Preserve CSS classes in output
     .disable_json_ld(true);     // Skip JSON-LD metadata extraction
 
-let readability = Readability::new(html, Some(url), Some(options));
+let article = parse(html, Some(url), Some(options));
 ```
 
 ### Available Options
@@ -111,10 +110,9 @@ let readability = Readability::new(html, Some(url), Some(options));
 The extracted HTML content is **unsanitized** and may contain malicious scripts or other dangerous content from the source document. Before rendering this HTML in a browser or other context where scripts could execute, you should sanitize it using a library like [ammonia](https://docs.rs/ammonia):
 
 ```rust
-use legible::Readability;
+use legible::parse;
 
-let readability = Readability::new(html, Some(url), None);
-let article = readability.parse()?;
+let article = parse(html, Some(url), None)?;
 
 // Sanitize before rendering
 let safe_html = ammonia::clean(&article.content);

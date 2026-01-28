@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-/// Configuration options for the [`Readability`](crate::Readability) parser.
+/// Configuration options for the [`parse()`](crate::parse) function.
 ///
 /// Use the builder methods to customize parsing behavior:
 ///
@@ -33,7 +33,7 @@ pub struct Options {
     /// Maximum number of elements to parse. Set to `0` for no limit.
     ///
     /// Use this to prevent excessive processing time on very large documents.
-    /// Returns [`ReadabilityError::TooManyElements`](crate::ReadabilityError::TooManyElements)
+    /// Returns [`Error::TooManyElements`](crate::Error::TooManyElements)
     /// if the limit is exceeded.
     pub max_elems_to_parse: usize,
 
