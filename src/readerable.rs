@@ -9,14 +9,40 @@ use hashbrown::HashSet;
 
 /// Check if a document is probably readerable without parsing the whole thing.
 ///
-/// This is a quick check to determine if `Readability::parse()` is likely to succeed.
+/// This is a quick heuristic check to determine if [`Readability::parse()`](crate::Readability::parse)
+/// is likely to succeed. Use this to avoid the overhead of full parsing on documents
+/// that are unlikely to contain extractable article content.
+///
+/// The function scores paragraph-like elements based on their text length, ignoring
+/// elements that match unlikely candidate patterns (sidebars, navigation, etc.).
 ///
 /// # Arguments
+///
 /// * `html` - The HTML content to check
-/// * `options` - Optional configuration for the check
+/// * `options` - Optional [`ReaderableOptions`] to customize the check
 ///
 /// # Returns
-/// `true` if the document appears to be readerable, `false` otherwise
+///
+/// `true` if the document appears to contain readable article content, `false` otherwise.
+///
+/// # Example
+///
+/// ```rust
+/// use legible::is_probably_readerable;
+///
+/// let html = r#"
+///     <html><body>
+///         <article>
+///             <p>This is a substantial article with enough content
+///             to be considered readable by the algorithm.</p>
+///         </article>
+///     </body></html>
+/// "#;
+///
+/// if is_probably_readerable(html, None) {
+///     println!("Document is likely readerable");
+/// }
+/// ```
 pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) -> bool {
     let options = options.unwrap_or_default();
     let doc = Document::from(html);

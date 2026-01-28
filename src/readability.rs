@@ -26,39 +26,124 @@ use url::Url;
 
 /// The extracted article content.
 ///
+/// This struct contains the main article content extracted from an HTML document,
+/// along with metadata like title, author, and publication date.
+///
+/// # Example
+///
+/// ```rust
+/// use legible::Readability;
+///
+/// let html = "<html><body><article><h1>Title</h1><p>Content...</p></article></body></html>";
+/// let readability = Readability::new(html, None, None);
+///
+/// if let Ok(article) = readability.parse() {
+///     println!("Title: {}", article.title);
+///     println!("Author: {:?}", article.byline);
+///     println!("HTML length: {} bytes", article.content.len());
+///     println!("Text length: {} chars", article.length);
+/// }
+/// ```
+///
 /// # Security
 ///
 /// The [`content`](Article::content) field contains unsanitized HTML extracted from the
 /// source document. Before rendering this HTML in a browser or other context where scripts
-/// could execute, you should sanitize it using a library like [`ammonia`](https://docs.rs/ammonia).
+/// could execute, you should sanitize it using a library like [`ammonia`](https://docs.rs/ammonia):
+///
+/// ```rust,ignore
+/// let safe_html = ammonia::clean(&article.content);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Article {
     /// The article title.
+    ///
+    /// Extracted from the document's `<title>` tag, `<h1>`, or metadata (JSON-LD, OpenGraph).
     pub title: String,
+
     /// The author byline.
+    ///
+    /// Extracted from byline elements, `rel="author"` links, or metadata.
     pub byline: Option<String>,
-    /// The text direction (ltr or rtl).
+
+    /// The text direction (`"ltr"` or `"rtl"`).
+    ///
+    /// Inherited from the `dir` attribute of ancestor elements.
     pub dir: Option<String>,
-    /// The document language.
+
+    /// The document language (e.g., `"en"`, `"fr"`).
+    ///
+    /// Extracted from the `lang` attribute of the `<html>` element.
     pub lang: Option<String>,
+
     /// The article content as HTML.
+    ///
+    /// This is the cleaned, extracted article content wrapped in a container div.
+    /// The HTML structure is simplified and non-content elements are removed.
     ///
     /// **Warning:** This HTML is unsanitized and may contain malicious scripts or other
     /// dangerous content. Always sanitize before rendering (e.g., with the `ammonia` crate).
     pub content: String,
+
     /// The article content as plain text.
+    ///
+    /// All HTML tags are stripped, leaving only the text content.
     pub text_content: String,
-    /// The length of the text content.
+
+    /// The length of the text content in characters.
     pub length: usize,
+
     /// A short excerpt from the article.
+    ///
+    /// Typically the first paragraph or the meta description.
     pub excerpt: Option<String>,
-    /// The site name.
+
+    /// The site name (e.g., `"The New York Times"`).
+    ///
+    /// Extracted from OpenGraph `og:site_name` or JSON-LD metadata.
     pub site_name: Option<String>,
-    /// The published time.
+
+    /// The published time as an ISO 8601 string.
+    ///
+    /// Extracted from `article:published_time` meta tag or JSON-LD metadata.
     pub published_time: Option<String>,
 }
 
-/// The Readability parser.
+/// The Readability parser for extracting article content from HTML.
+///
+/// This is the main entry point for content extraction. Create a new instance with
+/// [`Readability::new()`], then call [`parse()`](Readability::parse) to extract the article.
+///
+/// # Example
+///
+/// ```rust
+/// use legible::Readability;
+///
+/// let html = r#"
+///     <html><body>
+///         <nav>Navigation</nav>
+///         <article>
+///             <h1>Article Title</h1>
+///             <p>Article content goes here...</p>
+///         </article>
+///     </body></html>
+/// "#;
+///
+/// let readability = Readability::new(html, Some("https://example.com"), None);
+/// let article = readability.parse().expect("Failed to extract article");
+///
+/// println!("Title: {}", article.title);
+/// println!("Content: {}", article.content);
+/// ```
+///
+/// # URL Resolution
+///
+/// If a base URL is provided, relative URLs in the extracted content (links, images, etc.)
+/// are converted to absolute URLs.
+///
+/// # Configuration
+///
+/// See [`Options`] for available configuration options.
 pub struct Readability {
     doc: Document,
     options: Options,
@@ -91,9 +176,29 @@ impl Readability {
     /// Create a new Readability parser for the given HTML.
     ///
     /// # Arguments
+    ///
     /// * `html` - The HTML content to parse
-    /// * `url` - Optional base URL for resolving relative links
-    /// * `options` - Optional configuration options
+    /// * `url` - Optional base URL for resolving relative links. If provided, relative URLs
+    ///   in the extracted content will be converted to absolute URLs.
+    /// * `options` - Optional [`Options`] to customize parsing behavior
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use legible::{Readability, Options};
+    ///
+    /// let html = "<html><body><article>Content...</article></body></html>";
+    ///
+    /// // Basic usage
+    /// let readability = Readability::new(html, None, None);
+    ///
+    /// // With URL for resolving relative links
+    /// let readability = Readability::new(html, Some("https://example.com/article"), None);
+    ///
+    /// // With custom options
+    /// let options = Options::new().char_threshold(250);
+    /// let readability = Readability::new(html, Some("https://example.com"), Some(options));
+    /// ```
     pub fn new(html: &str, url: Option<&str>, options: Option<Options>) -> Self {
         let doc = Document::from(html);
         let options = options.unwrap_or_default();
@@ -120,7 +225,29 @@ impl Readability {
 
     /// Parse the document and extract the article content.
     ///
-    /// This method consumes the `Readability` instance.
+    /// This method consumes the `Readability` instance and returns an [`Article`]
+    /// containing the extracted content and metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The document has no `<body>` element ([`ReadabilityError::NoBody`])
+    /// - No article content could be extracted ([`ReadabilityError::NoContent`])
+    /// - The document exceeds `max_elems_to_parse` ([`ReadabilityError::TooManyElements`])
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use legible::Readability;
+    ///
+    /// let html = "<html><body><article><p>Content...</p></article></body></html>";
+    /// let readability = Readability::new(html, None, None);
+    ///
+    /// match readability.parse() {
+    ///     Ok(article) => println!("Extracted: {}", article.title),
+    ///     Err(e) => eprintln!("Extraction failed: {}", e),
+    /// }
+    /// ```
     pub fn parse(mut self) -> Result<Article> {
         // Check element count limit
         if self.options.max_elems_to_parse > 0 {

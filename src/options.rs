@@ -2,34 +2,85 @@
 
 use regex::Regex;
 
-/// Configuration options for the Readability parser.
+/// Configuration options for the [`Readability`](crate::Readability) parser.
+///
+/// Use the builder methods to customize parsing behavior:
+///
+/// ```rust
+/// use legible::Options;
+///
+/// let options = Options::new()
+///     .char_threshold(250)
+///     .keep_classes(true)
+///     .disable_json_ld(true);
+/// ```
+///
+/// # Available Options
+///
+/// | Option | Default | Description |
+/// |--------|---------|-------------|
+/// | `max_elems_to_parse` | `0` | Maximum elements to parse (0 = unlimited) |
+/// | `nb_top_candidates` | `5` | Number of top candidates to consider |
+/// | `char_threshold` | `500` | Minimum article character length |
+/// | `keep_classes` | `false` | Preserve CSS classes in output |
+/// | `classes_to_preserve` | `["page"]` | Specific classes to keep |
+/// | `disable_json_ld` | `false` | Skip JSON-LD metadata extraction |
+/// | `allowed_video_regex` | - | Custom regex for allowed video embeds |
+/// | `link_density_modifier` | `0.0` | Adjust link density threshold |
+/// | `debug` | `false` | Enable debug logging |
 #[derive(Clone)]
 pub struct Options {
-    /// Maximum number of elements to parse. 0 means no limit.
+    /// Maximum number of elements to parse. Set to `0` for no limit.
+    ///
+    /// Use this to prevent excessive processing time on very large documents.
+    /// Returns [`ReadabilityError::TooManyElements`](crate::ReadabilityError::TooManyElements)
+    /// if the limit is exceeded.
     pub max_elems_to_parse: usize,
 
     /// The number of top candidates to consider when analyzing competition.
+    ///
+    /// Higher values may improve accuracy on complex pages but increase processing time.
     pub nb_top_candidates: usize,
 
     /// The minimum number of characters an article must have to return a result.
+    ///
+    /// If the extracted content is shorter than this threshold, the algorithm
+    /// will retry with less aggressive filtering.
     pub char_threshold: usize,
 
-    /// Classes to preserve on elements in the output.
+    /// CSS classes to preserve on elements in the output.
+    ///
+    /// By default, most classes are stripped from the output HTML. Add class names
+    /// here to preserve them (e.g., for styling purposes).
     pub classes_to_preserve: Vec<String>,
 
-    /// Whether to keep all classes on elements (if false, only preserved classes are kept).
+    /// Whether to keep all CSS classes on elements.
+    ///
+    /// If `true`, all classes are preserved. If `false`, only classes in
+    /// `classes_to_preserve` are kept.
     pub keep_classes: bool,
 
     /// Whether to disable JSON-LD metadata extraction.
+    ///
+    /// JSON-LD is commonly used for structured article metadata. Disable this
+    /// if you're experiencing issues with JSON-LD parsing.
     pub disable_json_ld: bool,
 
-    /// Custom regex for allowed video URLs (youtube, vimeo, etc.).
+    /// Custom regex for allowed video embed URLs.
+    ///
+    /// By default, common video platforms (YouTube, Vimeo, etc.) are allowed.
+    /// Set this to customize which video embeds are preserved.
     pub allowed_video_regex: Option<Regex>,
 
-    /// Modifier for link density threshold (added to the base threshold).
+    /// Modifier for link density threshold.
+    ///
+    /// Added to the base threshold when determining if an element has too many links.
+    /// Positive values make the algorithm more permissive of link-heavy content.
     pub link_density_modifier: f64,
 
-    /// Enable debug logging.
+    /// Enable debug logging to stderr.
+    ///
+    /// When enabled, the algorithm logs its decision-making process.
     pub debug: bool,
 }
 
@@ -110,13 +161,33 @@ impl Options {
     }
 }
 
-/// Options for the `is_probably_readerable` function.
+/// Options for the [`is_probably_readerable`](crate::is_probably_readerable) function.
+///
+/// Use these options to tune the quick readability check:
+///
+/// ```rust
+/// use legible::{is_probably_readerable, ReaderableOptions};
+///
+/// let options = ReaderableOptions::new()
+///     .min_score(30.0)
+///     .min_content_length(100);
+///
+/// let html = "<html><body><article>Content...</article></body></html>";
+/// if is_probably_readerable(html, Some(options)) {
+///     println!("Document appears to be readerable");
+/// }
+/// ```
 #[derive(Clone)]
 pub struct ReaderableOptions {
     /// Minimum cumulated score to consider the document readerable.
+    ///
+    /// The score is calculated based on the length of text content in paragraph-like elements.
+    /// Higher values require more substantial content. Default is `20.0`.
     pub min_score: f64,
 
     /// Minimum node content length to consider for scoring.
+    ///
+    /// Nodes with fewer characters than this threshold are ignored. Default is `140`.
     pub min_content_length: usize,
 }
 
