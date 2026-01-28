@@ -5,8 +5,9 @@ use crate::constants::{
 };
 use crate::dom::{NodeDataStore, get_tag_name, node_select, node_select_matcher};
 use crate::scoring::{
-    get_class_weight, get_inner_text, get_link_density_with_text, get_text_density,
-    has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
+    get_class_weight, get_inner_text, get_link_density_cached, get_or_compute_stats,
+    get_text_density_cached, has_single_tag_inside_element, is_element_without_content,
+    is_phrasing_content,
 };
 use crate::selectors::Selectors;
 use dom_query::{Document, Node};
@@ -260,7 +261,7 @@ pub fn clean_conditionally(
     tag: &str,
     flags: u32,
     allowed_video_regex: &Regex,
-    store: &NodeDataStore,
+    store: &mut NodeDataStore,
     link_density_modifier: f64,
     selectors: &Selectors,
 ) {
@@ -299,7 +300,7 @@ fn should_remove_conditionally(
     tag: &str,
     flags: u32,
     allowed_video_regex: &Regex,
-    store: &NodeDataStore,
+    store: &mut NodeDataStore,
     link_density_modifier: f64,
     selectors: &Selectors,
 ) -> bool {
@@ -342,8 +343,9 @@ fn should_remove_conditionally(
         }
     }
 
-    // Extract inner_text once and reuse for all checks (performance optimization)
-    let inner_text = get_inner_text(node, true);
+    // Get or compute cached stats for this node
+    let stats = get_or_compute_stats(node, store);
+    let content_length = stats.text_length;
 
     let is_list = tag == "ul" || tag == "ol";
     let is_list = if !is_list {
@@ -351,10 +353,11 @@ fn should_remove_conditionally(
         let list_nodes = node_select_matcher(node, &selectors.ul_ol);
         let mut list_length = 0;
         for list in list_nodes.nodes().iter() {
-            list_length += get_inner_text(list, true).chars().count();
+            let list_stats = get_or_compute_stats(list, store);
+            list_length += list_stats.text_length;
         }
-        if !inner_text.is_empty() {
-            list_length as f64 / inner_text.chars().count() as f64 > 0.9
+        if content_length > 0 {
+            list_length as f64 / content_length as f64 > 0.9
         } else {
             false
         }
@@ -368,9 +371,9 @@ fn should_remove_conditionally(
         return true;
     }
 
-    // Check comma count (reusing pre-extracted inner_text)
-    let comma_count = inner_text.matches(',').count();
-    if comma_count >= 10 {
+    // Check comma count using cached stats
+    // Note: stats.comma_count is the raw count, check >= 10
+    if stats.comma_count >= 10 {
         return false;
     }
 
@@ -393,7 +396,12 @@ fn should_remove_conditionally(
         }
         (p, img, li.saturating_sub(100), input)
     };
-    let heading_density = get_text_density(node, &["h1", "h2", "h3", "h4", "h5", "h6"]);
+    let heading_density = get_text_density_cached(
+        node,
+        content_length,
+        &["h1", "h2", "h3", "h4", "h5", "h6"],
+        store,
+    );
 
     let mut embed_count = 0;
     let embeds = node_select_matcher(node, &selectors.object_embed_iframe);
@@ -422,13 +430,13 @@ fn should_remove_conditionally(
         embed_count += 1;
     }
 
-    // Check for ad/loading words (reusing pre-extracted inner_text)
+    // Check for ad/loading words - need to extract text for regex matching
+    let inner_text = get_inner_text(node, true);
     if regexps::AD_WORDS.is_match(&inner_text) || regexps::LOADING_WORDS.is_match(&inner_text) {
         return true;
     }
 
-    let content_length = inner_text.chars().count();
-    let link_density = get_link_density_with_text(node, Some(&inner_text), selectors);
+    let link_density = get_link_density_cached(node, content_length, store, selectors);
 
     let textish_tags = [
         "SPAN",
@@ -444,7 +452,7 @@ fn should_remove_conditionally(
         "TABLE",
         "UL",
     ];
-    let text_density = get_text_density(node, &textish_tags);
+    let text_density = get_text_density_cached(node, content_length, &textish_tags, store);
 
     // Check if this is a child of figure
     let is_figure_child = {

@@ -1,9 +1,30 @@
 //! Content scoring logic for Readability.
 
 use crate::constants::{PHRASING_ELEMS, flags::*, regexps};
-use crate::dom::{NodeDataStore, get_tag_name, node_select_matcher};
+use crate::dom::{NodeDataStore, NodeStats, get_tag_name, node_select, node_select_matcher};
 use crate::selectors::Selectors;
 use dom_query::Node;
+
+/// Compute and return text statistics for a node.
+/// This extracts the inner text once and computes all metrics from it.
+pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
+    let text = get_inner_text(node, true);
+    NodeStats {
+        text_length: text.chars().count(),
+        comma_count: regexps::COMMAS.find_iter(&text).count(),
+        has_sentence_end: regexps::SENTENCE_END.is_match(&text),
+    }
+}
+
+/// Get or compute stats for a node, caching the result.
+pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeStats {
+    if let Some(stats) = store.get_stats(&node.id) {
+        return stats.clone();
+    }
+    let stats = compute_node_stats(node);
+    store.set_stats(node.id, stats.clone());
+    stats
+}
 
 /// Initialize a node with readability data and initial score based on tag.
 pub fn initialize_node(node: &Node<'_>, store: &mut NodeDataStore, flags: u32) {
@@ -114,12 +135,44 @@ pub fn get_link_density(node: &Node<'_>, selectors: &Selectors) -> f64 {
     get_link_density_with_text(node, None, selectors)
 }
 
-/// Get the text density for specific tags within an element.
-pub fn get_text_density(node: &Node<'_>, tags: &[&str]) -> f64 {
-    use crate::dom::node_select;
+/// Get the link density using a pre-computed parent text length.
+/// Caches link text stats for efficiency.
+pub fn get_link_density_cached(
+    node: &Node<'_>,
+    parent_text_length: usize,
+    store: &mut NodeDataStore,
+    selectors: &Selectors,
+) -> f64 {
+    if parent_text_length == 0 {
+        return 0.0;
+    }
 
-    let text_length = get_inner_text(node, true).chars().count();
-    if text_length == 0 {
+    let mut link_length = 0.0;
+
+    for link in node_select_matcher(node, &selectors.a).nodes().iter() {
+        // Get or compute stats for the link
+        let link_stats = get_or_compute_stats(link, store);
+
+        // Check href directly without allocating a new String
+        let coefficient = match link.attr("href") {
+            Some(href) if regexps::HASH_URL.is_match(href.as_ref()) => 0.3,
+            _ => 1.0,
+        };
+        link_length += link_stats.text_length as f64 * coefficient;
+    }
+
+    link_length / parent_text_length as f64
+}
+
+/// Get the text density using a pre-computed parent text length.
+/// Caches child text stats for efficiency.
+pub fn get_text_density_cached(
+    node: &Node<'_>,
+    parent_text_length: usize,
+    tags: &[&str],
+    store: &mut NodeDataStore,
+) -> f64 {
+    if parent_text_length == 0 {
         return 0.0;
     }
 
@@ -127,18 +180,11 @@ pub fn get_text_density(node: &Node<'_>, tags: &[&str]) -> f64 {
     let selector = tags.join(",");
 
     for child in node_select(node, &selector).nodes().iter() {
-        children_length += get_inner_text(child, true).chars().count();
+        let child_stats = get_or_compute_stats(child, store);
+        children_length += child_stats.text_length;
     }
 
-    children_length as f64 / text_length as f64
-}
-
-/// Get the comma count from pre-extracted text.
-/// Returns comma count + 1 to match JS split().length behavior.
-/// Use this when you already have the inner text to avoid redundant extraction.
-pub fn get_comma_count_from_text(text: &str) -> usize {
-    // JS uses split(commas).length which returns segments (commas + 1)
-    regexps::COMMAS.find_iter(text).count() + 1
+    children_length as f64 / parent_text_length as f64
 }
 
 /// Check if a node is whitespace.

@@ -10,6 +10,17 @@ pub struct ReadabilityData {
     pub content_score: f64,
 }
 
+/// Cached text statistics for a node to avoid repeated computation.
+#[derive(Debug, Clone, Default)]
+pub struct NodeStats {
+    /// Character count of normalized inner text.
+    pub text_length: usize,
+    /// Number of commas in the text (raw count, not +1).
+    pub comma_count: usize,
+    /// Whether the text ends with sentence-ending punctuation.
+    pub has_sentence_end: bool,
+}
+
 impl ReadabilityData {
     /// Create a new ReadabilityData with an initial score.
     pub fn with_score(score: f64) -> Self {
@@ -27,6 +38,8 @@ pub struct NodeDataStore {
     data: HashMap<NodeId, ReadabilityData>,
     /// Track which tables are data tables (vs layout tables).
     data_tables: HashMap<NodeId, bool>,
+    /// Cached text statistics for nodes.
+    stats: HashMap<NodeId, NodeStats>,
 }
 
 impl NodeDataStore {
@@ -35,6 +48,7 @@ impl NodeDataStore {
         Self {
             data: HashMap::new(),
             data_tables: HashMap::new(),
+            stats: HashMap::new(),
         }
     }
 
@@ -86,5 +100,16 @@ impl NodeDataStore {
     pub fn clear(&mut self) {
         self.data.clear();
         self.data_tables.clear();
+        self.stats.clear();
+    }
+
+    /// Get the cached stats for a node, if they exist.
+    pub fn get_stats(&self, node_id: &NodeId) -> Option<&NodeStats> {
+        self.stats.get(node_id)
+    }
+
+    /// Set the cached stats for a node.
+    pub fn set_stats(&mut self, node_id: NodeId, stats: NodeStats) {
+        self.stats.insert(node_id, stats);
     }
 }
