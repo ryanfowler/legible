@@ -622,12 +622,12 @@ impl Readability {
             }
 
             // Sort by score descending and take top N (Phase 3.2 - O(n log n) vs O(n²))
-            all_candidate_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            all_candidate_scores
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let top_candidates: Vec<(NodeId, f64)> = all_candidate_scores
                 .into_iter()
                 .take(self.options.nb_top_candidates)
                 .collect();
-
 
             // Get top candidate
             // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
