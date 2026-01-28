@@ -2,6 +2,7 @@
 
 use crate::constants::{HTML_ESCAPE_MAP, regexps};
 use crate::scoring::get_inner_text;
+use crate::selectors::Selectors;
 use dom_query::Document;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -70,10 +71,10 @@ pub fn unescape_html_entities(s: &str) -> String {
 }
 
 /// Extract JSON-LD metadata from the document.
-pub fn get_json_ld(doc: &Document, article_title: &str) -> Metadata {
+pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -> Metadata {
     let mut metadata = Metadata::default();
 
-    let scripts = doc.select("script[type='application/ld+json']");
+    let scripts = doc.select_matcher(&selectors.json_ld_script);
 
     for script in scripts.iter() {
         let content = script.text();
@@ -241,8 +242,8 @@ pub fn get_json_ld(doc: &Document, article_title: &str) -> Metadata {
 }
 
 /// Get the article title from the document.
-pub fn get_article_title(doc: &Document) -> String {
-    let title_elem = doc.select("title");
+pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
+    let title_elem = doc.select_matcher(&selectors.title);
     let mut cur_title = title_elem.text().trim().to_string();
     let orig_title = cur_title.clone();
 
@@ -326,7 +327,12 @@ pub fn get_article_title(doc: &Document) -> String {
 }
 
 /// Get article metadata from meta tags and JSON-LD.
-pub fn get_article_metadata(doc: &Document, json_ld: &Metadata, article_title: &str) -> Metadata {
+pub fn get_article_metadata(
+    doc: &Document,
+    json_ld: &Metadata,
+    article_title: &str,
+    selectors: &Selectors,
+) -> Metadata {
     let mut metadata = Metadata::default();
 
     // Property pattern: article:author, og:title, etc.
@@ -341,7 +347,7 @@ pub fn get_article_metadata(doc: &Document, json_ld: &Metadata, article_title: &
 
     let mut values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
-    let metas = doc.select("meta");
+    let metas = doc.select_matcher(&selectors.meta);
     for meta in metas.iter() {
         let content = match meta.attr("content") {
             Some(c) if !c.is_empty() => c.to_string(),

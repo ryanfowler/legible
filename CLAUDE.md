@@ -12,6 +12,7 @@ Legible is a Rust port of Mozilla's Readability.js - an algorithm for extracting
 cargo build            # Build the library
 cargo test             # Run all tests (includes Mozilla's readability test suite)
 cargo test test_name   # Run a specific test (test names are sanitized from test-pages directory names)
+cargo fmt              # Format code - run after making changes
 cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
 ```

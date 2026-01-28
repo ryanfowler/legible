@@ -1,7 +1,8 @@
 //! Content scoring logic for Readability.
 
 use crate::constants::{PHRASING_ELEMS, flags::*, regexps};
-use crate::dom::{NodeDataStore, get_tag_name};
+use crate::dom::{NodeDataStore, get_tag_name, node_select_matcher};
+use crate::selectors::Selectors;
 use dom_query::Node;
 
 /// Initialize a node with readability data and initial score based on tag.
@@ -81,9 +82,11 @@ pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
 
 /// Get the link density of an element with optional pre-extracted text.
 /// Use this when you already have the inner text to avoid redundant extraction.
-pub fn get_link_density_with_text(node: &Node<'_>, node_text: Option<&str>) -> f64 {
-    use crate::dom::node_select;
-
+pub fn get_link_density_with_text(
+    node: &Node<'_>,
+    node_text: Option<&str>,
+    selectors: &Selectors,
+) -> f64 {
     let text_length = match node_text {
         Some(t) => t.chars().count(),
         None => get_inner_text(node, true).chars().count(),
@@ -94,7 +97,7 @@ pub fn get_link_density_with_text(node: &Node<'_>, node_text: Option<&str>) -> f
 
     let mut link_length = 0.0;
 
-    for link in node_select(node, "a").nodes().iter() {
+    for link in node_select_matcher(node, &selectors.a).nodes().iter() {
         // Check href directly without allocating a new String
         let coefficient = match link.attr("href") {
             Some(href) if regexps::HASH_URL.is_match(href.as_ref()) => 0.3,
@@ -107,8 +110,8 @@ pub fn get_link_density_with_text(node: &Node<'_>, node_text: Option<&str>) -> f
 }
 
 /// Get the link density of an element (ratio of link text to total text).
-pub fn get_link_density(node: &Node<'_>) -> f64 {
-    get_link_density_with_text(node, None)
+pub fn get_link_density(node: &Node<'_>, selectors: &Selectors) -> f64 {
+    get_link_density_with_text(node, None, selectors)
 }
 
 /// Get the text density for specific tags within an element.
@@ -262,9 +265,7 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
 }
 
 /// Check if an element has no content.
-pub fn is_element_without_content(node: &Node<'_>) -> bool {
-    use crate::dom::node_select;
-
+pub fn is_element_without_content(node: &Node<'_>, selectors: &Selectors) -> bool {
     if !node.is_element() {
         return false;
     }
@@ -280,8 +281,8 @@ pub fn is_element_without_content(node: &Node<'_>) -> bool {
     }
 
     // Check if all children are just BR or HR
-    let br_count = node_select(node, "br").length();
-    let hr_count = node_select(node, "hr").length();
+    let br_count = node_select_matcher(node, &selectors.br).length();
+    let hr_count = node_select_matcher(node, &selectors.hr).length();
 
     children.len() == br_count + hr_count
 }
