@@ -45,17 +45,10 @@ pub enum ReadabilityError {
 
     /// URL parsing error.
     ///
-    /// This can occur when processing URLs in the document content.
+    /// This error is returned when the URL provided to [`Readability::new()`](crate::Readability::new)
+    /// is invalid and cannot be parsed.
     #[error("Invalid URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
-
-    /// JSON parsing error (for JSON-LD metadata).
-    ///
-    /// This occurs when the document contains malformed JSON-LD metadata.
-    /// Note: JSON-LD errors don't prevent content extraction; the metadata
-    /// is simply skipped.
-    #[error("JSON parsing error: {0}")]
-    JsonError(#[from] serde_json::Error),
 }
 
 /// Result type alias for readability operations.
