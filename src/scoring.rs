@@ -25,6 +25,7 @@ pub fn initialize_node(node: &Node<'_>, store: &mut NodeDataStore, flags: u32) {
 
 /// Get the class/id weight of an element.
 /// Positive weight for content-like classes, negative for non-content.
+/// Uses RegexSet for efficient single-pass matching.
 pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
     if (flags & FLAG_WEIGHT_CLASSES) == 0 {
         return 0;
@@ -32,28 +33,30 @@ pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
 
     let mut weight: i32 = 0;
 
-    // Check class name
+    // Check class name using RegexSet for 2 matches in single pass
     if let Some(class_name) = node.attr("class") {
         let class_str = class_name.as_ref();
         if !class_str.is_empty() {
-            if regexps::NEGATIVE.is_match(class_str) {
-                weight -= 25;
+            let matches = regexps::CLASS_WEIGHT_SET.matches(class_str);
+            if matches.matched(0) {
+                weight -= 25; // NEGATIVE matched
             }
-            if regexps::POSITIVE.is_match(class_str) {
-                weight += 25;
+            if matches.matched(1) {
+                weight += 25; // POSITIVE matched
             }
         }
     }
 
-    // Check ID
+    // Check ID using RegexSet for 2 matches in single pass
     if let Some(id) = node.attr("id") {
         let id_str = id.as_ref();
         if !id_str.is_empty() {
-            if regexps::NEGATIVE.is_match(id_str) {
-                weight -= 25;
+            let matches = regexps::CLASS_WEIGHT_SET.matches(id_str);
+            if matches.matched(0) {
+                weight -= 25; // NEGATIVE matched
             }
-            if regexps::POSITIVE.is_match(id_str) {
-                weight += 25;
+            if matches.matched(1) {
+                weight += 25; // POSITIVE matched
             }
         }
     }
@@ -63,19 +66,28 @@ pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
 
 /// Get the inner text of a node, optionally normalizing whitespace.
 pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
-    let text = node.text().trim().to_string();
+    let text = node.text();
+    let trimmed = text.trim();
     if normalize_spaces {
-        regexps::NORMALIZE.replace_all(&text, " ").to_string()
+        // replace_all returns Cow - only allocates if replacements were made
+        match regexps::NORMALIZE.replace_all(trimmed, " ") {
+            std::borrow::Cow::Borrowed(s) => s.to_string(),
+            std::borrow::Cow::Owned(s) => s, // reuse the already-allocated string
+        }
     } else {
-        text
+        trimmed.to_string()
     }
 }
 
-/// Get the link density of an element (ratio of link text to total text).
-pub fn get_link_density(node: &Node<'_>) -> f64 {
+/// Get the link density of an element with optional pre-extracted text.
+/// Use this when you already have the inner text to avoid redundant extraction.
+pub fn get_link_density_with_text(node: &Node<'_>, node_text: Option<&str>) -> f64 {
     use crate::dom::node_select;
 
-    let text_length = get_inner_text(node, true).chars().count();
+    let text_length = match node_text {
+        Some(t) => t.chars().count(),
+        None => get_inner_text(node, true).chars().count(),
+    };
     if text_length == 0 {
         return 0.0;
     }
@@ -92,6 +104,11 @@ pub fn get_link_density(node: &Node<'_>) -> f64 {
     }
 
     link_length / text_length as f64
+}
+
+/// Get the link density of an element (ratio of link text to total text).
+pub fn get_link_density(node: &Node<'_>) -> f64 {
+    get_link_density_with_text(node, None)
 }
 
 /// Get the text density for specific tags within an element.
@@ -113,12 +130,12 @@ pub fn get_text_density(node: &Node<'_>, tags: &[&str]) -> f64 {
     children_length as f64 / text_length as f64
 }
 
-/// Get the comma count in an element's text.
+/// Get the comma count from pre-extracted text.
 /// Returns comma count + 1 to match JS split().length behavior.
-pub fn get_comma_count(node: &Node<'_>) -> usize {
-    let text = get_inner_text(node, true);
+/// Use this when you already have the inner text to avoid redundant extraction.
+pub fn get_comma_count_from_text(text: &str) -> usize {
     // JS uses split(commas).length which returns segments (commas + 1)
-    regexps::COMMAS.find_iter(&text).count() + 1
+    regexps::COMMAS.find_iter(text).count() + 1
 }
 
 /// Check if a node is whitespace.
@@ -142,7 +159,7 @@ pub fn is_phrasing_content(node: &Node<'_>) -> bool {
     }
 
     if let Some(tag) = get_tag_name(node) {
-        if PHRASING_ELEMS.contains(tag.as_str()) {
+        if PHRASING_ELEMS.contains(&*tag) {
             return true;
         }
 
@@ -299,7 +316,7 @@ pub fn has_child_block_element(node: &Node<'_>) -> bool {
 
     for child in node.children() {
         if let Some(tag) = get_tag_name(&child)
-            && DIV_TO_P_ELEMS.contains(tag.as_str())
+            && DIV_TO_P_ELEMS.contains(&*tag)
         {
             return true;
         }

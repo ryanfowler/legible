@@ -15,7 +15,7 @@ use crate::metadata::{
 };
 use crate::options::Options;
 use crate::scoring::{
-    get_comma_count, get_inner_text, get_link_density, has_child_block_element,
+    get_comma_count_from_text, get_inner_text, get_link_density, has_child_block_element,
     has_single_tag_inside_element, initialize_node, is_element_without_content,
     is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
 };
@@ -164,6 +164,33 @@ pub struct Readability {
 struct AttemptResult {
     content_html: String,
     text_length: usize,
+}
+
+/// Cached node index for O(1) lookups by NodeId.
+/// This avoids rebuilding the index multiple times during grab_article.
+struct NodeIndex<'a> {
+    nodes: Vec<Node<'a>>,
+    index: HashMap<NodeId, usize>,
+}
+
+impl<'a> NodeIndex<'a> {
+    /// Build a new node index from the document.
+    fn new(doc: &'a Document) -> Self {
+        let nodes: Vec<_> = doc.select("*").nodes().to_vec();
+        let index: HashMap<NodeId, usize> =
+            nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        Self { nodes, index }
+    }
+
+    /// Get a node by its ID.
+    fn get(&self, id: &NodeId) -> Option<Node<'a>> {
+        self.index.get(id).map(|&i| self.nodes[i])
+    }
+
+    /// Get all nodes.
+    fn all_nodes(&self) -> &[Node<'a>] {
+        &self.nodes
+    }
 }
 
 /// Intermediate article content extracted by grab_article
@@ -380,6 +407,9 @@ impl Readability {
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
 
+            // Reusable buffer for building match_string to avoid allocations per node
+            let mut match_string_buf = String::with_capacity(128);
+
             for node in &all_nodes {
                 // Skip if this node or any ancestor is scheduled for removal
                 if nodes_to_remove.contains(&node.id)
@@ -389,13 +419,16 @@ impl Readability {
                 }
 
                 let tag_name = get_tag_name(node).unwrap_or_default();
-                // Build match_string for regex matching - allocation is needed for the combined string
-                let match_string = match (node.attr("class"), node.attr("id")) {
-                    (Some(class), Some(id)) => format!("{} {}", class.as_ref(), id.as_ref()),
-                    (Some(class), None) => format!("{} ", class.as_ref()),
-                    (None, Some(id)) => format!(" {}", id.as_ref()),
-                    (None, None) => String::from(" "),
-                };
+                // Build match_string for regex matching - reuse buffer to avoid allocations
+                match_string_buf.clear();
+                if let Some(class) = node.attr("class") {
+                    match_string_buf.push_str(class.as_ref());
+                }
+                match_string_buf.push(' ');
+                if let Some(id) = node.attr("id") {
+                    match_string_buf.push_str(id.as_ref());
+                }
+                let match_string = &match_string_buf;
 
                 // Check visibility
                 if !is_probably_visible(node) {
@@ -421,7 +454,7 @@ impl Readability {
                 // Check for byline
                 if self.article_byline.is_none()
                     && self.metadata.byline.is_none()
-                    && is_valid_byline(node, &match_string)
+                    && is_valid_byline(node, match_string)
                 {
                     // Look for itemprop="name" child
                     let itemprop_name = node_select(node, "[itemprop*='name']")
@@ -446,10 +479,11 @@ impl Readability {
                     continue;
                 }
 
-                // Remove unlikely candidates
+                // Remove unlikely candidates - use RegexSet for single-pass matching
                 if strip_unlikely_candidates {
-                    if regexps::UNLIKELY_CANDIDATES.is_match(&match_string)
-                        && !regexps::OK_MAYBE_ITS_A_CANDIDATE.is_match(&match_string)
+                    let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string);
+                    if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
+                        && !candidate_matches.matched(1)  // OK_MAYBE_ITS_A_CANDIDATE
                         && !has_ancestor_tag(node, "table", 3, None::<fn(&Node) -> bool>)
                         && !has_ancestor_tag(node, "code", 3, None::<fn(&Node) -> bool>)
                         && tag_name != "BODY"
@@ -474,7 +508,7 @@ impl Readability {
 
                 // Remove empty DIV, SECTION, HEADER, H1-H6
                 if matches!(
-                    tag_name.as_str(),
+                    &*tag_name,
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
                 ) && is_element_without_content(node)
                 {
@@ -483,7 +517,7 @@ impl Readability {
                 }
 
                 // Add to elements to score (HashSet handles duplicates automatically)
-                if DEFAULT_TAGS_TO_SCORE.contains(tag_name.as_str()) {
+                if DEFAULT_TAGS_TO_SCORE.contains(&*tag_name) {
                     elements_to_score.insert(node.id);
                 }
 
@@ -521,35 +555,22 @@ impl Readability {
                 }
             }
 
-            // Remove marked nodes
-            // Build node index once for O(1) lookups (Phase 1.1)
-            {
-                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let node_index: HashMap<NodeId, usize> = all_nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (n.id, i))
-                    .collect();
-                for node_id in &nodes_to_remove {
-                    if let Some(&idx) = node_index.get(node_id) {
-                        all_nodes[idx].remove_from_parent();
-                    }
+            // Remove marked nodes - use all_nodes which we already have
+            // instead of building a new NodeIndex
+            for node_id in &nodes_to_remove {
+                if let Some(node) = all_nodes.iter().find(|n| n.id == *node_id) {
+                    node.remove_from_parent();
                 }
             }
+
+            // Build node index once after removals - reuse for scoring, candidates, and sibling gathering
+            let cached_index = NodeIndex::new(&self.doc);
 
             // Score elements
             let mut candidates: Vec<NodeId> = Vec::new();
 
-            // Build node index once for O(1) lookups during scoring (Phase 1.1)
-            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let node_index: HashMap<NodeId, usize> = all_nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.id, i))
-                .collect();
-
             for node_id in &elements_to_score {
-                let node = match node_index.get(node_id).map(|&i| all_nodes[i]) {
+                let node = match cached_index.get(node_id) {
                     Some(n) => n,
                     None => continue,
                 };
@@ -573,7 +594,7 @@ impl Readability {
 
                 // Calculate content score
                 let mut content_score = 1.0;
-                content_score += get_comma_count(&node) as f64;
+                content_score += get_comma_count_from_text(&inner_text) as f64;
                 content_score += (inner_text_len / 100).min(3) as f64;
 
                 // Score ancestors
@@ -608,16 +629,8 @@ impl Readability {
             // Collect all scores first, then sort once at the end (Phase 3.2)
             let mut all_candidate_scores: Vec<(NodeId, f64)> = Vec::with_capacity(candidates.len());
 
-            // Build node index for candidate lookups (Phase 1.1)
-            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let node_index: HashMap<NodeId, usize> = all_nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.id, i))
-                .collect();
-
             for candidate_id in &candidates {
-                let candidate = match node_index.get(candidate_id).map(|&i| all_nodes[i]) {
+                let candidate = match cached_index.get(candidate_id) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -682,14 +695,7 @@ impl Readability {
                 (Some(container_id), true)
             } else {
                 let top_id = top_candidates[0].0;
-                // Build node index for O(1) lookups (Phase 1.1)
-                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let node_index: HashMap<NodeId, usize> = all_nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (n.id, i))
-                    .collect();
-                let mut top_candidate = node_index.get(&top_id).map(|&i| all_nodes[i]);
+                let mut top_candidate = cached_index.get(&top_id);
 
                 // Alternative candidate ancestors logic:
                 // Find a better top candidate node if it contains (at least three) nodes
@@ -698,14 +704,14 @@ impl Readability {
                 if let Some(ref tc) = top_candidate {
                     let top_score = top_candidates[0].1;
 
-                    // Collect ancestor lists for candidates with score >= 75% of top score
-                    let mut alternative_candidate_ancestors: Vec<Vec<NodeId>> = Vec::new();
+                    // Collect ancestor sets for candidates with score >= 75% of top score
+                    // Use HashSet for O(1) lookups instead of Vec::contains() O(n)
+                    let mut alternative_candidate_ancestors: Vec<HashSet<NodeId>> = Vec::new();
                     for &(candidate_id, candidate_score) in top_candidates.iter().skip(1) {
                         if candidate_score / top_score >= 0.75
-                            && let Some(&idx) = node_index.get(&candidate_id)
+                            && let Some(candidate_node) = cached_index.get(&candidate_id)
                         {
-                            let candidate_node = all_nodes[idx];
-                            let ancestors: Vec<NodeId> = get_ancestors(&candidate_node, 0)
+                            let ancestors: HashSet<NodeId> = get_ancestors(&candidate_node, 0)
                                 .iter()
                                 .map(|n| n.id)
                                 .collect();
@@ -820,14 +826,7 @@ impl Readability {
             } else {
                 // Gather siblings and potentially create container DIV
                 // Like JS, we always create a container and move siblings into it
-                // Build node index for O(1) lookups (Phase 1.1)
-                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let node_index: HashMap<NodeId, usize> = all_nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (n.id, i))
-                    .collect();
-                let sibling_ids = self.gather_siblings(top_candidate_id, &all_nodes);
+                let sibling_ids = self.gather_siblings(top_candidate_id, cached_index.all_nodes());
 
                 if sibling_ids.is_empty() {
                     // No siblings qualified (shouldn't happen since top candidate always included)
@@ -837,9 +836,12 @@ impl Readability {
                     // Create container DIV and move siblings into it
                     // This includes the case of a single sibling - we still need a container
                     // so that the wrapper div is added correctly
-                    if let Some(&idx) = node_index.get(&top_candidate_id) {
-                        let top_candidate = &all_nodes[idx];
-                        self.create_article_container(top_candidate, &sibling_ids, &all_nodes)
+                    if let Some(top_candidate) = cached_index.get(&top_candidate_id) {
+                        self.create_article_container(
+                            &top_candidate,
+                            &sibling_ids,
+                            cached_index.all_nodes(),
+                        )
                     } else {
                         Some(top_candidate_id)
                     }
@@ -848,42 +850,31 @@ impl Readability {
 
             let article_node_id = article_node_id.ok_or(ReadabilityError::NoContent)?;
 
-            // Get article node by ID using HashMap for O(1) lookup (Phase 1.1)
-            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let node_index: HashMap<NodeId, usize> = all_nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.id, i))
-                .collect();
-            let article_node = node_index.get(&article_node_id).map(|&i| all_nodes[i]);
+            // Get article node directly by ID - O(1) instead of rebuilding full index
+            let article_node = self.doc.tree.get(&article_node_id);
 
             // Prepare article content
             if let Some(article_node) = article_node {
-                let video_regex = self
+                // Use reference to avoid cloning the regex
+                let video_regex: &Regex = self
                     .options
                     .allowed_video_regex
-                    .clone()
-                    .unwrap_or_else(|| regexps::VIDEOS.clone());
+                    .as_ref()
+                    .unwrap_or(&regexps::VIDEOS);
 
                 Self::prep_article(
                     &article_node,
                     &mut self.node_data,
                     self.flags,
-                    &video_regex,
+                    video_regex,
                     self.options.link_density_modifier,
                 );
 
-                // Re-fetch the article node after prep_article mutated the DOM
-                // Use HashMap for O(1) lookup (Phase 1.1)
-                let all_nodes_after: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let node_index: HashMap<NodeId, usize> = all_nodes_after
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (n.id, i))
-                    .collect();
-                let article_node = node_index
+                // Re-fetch the article node after prep_article mutated the DOM - O(1) lookup
+                let article_node = self
+                    .doc
+                    .tree
                     .get(&article_node_id)
-                    .map(|&i| all_nodes_after[i])
                     .ok_or(ReadabilityError::NoContent)?;
 
                 // Add readability-page-1 wrapper div
@@ -911,17 +902,11 @@ impl Readability {
                     article_node.append_child(&wrapper);
                 }
 
-                // Re-fetch the article node after wrapping
-                // Use HashMap for O(1) lookup (Phase 1.1)
-                let all_nodes_after: Vec<_> = self.doc.select("*").nodes().to_vec();
-                let node_index: HashMap<NodeId, usize> = all_nodes_after
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (n.id, i))
-                    .collect();
-                let article_node = node_index
+                // Re-fetch the article node after wrapping - O(1) lookup
+                let article_node = self
+                    .doc
+                    .tree
                     .get(&article_node_id)
-                    .map(|&i| all_nodes_after[i])
                     .ok_or(ReadabilityError::NoContent)?;
 
                 let text_content = get_inner_text(&article_node, true);
@@ -979,23 +964,13 @@ impl Readability {
                     continue;
                 }
 
-                // Find dir attribute from ancestors
-                // Use HashMap for O(1) lookup (Phase 1.1)
-                {
-                    let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-                    let node_index: HashMap<NodeId, usize> = all_nodes
-                        .iter()
-                        .enumerate()
-                        .map(|(i, n)| (n.id, i))
-                        .collect();
-                    if let Some(&idx) = node_index.get(&top_candidate_id) {
-                        let tc = all_nodes[idx];
-                        let ancestors = get_ancestors(&tc, 0);
-                        for ancestor in std::iter::once(tc).chain(ancestors) {
-                            if let Some(dir) = ancestor.attr("dir") {
-                                self.article_dir = Some(dir.to_string());
-                                break;
-                            }
+                // Find dir attribute from ancestors - O(1) lookup
+                if let Some(tc) = self.doc.tree.get(&top_candidate_id) {
+                    let ancestors = get_ancestors(&tc, 0);
+                    for ancestor in std::iter::once(tc).chain(ancestors) {
+                        if let Some(dir) = ancestor.attr("dir") {
+                            self.article_dir = Some(dir.to_string());
+                            break;
                         }
                     }
                 }
@@ -1129,7 +1104,7 @@ impl Readability {
             if let Some(sibling) = all_nodes.iter().find(|n| &n.id == sibling_id) {
                 // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
                 if let Some(tag) = get_tag_name(sibling)
-                    && !ALTER_TO_DIV_EXCEPTIONS.contains(tag.as_str())
+                    && !ALTER_TO_DIV_EXCEPTIONS.contains(&*tag)
                 {
                     self.log(&format!("Altering sibling {} to div", tag));
                     sibling.rename("div");
@@ -1326,9 +1301,9 @@ impl Readability {
                 })
                 .collect();
 
-            // Now modify attributes
+            // Now modify attributes - single-pass escaping to avoid intermediate string
             for (name, value) in attrs_to_fix {
-                let escaped = value.replace('<', "&lt;").replace('>', "&gt;");
+                let escaped = escape_angle_brackets(&value);
                 element.set_attr(&name, &escaped);
             }
         }
@@ -1442,7 +1417,7 @@ fn get_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
     ancestors
 }
 
-/// Escape HTML special characters using single-pass with pre-allocated buffer (Phase 2.2).
+/// Escape HTML special characters using single-pass with pre-allocated buffer.
 fn html_escape(s: &str) -> String {
     // Estimate capacity: worst case every char needs escaping (5 chars for &#39;)
     // but usually only a few chars need escaping, so start with original length + some buffer
@@ -1454,6 +1429,19 @@ fn html_escape(s: &str) -> String {
             '>' => result.push_str("&gt;"),
             '"' => result.push_str("&quot;"),
             '\'' => result.push_str("&#39;"),
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
+/// Escape only angle brackets using single-pass to avoid intermediate string allocations.
+fn escape_angle_brackets(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
             _ => result.push(c),
         }
     }
