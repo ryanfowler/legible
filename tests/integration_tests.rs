@@ -1,6 +1,6 @@
 //! Integration tests against Mozilla's readability test suite.
 
-use legible::Readability;
+use legible::parse;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -77,12 +77,11 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
     };
 
     // Run Readability
-    let readability = Readability::new(
+    let article = parse(
         &source_html,
         Some(&format!("http://fakehost/test/{}", test_name)),
         None,
-    );
-    let article = readability.parse()?;
+    )?;
 
     // Check metadata
     if let Some(expected) = expected_metadata {

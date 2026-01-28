@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use legible::{Readability, is_probably_readerable};
+use legible::{is_probably_readerable, parse};
 use std::fs;
 
 const TEST_PAGES_DIR: &str = "tests/readability-js/test/test-pages";
@@ -39,10 +39,7 @@ fn bench_parse(c: &mut Criterion) {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("small", name), &html, |b, html| {
-            b.iter(|| {
-                let readability = Readability::new(black_box(html), Some(url), None);
-                readability.parse()
-            })
+            b.iter(|| parse(black_box(html), Some(url), None))
         });
     }
 
@@ -51,10 +48,7 @@ fn bench_parse(c: &mut Criterion) {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("medium", name), &html, |b, html| {
-            b.iter(|| {
-                let readability = Readability::new(black_box(html), Some(url), None);
-                readability.parse()
-            })
+            b.iter(|| parse(black_box(html), Some(url), None))
         });
     }
 
@@ -63,10 +57,7 @@ fn bench_parse(c: &mut Criterion) {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("large", name), &html, |b, html| {
-            b.iter(|| {
-                let readability = Readability::new(black_box(html), Some(url), None);
-                readability.parse()
-            })
+            b.iter(|| parse(black_box(html), Some(url), None))
         });
     }
 
@@ -109,10 +100,7 @@ fn bench_complex_pages(c: &mut Criterion) {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("page", name), &html, |b, html| {
-            b.iter(|| {
-                let readability = Readability::new(black_box(html), Some(url), None);
-                readability.parse()
-            })
+            b.iter(|| parse(black_box(html), Some(url), None))
         });
     }
 

@@ -10,7 +10,7 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use legible::Readability;
+//! use legible::parse;
 //!
 //! let html = r#"
 //!     <html>
@@ -29,8 +29,7 @@
 //!     </html>
 //! "#;
 //!
-//! let readability = Readability::new(html, Some("https://example.com"), None);
-//! match readability.parse() {
+//! match parse(html, Some("https://example.com"), None) {
 //!     Ok(article) => {
 //!         println!("Title: {}", article.title);
 //!         println!("Byline: {:?}", article.byline);
@@ -72,7 +71,7 @@
 //! Use the [`Options`] builder to customize parsing behavior:
 //!
 //! ```rust
-//! use legible::{Readability, Options};
+//! use legible::{parse, Options};
 //!
 //! let html = "<html><body><article>Content...</article></body></html>";
 //!
@@ -81,7 +80,7 @@
 //!     .keep_classes(true)         // Preserve CSS classes in output
 //!     .disable_json_ld(true);     // Skip JSON-LD metadata extraction
 //!
-//! let readability = Readability::new(html, Some("https://example.com"), Some(options));
+//! let article = parse(html, Some("https://example.com"), Some(options));
 //! ```
 //!
 //! See [`Options`] for all available configuration options.
@@ -94,7 +93,7 @@
 //! a library like [`ammonia`](https://docs.rs/ammonia):
 //!
 //! ```rust,ignore
-//! let article = readability.parse()?;
+//! let article = parse(html, Some(url), None)?;
 //! let safe_html = ammonia::clean(&article.content);
 //! ```
 //!
@@ -120,7 +119,51 @@ mod readerable;
 mod scoring;
 mod selectors;
 
-pub use error::{ReadabilityError, Result};
+pub use error::{Error, Result};
 pub use options::{Options, ReaderableOptions};
-pub use readability::{Article, Readability};
+pub use readability::Article;
 pub use readerable::is_probably_readerable;
+
+use readability::Readability;
+
+/// Parse an HTML document and extract the article content.
+///
+/// This is the main entry point for content extraction. It parses the HTML, identifies
+/// the main article content, and returns an [`Article`] with the extracted content
+/// and metadata.
+///
+/// # Arguments
+///
+/// * `html` - The HTML content to parse
+/// * `url` - Optional base URL for resolving relative links. If provided, relative URLs
+///   in the extracted content will be converted to absolute URLs.
+/// * `options` - Optional [`Options`] to customize parsing behavior
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The provided URL is invalid ([`Error::InvalidUrl`])
+/// - The document has no `<body>` element ([`Error::NoBody`])
+/// - No article content could be extracted ([`Error::NoContent`])
+/// - The document exceeds `max_elems_to_parse` ([`Error::TooManyElements`])
+///
+/// # Example
+///
+/// ```rust
+/// use legible::{parse, Options};
+///
+/// let html = "<html><body><article>Content...</article></body></html>";
+///
+/// // Basic usage
+/// let article = parse(html, None, None);
+///
+/// // With URL for resolving relative links
+/// let article = parse(html, Some("https://example.com/article"), None);
+///
+/// // With custom options
+/// let options = Options::new().char_threshold(250);
+/// let article = parse(html, Some("https://example.com"), Some(options));
+/// ```
+pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<Article> {
+    Readability::new(html, url, options).parse()
+}

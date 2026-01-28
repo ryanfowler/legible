@@ -9,7 +9,7 @@ use hashbrown::HashSet;
 
 /// Check if a document is probably readerable without parsing the whole thing.
 ///
-/// This is a quick heuristic check to determine if [`Readability::parse()`](crate::Readability::parse)
+/// This is a quick heuristic check to determine if [`parse()`](crate::parse)
 /// is likely to succeed. Use this to avoid the overhead of full parsing on documents
 /// that are unlikely to contain extractable article content.
 ///
