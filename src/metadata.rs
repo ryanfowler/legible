@@ -268,7 +268,9 @@ pub fn get_article_title(doc: &Document) -> String {
 
         // If the resulting title is too short, remove the first part instead
         if word_count(&cur_title) < 3 {
-            cur_title = regexps::TITLE_FIRST_PART.replace(&orig_title, "").to_string();
+            cur_title = regexps::TITLE_FIRST_PART
+                .replace(&orig_title, "")
+                .to_string();
         }
     } else if cur_title.contains(": ") {
         // Check if we have a heading containing this exact string
