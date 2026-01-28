@@ -15,9 +15,10 @@ use crate::metadata::{
 };
 use crate::options::Options;
 use crate::scoring::{
-    get_comma_count_from_text, get_inner_text, get_link_density, has_child_block_element,
-    has_single_tag_inside_element, initialize_node, is_element_without_content,
-    is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
+    get_inner_text, get_link_density, get_link_density_cached, get_or_compute_stats,
+    has_child_block_element, has_single_tag_inside_element, initialize_node,
+    is_element_without_content, is_phrasing_content, is_probably_visible, is_valid_byline,
+    wrap_phrasing_content_in_p,
 };
 use crate::selectors::{SELECTORS, Selectors};
 use dom_query::{Document, Node, NodeId};
@@ -590,8 +591,9 @@ impl Readability {
                     _ => continue,
                 };
 
-                let inner_text = get_inner_text(&node, true);
-                let inner_text_len = inner_text.chars().count();
+                // Get or compute cached stats for this node
+                let stats = get_or_compute_stats(&node, &mut self.node_data);
+                let inner_text_len = stats.text_length;
                 if inner_text_len < 25 {
                     continue;
                 }
@@ -603,8 +605,9 @@ impl Readability {
                 }
 
                 // Calculate content score
+                // Note: stats.comma_count is the raw count, add 1 to match JS split().length behavior
                 let mut content_score = 1.0;
-                content_score += get_comma_count_from_text(&inner_text) as f64;
+                content_score += (stats.comma_count + 1) as f64;
                 content_score += (inner_text_len / 100).min(3) as f64;
 
                 // Score ancestors
@@ -646,7 +649,14 @@ impl Readability {
                 };
 
                 let score = self.node_data.get_content_score(candidate_id);
-                let link_density = get_link_density(&candidate, &self.selectors);
+                // Get or compute stats for cached link density calculation
+                let stats = get_or_compute_stats(&candidate, &mut self.node_data);
+                let link_density = get_link_density_cached(
+                    &candidate,
+                    stats.text_length,
+                    &mut self.node_data,
+                    &self.selectors,
+                );
                 let final_score = score * (1.0 - link_density);
 
                 if let Some(data) = self.node_data.get_mut(candidate_id) {
@@ -836,7 +846,13 @@ impl Readability {
             } else {
                 // Gather siblings and potentially create container DIV
                 // Like JS, we always create a container and move siblings into it
-                let sibling_ids = self.gather_siblings(top_candidate_id, cached_index.all_nodes());
+                let sibling_ids = Self::gather_siblings(
+                    top_candidate_id,
+                    cached_index.all_nodes(),
+                    &mut self.node_data,
+                    &self.selectors,
+                    self.options.debug,
+                );
 
                 if sibling_ids.is_empty() {
                     // No siblings qualified (shouldn't happen since top candidate always included)
@@ -1017,7 +1033,13 @@ impl Readability {
 
     /// Gather sibling nodes of the top candidate that should be included in the article.
     /// Returns a list of NodeIds that should be included.
-    fn gather_siblings(&self, top_candidate_id: NodeId, all_nodes: &[Node<'_>]) -> Vec<NodeId> {
+    fn gather_siblings(
+        top_candidate_id: NodeId,
+        all_nodes: &[Node<'_>],
+        node_data: &mut NodeDataStore,
+        selectors: &Selectors,
+        debug: bool,
+    ) -> Vec<NodeId> {
         let top_candidate = match all_nodes.iter().find(|n| n.id == top_candidate_id) {
             Some(tc) => tc,
             None => return vec![top_candidate_id],
@@ -1029,7 +1051,7 @@ impl Readability {
         };
 
         // Calculate sibling score threshold
-        let top_score = self.node_data.get_content_score(&top_candidate_id);
+        let top_score = node_data.get_content_score(&top_candidate_id);
         let sibling_score_threshold = (10.0_f64).max(top_score * 0.2);
 
         // Get top candidate's class for bonus calculation
@@ -1060,8 +1082,8 @@ impl Readability {
                 }
 
                 // Check if sibling has a readability score that qualifies
-                if self.node_data.has(&sibling.id) {
-                    let sibling_score = self.node_data.get_content_score(&sibling.id);
+                if node_data.has(&sibling.id) {
+                    let sibling_score = node_data.get_content_score(&sibling.id);
                     if sibling_score + content_bonus >= sibling_score_threshold {
                         should_append = true;
                     }
@@ -1072,15 +1094,17 @@ impl Readability {
                     && let Some(tag) = get_tag_name(&sibling)
                     && tag == "P"
                 {
-                    let link_density = get_link_density(&sibling, &self.selectors);
-                    let node_content = get_inner_text(&sibling, true);
-                    let node_length = node_content.chars().count();
+                    // Get or compute cached stats for the sibling
+                    let stats = get_or_compute_stats(&sibling, node_data);
+                    let node_length = stats.text_length;
+                    let link_density =
+                        get_link_density_cached(&sibling, node_length, node_data, selectors);
 
                     if (node_length > 80 && link_density < 0.25)
                         || (node_length < 80
                             && node_length > 0
                             && link_density == 0.0
-                            && regexps::SENTENCE_END.is_match(&node_content))
+                            && stats.has_sentence_end)
                     {
                         should_append = true;
                     }
@@ -1088,7 +1112,12 @@ impl Readability {
             }
 
             if should_append {
-                self.log(&format!("Appending sibling node: {:?}", sibling.id));
+                if debug {
+                    eprintln!(
+                        "Reader: (Readability) Appending sibling node: {:?}",
+                        sibling.id
+                    );
+                }
                 siblings_to_include.push(sibling.id);
             }
         }
