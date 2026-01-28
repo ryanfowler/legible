@@ -118,6 +118,7 @@ mod options;
 mod readability;
 mod readerable;
 mod scoring;
+mod selectors;
 
 pub use error::{ReadabilityError, Result};
 pub use options::{Options, ReaderableOptions};

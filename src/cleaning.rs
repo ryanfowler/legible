@@ -3,29 +3,30 @@
 use crate::constants::{
     DEPRECATED_SIZE_ATTRIBUTE_ELEMS, PRESENTATIONAL_ATTRIBUTES, flags::*, regexps,
 };
-use crate::dom::{NodeDataStore, get_tag_name, node_select};
+use crate::dom::{NodeDataStore, get_tag_name, node_select, node_select_matcher};
 use crate::scoring::{
     get_class_weight, get_inner_text, get_link_density_with_text, get_text_density,
     has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
+use crate::selectors::Selectors;
 use dom_query::{Document, Node};
 use regex::Regex;
 
 /// Prepare the document for parsing by cleaning up styles, etc.
-pub fn prep_document(doc: &Document) {
+pub fn prep_document(doc: &Document, selectors: &Selectors) {
     // Remove all style tags in head
-    let styles: Vec<_> = doc.select("style").nodes().to_vec();
+    let styles: Vec<_> = doc.select_matcher(&selectors.style).nodes().to_vec();
     for style in styles {
         style.remove_from_parent();
     }
 
     // Replace double br's with p tags in body
-    if let Some(body) = doc.select("body").nodes().first() {
-        replace_brs(body);
+    if let Some(body) = doc.select_matcher(&selectors.body).nodes().first() {
+        replace_brs(body, selectors);
     }
 
     // Replace font tags with span
-    let fonts: Vec<_> = doc.select("font").nodes().to_vec();
+    let fonts: Vec<_> = doc.select_matcher(&selectors.font).nodes().to_vec();
     for font in fonts {
         font.rename("span");
     }
@@ -65,8 +66,8 @@ fn next_element<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 /// Consecutive BRs (with optional whitespace between) are converted to paragraph breaks.
 /// Following phrasing content is moved into the new P until we hit a block element
 /// or another BR pair.
-fn replace_brs(elem: &Node<'_>) {
-    let brs: Vec<_> = node_select(elem, "br").nodes().to_vec();
+fn replace_brs(elem: &Node<'_>, selectors: &Selectors) {
+    let brs: Vec<_> = node_select_matcher(elem, &selectors.br).nodes().to_vec();
 
     for br in brs {
         // Check if this BR has been removed (as part of a previous BR chain)
@@ -146,8 +147,11 @@ fn replace_brs(elem: &Node<'_>) {
 }
 
 /// Remove script and noscript tags from the document.
-pub fn remove_scripts(doc: &Document) {
-    let scripts: Vec<_> = doc.select("script, noscript").nodes().to_vec();
+pub fn remove_scripts(doc: &Document, selectors: &Selectors) {
+    let scripts: Vec<_> = doc
+        .select_matcher(&selectors.script_noscript)
+        .nodes()
+        .to_vec();
     for script in scripts {
         script.remove_from_parent();
     }
@@ -235,8 +239,8 @@ pub fn clean_classes(node: &Node<'_>, classes_to_preserve: &[String]) {
 }
 
 /// Clean spurious headers from an element.
-pub fn clean_headers(node: &Node<'_>, flags: u32) {
-    let headings: Vec<_> = node_select(node, "h1, h2").nodes().to_vec();
+pub fn clean_headers(node: &Node<'_>, flags: u32, selectors: &Selectors) {
+    let headings: Vec<_> = node_select_matcher(node, &selectors.h1_h2).nodes().to_vec();
     let to_remove: Vec<_> = headings
         .iter()
         .filter(|h| get_class_weight(h, flags) < 0)
@@ -258,6 +262,7 @@ pub fn clean_conditionally(
     allowed_video_regex: &Regex,
     store: &NodeDataStore,
     link_density_modifier: f64,
+    selectors: &Selectors,
 ) {
     if (flags & FLAG_CLEAN_CONDITIONALLY) == 0 {
         return;
@@ -282,6 +287,7 @@ pub fn clean_conditionally(
             allowed_video_regex,
             store,
             link_density_modifier,
+            selectors,
         ) {
             elem.remove_from_parent();
         }
@@ -295,6 +301,7 @@ fn should_remove_conditionally(
     allowed_video_regex: &Regex,
     store: &NodeDataStore,
     link_density_modifier: f64,
+    selectors: &Selectors,
 ) -> bool {
     // Check if this is a data table
     if tag == "table"
@@ -327,7 +334,7 @@ fn should_remove_conditionally(
     }
 
     // Check if this element contains data tables
-    for table in node_select(node, "table").nodes().iter() {
+    for table in node_select_matcher(node, &selectors.table).nodes().iter() {
         if let Some(is_data_table) = store.is_data_table(&table.id)
             && is_data_table
         {
@@ -341,7 +348,7 @@ fn should_remove_conditionally(
     let is_list = tag == "ul" || tag == "ol";
     let is_list = if !is_list {
         // Check if this element is mostly a list
-        let list_nodes = node_select(node, "ul, ol");
+        let list_nodes = node_select_matcher(node, &selectors.ul_ol);
         let mut list_length = 0;
         for list in list_nodes.nodes().iter() {
             list_length += get_inner_text(list, true).chars().count();
@@ -389,7 +396,7 @@ fn should_remove_conditionally(
     let heading_density = get_text_density(node, &["h1", "h2", "h3", "h4", "h5", "h6"]);
 
     let mut embed_count = 0;
-    let embeds = node_select(node, "object, embed, iframe");
+    let embeds = node_select_matcher(node, &selectors.object_embed_iframe);
     for embed in embeds.nodes().iter() {
         // Check if embed has allowed video URL
         let attrs = embed.attrs();
@@ -421,7 +428,7 @@ fn should_remove_conditionally(
     }
 
     let content_length = inner_text.chars().count();
-    let link_density = get_link_density_with_text(node, Some(&inner_text));
+    let link_density = get_link_density_with_text(node, Some(&inner_text), selectors);
 
     let textish_tags = [
         "SPAN",
@@ -492,7 +499,7 @@ fn should_remove_conditionally(
                 return have_to_remove;
             }
         }
-        let li_count = node_select(node, "li").length();
+        let li_count = node_select_matcher(node, &selectors.li).length();
         if img_count == li_count {
             return false;
         }
@@ -502,8 +509,8 @@ fn should_remove_conditionally(
 }
 
 /// Mark tables as data tables or layout tables.
-pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore) {
-    let tables: Vec<_> = node_select(root, "table").nodes().to_vec();
+pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore, selectors: &Selectors) {
+    let tables: Vec<_> = node_select_matcher(root, &selectors.table).nodes().to_vec();
 
     for table in tables {
         // Check role="presentation"
@@ -529,7 +536,7 @@ pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore) {
         }
 
         // Has caption with content
-        let captions = node_select(&table, "caption");
+        let captions = node_select_matcher(&table, &selectors.caption);
         if captions.length() > 0
             && let Some(caption) = captions.nodes().first()
             && !caption.children().is_empty()
@@ -539,10 +546,8 @@ pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore) {
         }
 
         // Has data-related descendants
-        let data_descendants = ["col", "colgroup", "tfoot", "thead", "th"];
-        let has_data_descendant = data_descendants
-            .iter()
-            .any(|tag| node_select(&table, tag).length() > 0);
+        let has_data_descendant =
+            node_select_matcher(&table, &selectors.table_data_elements).length() > 0;
 
         if has_data_descendant {
             store.set_data_table(table.id, true);
@@ -550,7 +555,7 @@ pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore) {
         }
 
         // Has nested table - it's a layout table
-        if node_select(&table, "table").length() > 0 {
+        if node_select_matcher(&table, &selectors.table).length() > 0 {
             store.set_data_table(table.id, false);
             continue;
         }
@@ -630,8 +635,10 @@ fn count_row(tr: &Node<'_>) -> (usize, usize) {
 }
 
 /// Fix lazy-loaded images.
-pub fn fix_lazy_images(root: &Node<'_>) {
-    let elems: Vec<_> = node_select(root, "img, picture, figure").nodes().to_vec();
+pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
+    let elems: Vec<_> = node_select_matcher(root, &selectors.img_picture_figure)
+        .nodes()
+        .to_vec();
 
     for elem in elems {
         // Check for base64 placeholder images
@@ -707,7 +714,7 @@ pub fn fix_lazy_images(root: &Node<'_>) {
                     elem.set_attr(target, value);
                 } else if tag == "FIGURE" {
                     // Create img if figure doesn't have one
-                    if node_select(&elem, "img, picture").length() == 0 {
+                    if node_select_matcher(&elem, &selectors.img_picture).length() == 0 {
                         let html = format!("<img {}=\"{}\">", target, value);
                         elem.set_html(html.as_str());
                     }
@@ -718,9 +725,9 @@ pub fn fix_lazy_images(root: &Node<'_>) {
 }
 
 /// Unwrap images from noscript tags.
-pub fn unwrap_noscript_images(doc: &Document) {
+pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
     // First, remove images without useful sources
-    let imgs: Vec<_> = doc.select("img").nodes().to_vec();
+    let imgs: Vec<_> = doc.select_matcher(&selectors.img).nodes().to_vec();
     for img in imgs {
         let mut has_useful_attr = false;
         let attrs = img.attrs();
@@ -745,7 +752,7 @@ pub fn unwrap_noscript_images(doc: &Document) {
     }
 
     // Process noscript tags
-    let noscripts: Vec<_> = doc.select("noscript").nodes().to_vec();
+    let noscripts: Vec<_> = doc.select_matcher(&selectors.noscript).nodes().to_vec();
     for noscript in noscripts {
         use crate::scoring::is_single_image;
 
@@ -777,7 +784,10 @@ pub fn unwrap_noscript_images(doc: &Document) {
             let prev_img = if get_tag_name(&prev).as_deref() == Some("IMG") {
                 Some(prev)
             } else {
-                node_select(&prev, "img").nodes().first().cloned()
+                node_select_matcher(&prev, &selectors.img)
+                    .nodes()
+                    .first()
+                    .cloned()
             };
 
             if let (Some(new_img), Some(prev_img)) = (new_img, prev_img) {
@@ -828,7 +838,7 @@ pub fn unwrap_noscript_images(doc: &Document) {
 }
 
 /// Simplify nested elements by removing empty ones and unwrapping single-child containers.
-pub fn simplify_nested_elements(article_content: &Node<'_>) {
+pub fn simplify_nested_elements(article_content: &Node<'_>, selectors: &Selectors) {
     let to_process: Vec<_> = article_content.descendants_it().collect();
 
     for node in to_process {
@@ -846,7 +856,7 @@ pub fn simplify_nested_elements(article_content: &Node<'_>) {
                 continue;
             }
 
-            if is_element_without_content(&node) {
+            if is_element_without_content(&node, selectors) {
                 node.remove_from_parent();
                 continue;
             }

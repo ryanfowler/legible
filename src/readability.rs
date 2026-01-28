@@ -8,7 +8,7 @@ use crate::cleaning::{
 use crate::constants::{
     ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
 };
-use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select};
+use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select, node_select_matcher};
 use crate::error::{ReadabilityError, Result};
 use crate::metadata::{
     Metadata, get_article_metadata, get_article_title, get_json_ld, text_similarity,
@@ -19,6 +19,7 @@ use crate::scoring::{
     has_single_tag_inside_element, initialize_node, is_element_without_content,
     is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
 };
+use crate::selectors::{SELECTORS, Selectors};
 use dom_query::{Document, Node, NodeId};
 use hashbrown::{HashMap, HashSet};
 use regex::Regex;
@@ -149,6 +150,7 @@ pub struct Readability {
     options: Options,
     flags: u32,
     node_data: NodeDataStore,
+    selectors: Selectors,
     article_title: String,
     article_byline: Option<String>,
     article_dir: Option<String>,
@@ -245,6 +247,7 @@ impl Readability {
             options,
             flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeDataStore::new(),
+            selectors: SELECTORS.clone(),
             article_title: String::new(),
             article_byline: None,
             article_dir: None,
@@ -302,29 +305,30 @@ impl Readability {
         }
 
         // Unwrap images from noscript tags
-        unwrap_noscript_images(&self.doc);
+        unwrap_noscript_images(&self.doc, &self.selectors);
 
         // Get article title early (needed for JSON-LD disambiguation)
-        let article_title = get_article_title(&self.doc);
+        let article_title = get_article_title(&self.doc, &self.selectors);
 
         // Extract JSON-LD metadata before removing scripts
         let json_ld = if self.options.disable_json_ld {
             Metadata::default()
         } else {
-            get_json_ld(&self.doc, &article_title)
+            get_json_ld(&self.doc, &article_title, &self.selectors)
         };
 
         // Remove scripts
-        remove_scripts(&self.doc);
+        remove_scripts(&self.doc, &self.selectors);
 
         // Prepare document
-        prep_document(&self.doc);
+        prep_document(&self.doc, &self.selectors);
 
         // Store article title
         self.article_title = article_title;
 
         // Get metadata
-        self.metadata = get_article_metadata(&self.doc, &json_ld, &self.article_title);
+        self.metadata =
+            get_article_metadata(&self.doc, &json_ld, &self.article_title, &self.selectors);
         if self.metadata.title.is_some() {
             self.article_title = self.metadata.title.clone().unwrap_or_default();
         }
@@ -361,7 +365,7 @@ impl Readability {
 
     /// The main content extraction algorithm.
     fn grab_article(&mut self) -> Result<ArticleContent> {
-        let body = self.doc.select("body");
+        let body = self.doc.select_matcher(&self.selectors.body);
         if body.length() == 0 {
             return Err(ReadabilityError::NoBody);
         }
@@ -379,7 +383,11 @@ impl Readability {
             let mut elements_to_score: HashSet<NodeId> = HashSet::new();
 
             // Get the HTML element for language
-            if let Some(html) = self.doc.select("html").nodes().first()
+            if let Some(html) = self
+                .doc
+                .select_matcher(&self.selectors.html)
+                .nodes()
+                .first()
                 && let Some(lang) = html.attr("lang")
             {
                 self.article_lang = Some(lang.to_string());
@@ -510,7 +518,7 @@ impl Readability {
                 if matches!(
                     &*tag_name,
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-                ) && is_element_without_content(node)
+                ) && is_element_without_content(node, &self.selectors)
                 {
                     nodes_to_remove.insert(node.id);
                     continue;
@@ -527,7 +535,9 @@ impl Readability {
                     wrap_phrasing_content_in_p(node);
 
                     // Now check if DIV should be converted or scored
-                    if has_single_tag_inside_element(node, "P") && get_link_density(node) < 0.25 {
+                    if has_single_tag_inside_element(node, "P")
+                        && get_link_density(node, &self.selectors) < 0.25
+                    {
                         // Sites like http://mobile.slate.com enclose each paragraph with a DIV
                         // element. DIVs with only a P element inside and no text content can be
                         // safely converted into plain P elements to avoid confusing the scoring
@@ -636,7 +646,7 @@ impl Readability {
                 };
 
                 let score = self.node_data.get_content_score(candidate_id);
-                let link_density = get_link_density(&candidate);
+                let link_density = get_link_density(&candidate, &self.selectors);
                 let final_score = score * (1.0 - link_density);
 
                 if let Some(data) = self.node_data.get_mut(candidate_id) {
@@ -658,7 +668,7 @@ impl Readability {
 
             // Get top candidate
             // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
-            let body = self.doc.select("body");
+            let body = self.doc.select_matcher(&self.selectors.body);
             let body_node = body.nodes().first().ok_or(ReadabilityError::NoBody)?;
             let body_id = body_node.id;
 
@@ -868,6 +878,7 @@ impl Readability {
                     self.flags,
                     video_regex,
                     self.options.link_density_modifier,
+                    &self.selectors,
                 );
 
                 // Re-fetch the article node after prep_article mutated the DOM - O(1) lookup
@@ -918,7 +929,9 @@ impl Readability {
                         text_length,
                     });
 
-                    self.doc.select("body").set_html(page_cache_html.as_str());
+                    self.doc
+                        .select_matcher(&self.selectors.body)
+                        .set_html(page_cache_html.as_str());
 
                     if self.flag_is_active(FLAG_STRIP_UNLIKELYS) {
                         self.remove_flag(FLAG_STRIP_UNLIKELYS);
@@ -937,13 +950,19 @@ impl Readability {
                         // Use the best attempt - set its content as body and extract text/excerpt
                         let best_attempt = &self.attempts[0];
                         self.doc
-                            .select("body")
+                            .select_matcher(&self.selectors.body)
                             .set_html(best_attempt.content_html.as_str());
 
                         // Re-fetch to get text and excerpt
-                        if let Some(body) = self.doc.select("body").nodes().first().cloned() {
+                        if let Some(body) = self
+                            .doc
+                            .select_matcher(&self.selectors.body)
+                            .nodes()
+                            .first()
+                            .cloned()
+                        {
                             let text_content = get_inner_text(&body, true);
-                            let excerpt = node_select(&body, "p")
+                            let excerpt = node_select_matcher(&body, &self.selectors.p)
                                 .nodes()
                                 .first()
                                 .map(|p| p.text().trim().to_string())
@@ -976,7 +995,7 @@ impl Readability {
                 }
 
                 // Extract excerpt from the first paragraph
-                let excerpt = node_select(&article_node, "p")
+                let excerpt = node_select_matcher(&article_node, &self.selectors.p)
                     .nodes()
                     .first()
                     .map(|p| p.text().trim().to_string())
@@ -1053,7 +1072,7 @@ impl Readability {
                     && let Some(tag) = get_tag_name(&sibling)
                     && tag == "P"
                 {
-                    let link_density = get_link_density(&sibling);
+                    let link_density = get_link_density(&sibling, &self.selectors);
                     let node_content = get_inner_text(&sibling, true);
                     let node_length = node_content.chars().count();
 
@@ -1135,12 +1154,13 @@ impl Readability {
         flags: u32,
         video_regex: &Regex,
         link_density_modifier: f64,
+        selectors: &Selectors,
     ) {
         clean_styles(article_content);
 
-        mark_data_tables(article_content, node_data);
+        mark_data_tables(article_content, node_data, selectors);
 
-        fix_lazy_images(article_content);
+        fix_lazy_images(article_content, selectors);
 
         clean_conditionally(
             article_content,
@@ -1149,6 +1169,7 @@ impl Readability {
             video_regex,
             node_data,
             link_density_modifier,
+            selectors,
         );
         clean_conditionally(
             article_content,
@@ -1157,6 +1178,7 @@ impl Readability {
             video_regex,
             node_data,
             link_density_modifier,
+            selectors,
         );
         clean(article_content, "object", video_regex);
         clean(article_content, "embed", video_regex);
@@ -1178,7 +1200,7 @@ impl Readability {
         clean(article_content, "select", video_regex);
         clean(article_content, "button", video_regex);
 
-        clean_headers(article_content, flags);
+        clean_headers(article_content, flags, selectors);
 
         clean_conditionally(
             article_content,
@@ -1187,6 +1209,7 @@ impl Readability {
             video_regex,
             node_data,
             link_density_modifier,
+            selectors,
         );
         clean_conditionally(
             article_content,
@@ -1195,6 +1218,7 @@ impl Readability {
             video_regex,
             node_data,
             link_density_modifier,
+            selectors,
         );
         clean_conditionally(
             article_content,
@@ -1203,30 +1227,41 @@ impl Readability {
             video_regex,
             node_data,
             link_density_modifier,
+            selectors,
         );
 
-        for h1 in node_select(article_content, "h1").nodes().iter() {
+        for h1 in node_select_matcher(article_content, &selectors.h1)
+            .nodes()
+            .iter()
+        {
             h1.rename("h2");
         }
 
-        let empty_ps: Vec<_> = node_select(article_content, "p")
+        let empty_ps: Vec<_> = node_select_matcher(article_content, &selectors.p)
             .nodes()
             .iter()
             .filter(|p| {
-                let has_media = node_select(p, "img, embed, object, iframe").length() > 0;
+                let has_media =
+                    node_select_matcher(p, &selectors.img_embed_object_iframe).length() > 0;
                 let has_text = !get_inner_text(p, false).is_empty();
                 !has_media && !has_text
             })
             .map(|p| p.id)
             .collect();
 
-        for p in node_select(article_content, "p").nodes().iter() {
+        for p in node_select_matcher(article_content, &selectors.p)
+            .nodes()
+            .iter()
+        {
             if empty_ps.contains(&p.id) {
                 p.remove_from_parent();
             }
         }
 
-        for br in node_select(article_content, "br").nodes().iter() {
+        for br in node_select_matcher(article_content, &selectors.br)
+            .nodes()
+            .iter()
+        {
             if let Some(next) = br.next_sibling()
                 && next.is_element()
                 && let Some(tag) = get_tag_name(&next)
@@ -1236,7 +1271,9 @@ impl Readability {
             }
         }
 
-        let tables: Vec<_> = node_select(article_content, "table").nodes().to_vec();
+        let tables: Vec<_> = node_select_matcher(article_content, &selectors.table)
+            .nodes()
+            .to_vec();
         for table in tables {
             let tbody = if has_single_tag_inside_element(&table, "TBODY") {
                 table.element_children().first().cloned()
@@ -1263,7 +1300,7 @@ impl Readability {
     fn post_process_content_node(&self, node: &Node<'_>) -> String {
         self.fix_relative_uris(node);
 
-        simplify_nested_elements(node);
+        simplify_nested_elements(node, &self.selectors);
 
         if !self.options.keep_classes {
             clean_classes(node, &self.options.classes_to_preserve);
@@ -1316,7 +1353,10 @@ impl Readability {
             None => return,
         };
 
-        for link in node_select(article_content, "a").nodes().iter() {
+        for link in node_select_matcher(article_content, &self.selectors.a)
+            .nodes()
+            .iter()
+        {
             if let Some(href) = link.attr("href") {
                 if href.starts_with('#') && self.base_uri == self.document_uri {
                     continue;
@@ -1336,9 +1376,9 @@ impl Readability {
             }
         }
 
-        for media in node_select(
+        for media in node_select_matcher(
             article_content,
-            "img, picture, figure, video, audio, source",
+            &self.selectors.img_picture_figure_video_audio_source,
         )
         .nodes()
         .iter()
