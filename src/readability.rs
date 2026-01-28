@@ -10,6 +10,7 @@ use crate::constants::{
 };
 use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select_matcher};
 use crate::error::{Error, Result};
+use crate::logging::debug_log;
 use crate::metadata::{
     Metadata, get_article_metadata, get_article_title, get_json_ld, text_similarity,
 };
@@ -292,7 +293,7 @@ impl<'a> Readability<'a> {
         }
 
         loop {
-            self.log("Starting grabArticle loop");
+            debug_log!(self, "Starting grabArticle loop");
 
             let strip_unlikely_candidates = self.flag_is_active(FLAG_STRIP_UNLIKELYS);
 
@@ -358,7 +359,7 @@ impl<'a> Readability<'a> {
 
                 // Check visibility
                 if !is_probably_visible(node) {
-                    self.log(&format!("Removing hidden node - {}", match_string));
+                    debug_log!(self, "Removing hidden node: {}", match_string);
                     nodes_to_remove.insert(node.id);
                     continue;
                 }
@@ -395,11 +396,12 @@ impl<'a> Readability<'a> {
 
                 // Check for duplicate title header
                 if should_remove_title_header && self.header_duplicates_title(node) {
-                    self.log(&format!(
+                    debug_log!(
+                        self,
                         "Removing header: {} / {}",
                         node.text().trim(),
                         self.article_title.trim()
-                    ));
+                    );
                     should_remove_title_header = false;
                     nodes_to_remove.insert(node.id);
                     continue;
@@ -415,7 +417,7 @@ impl<'a> Readability<'a> {
                         && tag_name != "BODY"
                         && tag_name != "A"
                     {
-                        self.log(&format!("Removing unlikely candidate - {}", match_string));
+                        debug_log!(self, "Removing unlikely candidate: {}", match_string);
                         nodes_to_remove.insert(node.id);
                         continue;
                     }
@@ -423,10 +425,12 @@ impl<'a> Readability<'a> {
                     if let Some(role) = node.attr("role")
                         && UNLIKELY_ROLES.contains(role.as_ref())
                     {
-                        self.log(&format!(
-                            "Removing content with role {} - {}",
-                            role, match_string
-                        ));
+                        debug_log!(
+                            self,
+                            "Removing element with role={}: {}",
+                            role,
+                            match_string
+                        );
                         nodes_to_remove.insert(node.id);
                         continue;
                     }
@@ -580,7 +584,7 @@ impl<'a> Readability<'a> {
                     data.content_score = final_score;
                 }
 
-                self.log(&format!("Candidate with score {:.2}", final_score));
+                debug_log!(self, "Candidate with score {:.2}", final_score);
 
                 all_candidate_scores.push((*candidate_id, final_score));
             }
@@ -616,10 +620,11 @@ impl<'a> Readability<'a> {
 
                 // Move all children (including text nodes) into the container
                 for child in children {
-                    self.log(&format!(
-                        "Moving child out: {:?}",
+                    debug_log!(
+                        self,
+                        "Moving child out: {}",
                         get_tag_name(&child).unwrap_or_default()
-                    ));
+                    );
                     container.append_child(&child);
                 }
 
@@ -1026,12 +1031,7 @@ impl<'a> Readability<'a> {
             }
 
             if should_append {
-                if debug {
-                    eprintln!(
-                        "Reader: (Readability) Appending sibling node: {:?}",
-                        sibling.id
-                    );
-                }
+                debug_log!(@bool debug, "Appending sibling node: {:?}", sibling.id);
                 siblings_to_include.push(sibling.id);
             }
         }
@@ -1068,7 +1068,7 @@ impl<'a> Readability<'a> {
                 if let Some(tag) = get_tag_name(sibling)
                     && !ALTER_TO_DIV_EXCEPTIONS.contains(&*tag)
                 {
-                    self.log(&format!("Altering sibling {} to div", tag));
+                    debug_log!(self, "Altering sibling {} to div", tag);
                     sibling.rename("div");
                 }
 
@@ -1397,12 +1397,6 @@ impl<'a> Readability<'a> {
 
         self.node_data.clear();
         Ok(())
-    }
-
-    fn log(&self, msg: &str) {
-        if self.options.debug {
-            eprintln!("Reader: (Readability) {}", msg);
-        }
     }
 }
 

@@ -112,6 +112,7 @@ mod cleaning;
 mod constants;
 mod dom;
 mod error;
+mod logging;
 mod metadata;
 mod options;
 mod readability;
