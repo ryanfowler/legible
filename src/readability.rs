@@ -146,8 +146,9 @@ pub struct Article {
 /// # Configuration
 ///
 /// See [`Options`] for available configuration options.
-pub struct Readability {
+pub struct Readability<'a> {
     doc: Document,
+    original_html: &'a str,
     options: Options,
     flags: u32,
     node_data: NodeDataStore,
@@ -203,7 +204,7 @@ struct ArticleContent {
     excerpt: Option<String>,
 }
 
-impl Readability {
+impl<'a> Readability<'a> {
     /// Create a new Readability parser for the given HTML.
     ///
     /// # Arguments
@@ -230,7 +231,7 @@ impl Readability {
     /// let options = Options::new().char_threshold(250);
     /// let readability = Readability::new(html, Some("https://example.com"), Some(options));
     /// ```
-    pub fn new(html: &str, url: Option<&str>, options: Option<Options>) -> Self {
+    pub fn new(html: &'a str, url: Option<&str>, options: Option<Options>) -> Self {
         let doc = Document::from(html);
         let options = options.unwrap_or_default();
 
@@ -245,6 +246,7 @@ impl Readability {
 
         Self {
             doc,
+            original_html: html,
             options,
             flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeDataStore::new(),
@@ -370,9 +372,6 @@ impl Readability {
         if body.length() == 0 {
             return Err(ReadabilityError::NoBody);
         }
-
-        // Store original HTML for retry logic
-        let page_cache_html = body.html().to_string();
 
         loop {
             self.log("Starting grabArticle loop");
@@ -945,10 +944,6 @@ impl Readability {
                         text_length,
                     });
 
-                    self.doc
-                        .select_matcher(&self.selectors.body)
-                        .set_html(page_cache_html.as_str());
-
                     if self.flag_is_active(FLAG_STRIP_UNLIKELYS) {
                         self.remove_flag(FLAG_STRIP_UNLIKELYS);
                     } else if self.flag_is_active(FLAG_WEIGHT_CLASSES) {
@@ -995,7 +990,8 @@ impl Readability {
                         return Err(ReadabilityError::NoContent);
                     }
 
-                    self.node_data.clear();
+                    // Reparse document from original HTML for retry
+                    self.reparse_and_prepare()?;
                     continue;
                 }
 
@@ -1459,6 +1455,30 @@ impl Readability {
 
     fn remove_flag(&mut self, flag: u32) {
         self.flags &= !flag;
+    }
+
+    /// Reparse the document from original HTML and re-run preparation steps.
+    /// Used during retry logic to restore document to prepared state.
+    fn reparse_and_prepare(&mut self) -> Result<()> {
+        self.doc = Document::from(self.original_html);
+
+        // Re-run preparation (but NOT metadata extraction - already stored)
+        unwrap_noscript_images(&self.doc, &self.selectors);
+        remove_scripts(&self.doc, &self.selectors);
+        prep_document(&self.doc, &self.selectors);
+
+        // Verify body exists
+        if self.doc.select_matcher(&self.selectors.body).length() == 0 {
+            return Err(ReadabilityError::NoBody);
+        }
+
+        // Reset state that could have been set during failed attempt
+        self.article_byline = None;
+        self.article_dir = None;
+        self.article_lang = None;
+
+        self.node_data.clear();
+        Ok(())
     }
 
     fn log(&self, msg: &str) {
