@@ -157,6 +157,7 @@ pub struct Readability {
     metadata: Metadata,
     base_uri: Option<Url>,
     document_uri: Option<Url>,
+    url_error: Option<url::ParseError>,
     attempts: Vec<AttemptResult>,
 }
 
@@ -203,7 +204,13 @@ impl Readability {
         let doc = Document::from(html);
         let options = options.unwrap_or_default();
 
-        let base_uri = url.and_then(|u| Url::parse(u).ok());
+        let (base_uri, url_error) = match url {
+            Some(u) => match Url::parse(u) {
+                Ok(parsed) => (Some(parsed), None),
+                Err(e) => (None, Some(e)),
+            },
+            None => (None, None),
+        };
         let document_uri = base_uri.clone();
 
         Self {
@@ -219,6 +226,7 @@ impl Readability {
             metadata: Metadata::default(),
             base_uri,
             document_uri,
+            url_error,
             attempts: Vec::new(),
         }
     }
@@ -231,6 +239,7 @@ impl Readability {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The provided URL is invalid ([`ReadabilityError::InvalidUrl`])
     /// - The document has no `<body>` element ([`ReadabilityError::NoBody`])
     /// - No article content could be extracted ([`ReadabilityError::NoContent`])
     /// - The document exceeds `max_elems_to_parse` ([`ReadabilityError::TooManyElements`])
@@ -249,6 +258,11 @@ impl Readability {
     /// }
     /// ```
     pub fn parse(mut self) -> Result<Article> {
+        // Check for URL parsing error
+        if let Some(e) = self.url_error {
+            return Err(ReadabilityError::InvalidUrl(e));
+        }
+
         // Check element count limit
         if self.options.max_elems_to_parse > 0 {
             let count = self.doc.select("*").length();
