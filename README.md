@@ -1,5 +1,8 @@
 # Legible
 
+[![Crates.io](https://img.shields.io/crates/v/legible.svg)](https://crates.io/crates/legible)
+[![Documentation](https://docs.rs/legible/badge.svg)](https://docs.rs/legible)
+
 A Rust port of Mozilla's [Readability.js](https://github.com/mozilla/readability) for extracting readable content from web pages.
 
 Legible analyzes HTML documents and extracts the main article content, stripping away navigation, ads, sidebars, and other non-content elements to produce clean, readable output.
