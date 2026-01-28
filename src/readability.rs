@@ -8,7 +8,7 @@ use crate::cleaning::{
 use crate::constants::{
     ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
 };
-use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select, node_select_matcher};
+use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select_matcher};
 use crate::error::{ReadabilityError, Result};
 use crate::metadata::{
     Metadata, get_article_metadata, get_article_title, get_json_ld, text_similarity,
@@ -465,7 +465,7 @@ impl Readability {
                     && is_valid_byline(node, match_string)
                 {
                     // Look for itemprop="name" child
-                    let itemprop_name = node_select(node, "[itemprop*='name']")
+                    let itemprop_name = node_select_matcher(node, &self.selectors.itemprop)
                         .nodes()
                         .first()
                         .cloned();

@@ -38,6 +38,7 @@ pub struct Selectors {
     pub font: Matcher,
     pub noscript: Matcher,
     pub caption: Matcher,
+    pub itemprop: Matcher,
 
     // Image/media related selectors
     pub img_picture_figure: Matcher,
@@ -81,6 +82,7 @@ impl Selectors {
             font: Matcher::new("font").unwrap(),
             noscript: Matcher::new("noscript").unwrap(),
             caption: Matcher::new("caption").unwrap(),
+            itemprop: Matcher::new("[itemprop*='name']").unwrap(),
 
             // Image/media related selectors
             img_picture_figure: Matcher::new("img, picture, figure").unwrap(),
