@@ -75,7 +75,7 @@ fn run_test_case(test_dir: &Path) -> Result<(), String> {
     };
 
     // Run Readability
-    let mut readability = Readability::new(
+    let readability = Readability::new(
         &source_html,
         Some(&format!("http://fakehost/test/{}", test_name)),
         None,

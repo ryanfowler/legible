@@ -6,7 +6,7 @@ description = "HTTP server for the Legible article extraction library"
 license = "Apache-2.0"
 
 [dependencies]
-legible = { path = ".." }
+legible = { path = "../.." }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
