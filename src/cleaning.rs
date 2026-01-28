@@ -5,7 +5,7 @@ use crate::constants::{
 };
 use crate::dom::{NodeDataStore, get_tag_name, node_select};
 use crate::scoring::{
-    get_class_weight, get_inner_text, get_link_density, get_text_density,
+    get_class_weight, get_inner_text, get_link_density_with_text, get_text_density,
     has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
 use dom_query::{Document, Node};
@@ -202,7 +202,7 @@ pub fn clean_styles(node: &Node<'_>) {
 
     // Remove deprecated size attributes on certain elements
     if let Some(tag) = get_tag_name(node)
-        && DEPRECATED_SIZE_ATTRIBUTE_ELEMS.contains(tag.as_str())
+        && DEPRECATED_SIZE_ATTRIBUTE_ELEMS.contains(&*tag)
     {
         node.remove_attr("width");
         node.remove_attr("height");
@@ -335,6 +335,9 @@ fn should_remove_conditionally(
         }
     }
 
+    // Extract inner_text once and reuse for all checks (performance optimization)
+    let inner_text = get_inner_text(node, true);
+
     let is_list = tag == "ul" || tag == "ol";
     let is_list = if !is_list {
         // Check if this element is mostly a list
@@ -343,7 +346,6 @@ fn should_remove_conditionally(
         for list in list_nodes.nodes().iter() {
             list_length += get_inner_text(list, true).chars().count();
         }
-        let inner_text = get_inner_text(node, true);
         if !inner_text.is_empty() {
             list_length as f64 / inner_text.chars().count() as f64 > 0.9
         } else {
@@ -359,17 +361,31 @@ fn should_remove_conditionally(
         return true;
     }
 
-    // Check comma count
-    let comma_count = get_inner_text(node, true).matches(',').count();
+    // Check comma count (reusing pre-extracted inner_text)
+    let comma_count = inner_text.matches(',').count();
     if comma_count >= 10 {
         return false;
     }
 
-    // Various content-based checks
-    let p_count = node_select(node, "p").length();
-    let img_count = node_select(node, "img").length();
-    let li_count = node_select(node, "li").length().saturating_sub(100);
-    let input_count = node_select(node, "input").length();
+    // Various content-based checks - single traversal instead of 4 separate selector calls
+    let (p_count, img_count, li_count, input_count) = {
+        let mut p: usize = 0;
+        let mut img: usize = 0;
+        let mut li: usize = 0;
+        let mut input: usize = 0;
+        for descendant in node.descendants_it() {
+            if let Some(tag) = get_tag_name(&descendant) {
+                match &*tag {
+                    "P" => p += 1,
+                    "IMG" => img += 1,
+                    "LI" => li += 1,
+                    "INPUT" => input += 1,
+                    _ => {}
+                }
+            }
+        }
+        (p, img, li.saturating_sub(100), input)
+    };
     let heading_density = get_text_density(node, &["h1", "h2", "h3", "h4", "h5", "h6"]);
 
     let mut embed_count = 0;
@@ -399,15 +415,13 @@ fn should_remove_conditionally(
         embed_count += 1;
     }
 
-    let inner_text = get_inner_text(node, true);
-
-    // Check for ad/loading words
+    // Check for ad/loading words (reusing pre-extracted inner_text)
     if regexps::AD_WORDS.is_match(&inner_text) || regexps::LOADING_WORDS.is_match(&inner_text) {
         return true;
     }
 
     let content_length = inner_text.chars().count();
-    let link_density = get_link_density(node);
+    let link_density = get_link_density_with_text(node, Some(&inner_text));
 
     let textish_tags = [
         "SPAN",
@@ -562,25 +576,57 @@ fn get_row_and_column_count(table: &Node<'_>) -> (usize, usize) {
     let mut rows = 0;
     let mut columns = 0;
 
-    for tr in node_select(table, "tr").nodes().iter() {
-        let rowspan = tr
-            .attr("rowspan")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(1);
-        rows += rowspan;
+    // Use element_children() instead of selector queries for better performance.
+    // Tables can have TBODY, THEAD, etc. as direct children, so we need to handle that.
+    for child in table.element_children() {
+        if let Some(tag) = get_tag_name(&child) {
+            match &*tag {
+                "TR" => {
+                    let (row_count, col_count) = count_row(&child);
+                    rows += row_count;
+                    columns = columns.max(col_count);
+                }
+                "TBODY" | "THEAD" | "TFOOT" => {
+                    // Process TRs inside these wrapper elements
+                    for tr_child in child.element_children() {
+                        if let Some(tr_tag) = get_tag_name(&tr_child)
+                            && &*tr_tag == "TR"
+                        {
+                            let (row_count, col_count) = count_row(&tr_child);
+                            rows += row_count;
+                            columns = columns.max(col_count);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 
-        let mut cols_in_row = 0;
-        for td in node_select(tr, "td").nodes().iter() {
-            let colspan = td
+    (rows, columns)
+}
+
+/// Count rows (from rowspan) and columns (from cells) in a single TR element.
+fn count_row(tr: &Node<'_>) -> (usize, usize) {
+    let rowspan = tr
+        .attr("rowspan")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+
+    let mut cols_in_row = 0;
+    for cell in tr.element_children() {
+        if let Some(cell_tag) = get_tag_name(&cell)
+            && (cell_tag == "TD" || cell_tag == "TH")
+        {
+            let colspan = cell
                 .attr("colspan")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1);
             cols_in_row += colspan;
         }
-        columns = columns.max(cols_in_row);
     }
 
-    (rows, columns)
+    (rowspan, cols_in_row)
 }
 
 /// Fix lazy-loaded images.
@@ -698,7 +744,7 @@ pub fn unwrap_noscript_images(doc: &Document) {
         }
     }
 
-    // Process noscript tags - simplified version
+    // Process noscript tags
     let noscripts: Vec<_> = doc.select("noscript").nodes().to_vec();
     for noscript in noscripts {
         use crate::scoring::is_single_image;
@@ -722,10 +768,61 @@ pub fn unwrap_noscript_images(doc: &Document) {
         if let Some(prev) = prev_element
             && is_single_image(&prev)
         {
-            // Replace previous element with noscript content
+            // Parse noscript content into a temporary container
             let noscript_html = noscript.inner_html();
-            prev.set_html(noscript_html.as_ref());
-            noscript.remove_from_parent();
+            let tmp_doc = Document::from(format!("<div>{}</div>", noscript_html).as_str());
+            let new_img = tmp_doc.select("img").nodes().first().cloned();
+
+            // Get the actual img element from the previous element
+            let prev_img = if get_tag_name(&prev).as_deref() == Some("IMG") {
+                Some(prev)
+            } else {
+                node_select(&prev, "img").nodes().first().cloned()
+            };
+
+            if let (Some(new_img), Some(prev_img)) = (new_img, prev_img) {
+                // Copy image-related attributes from old img to new img
+                // This preserves lazy-loading attributes like data-src
+                for attr in prev_img.attrs().iter() {
+                    let attr_name = attr.name.local.as_ref();
+                    let attr_value = attr.value.as_ref();
+
+                    // Skip empty attributes
+                    if attr_value.is_empty() {
+                        continue;
+                    }
+
+                    // Only copy src, srcset, or attributes containing image extensions
+                    let is_image_attr = attr_name == "src"
+                        || attr_name == "srcset"
+                        || regexps::IMAGE_EXTENSION.is_match(attr_value);
+
+                    if is_image_attr {
+                        // Skip if new img already has the same value for this attribute
+                        if let Some(new_value) = new_img.attr(attr_name)
+                            && new_value.as_ref() == attr_value
+                        {
+                            continue;
+                        }
+
+                        // If new img already has this attribute, prefix with data-old-
+                        let target_name = if new_img.has_attr(attr_name) {
+                            format!("data-old-{}", attr_name)
+                        } else {
+                            attr_name.to_string()
+                        };
+
+                        new_img.set_attr(&target_name, attr_value);
+                    }
+                }
+
+                // Replace the entire previous element with the new img
+                // Build the new img HTML and replace prev element
+                let new_img_html = new_img.html().to_string();
+                prev.after_html(new_img_html.as_str());
+                prev.remove_from_parent();
+                noscript.remove_from_parent();
+            }
         }
     }
 }
@@ -786,20 +883,25 @@ where
 {
     let descendants: Vec<_> = node.descendants_it().collect();
 
+    // Reusable buffer for match_string to avoid allocations per node
+    let mut match_string_buf = String::with_capacity(128);
+
     for n in descendants {
         if !n.is_element() {
             continue;
         }
 
-        // Build match_string for filter - allocation is needed for the combined string
-        let match_string = match (n.attr("class"), n.attr("id")) {
-            (Some(class), Some(id)) => format!("{} {}", class.as_ref(), id.as_ref()),
-            (Some(class), None) => format!("{} ", class.as_ref()),
-            (None, Some(id)) => format!(" {}", id.as_ref()),
-            (None, None) => String::from(" "),
-        };
+        // Build match_string for filter - reuse buffer to avoid allocations
+        match_string_buf.clear();
+        if let Some(class) = n.attr("class") {
+            match_string_buf.push_str(class.as_ref());
+        }
+        match_string_buf.push(' ');
+        if let Some(id) = n.attr("id") {
+            match_string_buf.push_str(id.as_ref());
+        }
 
-        if filter(&n, &match_string) {
+        if filter(&n, &match_string_buf) {
             n.remove_from_parent();
         }
     }

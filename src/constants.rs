@@ -1,7 +1,7 @@
 //! Constants and regex patterns used by Readability.
 
 use once_cell::sync::Lazy;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use std::collections::HashSet;
 
 /// Parsing flags that control the behavior of the algorithm.
@@ -136,6 +136,26 @@ pub mod regexps {
     /// Matches the first part of a title up to and including a separator.
     pub static TITLE_FIRST_PART: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"^[^\|\-–—\\\/>»]*[\|\-–—\\\/>»]").unwrap());
+
+    /// RegexSet for class weight scoring - combines NEGATIVE (index 0) and POSITIVE (index 1).
+    /// Allows single-pass matching instead of 4 separate regex calls.
+    pub static CLASS_WEIGHT_SET: Lazy<RegexSet> = Lazy::new(|| {
+        RegexSet::new([
+            NEGATIVE.as_str(), // Index 0 - negative patterns
+            POSITIVE.as_str(), // Index 1 - positive patterns
+        ])
+        .unwrap()
+    });
+
+    /// RegexSet for candidate filtering - combines UNLIKELY_CANDIDATES (index 0)
+    /// and OK_MAYBE_ITS_A_CANDIDATE (index 1).
+    pub static CANDIDATE_FILTER_SET: Lazy<RegexSet> = Lazy::new(|| {
+        RegexSet::new([
+            UNLIKELY_CANDIDATES.as_str(),      // Index 0 - unlikely patterns
+            OK_MAYBE_ITS_A_CANDIDATE.as_str(), // Index 1 - maybe ok patterns
+        ])
+        .unwrap()
+    });
 }
 
 /// Roles that indicate unlikely content areas.

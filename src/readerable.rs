@@ -64,6 +64,9 @@ pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) ->
 
     let mut score = 0.0;
 
+    // Reusable buffer for match_string to avoid allocations per node
+    let mut match_string_buf = String::with_capacity(128);
+
     // Iterate only over the nodes we've collected (p, pre, article, and parent divs of br)
     let all_nodes: Vec<_> = doc.select("*").nodes().to_vec();
     for node in all_nodes.iter().filter(|n| node_ids.contains(&n.id)) {
@@ -72,18 +75,19 @@ pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) ->
             continue;
         }
 
-        // Check class/id against unlikely patterns
-        // Build match_string for regex - allocation is needed for the combined string
-        let match_string = match (node.attr("class"), node.attr("id")) {
-            (Some(class), Some(id)) => format!("{} {}", class.as_ref(), id.as_ref()),
-            (Some(class), None) => format!("{} ", class.as_ref()),
-            (None, Some(id)) => format!(" {}", id.as_ref()),
-            (None, None) => String::from(" "),
-        };
+        // Build match_string for regex - reuse buffer to avoid allocations
+        match_string_buf.clear();
+        if let Some(class) = node.attr("class") {
+            match_string_buf.push_str(class.as_ref());
+        }
+        match_string_buf.push(' ');
+        if let Some(id) = node.attr("id") {
+            match_string_buf.push_str(id.as_ref());
+        }
 
-        if regexps::UNLIKELY_CANDIDATES.is_match(&match_string)
-            && !regexps::OK_MAYBE_ITS_A_CANDIDATE.is_match(&match_string)
-        {
+        // Use RegexSet for single-pass matching of both patterns
+        let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(&match_string_buf);
+        if candidate_matches.matched(0) && !candidate_matches.matched(1) {
             continue;
         }
 
