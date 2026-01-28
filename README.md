@@ -13,7 +13,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-legible = "0.1"
+legible = "0.3"
 ```
 
 ## Usage
