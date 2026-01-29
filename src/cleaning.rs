@@ -33,21 +33,6 @@ pub fn prep_document(doc: &Document, selectors: &Selectors) {
     }
 }
 
-/// Remove comment nodes from an element and its descendants.
-/// In JavaScript Readability, comment nodes are never added to the DOM during parsing.
-/// Since dom_query/html5ever keeps comment nodes, we need to remove them to match JS behavior.
-pub fn remove_comments(node: &Node<'_>) {
-    // Collect all comment nodes (nodes that are neither elements nor text)
-    let comments: Vec<_> = node
-        .descendants_it()
-        .filter(|n| !n.is_element() && !n.is_text())
-        .collect();
-
-    for comment in comments {
-        comment.remove_from_parent();
-    }
-}
-
 /// Get the next element node, skipping whitespace text nodes.
 fn next_element<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     let mut next = node.next_sibling();
@@ -55,7 +40,7 @@ fn next_element<'a>(node: &Node<'a>) -> Option<Node<'a>> {
         if n.is_element() {
             return next;
         }
-        if n.is_text() && !regexps::WHITESPACE.is_match(n.text().as_ref()) {
+        if n.is_text() && !n.text().trim().is_empty() {
             return None;
         }
         next = n.next_sibling();
@@ -128,7 +113,7 @@ fn replace_brs(elem: &Node<'_>, selectors: &Selectors) {
             loop {
                 if let Some(last) = p.children().last()
                     && last.is_text()
-                    && regexps::WHITESPACE.is_match(last.text().as_ref())
+                    && last.text().trim().is_empty()
                 {
                     last.remove_from_parent();
                     continue;
@@ -216,26 +201,6 @@ pub fn clean_styles(node: &Node<'_>) {
     // Clean children
     for child in node.element_children() {
         clean_styles(&child);
-    }
-}
-
-/// Clean classes from an element, keeping only preserved classes.
-pub fn clean_classes(node: &Node<'_>, classes_to_preserve: &[String]) {
-    if let Some(class_attr) = node.attr("class") {
-        let preserved: Vec<&str> = class_attr
-            .split_whitespace()
-            .filter(|c| classes_to_preserve.iter().any(|p| p == *c))
-            .collect();
-
-        if preserved.is_empty() {
-            node.remove_attr("class");
-        } else {
-            node.set_attr("class", &preserved.join(" "));
-        }
-    }
-
-    for child in node.element_children() {
-        clean_classes(&child, classes_to_preserve);
     }
 }
 
@@ -430,9 +395,9 @@ fn should_remove_conditionally(
         embed_count += 1;
     }
 
-    // Check for ad/loading words - need to extract text for regex matching
+    // Check for ad/loading words - use RegexSet for single-pass matching
     let inner_text = get_inner_text(node, true);
-    if regexps::AD_WORDS.is_match(&inner_text) || regexps::LOADING_WORDS.is_match(&inner_text) {
+    if regexps::AD_LOADING_SET.is_match(&inner_text) {
         return true;
     }
 

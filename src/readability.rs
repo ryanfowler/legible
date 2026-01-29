@@ -1,9 +1,9 @@
 //! Main Readability parser implementation.
 
 use crate::cleaning::{
-    clean, clean_classes, clean_conditionally, clean_headers, clean_matched_nodes, clean_styles,
-    fix_lazy_images, mark_data_tables, prep_document, remove_comments, remove_scripts,
-    simplify_nested_elements, unwrap_noscript_images,
+    clean, clean_conditionally, clean_headers, clean_matched_nodes, clean_styles, fix_lazy_images,
+    mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
+    unwrap_noscript_images,
 };
 use crate::constants::{
     ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
@@ -1180,23 +1180,15 @@ impl<'a> Readability<'a> {
             h1.rename("h2");
         }
 
-        let empty_ps: Vec<_> = node_select_matcher(article_content, &selectors.p)
+        // Query P elements once and remove empty ones directly
+        let ps: Vec<_> = node_select_matcher(article_content, &selectors.p)
             .nodes()
-            .iter()
-            .filter(|p| {
-                let has_media =
-                    node_select_matcher(p, &selectors.img_embed_object_iframe).length() > 0;
-                let has_text = !get_inner_text(p, false).is_empty();
-                !has_media && !has_text
-            })
-            .map(|p| p.id)
-            .collect();
-
-        for p in node_select_matcher(article_content, &selectors.p)
-            .nodes()
-            .iter()
-        {
-            if empty_ps.contains(&p.id) {
+            .to_vec();
+        for p in ps {
+            let has_media =
+                node_select_matcher(&p, &selectors.img_embed_object_iframe).length() > 0;
+            let has_text = !get_inner_text(&p, false).is_empty();
+            if !has_media && !has_text {
                 p.remove_from_parent();
             }
         }
@@ -1233,59 +1225,86 @@ impl<'a> Readability<'a> {
                 let all_phrasing = cell.children().iter().all(|c| is_phrasing_content(c));
                 let new_tag = if all_phrasing { "p" } else { "div" };
                 cell.rename(new_tag);
-                let cell_html = cell.inner_html();
-                table.set_html(cell_html.as_ref());
+                // Move the cell (now renamed) to replace the table directly
+                // This avoids the serialize/deserialize cycle of inner_html + set_html
+                table.replace_with(cell);
             }
         }
     }
 
     /// Post-process the extracted content from a Node.
+    /// Combines multiple traversals into optimized passes for better performance.
     fn post_process_content_node(&self, node: &Node<'_>) -> String {
+        // These use targeted selectors, so they remain separate
         self.fix_relative_uris(node);
 
+        // This may modify tree structure, so it runs before the combined pass
         simplify_nested_elements(node, &self.selectors);
 
-        if !self.options.keep_classes {
-            clean_classes(node, &self.options.classes_to_preserve);
-        }
-
-        // Remove HTML comment nodes - JS Readability never adds them to the DOM,
-        // so we need to remove them to match the expected output
-        remove_comments(node);
-
-        // Escape < and > in attribute values to match browser serialization
-        self.escape_attribute_values(node);
+        // Combined single-pass traversal for:
+        // - clean_classes (if not keeping classes)
+        // - remove_comments
+        // - escape_attribute_values
+        self.post_process_single_pass(node);
 
         node.inner_html().to_string()
     }
 
-    /// Escape < and > characters inside attribute values.
-    /// Browser innerHTML serialization escapes these characters, but dom_query doesn't.
-    fn escape_attribute_values(&self, node: &Node<'_>) {
-        // Collect all elements first to avoid borrow issues
-        let elements: Vec<_> = node.descendants_it().filter(|n| n.is_element()).collect();
+    /// Single-pass post-processing that handles multiple cleanup operations per node.
+    /// Combines clean_classes, remove_comments, and escape_attribute_values into one traversal.
+    fn post_process_single_pass(&self, node: &Node<'_>) {
+        // Collect all descendants first to avoid mutation issues during traversal
+        let descendants: Vec<_> = node.descendants_it().collect();
 
-        for element in elements {
-            // Collect attribute info
-            let attrs_to_fix: Vec<_> = element
-                .attrs()
-                .into_iter()
-                .filter_map(|attr| {
-                    let name = attr.name.local.to_string();
-                    let value = attr.value.to_string();
-                    if value.contains('<') || value.contains('>') {
-                        Some((name, value))
+        // Track comment nodes to remove (can't remove during iteration)
+        let mut comments_to_remove = Vec::new();
+
+        for descendant in descendants {
+            if descendant.is_element() {
+                // Clean classes (unless keeping them)
+                if !self.options.keep_classes
+                    && let Some(class_attr) = descendant.attr("class")
+                {
+                    let preserved: Vec<&str> = class_attr
+                        .split_whitespace()
+                        .filter(|c| self.options.classes_to_preserve.iter().any(|p| p == *c))
+                        .collect();
+
+                    if preserved.is_empty() {
+                        descendant.remove_attr("class");
                     } else {
-                        None
+                        descendant.set_attr("class", &preserved.join(" "));
                     }
-                })
-                .collect();
+                }
 
-            // Now modify attributes - single-pass escaping to avoid intermediate string
-            for (name, value) in attrs_to_fix {
-                let escaped = escape_angle_brackets(&value);
-                element.set_attr(&name, &escaped);
+                // Escape < and > in attribute values
+                let attrs_to_fix: Vec<_> = descendant
+                    .attrs()
+                    .into_iter()
+                    .filter_map(|attr| {
+                        let name = attr.name.local.to_string();
+                        let value = attr.value.to_string();
+                        if value.contains('<') || value.contains('>') {
+                            Some((name, value))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                for (name, value) in attrs_to_fix {
+                    let escaped = escape_angle_brackets(&value);
+                    descendant.set_attr(&name, &escaped);
+                }
+            } else if !descendant.is_text() {
+                // It's a comment node - mark for removal
+                comments_to_remove.push(descendant);
             }
+        }
+
+        // Remove comment nodes after traversal
+        for comment in comments_to_remove {
+            comment.remove_from_parent();
         }
     }
 
