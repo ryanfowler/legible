@@ -91,10 +91,16 @@ pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
     let text = node.text();
     let trimmed = text.trim();
     if normalize_spaces {
-        // replace_all returns Cow - only allocates if replacements were made
-        match regexps::NORMALIZE.replace_all(trimmed, " ") {
-            std::borrow::Cow::Borrowed(s) => s.to_string(),
-            std::borrow::Cow::Owned(s) => s, // reuse the already-allocated string
+        // Quick pre-check: only run regex if there are consecutive spaces
+        // The NORMALIZE regex matches \s{2,}, so if no "  " exists, regex is unnecessary
+        if trimmed.contains("  ") || trimmed.contains('\t') || trimmed.contains('\n') {
+            // replace_all returns Cow - only allocates if replacements were made
+            match regexps::NORMALIZE.replace_all(trimmed, " ") {
+                std::borrow::Cow::Borrowed(s) => s.to_string(),
+                std::borrow::Cow::Owned(s) => s, // reuse the already-allocated string
+            }
+        } else {
+            trimmed.to_string()
         }
     } else {
         trimmed.to_string()
@@ -248,7 +254,7 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
             let has_content = phrasing_nodes.iter().any(|&idx| {
                 let n = &children[idx];
                 if n.is_text() {
-                    !regexps::WHITESPACE.is_match(n.text().as_ref())
+                    !n.text().trim().is_empty()
                 } else {
                     true
                 }

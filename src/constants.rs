@@ -69,6 +69,7 @@ pub mod regexps {
     pub static TOKENIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\W+").unwrap());
 
     /// Matches whitespace-only strings.
+    #[allow(dead_code)]
     pub static WHITESPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*$").unwrap());
 
     /// Matches strings with content (non-whitespace at end).
@@ -153,6 +154,16 @@ pub mod regexps {
         RegexSet::new([
             UNLIKELY_CANDIDATES.as_str(),      // Index 0 - unlikely patterns
             OK_MAYBE_ITS_A_CANDIDATE.as_str(), // Index 1 - maybe ok patterns
+        ])
+        .unwrap()
+    });
+
+    /// RegexSet for ad/loading word detection - combines AD_WORDS (index 0)
+    /// and LOADING_WORDS (index 1) for single-pass matching.
+    pub static AD_LOADING_SET: Lazy<RegexSet> = Lazy::new(|| {
+        RegexSet::new([
+            AD_WORDS.as_str(),      // Index 0 - ad-related words
+            LOADING_WORDS.as_str(), // Index 1 - loading indicator words
         ])
         .unwrap()
     });

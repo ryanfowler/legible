@@ -68,8 +68,12 @@ pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) ->
     let mut match_string_buf = String::with_capacity(128);
 
     // Iterate only over the nodes we've collected (p, pre, article, and parent divs of br)
-    let all_nodes: Vec<_> = doc.select("*").nodes().to_vec();
-    for node in all_nodes.iter().filter(|n| node_ids.contains(&n.id)) {
+    for node in doc
+        .select("*")
+        .nodes()
+        .iter()
+        .filter(|n| node_ids.contains(&n.id))
+    {
         // Check visibility
         if !is_probably_visible(node) {
             continue;
