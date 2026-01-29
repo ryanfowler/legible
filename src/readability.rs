@@ -16,8 +16,8 @@ use crate::metadata::{
 };
 use crate::options::Options;
 use crate::scoring::{
-    get_inner_text, get_link_density, get_link_density_cached, get_or_compute_stats,
-    has_child_block_element, has_single_tag_inside_element, initialize_node,
+    compute_initial_readability_data, get_inner_text, get_link_density, get_link_density_cached,
+    get_or_compute_stats, has_child_block_element, has_single_tag_inside_element, initialize_node,
     is_element_without_content, is_phrasing_content, is_probably_visible, is_valid_byline,
     wrap_phrasing_content_in_p,
 };
@@ -121,7 +121,6 @@ pub(crate) struct Readability<'a> {
     options: Options,
     flags: u32,
     node_data: NodeDataStore,
-    selectors: Selectors,
     article_title: String,
     article_byline: Option<String>,
     article_dir: Option<String>,
@@ -155,14 +154,9 @@ impl<'a> NodeIndex<'a> {
         Self { nodes, index }
     }
 
-    /// Get a node by its ID.
+    /// Get a node by its ID in O(1) time.
     fn get(&self, id: &NodeId) -> Option<Node<'a>> {
         self.index.get(id).map(|&i| self.nodes[i])
-    }
-
-    /// Get all nodes.
-    fn all_nodes(&self) -> &[Node<'a>] {
-        &self.nodes
     }
 }
 
@@ -194,7 +188,6 @@ impl<'a> Readability<'a> {
             options,
             flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeDataStore::new(),
-            selectors: SELECTORS.clone(),
             article_title: String::new(),
             article_byline: None,
             article_dir: None,
@@ -227,30 +220,29 @@ impl<'a> Readability<'a> {
         }
 
         // Unwrap images from noscript tags
-        unwrap_noscript_images(&self.doc, &self.selectors);
+        unwrap_noscript_images(&self.doc, &SELECTORS);
 
         // Get article title early (needed for JSON-LD disambiguation)
-        let article_title = get_article_title(&self.doc, &self.selectors);
+        let article_title = get_article_title(&self.doc, &SELECTORS);
 
         // Extract JSON-LD metadata before removing scripts
         let json_ld = if self.options.disable_json_ld {
             Metadata::default()
         } else {
-            get_json_ld(&self.doc, &article_title, &self.selectors)
+            get_json_ld(&self.doc, &article_title, &SELECTORS)
         };
 
         // Remove scripts
-        remove_scripts(&self.doc, &self.selectors);
+        remove_scripts(&self.doc, &SELECTORS);
 
         // Prepare document
-        prep_document(&self.doc, &self.selectors);
+        prep_document(&self.doc, &SELECTORS);
 
         // Store article title
         self.article_title = article_title;
 
         // Get metadata
-        self.metadata =
-            get_article_metadata(&self.doc, &json_ld, &self.article_title, &self.selectors);
+        self.metadata = get_article_metadata(&self.doc, &json_ld, &self.article_title, &SELECTORS);
         if self.metadata.title.is_some() {
             self.article_title = self.metadata.title.clone().unwrap_or_default();
         }
@@ -287,7 +279,7 @@ impl<'a> Readability<'a> {
 
     /// The main content extraction algorithm.
     fn grab_article(&mut self) -> Result<ArticleContent> {
-        let body = self.doc.select_matcher(&self.selectors.body);
+        let body = self.doc.select_matcher(&SELECTORS.body);
         if body.length() == 0 {
             return Err(Error::NoBody);
         }
@@ -302,11 +294,7 @@ impl<'a> Readability<'a> {
             let mut elements_to_score: HashSet<NodeId> = HashSet::new();
 
             // Get the HTML element for language
-            if let Some(html) = self
-                .doc
-                .select_matcher(&self.selectors.html)
-                .nodes()
-                .first()
+            if let Some(html) = self.doc.select_matcher(&SELECTORS.html).nodes().first()
                 && let Some(lang) = html.attr("lang")
             {
                 self.article_lang = Some(lang.to_string());
@@ -384,7 +372,7 @@ impl<'a> Readability<'a> {
                     && is_valid_byline(node, match_string)
                 {
                     // Look for itemprop="name" child
-                    let itemprop_name = node_select_matcher(node, &self.selectors.itemprop)
+                    let itemprop_name = node_select_matcher(node, &SELECTORS.itemprop)
                         .nodes()
                         .first()
                         .cloned();
@@ -407,19 +395,20 @@ impl<'a> Readability<'a> {
                     continue;
                 }
 
-                // Remove unlikely candidates - use RegexSet for single-pass matching
+                // Remove unlikely candidates - check cheap conditions first, then regex
                 if strip_unlikely_candidates {
-                    let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string);
-                    if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
-                        && !candidate_matches.matched(1)  // OK_MAYBE_ITS_A_CANDIDATE
-                        && !has_ancestor_tag(node, "table", 3, None::<fn(&Node) -> bool>)
-                        && !has_ancestor_tag(node, "code", 3, None::<fn(&Node) -> bool>)
-                        && tag_name != "BODY"
-                        && tag_name != "A"
-                    {
-                        debug_log!(self, "Removing unlikely candidate: {}", match_string);
-                        nodes_to_remove.insert(node.id);
-                        continue;
+                    // Check tag names first (cheap) before running regex (expensive)
+                    if tag_name != "BODY" && tag_name != "A" {
+                        let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string);
+                        if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
+                            && !candidate_matches.matched(1)  // OK_MAYBE_ITS_A_CANDIDATE
+                            && !has_ancestor_tag(node, "table", 3, None::<fn(&Node) -> bool>)
+                            && !has_ancestor_tag(node, "code", 3, None::<fn(&Node) -> bool>)
+                        {
+                            debug_log!(self, "Removing unlikely candidate: {}", match_string);
+                            nodes_to_remove.insert(node.id);
+                            continue;
+                        }
                     }
 
                     if let Some(role) = node.attr("role")
@@ -440,7 +429,7 @@ impl<'a> Readability<'a> {
                 if matches!(
                     &*tag_name,
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-                ) && is_element_without_content(node, &self.selectors)
+                ) && is_element_without_content(node, &SELECTORS)
                 {
                     nodes_to_remove.insert(node.id);
                     continue;
@@ -458,7 +447,7 @@ impl<'a> Readability<'a> {
 
                     // Now check if DIV should be converted or scored
                     if has_single_tag_inside_element(node, "P")
-                        && get_link_density(node, &self.selectors) < 0.25
+                        && get_link_density(node, &SELECTORS) < 0.25
                     {
                         // Sites like http://mobile.slate.com enclose each paragraph with a DIV
                         // element. DIVs with only a P element inside and no text content can be
@@ -541,9 +530,11 @@ impl<'a> Readability<'a> {
                         continue;
                     }
 
-                    if !self.node_data.has(&ancestor.id) {
-                        initialize_node(ancestor, &mut self.node_data, self.flags);
-                        candidates.push(ancestor.id);
+                    {
+                        let data = compute_initial_readability_data(ancestor, self.flags);
+                        if self.node_data.initialize_if_absent(ancestor.id, data) {
+                            candidates.push(ancestor.id);
+                        }
                     }
 
                     let score_divider = if level == 0 {
@@ -576,7 +567,7 @@ impl<'a> Readability<'a> {
                     &candidate,
                     stats.text_length,
                     &mut self.node_data,
-                    &self.selectors,
+                    &SELECTORS,
                 );
                 let final_score = score * (1.0 - link_density);
 
@@ -599,7 +590,7 @@ impl<'a> Readability<'a> {
 
             // Get top candidate
             // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
-            let body = self.doc.select_matcher(&self.selectors.body);
+            let body = self.doc.select_matcher(&SELECTORS.body);
             let body_node = body.nodes().first().ok_or(Error::NoBody)?;
             let body_id = body_node.id;
 
@@ -770,9 +761,9 @@ impl<'a> Readability<'a> {
                 // Like JS, we always create a container and move siblings into it
                 let sibling_ids = Self::gather_siblings(
                     top_candidate_id,
-                    cached_index.all_nodes(),
+                    &cached_index,
                     &mut self.node_data,
-                    &self.selectors,
+                    &SELECTORS,
                     self.options.debug,
                 );
 
@@ -785,11 +776,7 @@ impl<'a> Readability<'a> {
                     // This includes the case of a single sibling - we still need a container
                     // so that the wrapper div is added correctly
                     if let Some(top_candidate) = cached_index.get(&top_candidate_id) {
-                        self.create_article_container(
-                            &top_candidate,
-                            &sibling_ids,
-                            cached_index.all_nodes(),
-                        )
+                        self.create_article_container(&top_candidate, &sibling_ids, &cached_index)
                     } else {
                         Some(top_candidate_id)
                     }
@@ -816,7 +803,7 @@ impl<'a> Readability<'a> {
                     self.flags,
                     video_regex,
                     self.options.link_density_modifier,
-                    &self.selectors,
+                    &SELECTORS,
                 );
 
                 // Re-fetch the article node after prep_article mutated the DOM - O(1) lookup
@@ -884,19 +871,19 @@ impl<'a> Readability<'a> {
                         // Use the best attempt - set its content as body and extract text/excerpt
                         let best_attempt = &self.attempts[0];
                         self.doc
-                            .select_matcher(&self.selectors.body)
+                            .select_matcher(&SELECTORS.body)
                             .set_html(best_attempt.content_html.as_str());
 
                         // Re-fetch to get text and excerpt
                         if let Some(body) = self
                             .doc
-                            .select_matcher(&self.selectors.body)
+                            .select_matcher(&SELECTORS.body)
                             .nodes()
                             .first()
                             .cloned()
                         {
                             let text_content = get_inner_text(&body, true);
-                            let excerpt = node_select_matcher(&body, &self.selectors.p)
+                            let excerpt = node_select_matcher(&body, &SELECTORS.p)
                                 .nodes()
                                 .first()
                                 .map(|p| p.text().trim().to_string())
@@ -930,7 +917,7 @@ impl<'a> Readability<'a> {
                 }
 
                 // Extract excerpt from the first paragraph
-                let excerpt = node_select_matcher(&article_node, &self.selectors.p)
+                let excerpt = node_select_matcher(&article_node, &SELECTORS.p)
                     .nodes()
                     .first()
                     .map(|p| p.text().trim().to_string())
@@ -954,12 +941,12 @@ impl<'a> Readability<'a> {
     /// Returns a list of NodeIds that should be included.
     fn gather_siblings(
         top_candidate_id: NodeId,
-        all_nodes: &[Node<'_>],
+        node_index: &NodeIndex<'_>,
         node_data: &mut NodeDataStore,
         selectors: &Selectors,
         debug: bool,
     ) -> Vec<NodeId> {
-        let top_candidate = match all_nodes.iter().find(|n| n.id == top_candidate_id) {
+        let top_candidate = match node_index.get(&top_candidate_id) {
             Some(tc) => tc,
             None => return vec![top_candidate_id],
         };
@@ -973,11 +960,8 @@ impl<'a> Readability<'a> {
         let top_score = node_data.get_content_score(&top_candidate_id);
         let sibling_score_threshold = (10.0_f64).max(top_score * 0.2);
 
-        // Get top candidate's class for bonus calculation
-        let top_class = top_candidate
-            .attr("class")
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        // Get top candidate's class for bonus calculation - keep as Cow to avoid allocation
+        let top_class = top_candidate.attr("class");
 
         let mut siblings_to_include = Vec::new();
 
@@ -992,11 +976,12 @@ impl<'a> Readability<'a> {
                 let mut content_bonus = 0.0;
 
                 // Give a bonus if sibling and top candidate have the same non-empty class
-                let sibling_class = sibling
-                    .attr("class")
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                if !sibling_class.is_empty() && sibling_class == top_class {
+                // Compare Cow<str> directly without allocating String
+                let sibling_class = sibling.attr("class");
+                if let (Some(top), Some(sib)) = (&top_class, &sibling_class)
+                    && !sib.is_empty()
+                    && sib.as_ref() == top.as_ref()
+                {
                     content_bonus = top_score * 0.2;
                 }
 
@@ -1045,7 +1030,7 @@ impl<'a> Readability<'a> {
         &self,
         top_candidate: &Node<'_>,
         sibling_ids: &[NodeId],
-        all_nodes: &[Node<'_>],
+        node_index: &NodeIndex<'_>,
     ) -> Option<NodeId> {
         let parent = top_candidate.parent()?;
 
@@ -1053,19 +1038,17 @@ impl<'a> Readability<'a> {
         let container = self.doc.tree.new_element("div");
         let container_id = container.id;
 
-        // Find the first sibling to insert before
-        let first_sibling = sibling_ids
-            .first()
-            .and_then(|id| all_nodes.iter().find(|n| &n.id == id))?;
+        // Find the first sibling to insert before - O(1) lookup
+        let first_sibling = sibling_ids.first().and_then(|id| node_index.get(id))?;
 
         // Insert container before the first sibling
         first_sibling.insert_before(&container);
 
         // Move each qualifying sibling into the container
         for sibling_id in sibling_ids {
-            if let Some(sibling) = all_nodes.iter().find(|n| &n.id == sibling_id) {
+            if let Some(sibling) = node_index.get(sibling_id) {
                 // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
-                if let Some(tag) = get_tag_name(sibling)
+                if let Some(tag) = get_tag_name(&sibling)
                     && !ALTER_TO_DIV_EXCEPTIONS.contains(&*tag)
                 {
                     debug_log!(self, "Altering sibling {} to div", tag);
@@ -1073,7 +1056,7 @@ impl<'a> Readability<'a> {
                 }
 
                 // Append to container
-                container.append_child(sibling);
+                container.append_child(&sibling);
             }
         }
 
@@ -1239,7 +1222,7 @@ impl<'a> Readability<'a> {
         self.fix_relative_uris(node);
 
         // This may modify tree structure, so it runs before the combined pass
-        simplify_nested_elements(node, &self.selectors);
+        simplify_nested_elements(node, &SELECTORS);
 
         // Combined single-pass traversal for:
         // - clean_classes (if not keeping classes)
@@ -1321,7 +1304,7 @@ impl<'a> Readability<'a> {
             None => return,
         };
 
-        for link in node_select_matcher(article_content, &self.selectors.a)
+        for link in node_select_matcher(article_content, &SELECTORS.a)
             .nodes()
             .iter()
         {
@@ -1346,7 +1329,7 @@ impl<'a> Readability<'a> {
 
         for media in node_select_matcher(
             article_content,
-            &self.selectors.img_picture_figure_video_audio_source,
+            &SELECTORS.img_picture_figure_video_audio_source,
         )
         .nodes()
         .iter()
@@ -1406,12 +1389,12 @@ impl<'a> Readability<'a> {
         self.doc = Document::from(self.original_html);
 
         // Re-run preparation (but NOT metadata extraction - already stored)
-        unwrap_noscript_images(&self.doc, &self.selectors);
-        remove_scripts(&self.doc, &self.selectors);
-        prep_document(&self.doc, &self.selectors);
+        unwrap_noscript_images(&self.doc, &SELECTORS);
+        remove_scripts(&self.doc, &SELECTORS);
+        prep_document(&self.doc, &SELECTORS);
 
         // Verify body exists
-        if self.doc.select_matcher(&self.selectors.body).length() == 0 {
+        if self.doc.select_matcher(&SELECTORS.body).length() == 0 {
             return Err(Error::NoBody);
         }
 
