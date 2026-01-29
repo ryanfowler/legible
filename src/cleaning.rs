@@ -1,7 +1,8 @@
 //! DOM cleaning functions for Readability.
 
 use crate::constants::{
-    DEPRECATED_SIZE_ATTRIBUTE_ELEMS, PRESENTATIONAL_ATTRIBUTES, flags::*, regexps,
+    DEPRECATED_SIZE_ATTRIBUTE_ELEMS, PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension,
+    has_image_src, has_image_srcset, regexps,
 };
 use crate::dom::{NodeDataStore, get_tag_name, node_select, node_select_matcher};
 use crate::scoring::{
@@ -631,7 +632,7 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
                 if attr.name.local.as_ref() == "src" {
                     continue;
                 }
-                if regexps::IMAGE_EXTENSION.is_match(attr.value.as_ref()) {
+                if has_image_extension(attr.value.as_ref()) {
                     src_could_be_removed = true;
                     break;
                 }
@@ -671,9 +672,9 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
             }
 
             let value = attr.value.as_ref();
-            let copy_to = if regexps::IMAGE_SRCSET.is_match(value) {
+            let copy_to = if has_image_srcset(value) {
                 Some("srcset")
-            } else if regexps::IMAGE_SRC.is_match(value) {
+            } else if has_image_src(value) {
                 Some("src")
             } else {
                 None
@@ -711,7 +712,7 @@ pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
                     break;
                 }
                 _ => {
-                    if regexps::IMAGE_EXTENSION.is_match(attr.value.as_ref()) {
+                    if has_image_extension(attr.value.as_ref()) {
                         has_useful_attr = true;
                         break;
                     }
@@ -777,7 +778,7 @@ pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
                     // Only copy src, srcset, or attributes containing image extensions
                     let is_image_attr = attr_name == "src"
                         || attr_name == "srcset"
-                        || regexps::IMAGE_EXTENSION.is_match(attr_value);
+                        || has_image_extension(attr_value);
 
                     if is_image_attr {
                         // Skip if new img already has the same value for this attribute

@@ -68,10 +68,6 @@ pub mod regexps {
     /// Tokenizes text on word boundaries.
     pub static TOKENIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\W+").unwrap());
 
-    /// Matches whitespace-only strings.
-    #[allow(dead_code)]
-    pub static WHITESPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*$").unwrap());
-
     /// Matches strings with content (non-whitespace at end).
     pub static HAS_CONTENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\S$").unwrap());
 
@@ -85,12 +81,6 @@ pub mod regexps {
     /// Matches base64 data URLs.
     pub static B64_DATA_URL: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?i)^data:\s*([^\s;,]+)\s*;\s*base64\s*,").unwrap());
-
-    /// Matches commas in various scripts.
-    /// See: https://en.wikipedia.org/wiki/Comma#Comma_variants
-    pub static COMMAS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"[\u002C\u060C\uFE50\uFE10\uFE11\u2E41\u2E34\u2E32\uFF0C]").unwrap()
-    });
 
     /// Matches JSON-LD article types.
     /// See: https://schema.org/Article
@@ -113,18 +103,6 @@ pub mod regexps {
 
     /// Matches sentence-ending periods.
     pub static SENTENCE_END: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.( |$)").unwrap());
-
-    /// Matches image file extensions in strings.
-    pub static IMAGE_EXTENSION: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)").unwrap());
-
-    /// Matches image srcset patterns.
-    pub static IMAGE_SRCSET: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\s+\d").unwrap());
-
-    /// Matches single image URL patterns.
-    pub static IMAGE_SRC: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)\S*\s*$").unwrap());
 
     /// Matches title separators surrounded by whitespace.
     pub static TITLE_SEPARATOR: Lazy<Regex> =
@@ -258,3 +236,85 @@ pub static HTML_ESCAPE_MAP: Lazy<std::collections::HashMap<&'static str, &'stati
         map.insert("apos", "'");
         map
     });
+
+/// Image extensions to check (without the dot, for suffix matching).
+const IMAGE_EXTS: [&[u8]; 5] = [b"jpg", b"jpeg", b"png", b"webp", b"avif"];
+
+/// Check if the bytes starting at `start` match an image extension (case-insensitive).
+/// Returns the length of the matched extension, or None if no match.
+#[inline]
+fn match_image_ext(bytes: &[u8], start: usize) -> Option<usize> {
+    for ext in IMAGE_EXTS {
+        if start + ext.len() <= bytes.len()
+            && bytes[start..start + ext.len()]
+                .iter()
+                .zip(ext.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return Some(ext.len());
+        }
+    }
+    None
+}
+
+/// Check if a string contains an image file extension (.jpg, .jpeg, .png, .webp, .avif).
+#[inline]
+pub fn has_image_extension(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    // Find each '.' and check if an image extension follows
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'.' && match_image_ext(bytes, i + 1).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a string matches the srcset pattern: image extension followed by whitespace and digit.
+#[inline]
+pub fn has_image_srcset(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'.'
+            && let Some(ext_len) = match_image_ext(bytes, i + 1)
+        {
+            let after = i + 1 + ext_len;
+            // Check for whitespace followed by digit
+            if after < bytes.len()
+                && bytes[after].is_ascii_whitespace()
+                && let Some(pos) = bytes[after..]
+                    .iter()
+                    .position(|&c| !c.is_ascii_whitespace())
+                && bytes[after + pos].is_ascii_digit()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a string is a single image URL (matches IMAGE_SRC regex pattern).
+/// Pattern: optional whitespace, non-whitespace chars ending with image extension, optional whitespace.
+#[inline]
+pub fn has_image_src(s: &str) -> bool {
+    let trimmed = s.trim();
+    // Must be non-empty and contain no internal whitespace
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    // Find last '.' and check if it's followed by an image extension (possibly with ?/#)
+    for (i, &b) in bytes.iter().enumerate().rev() {
+        if b == b'.'
+            && let Some(ext_len) = match_image_ext(bytes, i + 1)
+        {
+            let after = i + 1 + ext_len;
+            // Valid if at end, or followed by ? or #
+            if after >= bytes.len() || bytes[after] == b'?' || bytes[after] == b'#' {
+                return true;
+            }
+        }
+    }
+    false
+}

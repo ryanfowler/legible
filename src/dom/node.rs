@@ -11,7 +11,7 @@ pub struct ReadabilityData {
 }
 
 /// Cached text statistics for a node to avoid repeated computation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct NodeStats {
     /// Character count of normalized inner text.
     pub text_length: usize,
