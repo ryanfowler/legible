@@ -1284,14 +1284,14 @@ impl<'a> Readability<'a> {
                 }
 
                 // Escape < and > in attribute values
+                // Check on borrowed value first, only allocate if escaping is needed
                 let attrs_to_fix: Vec<_> = descendant
                     .attrs()
-                    .into_iter()
+                    .iter()
                     .filter_map(|attr| {
-                        let name = attr.name.local.to_string();
-                        let value = attr.value.to_string();
-                        if value.contains('<') || value.contains('>') {
-                            Some((name, value))
+                        let value_ref = attr.value.as_ref();
+                        if value_ref.contains('<') || value_ref.contains('>') {
+                            Some((attr.name.local.to_string(), value_ref.to_string()))
                         } else {
                             None
                         }

@@ -11,7 +11,22 @@ pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
     let text = get_inner_text(node, true);
     NodeStats {
         text_length: text.chars().count(),
-        comma_count: regexps::COMMAS.find_iter(&text).count(),
+        // Count commas in various scripts using char filtering instead of regex
+        // See: https://en.wikipedia.org/wiki/Comma#Comma_variants
+        comma_count: text
+            .chars()
+            .filter(|&c| {
+                c == ','        // U+002C COMMA
+                    || c == '\u{060C}'  // Arabic comma
+                    || c == '\u{FE50}'  // Small comma
+                    || c == '\u{FE10}'  // Presentation form
+                    || c == '\u{FE11}'  // Presentation form
+                    || c == '\u{2E41}'  // Reversed comma
+                    || c == '\u{2E34}'  // Raised comma
+                    || c == '\u{2E32}'  // Turned comma
+                    || c == '\u{FF0C}' // Fullwidth comma
+            })
+            .count(),
         has_sentence_end: regexps::SENTENCE_END.is_match(&text),
     }
 }
@@ -19,10 +34,10 @@ pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
 /// Get or compute stats for a node, caching the result.
 pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeStats {
     if let Some(stats) = store.get_stats(&node.id) {
-        return stats.clone();
+        return *stats;
     }
     let stats = compute_node_stats(node);
-    store.set_stats(node.id, stats.clone());
+    store.set_stats(node.id, stats);
     stats
 }
 
