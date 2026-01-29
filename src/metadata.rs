@@ -1,6 +1,6 @@
 //! Metadata extraction from HTML documents.
 
-use crate::constants::{HTML_ESCAPE_MAP, regexps};
+use crate::constants::regexps;
 use crate::scoring::get_inner_text;
 use crate::selectors::Selectors;
 use dom_query::Document;
@@ -18,56 +18,94 @@ pub struct Metadata {
     pub published_time: Option<String>,
 }
 
-/// Unescape common HTML entities in a string.
+/// Unescape common HTML entities in a string using single-pass approach.
+/// Handles both named entities (&lt;, &gt;, etc.) and numeric entities (&#123;, &#xABC;).
 pub fn unescape_html_entities(s: &str) -> String {
     if s.is_empty() {
+        return String::new();
+    }
+
+    // Quick check: if no '&' found, return the original string
+    if !s.contains('&') {
         return s.to_string();
     }
 
-    // First handle named entities
-    let mut result = s.to_string();
-    for (entity, char) in HTML_ESCAPE_MAP.iter() {
-        let pattern = format!("&{};", entity);
-        result = result.replace(&pattern, char);
-    }
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
 
-    // Then handle numeric entities (both hex and decimal)
-    static NUMERIC_ENTITY: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));").unwrap());
+    while let Some((i, c)) = chars.next() {
+        if c == '&' {
+            // Try to parse an entity
+            let remaining = &s[i..];
+            if let Some(semi_offset) = remaining.find(';') {
+                let entity_with_amp = &remaining[..semi_offset + 1];
+                let entity_content = &remaining[1..semi_offset];
 
-    let mut output = String::new();
-    let mut last_end = 0;
+                let replacement = if entity_content.starts_with('#') {
+                    // Numeric entity
+                    parse_numeric_entity(entity_content)
+                } else {
+                    // Named entity
+                    match entity_content {
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "amp" => Some('&'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        _ => None,
+                    }
+                };
 
-    for caps in NUMERIC_ENTITY.captures_iter(&result) {
-        let m = caps.get(0).unwrap();
-        output.push_str(&result[last_end..m.start()]);
-
-        let num = if let Some(hex) = caps.get(1) {
-            u32::from_str_radix(hex.as_str(), 16).unwrap_or(0xFFFD)
-        } else if let Some(dec) = caps.get(2) {
-            dec.as_str().parse::<u32>().unwrap_or(0xFFFD)
-        } else {
-            0xFFFD
-        };
-
-        // Handle invalid character references as per HTML spec
-        let num = if num == 0 || num > 0x10FFFF || (0xD800..=0xDFFF).contains(&num) {
-            0xFFFD
-        } else {
-            num
-        };
-
-        if let Some(c) = char::from_u32(num) {
-            output.push(c);
-        } else {
-            output.push('\u{FFFD}');
+                if let Some(replacement_char) = replacement {
+                    result.push(replacement_char);
+                    // Skip past the entity in the input
+                    while let Some(&(next_i, _)) = chars.peek() {
+                        if next_i >= i + entity_with_amp.len() {
+                            break;
+                        }
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
         }
-
-        last_end = m.end();
+        result.push(c);
     }
 
-    output.push_str(&result[last_end..]);
-    output
+    result
+}
+
+/// Parse a numeric entity like "#123" or "#xABCD" (without the & and ;).
+/// Returns the replacement character for invalid entities per HTML spec.
+fn parse_numeric_entity(content: &str) -> Option<char> {
+    if !content.starts_with('#') || content.len() < 2 {
+        return None;
+    }
+
+    let num_str = &content[1..];
+    let num = if num_str.starts_with('x') || num_str.starts_with('X') {
+        if num_str.len() < 2 {
+            return None;
+        }
+        // Try to parse, return replacement char if invalid hex
+        match u32::from_str_radix(&num_str[1..], 16) {
+            Ok(n) => n,
+            Err(_) => return None, // Invalid hex like &#xg;
+        }
+    } else {
+        match num_str.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => return None, // Invalid decimal
+        }
+    };
+
+    // Handle invalid character references as per HTML spec:
+    // - Code point 0 or > 0x10FFFF or surrogate range -> replacement char
+    if num == 0 || num > 0x10FFFF || (0xD800..=0xDFFF).contains(&num) {
+        return Some('\u{FFFD}');
+    }
+
+    char::from_u32(num).or(Some('\u{FFFD}'))
 }
 
 /// Extract JSON-LD metadata from the document.
@@ -379,62 +417,64 @@ pub fn get_article_metadata(
         }
     }
 
-    // Get title from various sources
+    // Get title from various sources - use as_ref() to avoid cloning until we find the value
     metadata.title = json_ld
         .title
-        .clone()
-        .or_else(|| values.get("dc:title").cloned())
-        .or_else(|| values.get("dcterm:title").cloned())
-        .or_else(|| values.get("og:title").cloned())
-        .or_else(|| values.get("weibo:article:title").cloned())
-        .or_else(|| values.get("weibo:webpage:title").cloned())
-        .or_else(|| values.get("title").cloned())
-        .or_else(|| values.get("twitter:title").cloned())
-        .or_else(|| values.get("parsely-title").cloned());
+        .as_ref()
+        .or_else(|| values.get("dc:title"))
+        .or_else(|| values.get("dcterm:title"))
+        .or_else(|| values.get("og:title"))
+        .or_else(|| values.get("weibo:article:title"))
+        .or_else(|| values.get("weibo:webpage:title"))
+        .or_else(|| values.get("title"))
+        .or_else(|| values.get("twitter:title"))
+        .or_else(|| values.get("parsely-title"))
+        .cloned();
 
     if metadata.title.is_none() && !article_title.is_empty() {
         metadata.title = Some(article_title.to_string());
     }
 
     // Get author/byline
-    let article_author = values.get("article:author").and_then(|v| {
-        // Skip if it looks like a URL
-        if is_url(v) { None } else { Some(v.clone()) }
-    });
+    let article_author = values.get("article:author").filter(|v| !is_url(v));
 
     metadata.byline = json_ld
         .byline
-        .clone()
-        .or_else(|| values.get("dc:creator").cloned())
-        .or_else(|| values.get("dcterm:creator").cloned())
-        .or_else(|| values.get("author").cloned())
-        .or_else(|| values.get("parsely-author").cloned())
-        .or(article_author);
+        .as_ref()
+        .or_else(|| values.get("dc:creator"))
+        .or_else(|| values.get("dcterm:creator"))
+        .or_else(|| values.get("author"))
+        .or_else(|| values.get("parsely-author"))
+        .or(article_author)
+        .cloned();
 
     // Get excerpt/description
     metadata.excerpt = json_ld
         .excerpt
-        .clone()
-        .or_else(|| values.get("dc:description").cloned())
-        .or_else(|| values.get("dcterm:description").cloned())
-        .or_else(|| values.get("og:description").cloned())
-        .or_else(|| values.get("weibo:article:description").cloned())
-        .or_else(|| values.get("weibo:webpage:description").cloned())
-        .or_else(|| values.get("description").cloned())
-        .or_else(|| values.get("twitter:description").cloned());
+        .as_ref()
+        .or_else(|| values.get("dc:description"))
+        .or_else(|| values.get("dcterm:description"))
+        .or_else(|| values.get("og:description"))
+        .or_else(|| values.get("weibo:article:description"))
+        .or_else(|| values.get("weibo:webpage:description"))
+        .or_else(|| values.get("description"))
+        .or_else(|| values.get("twitter:description"))
+        .cloned();
 
     // Get site name
     metadata.site_name = json_ld
         .site_name
-        .clone()
-        .or_else(|| values.get("og:site_name").cloned());
+        .as_ref()
+        .or_else(|| values.get("og:site_name"))
+        .cloned();
 
     // Get published time
     metadata.published_time = json_ld
         .published_time
-        .clone()
-        .or_else(|| values.get("article:published_time").cloned())
-        .or_else(|| values.get("parsely-pub-date").cloned());
+        .as_ref()
+        .or_else(|| values.get("article:published_time"))
+        .or_else(|| values.get("parsely-pub-date"))
+        .cloned();
 
     // Unescape HTML entities in metadata
     metadata.title = metadata.title.map(|s| unescape_html_entities(&s));

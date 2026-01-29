@@ -41,8 +41,12 @@ pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeS
     stats
 }
 
-/// Initialize a node with readability data and initial score based on tag.
-pub fn initialize_node(node: &Node<'_>, store: &mut NodeDataStore, flags: u32) {
+/// Compute the initial readability data for a node without storing it.
+/// Used with NodeDataStore::initialize_if_absent for single-lookup initialization.
+pub fn compute_initial_readability_data(
+    node: &Node<'_>,
+    flags: u32,
+) -> crate::dom::ReadabilityData {
     let initial_score = match get_tag_name(node).as_deref() {
         Some("DIV") => 5.0,
         Some("PRE") | Some("TD") | Some("BLOCKQUOTE") => 3.0,
@@ -54,10 +58,12 @@ pub fn initialize_node(node: &Node<'_>, store: &mut NodeDataStore, flags: u32) {
     };
 
     let class_weight = get_class_weight(node, flags);
-    store.set(
-        node.id,
-        crate::dom::ReadabilityData::with_score(initial_score + class_weight as f64),
-    );
+    crate::dom::ReadabilityData::with_score(initial_score + class_weight as f64)
+}
+
+/// Initialize a node with readability data and initial score based on tag.
+pub fn initialize_node(node: &Node<'_>, store: &mut NodeDataStore, flags: u32) {
+    store.set(node.id, compute_initial_readability_data(node, flags));
 }
 
 /// Get the class/id weight of an element.
@@ -276,31 +282,41 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
             });
 
             if has_content && !phrasing_nodes.is_empty() {
+                // Trim leading/trailing whitespace using index tracking - O(n) instead of O(n²)
+                let mut start = 0;
+                let mut end = phrasing_nodes.len();
+
                 // Trim leading whitespace nodes
-                while !phrasing_nodes.is_empty() {
-                    let first_idx = phrasing_nodes[0];
-                    if is_whitespace(&children[first_idx]) {
-                        phrasing_nodes.remove(0);
-                    } else {
-                        break;
-                    }
+                while start < end && is_whitespace(&children[phrasing_nodes[start]]) {
+                    start += 1;
                 }
 
                 // Trim trailing whitespace nodes
-                while !phrasing_nodes.is_empty() {
-                    let last_idx = *phrasing_nodes.last().unwrap();
-                    if is_whitespace(&children[last_idx]) {
-                        phrasing_nodes.pop();
-                    } else {
-                        break;
-                    }
+                while start < end && is_whitespace(&children[phrasing_nodes[end - 1]]) {
+                    end -= 1;
                 }
 
                 // Only wrap if we still have content after trimming
-                if !phrasing_nodes.is_empty() {
-                    // Build HTML for the phrasing content
-                    let mut html = String::from("<p>");
-                    for &idx in &phrasing_nodes {
+                if start < end {
+                    let trimmed_nodes = &phrasing_nodes[start..end];
+
+                    // Pre-calculate capacity for HTML string to avoid reallocations
+                    let estimated_size: usize = trimmed_nodes
+                        .iter()
+                        .map(|&idx| {
+                            let n = &children[idx];
+                            if n.is_text() {
+                                n.text().len()
+                            } else {
+                                n.html().len()
+                            }
+                        })
+                        .sum();
+
+                    // Build HTML for the phrasing content with pre-allocated capacity
+                    let mut html = String::with_capacity(estimated_size + 7); // +7 for <p></p>
+                    html.push_str("<p>");
+                    for &idx in trimmed_nodes {
                         let n = &children[idx];
                         if n.is_text() {
                             html.push_str(n.text().as_ref());
@@ -311,7 +327,7 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
                     html.push_str("</p>");
 
                     // Insert the P element before the first phrasing node
-                    if let Some(first_node) = children.get(phrasing_nodes[0]) {
+                    if let Some(first_node) = children.get(trimmed_nodes[0]) {
                         first_node.before_html(html.as_str());
                     }
 

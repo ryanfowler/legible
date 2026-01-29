@@ -225,18 +225,6 @@ pub static PHRASING_ELEMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     .collect()
 });
 
-/// HTML entity map for unescaping.
-pub static HTML_ESCAPE_MAP: Lazy<std::collections::HashMap<&'static str, &'static str>> =
-    Lazy::new(|| {
-        let mut map = std::collections::HashMap::new();
-        map.insert("lt", "<");
-        map.insert("gt", ">");
-        map.insert("amp", "&");
-        map.insert("quot", "\"");
-        map.insert("apos", "'");
-        map
-    });
-
 /// Image extensions to check (without the dot, for suffix matching).
 const IMAGE_EXTS: [&[u8]; 5] = [b"jpg", b"jpeg", b"png", b"webp", b"avif"];
 
