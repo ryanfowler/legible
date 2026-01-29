@@ -11,6 +11,9 @@ keywords = ["readability", "article", "extraction", "html", "parser"]
 categories = ["parsing", "text-processing", "web-programming"]
 exclude = ["examples/", "tests/"]
 
+[lib]
+bench = false
+
 [dependencies]
 dom_query = "0.25"
 hashbrown = "0.16"
