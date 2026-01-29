@@ -1265,15 +1265,21 @@ impl<'a> Readability<'a> {
                 if !self.options.keep_classes
                     && let Some(class_attr) = descendant.attr("class")
                 {
-                    let preserved: Vec<&str> = class_attr
-                        .split_whitespace()
-                        .filter(|c| self.options.classes_to_preserve.iter().any(|p| p == *c))
-                        .collect();
+                    // Build preserved classes string directly without intermediate Vec
+                    let mut preserved = String::new();
+                    for class in class_attr.split_whitespace() {
+                        if self.options.classes_to_preserve.iter().any(|p| p == class) {
+                            if !preserved.is_empty() {
+                                preserved.push(' ');
+                            }
+                            preserved.push_str(class);
+                        }
+                    }
 
                     if preserved.is_empty() {
                         descendant.remove_attr("class");
                     } else {
-                        descendant.set_attr("class", &preserved.join(" "));
+                        descendant.set_attr("class", &preserved);
                     }
                 }
 

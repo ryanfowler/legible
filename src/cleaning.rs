@@ -206,17 +206,16 @@ pub fn clean_styles(node: &Node<'_>) {
 
 /// Clean spurious headers from an element.
 pub fn clean_headers(node: &Node<'_>, flags: u32, selectors: &Selectors) {
-    let headings: Vec<_> = node_select_matcher(node, &selectors.h1_h2).nodes().to_vec();
-    let to_remove: Vec<_> = headings
+    // Collect only the headings that need removal, avoiding intermediate Vec
+    let to_remove: Vec<_> = node_select_matcher(node, &selectors.h1_h2)
+        .nodes()
         .iter()
         .filter(|h| get_class_weight(h, flags) < 0)
-        .map(|h| h.id)
+        .cloned()
         .collect();
 
-    for heading in headings {
-        if to_remove.contains(&heading.id) {
-            heading.remove_from_parent();
-        }
+    for heading in to_remove {
+        heading.remove_from_parent();
     }
 }
 

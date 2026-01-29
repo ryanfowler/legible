@@ -262,8 +262,7 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
         title_had_hierarchical_separators = regexps::TITLE_HIERARCHICAL.is_match(&cur_title);
 
         // Find all separators and split at the last one
-        let matches: Vec<_> = regexps::TITLE_SEPARATOR.find_iter(&orig_title).collect();
-        if let Some(last_match) = matches.last() {
+        if let Some(last_match) = regexps::TITLE_SEPARATOR.find_iter(&orig_title).last() {
             cur_title = orig_title[..last_match.start()].to_string();
         }
 
@@ -472,16 +471,15 @@ pub fn text_similarity(text_a: &str, text_b: &str) -> f64 {
         return 0.0;
     }
 
-    let unique_tokens_b: Vec<&str> = tokens_b
-        .iter()
-        .filter(|t| !tokens_a.contains(t))
-        .copied()
-        .collect();
-
     let tokens_b_len: usize =
         tokens_b.iter().map(|s| s.len()).sum::<usize>() + tokens_b.len().saturating_sub(1);
-    let unique_b_len: usize = unique_tokens_b.iter().map(|s| s.len()).sum::<usize>()
-        + unique_tokens_b.len().saturating_sub(1);
+
+    // Compute unique_b stats in single pass without intermediate Vec
+    let (unique_count, unique_len_sum): (usize, usize) = tokens_b
+        .iter()
+        .filter(|t| !tokens_a.contains(t))
+        .fold((0, 0), |(count, len), t| (count + 1, len + t.len()));
+    let unique_b_len: usize = unique_len_sum + unique_count.saturating_sub(1);
 
     if tokens_b_len == 0 {
         return 0.0;
