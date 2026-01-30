@@ -1,4 +1,5 @@
 /.claude
 /benches/external
 /Cargo.lock
+/CLAUDE.md
 target
