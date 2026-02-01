@@ -116,8 +116,8 @@ pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) ->
         }
 
         // Check text content length
-        let text_content = node.text().trim().to_string();
-        let text_length = text_content.chars().count();
+        let text = node.text();
+        let text_length = text.trim().chars().count();
 
         if text_length < options.min_content_length {
             continue;
