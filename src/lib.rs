@@ -66,6 +66,39 @@
 //! }
 //! ```
 //!
+//! ## Pre-parsed Document
+//!
+//! If you want to check readability before parsing, use [`Document`] to avoid
+//! parsing the HTML twice:
+//!
+//! ```rust
+//! use legible::Document;
+//!
+//! let html = r#"
+//!     <html>
+//!     <head><title>My Article</title></head>
+//!     <body>
+//!         <article>
+//!             <h1>Article Title</h1>
+//!             <p>This is the main content of the article. It contains several
+//!             paragraphs of text that make up the body of the article.</p>
+//!             <p>More content here to ensure we have enough text for the
+//!             readability algorithm to work with properly.</p>
+//!         </article>
+//!     </body>
+//!     </html>
+//! "#;
+//!
+//! let doc = Document::new(html);
+//!
+//! if doc.is_probably_readerable(None) {
+//!     match doc.parse(Some("https://example.com"), None) {
+//!         Ok(article) => println!("Title: {}", article.title),
+//!         Err(e) => eprintln!("Error: {}", e),
+//!     }
+//! }
+//! ```
+//!
 //! ## Configuration
 //!
 //! Use the [`Options`] builder to customize parsing behavior:
@@ -110,6 +143,7 @@
 
 mod cleaning;
 mod constants;
+mod document;
 mod dom;
 mod error;
 mod logging;
@@ -120,12 +154,11 @@ mod readerable;
 mod scoring;
 mod selectors;
 
+pub use document::Document;
 pub use error::{Error, Result};
 pub use options::{Options, ReaderableOptions};
 pub use readability::Article;
 pub use readerable::is_probably_readerable;
-
-use readability::Readability;
 
 /// Parse an HTML document and extract the article content.
 ///
@@ -166,5 +199,5 @@ use readability::Readability;
 /// let article = parse(html, Some("https://example.com"), Some(options));
 /// ```
 pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<Article> {
-    Readability::new(html, url, options).parse()
+    Document::new(html).parse(url, options)
 }

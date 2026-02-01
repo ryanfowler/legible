@@ -30,7 +30,9 @@ The extraction pipeline flows through these stages:
 
 ### Key Modules
 
+- **`document.rs`** - Public `Document<'a>` struct for pre-parsing HTML once; delegates to `readerable` and `readability` internally
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
+- **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, text density
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
@@ -56,11 +58,17 @@ Tests run against Mozilla's official Readability.js test suite (git submodule at
 ## Public API
 
 ```rust
-use legible::{parse, Options, is_probably_readerable};
+use legible::{parse, Options, is_probably_readerable, Document};
 
 // Full extraction
 let article = parse(html, Some("https://example.com"), None)?;  // Returns Article with title, content, text_content, byline, excerpt, etc.
 
 // Quick check without full parsing
 if is_probably_readerable(html, None) { /* ... */ }
+
+// Pre-parsed document (avoids parsing HTML twice when checking readability before extracting)
+let doc = Document::new(html);
+if doc.is_probably_readerable(None) {          // borrows — read-only check
+    let article = doc.parse(Some(url), None)?; // consumes — extraction mutates the DOM
+}
 ```
