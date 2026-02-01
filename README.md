@@ -59,6 +59,25 @@ if is_probably_readerable(html, None) {
 }
 ```
 
+### Pre-parsed Document
+
+If you want to check readability before parsing, use `Document` to parse the HTML once and reuse it for both operations:
+
+```rust
+use legible::Document;
+
+let doc = Document::new(html);
+
+if doc.is_probably_readerable(None) {
+    match doc.parse(Some("https://example.com"), None) {
+        Ok(article) => println!("Title: {}", article.title),
+        Err(e) => eprintln!("Error: {}", e),
+    }
+}
+```
+
+`is_probably_readerable` borrows the document (read-only check), while `parse` consumes it (the extraction algorithm mutates the DOM).
+
 ### Extracted Article Fields
 
 The `Article` struct contains:

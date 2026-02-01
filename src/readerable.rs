@@ -10,8 +10,8 @@ use hashbrown::HashSet;
 /// Check if a document is probably readerable without parsing the whole thing.
 ///
 /// This is a quick heuristic check to determine if [`parse()`](crate::parse)
-/// is likely to succeed. Use this to avoid the overhead of full parsing on documents
-/// that are unlikely to contain extractable article content.
+/// is likely to succeed. If you want to check readability before parsing, use
+/// [`Document`] to avoid parsing the HTML twice.
 ///
 /// The function scores paragraph-like elements based on their text length, ignoring
 /// elements that match unlikely candidate patterns (sidebars, navigation, etc.).
@@ -44,8 +44,15 @@ use hashbrown::HashSet;
 /// }
 /// ```
 pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) -> bool {
-    let options = options.unwrap_or_default();
     let doc = Document::from(html);
+    is_probably_readerable_doc(&doc, options)
+}
+
+pub(crate) fn is_probably_readerable_doc(
+    doc: &Document,
+    options: Option<ReaderableOptions>,
+) -> bool {
+    let options = options.unwrap_or_default();
 
     // Get initial nodes: p, pre, article
     let mut node_ids: HashSet<NodeId> = doc

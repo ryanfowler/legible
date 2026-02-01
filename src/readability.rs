@@ -169,9 +169,13 @@ struct ArticleContent {
 }
 
 impl<'a> Readability<'a> {
-    /// Create a new Readability parser for the given HTML.
-    pub(crate) fn new(html: &'a str, url: Option<&str>, options: Option<Options>) -> Self {
-        let doc = Document::from(html);
+    /// Create a new Readability parser from a pre-parsed document.
+    pub(crate) fn from_document(
+        doc: Document,
+        original_html: &'a str,
+        url: Option<&str>,
+        options: Option<Options>,
+    ) -> Self {
         let options = options.unwrap_or_default();
 
         let (base_uri, url_error) = match url {
@@ -183,7 +187,7 @@ impl<'a> Readability<'a> {
         };
         Self {
             doc,
-            original_html: html,
+            original_html,
             options,
             flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeDataStore::new(),
