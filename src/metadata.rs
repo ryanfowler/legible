@@ -7,6 +7,7 @@ use dom_query::Document;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+use std::borrow::Cow;
 
 /// Metadata extracted from an article.
 #[derive(Debug, Clone, Default)]
@@ -20,14 +21,9 @@ pub struct Metadata {
 
 /// Unescape common HTML entities in a string using single-pass approach.
 /// Handles both named entities (&lt;, &gt;, etc.) and numeric entities (&#123;, &#xABC;).
-pub fn unescape_html_entities(s: &str) -> String {
-    if s.is_empty() {
-        return String::new();
-    }
-
-    // Quick check: if no '&' found, return the original string
-    if !s.contains('&') {
-        return s.to_string();
+pub fn unescape_html_entities<'a>(s: &'a str) -> Cow<'a, str> {
+    if s.is_empty() || !s.contains('&') {
+        return Cow::Borrowed(s);
     }
 
     let mut result = String::with_capacity(s.len());
@@ -72,7 +68,7 @@ pub fn unescape_html_entities(s: &str) -> String {
         result.push(c);
     }
 
-    result
+    Cow::Owned(result)
 }
 
 /// Parse a numeric entity like "#123" or "#xABCD" (without the & and ;).
@@ -243,14 +239,20 @@ pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -
                     metadata.byline = Some(trimmed.to_string());
                 }
             } else if let Value::Array(authors) = author {
-                let names: Vec<String> = authors
-                    .iter()
-                    .filter_map(|a| a.get("name").and_then(|v| v.as_str()))
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !names.is_empty() {
-                    metadata.byline = Some(names.join(", "));
+                let mut byline = String::new();
+                for a in authors {
+                    if let Some(name) = a.get("name").and_then(|v| v.as_str()) {
+                        let trimmed = name.trim();
+                        if !trimmed.is_empty() {
+                            if !byline.is_empty() {
+                                byline.push_str(", ");
+                            }
+                            byline.push_str(trimmed);
+                        }
+                    }
+                }
+                if !byline.is_empty() {
+                    metadata.byline = Some(byline);
                 }
             }
         }
@@ -387,7 +389,7 @@ pub fn get_article_metadata(
     let metas = doc.select_matcher(&selectors.meta);
     for meta in metas.iter() {
         let content = match meta.attr("content") {
-            Some(c) if !c.is_empty() => c.to_string(),
+            Some(c) if !c.is_empty() => c,
             _ => continue,
         };
 
@@ -477,11 +479,21 @@ pub fn get_article_metadata(
         .cloned();
 
     // Unescape HTML entities in metadata
-    metadata.title = metadata.title.map(|s| unescape_html_entities(&s));
-    metadata.byline = metadata.byline.map(|s| unescape_html_entities(&s));
-    metadata.excerpt = metadata.excerpt.map(|s| unescape_html_entities(&s));
-    metadata.site_name = metadata.site_name.map(|s| unescape_html_entities(&s));
-    metadata.published_time = metadata.published_time.map(|s| unescape_html_entities(&s));
+    metadata.title = metadata
+        .title
+        .map(|s| unescape_html_entities(&s).into_owned());
+    metadata.byline = metadata
+        .byline
+        .map(|s| unescape_html_entities(&s).into_owned());
+    metadata.excerpt = metadata
+        .excerpt
+        .map(|s| unescape_html_entities(&s).into_owned());
+    metadata.site_name = metadata
+        .site_name
+        .map(|s| unescape_html_entities(&s).into_owned());
+    metadata.published_time = metadata
+        .published_time
+        .map(|s| unescape_html_entities(&s).into_owned());
 
     metadata
 }

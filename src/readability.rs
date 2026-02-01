@@ -1,5 +1,7 @@
 //! Main Readability parser implementation.
 
+use std::borrow::Cow;
+
 use crate::cleaning::{
     clean, clean_conditionally, clean_headers, clean_matched_nodes, clean_styles, fix_lazy_images,
     mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
@@ -128,7 +130,6 @@ pub(crate) struct Readability<'a> {
     article_site_name: Option<String>,
     metadata: Metadata,
     base_uri: Option<Url>,
-    document_uri: Option<Url>,
     url_error: Option<url::ParseError>,
     attempts: Vec<AttemptResult>,
 }
@@ -180,8 +181,6 @@ impl<'a> Readability<'a> {
             },
             None => (None, None),
         };
-        let document_uri = base_uri.clone();
-
         Self {
             doc,
             original_html: html,
@@ -195,7 +194,6 @@ impl<'a> Readability<'a> {
             article_site_name: None,
             metadata: Metadata::default(),
             base_uri,
-            document_uri,
             url_error,
             attempts: Vec::new(),
         }
@@ -244,26 +242,26 @@ impl<'a> Readability<'a> {
         // Get metadata
         self.metadata = get_article_metadata(&self.doc, &json_ld, &self.article_title, &SELECTORS);
         if self.metadata.title.is_some() {
-            self.article_title = self.metadata.title.clone().unwrap_or_default();
+            self.article_title = self.metadata.title.take().unwrap_or_default();
         }
 
         // Grab the article
         let article_content = self.grab_article()?;
 
         // Get excerpt if not in metadata
-        let excerpt = self.metadata.excerpt.clone().or(article_content.excerpt);
+        let excerpt = self.metadata.excerpt.take().or(article_content.excerpt);
 
         let length = article_content.text_content.len();
 
         Ok(Article {
-            title: self.article_title.clone(),
+            title: std::mem::take(&mut self.article_title),
             byline: self
                 .metadata
                 .byline
-                .clone()
-                .or_else(|| self.article_byline.clone()),
-            dir: self.article_dir.clone(),
-            lang: self.article_lang.clone(),
+                .take()
+                .or_else(|| self.article_byline.take()),
+            dir: self.article_dir.take(),
+            lang: self.article_lang.take(),
             content: article_content.content_html,
             text_content: article_content.text_content,
             length,
@@ -271,9 +269,9 @@ impl<'a> Readability<'a> {
             site_name: self
                 .metadata
                 .site_name
-                .clone()
-                .or_else(|| self.article_site_name.clone()),
-            published_time: self.metadata.published_time.clone(),
+                .take()
+                .or_else(|| self.article_site_name.take()),
+            published_time: self.metadata.published_time.take(),
         })
     }
 
@@ -1283,7 +1281,7 @@ impl<'a> Readability<'a> {
 
                 for (name, value) in attrs_to_fix {
                     let escaped = escape_angle_brackets(&value);
-                    descendant.set_attr(&name, &escaped);
+                    descendant.set_attr(&name, escaped.as_ref());
                 }
             } else if !descendant.is_text() {
                 // It's a comment node - mark for removal
@@ -1309,14 +1307,14 @@ impl<'a> Readability<'a> {
             .iter()
         {
             if let Some(href) = link.attr("href") {
-                if href.starts_with('#') && self.base_uri == self.document_uri {
+                if href.starts_with('#') {
                     continue;
                 }
 
                 if href.starts_with("javascript:") {
                     let text = link.text();
                     let escaped = html_escape(&text);
-                    link.set_html(escaped.as_str());
+                    link.set_html(escaped.as_ref());
                     link.rename("span");
                     continue;
                 }
@@ -1427,9 +1425,10 @@ fn get_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
 }
 
 /// Escape HTML special characters using single-pass with pre-allocated buffer.
-fn html_escape(s: &str) -> String {
-    // Estimate capacity: worst case every char needs escaping (5 chars for &#39;)
-    // but usually only a few chars need escaping, so start with original length + some buffer
+fn html_escape<'a>(s: &'a str) -> Cow<'a, str> {
+    if !s.contains(['&', '<', '>', '"', '\'']) {
+        return Cow::Borrowed(s);
+    }
     let mut result = String::with_capacity(s.len() + 16);
     for c in s.chars() {
         match c {
@@ -1441,11 +1440,14 @@ fn html_escape(s: &str) -> String {
             _ => result.push(c),
         }
     }
-    result
+    Cow::Owned(result)
 }
 
 /// Escape only angle brackets using single-pass to avoid intermediate string allocations.
-fn escape_angle_brackets(s: &str) -> String {
+fn escape_angle_brackets<'a>(s: &'a str) -> Cow<'a, str> {
+    if !s.contains(['<', '>']) {
+        return Cow::Borrowed(s);
+    }
     let mut result = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {
@@ -1454,5 +1456,5 @@ fn escape_angle_brackets(s: &str) -> String {
             _ => result.push(c),
         }
     }
-    result
+    Cow::Owned(result)
 }
