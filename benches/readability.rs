@@ -1,6 +1,7 @@
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use legible::{is_probably_readerable, parse};
 use std::fs;
+use std::hint::black_box;
 
 const TEST_PAGES_DIR: &str = "tests/readability-js/test/test-pages";
 
