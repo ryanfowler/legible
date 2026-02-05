@@ -8,6 +8,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 /// Metadata extracted from an article.
 #[derive(Debug, Clone, Default)]
@@ -509,7 +510,7 @@ pub fn text_similarity(text_a: &str, text_b: &str) -> f64 {
     let text_a_lower = text_a.to_lowercase();
     let text_b_lower = text_b.to_lowercase();
 
-    let tokens_a: Vec<&str> = regexps::TOKENIZE
+    let tokens_a: HashSet<&str> = regexps::TOKENIZE
         .split(&text_a_lower)
         .filter(|s| !s.is_empty())
         .collect();
@@ -523,14 +524,16 @@ pub fn text_similarity(text_a: &str, text_b: &str) -> f64 {
         return 0.0;
     }
 
-    let tokens_b_len: usize =
-        tokens_b.iter().map(|s| s.len()).sum::<usize>() + tokens_b.len().saturating_sub(1);
+    let tokens_b_len: usize = tokens_b.iter().map(|s| s.chars().count()).sum::<usize>()
+        + tokens_b.len().saturating_sub(1);
 
     // Compute unique_b stats in single pass without intermediate Vec
     let (unique_count, unique_len_sum): (usize, usize) = tokens_b
         .iter()
-        .filter(|t| !tokens_a.contains(t))
-        .fold((0, 0), |(count, len), t| (count + 1, len + t.len()));
+        .filter(|t| !tokens_a.contains(*t))
+        .fold((0, 0), |(count, len), t| {
+            (count + 1, len + t.chars().count())
+        });
     let unique_b_len: usize = unique_len_sum + unique_count.saturating_sub(1);
 
     if tokens_b_len == 0 {
