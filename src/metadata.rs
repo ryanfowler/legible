@@ -2,7 +2,7 @@
 
 use crate::constants::regexps;
 use crate::scoring::get_inner_text;
-use crate::selectors::Selectors;
+use crate::selectors::{SELECTORS, Selectors};
 use dom_query::Document;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -315,7 +315,7 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
         }
     } else if cur_title.contains(": ") {
         // Check if we have a heading containing this exact string
-        let headings = doc.select("h1, h2");
+        let headings = doc.select_matcher(&SELECTORS.h1_h2);
         let trimmed_title = cur_title.trim();
         let has_match = headings.iter().any(|h| h.text().trim() == trimmed_title);
 
@@ -507,16 +507,17 @@ fn is_url(s: &str) -> bool {
 /// Calculate text similarity between two strings.
 /// Returns a value between 0 (completely different) and 1 (identical).
 pub fn text_similarity(text_a: &str, text_b: &str) -> f64 {
-    let text_a_lower = text_a.to_lowercase();
-    let text_b_lower = text_b.to_lowercase();
-
-    let tokens_a: HashSet<&str> = regexps::TOKENIZE
-        .split(&text_a_lower)
+    // Collect tokens from text_a as lowercase owned strings into a HashSet.
+    // This avoids lowercasing the entire string upfront.
+    let tokens_a: HashSet<String> = regexps::TOKENIZE
+        .split(text_a)
         .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
         .collect();
 
+    // Collect tokens from text_b, keeping original case for length counting
     let tokens_b: Vec<&str> = regexps::TOKENIZE
-        .split(&text_b_lower)
+        .split(text_b)
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -527,10 +528,10 @@ pub fn text_similarity(text_a: &str, text_b: &str) -> f64 {
     let tokens_b_len: usize = tokens_b.iter().map(|s| s.chars().count()).sum::<usize>()
         + tokens_b.len().saturating_sub(1);
 
-    // Compute unique_b stats in single pass without intermediate Vec
+    // Compute unique_b stats in single pass, using case-insensitive comparison
     let (unique_count, unique_len_sum): (usize, usize) = tokens_b
         .iter()
-        .filter(|t| !tokens_a.contains(*t))
+        .filter(|t| !tokens_a.contains(&t.to_lowercase()))
         .fold((0, 0), |(count, len), t| {
             (count + 1, len + t.chars().count())
         });

@@ -478,11 +478,14 @@ impl<'a> Readability<'a> {
                 }
             }
 
-            // Remove marked nodes - use all_nodes which we already have
-            // instead of building a new NodeIndex
-            for node_id in &nodes_to_remove {
-                if let Some(node) = all_nodes.iter().find(|n| n.id == *node_id) {
-                    node.remove_from_parent();
+            // Remove marked nodes - build HashMap for O(1) lookups instead of O(n) linear search
+            {
+                let node_map: HashMap<NodeId, &Node> =
+                    all_nodes.iter().map(|n| (n.id, n)).collect();
+                for node_id in &nodes_to_remove {
+                    if let Some(node) = node_map.get(node_id) {
+                        node.remove_from_parent();
+                    }
                 }
             }
 
