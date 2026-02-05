@@ -51,6 +51,10 @@ pub struct Selectors {
 
     // Metadata selectors
     pub json_ld_script: Matcher,
+
+    // Text density selectors (for clean_conditionally)
+    pub headings: Matcher,
+    pub textish_tags: Matcher,
 }
 
 impl Selectors {
@@ -98,6 +102,13 @@ impl Selectors {
 
             // Metadata selectors
             json_ld_script: Matcher::new("script[type='application/ld+json']").unwrap(),
+
+            // Text density selectors (for clean_conditionally)
+            headings: Matcher::new("h1, h2, h3, h4, h5, h6").unwrap(),
+            textish_tags: Matcher::new(
+                "span, li, td, blockquote, dl, div, img, ol, p, pre, table, ul",
+            )
+            .unwrap(),
         }
     }
 }

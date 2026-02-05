@@ -361,12 +361,7 @@ fn should_remove_conditionally(
         }
         (p, img, li.saturating_sub(100), input)
     };
-    let heading_density = get_text_density_cached(
-        node,
-        content_length,
-        &["h1", "h2", "h3", "h4", "h5", "h6"],
-        store,
-    );
+    let heading_density = get_text_density_cached(node, content_length, &selectors.headings, store);
 
     let mut embed_count = 0;
     let embeds = node_select_matcher(node, &selectors.object_embed_iframe);
@@ -403,21 +398,8 @@ fn should_remove_conditionally(
 
     let link_density = get_link_density_cached(node, content_length, store, selectors);
 
-    let textish_tags = [
-        "SPAN",
-        "LI",
-        "TD",
-        "BLOCKQUOTE",
-        "DL",
-        "DIV",
-        "IMG",
-        "OL",
-        "P",
-        "PRE",
-        "TABLE",
-        "UL",
-    ];
-    let text_density = get_text_density_cached(node, content_length, &textish_tags, store);
+    let text_density =
+        get_text_density_cached(node, content_length, &selectors.textish_tags, store);
 
     // Check if this is a child of figure
     let is_figure_child = {
