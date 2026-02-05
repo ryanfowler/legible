@@ -1,9 +1,9 @@
 //! Content scoring logic for Readability.
 
 use crate::constants::{PHRASING_ELEMS, flags::*, regexps};
-use crate::dom::{NodeDataStore, NodeStats, get_tag_name, node_select, node_select_matcher};
+use crate::dom::{NodeDataStore, NodeStats, get_tag_name, node_select_matcher};
 use crate::selectors::Selectors;
-use dom_query::Node;
+use dom_query::{Matcher, Node};
 
 /// Compute and return text statistics for a node.
 /// This extracts the inner text once and computes all metrics from it.
@@ -196,7 +196,7 @@ pub fn get_link_density_cached(
 pub fn get_text_density_cached(
     node: &Node<'_>,
     parent_text_length: usize,
-    tags: &[&str],
+    matcher: &Matcher,
     store: &mut NodeDataStore,
 ) -> f64 {
     if parent_text_length == 0 {
@@ -204,9 +204,8 @@ pub fn get_text_density_cached(
     }
 
     let mut children_length = 0;
-    let selector = tags.join(",");
 
-    for child in node_select(node, &selector).nodes().iter() {
+    for child in node_select_matcher(node, matcher).nodes().iter() {
         let child_stats = get_or_compute_stats(child, store);
         children_length += child_stats.text_length;
     }
