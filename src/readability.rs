@@ -322,167 +322,173 @@ impl<'a> Readability<'a> {
             }
 
             // First pass: identify nodes to remove and score
-            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+            // Scoped block to limit borrow lifetime of node_map
+            {
+                // Collect nodes into Vec for ordered iteration, then build HashMap for O(1) removal lookup
+                let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+                let node_map: HashMap<NodeId, &Node<'_>> =
+                    all_nodes.iter().map(|n| (n.id, n)).collect();
 
-            // Reusable buffer for building match_string to avoid allocations per node
-            let mut match_string_buf = String::with_capacity(128);
+                // Reusable buffer for building match_string to avoid allocations per node
+                let mut match_string_buf = String::with_capacity(128);
 
-            for node in &all_nodes {
-                // Skip if this node or any ancestor is scheduled for removal
-                if nodes_to_remove.contains(&node.id)
-                    || has_ancestor_scheduled_for_removal(node, &nodes_to_remove)
-                {
-                    continue;
-                }
+                for node in &all_nodes {
+                    // Skip if this node or any ancestor is scheduled for removal
+                    if nodes_to_remove.contains(&node.id)
+                        || has_ancestor_scheduled_for_removal(node, &nodes_to_remove)
+                    {
+                        continue;
+                    }
 
-                let tag_name = get_tag_name(node).unwrap_or_default();
-                // Build match_string for regex matching - reuse buffer to avoid allocations
-                match_string_buf.clear();
-                if let Some(class) = node.attr("class") {
-                    match_string_buf.push_str(class.as_ref());
-                }
-                match_string_buf.push(' ');
-                if let Some(id) = node.attr("id") {
-                    match_string_buf.push_str(id.as_ref());
-                }
-                let match_string = &match_string_buf;
+                    let tag_name = get_tag_name(node).unwrap_or_default();
+                    // Build match_string for regex matching - reuse buffer to avoid allocations
+                    match_string_buf.clear();
+                    if let Some(class) = node.attr("class") {
+                        match_string_buf.push_str(class.as_ref());
+                    }
+                    match_string_buf.push(' ');
+                    if let Some(id) = node.attr("id") {
+                        match_string_buf.push_str(id.as_ref());
+                    }
+                    let match_string = &match_string_buf;
 
-                // Check visibility
-                if !is_probably_visible(node) {
-                    debug_log!(self, "Removing hidden node: {}", match_string);
-                    nodes_to_remove.insert(node.id);
-                    continue;
-                }
+                    // Check visibility
+                    if !is_probably_visible(node) {
+                        debug_log!(self, "Removing hidden node: {}", match_string);
+                        nodes_to_remove.insert(node.id);
+                        continue;
+                    }
 
-                // Check aria-modal with role=dialog
-                if node
-                    .attr("aria-modal")
-                    .map(|s| s.as_ref() == "true")
-                    .unwrap_or(false)
-                    && node
-                        .attr("role")
-                        .map(|s| s.as_ref() == "dialog")
+                    // Check aria-modal with role=dialog
+                    if node
+                        .attr("aria-modal")
+                        .map(|s| s.as_ref() == "true")
                         .unwrap_or(false)
-                {
-                    nodes_to_remove.insert(node.id);
-                    continue;
-                }
+                        && node
+                            .attr("role")
+                            .map(|s| s.as_ref() == "dialog")
+                            .unwrap_or(false)
+                    {
+                        nodes_to_remove.insert(node.id);
+                        continue;
+                    }
 
-                // Check for byline
-                if self.article_byline.is_none()
-                    && self.metadata.byline.is_none()
-                    && is_valid_byline(node, match_string)
-                {
-                    // Look for itemprop="name" child
-                    let itemprop_name = node_select_matcher(node, &SELECTORS.itemprop)
-                        .nodes()
-                        .first()
-                        .cloned();
-                    let byline_node = itemprop_name.as_ref().unwrap_or(node);
-                    self.article_byline = Some(byline_node.text().trim().to_string());
-                    nodes_to_remove.insert(node.id);
-                    continue;
-                }
+                    // Check for byline
+                    if self.article_byline.is_none()
+                        && self.metadata.byline.is_none()
+                        && is_valid_byline(node, match_string)
+                    {
+                        // Look for itemprop="name" child
+                        let itemprop_name = node_select_matcher(node, &SELECTORS.itemprop)
+                            .nodes()
+                            .first()
+                            .cloned();
+                        let byline_node = itemprop_name.as_ref().unwrap_or(node);
+                        self.article_byline = Some(byline_node.text().trim().to_string());
+                        nodes_to_remove.insert(node.id);
+                        continue;
+                    }
 
-                // Check for duplicate title header
-                if should_remove_title_header && self.header_duplicates_title(node) {
-                    debug_log!(
-                        self,
-                        "Removing header: {} / {}",
-                        node.text().trim(),
-                        self.article_title.trim()
-                    );
-                    should_remove_title_header = false;
-                    nodes_to_remove.insert(node.id);
-                    continue;
-                }
+                    // Check for duplicate title header
+                    if should_remove_title_header && self.header_duplicates_title(node) {
+                        debug_log!(
+                            self,
+                            "Removing header: {} / {}",
+                            node.text().trim(),
+                            self.article_title.trim()
+                        );
+                        should_remove_title_header = false;
+                        nodes_to_remove.insert(node.id);
+                        continue;
+                    }
 
-                // Remove unlikely candidates - check cheap conditions first, then regex
-                if strip_unlikely_candidates {
-                    // Check tag names first (cheap) before running regex (expensive)
-                    if tag_name != "BODY" && tag_name != "A" {
-                        let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string);
-                        if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
+                    // Remove unlikely candidates - check cheap conditions first, then regex
+                    if strip_unlikely_candidates {
+                        // Check tag names first (cheap) before running regex (expensive)
+                        if tag_name != "BODY" && tag_name != "A" {
+                            let candidate_matches =
+                                regexps::CANDIDATE_FILTER_SET.matches(match_string);
+                            if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
                             && !candidate_matches.matched(1)  // OK_MAYBE_ITS_A_CANDIDATE
                             && !has_ancestor_tag(node, "table", 3, None::<fn(&Node) -> bool>)
                             && !has_ancestor_tag(node, "code", 3, None::<fn(&Node) -> bool>)
+                            {
+                                debug_log!(self, "Removing unlikely candidate: {}", match_string);
+                                nodes_to_remove.insert(node.id);
+                                continue;
+                            }
+                        }
+
+                        if let Some(role) = node.attr("role")
+                            && UNLIKELY_ROLES.contains(role.as_ref())
                         {
-                            debug_log!(self, "Removing unlikely candidate: {}", match_string);
+                            debug_log!(
+                                self,
+                                "Removing element with role={}: {}",
+                                role,
+                                match_string
+                            );
                             nodes_to_remove.insert(node.id);
                             continue;
                         }
                     }
 
-                    if let Some(role) = node.attr("role")
-                        && UNLIKELY_ROLES.contains(role.as_ref())
+                    // Remove empty DIV, SECTION, HEADER, H1-H6
+                    if matches!(
+                        &*tag_name,
+                        "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
+                    ) && is_element_without_content(node, &SELECTORS)
                     {
-                        debug_log!(
-                            self,
-                            "Removing element with role={}: {}",
-                            role,
-                            match_string
-                        );
                         nodes_to_remove.insert(node.id);
                         continue;
                     }
-                }
 
-                // Remove empty DIV, SECTION, HEADER, H1-H6
-                if matches!(
-                    &*tag_name,
-                    "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-                ) && is_element_without_content(node, &SELECTORS)
-                {
-                    nodes_to_remove.insert(node.id);
-                    continue;
-                }
-
-                // Add to elements to score (HashSet handles duplicates automatically)
-                if DEFAULT_TAGS_TO_SCORE.contains(&*tag_name) {
-                    elements_to_score.insert(node.id);
-                }
-
-                // Process DIVs - wrap phrasing content in P tags
-                if tag_name == "DIV" {
-                    // First, wrap any loose phrasing content in P tags
-                    wrap_phrasing_content_in_p(node);
-
-                    // Now check if DIV should be converted or scored
-                    if has_single_tag_inside_element(node, "P")
-                        && get_link_density(node, &SELECTORS) < 0.25
-                    {
-                        // Sites like http://mobile.slate.com enclose each paragraph with a DIV
-                        // element. DIVs with only a P element inside and no text content can be
-                        // safely converted into plain P elements to avoid confusing the scoring
-                        // algorithm with DIVs with are, in practice, paragraphs.
-                        if let Some(p_child) = node.element_children().first() {
-                            let p_id = p_child.id;
-                            node.replace_with(p_child);
-                            elements_to_score.insert(p_id);
-                        }
-                    } else if !has_child_block_element(node) {
-                        node.rename("p");
+                    // Add to elements to score (HashSet handles duplicates automatically)
+                    if DEFAULT_TAGS_TO_SCORE.contains(&*tag_name) {
                         elements_to_score.insert(node.id);
-                    } else {
-                        // DIV stays as DIV - add any P children to elements_to_score
-                        // (these may have been created by wrap_phrasing_content_in_p)
-                        // This mimics JS behavior where tree walker visits children
-                        for child in node.element_children() {
-                            if let Some(child_tag) = get_tag_name(&child)
-                                && child_tag == "P"
-                            {
-                                elements_to_score.insert(child.id);
+                    }
+
+                    // Process DIVs - wrap phrasing content in P tags
+                    if tag_name == "DIV" {
+                        // First, wrap any loose phrasing content in P tags
+                        wrap_phrasing_content_in_p(node);
+
+                        // Now check if DIV should be converted or scored
+                        if has_single_tag_inside_element(node, "P")
+                            && get_link_density(node, &SELECTORS) < 0.25
+                        {
+                            // Sites like http://mobile.slate.com enclose each paragraph with a DIV
+                            // element. DIVs with only a P element inside and no text content can be
+                            // safely converted into plain P elements to avoid confusing the scoring
+                            // algorithm with DIVs with are, in practice, paragraphs.
+                            if let Some(p_child) = node.element_children().first() {
+                                let p_id = p_child.id;
+                                node.replace_with(p_child);
+                                elements_to_score.insert(p_id);
+                            }
+                        } else if !has_child_block_element(node) {
+                            node.rename("p");
+                            elements_to_score.insert(node.id);
+                        } else {
+                            // DIV stays as DIV - add any P children to elements_to_score
+                            // (these may have been created by wrap_phrasing_content_in_p)
+                            // This mimics JS behavior where tree walker visits children
+                            for child in node.element_children() {
+                                if let Some(child_tag) = get_tag_name(&child)
+                                    && child_tag == "P"
+                                {
+                                    elements_to_score.insert(child.id);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Remove marked nodes - use all_nodes which we already have
-            // instead of building a new NodeIndex
-            for node_id in &nodes_to_remove {
-                if let Some(node) = all_nodes.iter().find(|n| n.id == *node_id) {
-                    node.remove_from_parent();
+                // Remove marked nodes - O(1) lookup via HashMap
+                for node_id in &nodes_to_remove {
+                    if let Some(node) = node_map.get(node_id) {
+                        node.remove_from_parent();
+                    }
                 }
             }
 
