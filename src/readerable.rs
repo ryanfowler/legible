@@ -4,7 +4,7 @@ use crate::constants::regexps;
 use crate::dom::get_tag_name;
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
-use dom_query::{Document, NodeId};
+use dom_query::{Document, Node, NodeId};
 use hashbrown::HashSet;
 
 /// Check if a document is probably readerable without parsing the whole thing.
@@ -54,18 +54,18 @@ pub(crate) fn is_probably_readerable_doc(
 ) -> bool {
     let options = options.unwrap_or_default();
 
-    // Get initial nodes: p, pre, article
-    let mut node_ids: HashSet<NodeId> = doc
-        .select("p, pre, article")
-        .nodes()
-        .iter()
-        .map(|n| n.id)
-        .collect();
+    // Collect actual nodes: p, pre, article
+    let mut nodes: Vec<Node<'_>> = doc.select("p, pre, article").nodes().to_vec();
 
-    // Add parent divs of br elements
+    // Track seen IDs to avoid duplicates when adding parent divs
+    let mut seen_ids: HashSet<NodeId> = nodes.iter().map(|n| n.id).collect();
+
+    // Add parent divs of br elements (with deduplication)
     for br in doc.select("div > br").nodes().iter() {
-        if let Some(parent) = br.parent() {
-            node_ids.insert(parent.id);
+        if let Some(parent) = br.parent()
+            && seen_ids.insert(parent.id)
+        {
+            nodes.push(parent);
         }
     }
 
@@ -74,13 +74,8 @@ pub(crate) fn is_probably_readerable_doc(
     // Reusable buffer for match_string to avoid allocations per node
     let mut match_string_buf = String::with_capacity(128);
 
-    // Iterate only over the nodes we've collected (p, pre, article, and parent divs of br)
-    for node in doc
-        .select("*")
-        .nodes()
-        .iter()
-        .filter(|n| node_ids.contains(&n.id))
-    {
+    // Iterate directly over the collected nodes
+    for node in nodes.iter() {
         // Check visibility
         if !is_probably_visible(node) {
             continue;
