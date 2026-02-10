@@ -19,3 +19,16 @@ pub fn node_select<'a>(node: &Node<'a>, selector: &str) -> Selection<'a> {
 pub fn node_select_matcher<'a>(node: &Node<'a>, matcher: &Matcher) -> Selection<'a> {
     Selection::from(*node).select_matcher(matcher)
 }
+
+/// Build a match string from a node's class and id attributes into a reusable buffer.
+/// Format: "{class} {id}" — used for regex matching against node identity.
+pub fn build_match_string(node: &Node<'_>, buf: &mut String) {
+    buf.clear();
+    if let Some(class) = node.attr("class") {
+        buf.push_str(class.as_ref());
+    }
+    buf.push(' ');
+    if let Some(id) = node.attr("id") {
+        buf.push_str(id.as_ref());
+    }
+}

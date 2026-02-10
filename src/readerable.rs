@@ -1,9 +1,10 @@
 //! Functions to determine if a document is probably readerable.
 
 use crate::constants::regexps;
-use crate::dom::get_tag_name;
+use crate::dom::{build_match_string, get_tag_name};
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
+use crate::selectors::SELECTORS;
 use dom_query::{Document, Node, NodeId};
 use hashbrown::HashSet;
 
@@ -55,13 +56,16 @@ pub(crate) fn is_probably_readerable_doc(
     let options = options.unwrap_or_default();
 
     // Collect actual nodes: p, pre, article
-    let mut nodes: Vec<Node<'_>> = doc.select("p, pre, article").nodes().to_vec();
+    let mut nodes: Vec<Node<'_>> = doc
+        .select_matcher(&SELECTORS.p_pre_article)
+        .nodes()
+        .to_vec();
 
     // Track seen IDs to avoid duplicates when adding parent divs
     let mut seen_ids: HashSet<NodeId> = nodes.iter().map(|n| n.id).collect();
 
     // Add parent divs of br elements (with deduplication)
-    for br in doc.select("div > br").nodes().iter() {
+    for br in doc.select_matcher(&SELECTORS.div_br).nodes().iter() {
         if let Some(parent) = br.parent()
             && seen_ids.insert(parent.id)
         {
@@ -82,14 +86,7 @@ pub(crate) fn is_probably_readerable_doc(
         }
 
         // Build match_string for regex - reuse buffer to avoid allocations
-        match_string_buf.clear();
-        if let Some(class) = node.attr("class") {
-            match_string_buf.push_str(class.as_ref());
-        }
-        match_string_buf.push(' ');
-        if let Some(id) = node.attr("id") {
-            match_string_buf.push_str(id.as_ref());
-        }
+        build_match_string(node, &mut match_string_buf);
 
         // Use RegexSet for single-pass matching of both patterns
         let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(&match_string_buf);
