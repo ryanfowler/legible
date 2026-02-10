@@ -55,6 +55,10 @@ pub struct Selectors {
     // Text density selectors (for clean_conditionally)
     pub headings: Matcher,
     pub textish_tags: Matcher,
+
+    // Readerable check
+    pub p_pre_article: Matcher,
+    pub div_br: Matcher,
 }
 
 impl Selectors {
@@ -109,6 +113,10 @@ impl Selectors {
                 "span, li, td, blockquote, dl, div, img, ol, p, pre, table, ul",
             )
             .unwrap(),
+
+            // Readerable check
+            p_pre_article: Matcher::new("p, pre, article").unwrap(),
+            div_br: Matcher::new("div > br").unwrap(),
         }
     }
 }

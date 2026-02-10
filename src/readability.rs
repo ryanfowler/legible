@@ -3,14 +3,16 @@
 use std::borrow::Cow;
 
 use crate::cleaning::{
-    clean, clean_conditionally, clean_headers, clean_matched_nodes, clean_styles, fix_lazy_images,
-    mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
+    clean_conditionally, clean_headers, clean_matched_nodes, clean_styles, clean_tags,
+    fix_lazy_images, mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
     unwrap_noscript_images,
 };
 use crate::constants::{
     ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
 };
-use crate::dom::{NodeDataStore, get_tag_name, has_ancestor_tag, node_select_matcher};
+use crate::dom::{
+    NodeDataStore, build_match_string, get_tag_name, has_ancestor_tag, node_select_matcher,
+};
 use crate::error::{Error, Result};
 use crate::logging::debug_log;
 use crate::metadata::{
@@ -342,14 +344,7 @@ impl<'a> Readability<'a> {
 
                 let tag_name = get_tag_name(node).unwrap_or_default();
                 // Build match_string for regex matching - reuse buffer to avoid allocations
-                match_string_buf.clear();
-                if let Some(class) = node.attr("class") {
-                    match_string_buf.push_str(class.as_ref());
-                }
-                match_string_buf.push(' ');
-                if let Some(id) = node.attr("id") {
-                    match_string_buf.push_str(id.as_ref());
-                }
+                build_match_string(node, &mut match_string_buf);
                 let match_string = &match_string_buf;
 
                 // Check visibility
@@ -1112,11 +1107,11 @@ impl<'a> Readability<'a> {
             link_density_modifier,
             selectors,
         );
-        clean(article_content, "object", video_regex);
-        clean(article_content, "embed", video_regex);
-        clean(article_content, "footer", video_regex);
-        clean(article_content, "link", video_regex);
-        clean(article_content, "aside", video_regex);
+        clean_tags(
+            article_content,
+            &["object", "embed", "footer", "link", "aside"],
+            video_regex,
+        );
 
         let share_threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
         for child in article_content.element_children() {
@@ -1126,11 +1121,11 @@ impl<'a> Readability<'a> {
             });
         }
 
-        clean(article_content, "iframe", video_regex);
-        clean(article_content, "input", video_regex);
-        clean(article_content, "textarea", video_regex);
-        clean(article_content, "select", video_regex);
-        clean(article_content, "button", video_regex);
+        clean_tags(
+            article_content,
+            &["iframe", "input", "textarea", "select", "button"],
+            video_regex,
+        );
 
         clean_headers(article_content, flags, selectors);
 

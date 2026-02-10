@@ -285,27 +285,28 @@ pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -
 /// Get the article title from the document.
 pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
     let title_elem = doc.select_matcher(&selectors.title);
-    let mut cur_title = title_elem.text().trim().to_string();
-    let orig_title = cur_title.clone();
+    let orig_title = title_elem.text().trim().to_string();
 
-    if cur_title.is_empty() {
+    if orig_title.is_empty() {
         return String::new();
     }
 
+    let mut cur_title;
     let mut title_had_hierarchical_separators = false;
 
     fn word_count(s: &str) -> usize {
         s.split_whitespace().count()
     }
 
-    if regexps::TITLE_SEPARATOR.is_match(&cur_title) {
+    if regexps::TITLE_SEPARATOR.is_match(&orig_title) {
         // Check for hierarchical separators
-        title_had_hierarchical_separators = regexps::TITLE_HIERARCHICAL.is_match(&cur_title);
+        title_had_hierarchical_separators = regexps::TITLE_HIERARCHICAL.is_match(&orig_title);
 
         // Find all separators and split at the last one
-        if let Some(last_match) = regexps::TITLE_SEPARATOR.find_iter(&orig_title).last() {
-            cur_title = orig_title[..last_match.start()].to_string();
-        }
+        cur_title = match regexps::TITLE_SEPARATOR.find_iter(&orig_title).last() {
+            Some(last_match) => orig_title[..last_match.start()].to_string(),
+            None => orig_title.clone(),
+        };
 
         // If the resulting title is too short, remove the first part instead
         if word_count(&cur_title) < 3 {
@@ -313,10 +314,10 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
                 .replace(&orig_title, "")
                 .to_string();
         }
-    } else if cur_title.contains(": ") {
+    } else if orig_title.contains(": ") {
         // Check if we have a heading containing this exact string
         let headings = doc.select("h1, h2");
-        let trimmed_title = cur_title.trim();
+        let trimmed_title = orig_title.trim();
         let has_match = headings.iter().any(|h| h.text().trim() == trimmed_title);
 
         if !has_match {
@@ -335,16 +336,24 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
                         cur_title = orig_title.clone();
                     }
                 }
+            } else {
+                cur_title = orig_title.clone();
             }
+        } else {
+            cur_title = orig_title.clone();
         }
-    } else if cur_title.chars().count() > 150 || cur_title.chars().count() < 15 {
+    } else if orig_title.chars().count() > 150 || orig_title.chars().count() < 15 {
         // Title too long or short, try H1
         let h1s = doc.select("h1");
         if h1s.length() == 1
             && let Some(h1) = h1s.nodes().first()
         {
             cur_title = get_inner_text(h1, true);
+        } else {
+            cur_title = orig_title.clone();
         }
+    } else {
+        cur_title = orig_title.clone();
     }
 
     // Normalize whitespace
@@ -385,7 +394,7 @@ pub fn get_article_metadata(
         Regex::new(r"(?i)^\s*(?:(dc|dcterm|og|twitter|parsely|weibo:(article|webpage))\s*[-\.:]?\s*)?(author|creator|pub-date|description|title|site_name)\s*$").unwrap()
     });
 
-    let mut values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut values: hashbrown::HashMap<String, String> = hashbrown::HashMap::new();
 
     let metas = doc.select_matcher(&selectors.meta);
     for meta in metas.iter() {

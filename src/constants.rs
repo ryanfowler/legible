@@ -190,22 +190,20 @@ pub static ALTER_TO_DIV_EXCEPTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 });
 
 /// Presentational attributes to remove.
-pub static PRESENTATIONAL_ATTRIBUTES: Lazy<Vec<&'static str>> = Lazy::new(|| {
-    vec![
-        "align",
-        "background",
-        "bgcolor",
-        "border",
-        "cellpadding",
-        "cellspacing",
-        "frame",
-        "hspace",
-        "rules",
-        "style",
-        "valign",
-        "vspace",
-    ]
-});
+pub static PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
+    "align",
+    "background",
+    "bgcolor",
+    "border",
+    "cellpadding",
+    "cellspacing",
+    "frame",
+    "hspace",
+    "rules",
+    "style",
+    "valign",
+    "vspace",
+];
 
 /// Elements with deprecated size attributes to remove.
 pub static DEPRECATED_SIZE_ATTRIBUTE_ELEMS: Lazy<HashSet<&'static str>> =

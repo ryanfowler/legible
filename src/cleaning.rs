@@ -4,7 +4,9 @@ use crate::constants::{
     DEPRECATED_SIZE_ATTRIBUTE_ELEMS, PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension,
     has_image_src, has_image_srcset, regexps,
 };
-use crate::dom::{NodeDataStore, get_tag_name, node_select, node_select_matcher};
+use crate::dom::{
+    NodeDataStore, build_match_string, get_tag_name, node_select, node_select_matcher,
+};
 use crate::scoring::{
     get_class_weight, get_inner_text, get_link_density_cached, get_or_compute_stats,
     get_text_density_cached, has_single_tag_inside_element, is_element_without_content,
@@ -144,14 +146,25 @@ pub fn remove_scripts(doc: &Document, selectors: &Selectors) {
     }
 }
 
-/// Clean an element of all tags of the given type.
-pub fn clean(node: &Node<'_>, tag: &str, allowed_video_regex: &Regex) {
-    let is_embed = tag == "object" || tag == "embed" || tag == "iframe";
-    let elements: Vec<_> = node_select(node, tag).nodes().to_vec();
+/// Clean multiple tag types in a single descendant traversal.
+/// Embed-like tags (object, embed, iframe) get special handling for allowed video URLs.
+pub fn clean_tags(node: &Node<'_>, tags: &[&str], allowed_video_regex: &Regex) {
+    let elements: Vec<_> = node.descendants_it().filter(|n| n.is_element()).collect();
 
     for elem in elements {
+        let tag = match get_tag_name(&elem) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Check if this tag is in our target list (case-insensitive match via uppercase tag)
+        let tag_lower = tag.to_ascii_lowercase();
+        if !tags.iter().any(|&t| t == tag_lower) {
+            continue;
+        }
+
+        let is_embed = tag == "OBJECT" || tag == "EMBED" || tag == "IFRAME";
         if is_embed {
-            // Check if any attribute contains allowed video URL
             let attrs = elem.attrs();
             let mut keep = false;
             for attr in attrs.iter() {
@@ -164,8 +177,7 @@ pub fn clean(node: &Node<'_>, tag: &str, allowed_video_regex: &Regex) {
                 continue;
             }
 
-            // For object tags, also check innerHTML
-            if tag == "object" {
+            if tag == "OBJECT" {
                 let inner = elem.inner_html();
                 if allowed_video_regex.is_match(inner.as_ref()) {
                     continue;
@@ -179,29 +191,33 @@ pub fn clean(node: &Node<'_>, tag: &str, allowed_video_regex: &Regex) {
 
 /// Remove presentational styles from an element and its children.
 pub fn clean_styles(node: &Node<'_>) {
-    // Use eq_ignore_ascii_case to avoid allocation (Phase 4.1)
-    if let Some(tag) = get_tag_name(node)
-        && tag.eq_ignore_ascii_case("SVG")
-    {
-        return;
-    }
+    let nodes: Vec<_> = std::iter::once(*node)
+        .chain(node.descendants_it())
+        .collect();
 
-    // Remove presentational attributes
-    for attr in PRESENTATIONAL_ATTRIBUTES.iter() {
-        node.remove_attr(attr);
-    }
+    for current in nodes {
+        if !current.is_element() {
+            continue;
+        }
 
-    // Remove deprecated size attributes on certain elements
-    if let Some(tag) = get_tag_name(node)
-        && DEPRECATED_SIZE_ATTRIBUTE_ELEMS.contains(&*tag)
-    {
-        node.remove_attr("width");
-        node.remove_attr("height");
-    }
+        if let Some(tag) = get_tag_name(&current)
+            && tag == "SVG"
+        {
+            continue;
+        }
 
-    // Clean children
-    for child in node.element_children() {
-        clean_styles(&child);
+        // Remove presentational attributes
+        for attr in PRESENTATIONAL_ATTRIBUTES.iter() {
+            current.remove_attr(attr);
+        }
+
+        // Remove deprecated size attributes on certain elements
+        if let Some(tag) = get_tag_name(&current)
+            && DEPRECATED_SIZE_ATTRIBUTE_ELEMS.contains(&*tag)
+        {
+            current.remove_attr("width");
+            current.remove_attr("height");
+        }
     }
 }
 
@@ -857,14 +873,7 @@ where
         }
 
         // Build match_string for filter - reuse buffer to avoid allocations
-        match_string_buf.clear();
-        if let Some(class) = n.attr("class") {
-            match_string_buf.push_str(class.as_ref());
-        }
-        match_string_buf.push(' ');
-        if let Some(id) = n.attr("id") {
-            match_string_buf.push_str(id.as_ref());
-        }
+        build_match_string(&n, &mut match_string_buf);
 
         if filter(&n, &match_string_buf) {
             n.remove_from_parent();

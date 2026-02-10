@@ -1,7 +1,7 @@
 //! Node wrapper and readability data attachment.
 
 use dom_query::NodeId;
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 /// Readability data attached to nodes during processing.
 #[derive(Debug, Clone, Default)]
@@ -90,11 +90,9 @@ impl NodeDataStore {
     /// Uses the entry API for a single HashMap lookup.
     /// Returns true if the node was newly initialized, false if it already existed.
     pub fn initialize_if_absent(&mut self, node_id: NodeId, data: ReadabilityData) -> bool {
-        use std::collections::hash_map::Entry;
-
         match self.data.entry(node_id) {
-            Entry::Occupied(_) => false,
-            Entry::Vacant(entry) => {
+            hashbrown::hash_map::Entry::Occupied(_) => false,
+            hashbrown::hash_map::Entry::Vacant(entry) => {
                 entry.insert(data);
                 true
             }

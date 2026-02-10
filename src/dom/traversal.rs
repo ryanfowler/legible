@@ -55,289 +55,133 @@ pub fn get_tag_name(node: &Node<'_>) -> Option<Cow<'static, str>> {
 
 /// Intern common HTML tag names to avoid repeated allocations.
 /// Returns a static string reference for known tags, or allocates for unknown ones.
+/// Lowercases the input into a stack buffer and matches against known tags.
 #[inline]
 fn intern_tag_name(name: &str) -> Cow<'static, str> {
-    // Fast path: check for common tags using case-insensitive comparison
-    // These are the most frequently encountered tags in readability processing
-    match name.len() {
-        1 => match_tag_1(name),
-        2 => match_tag_2(name),
-        3 => match_tag_3(name),
-        4 => match_tag_4(name),
-        5 => match_tag_5(name),
-        6 => match_tag_6(name),
-        7 => match_tag_7(name),
-        8 => match_tag_8(name),
-        10 => match_tag_10(name),
+    // Stack buffer for lowercased tag name (max HTML tag is 10 chars)
+    let mut buf = [0u8; 16];
+    let len = name.len();
+    if len > buf.len() {
+        return Cow::Owned(name.to_ascii_uppercase());
+    }
+    for (i, &b) in name.as_bytes().iter().enumerate() {
+        buf[i] = b.to_ascii_lowercase();
+    }
+    let lower = &buf[..len];
+
+    match lower {
+        // 1-char tags
+        b"a" => Cow::Borrowed("A"),
+        b"b" => Cow::Borrowed("B"),
+        b"i" => Cow::Borrowed("I"),
+        b"p" => Cow::Borrowed("P"),
+        b"q" => Cow::Borrowed("Q"),
+        b"s" => Cow::Borrowed("S"),
+        b"u" => Cow::Borrowed("U"),
+        // 2-char tags
+        b"br" => Cow::Borrowed("BR"),
+        b"dd" => Cow::Borrowed("DD"),
+        b"dl" => Cow::Borrowed("DL"),
+        b"dt" => Cow::Borrowed("DT"),
+        b"em" => Cow::Borrowed("EM"),
+        b"h1" => Cow::Borrowed("H1"),
+        b"h2" => Cow::Borrowed("H2"),
+        b"h3" => Cow::Borrowed("H3"),
+        b"h4" => Cow::Borrowed("H4"),
+        b"h5" => Cow::Borrowed("H5"),
+        b"h6" => Cow::Borrowed("H6"),
+        b"hr" => Cow::Borrowed("HR"),
+        b"li" => Cow::Borrowed("LI"),
+        b"ol" => Cow::Borrowed("OL"),
+        b"td" => Cow::Borrowed("TD"),
+        b"th" => Cow::Borrowed("TH"),
+        b"tr" => Cow::Borrowed("TR"),
+        b"ul" => Cow::Borrowed("UL"),
+        // 3-char tags
+        b"bdi" => Cow::Borrowed("BDI"),
+        b"bdo" => Cow::Borrowed("BDO"),
+        b"col" => Cow::Borrowed("COL"),
+        b"dfn" => Cow::Borrowed("DFN"),
+        b"div" => Cow::Borrowed("DIV"),
+        b"img" => Cow::Borrowed("IMG"),
+        b"kbd" => Cow::Borrowed("KBD"),
+        b"nav" => Cow::Borrowed("NAV"),
+        b"pre" => Cow::Borrowed("PRE"),
+        b"sub" => Cow::Borrowed("SUB"),
+        b"sup" => Cow::Borrowed("SUP"),
+        b"svg" => Cow::Borrowed("SVG"),
+        b"var" => Cow::Borrowed("VAR"),
+        b"wbr" => Cow::Borrowed("WBR"),
+        // 4-char tags
+        b"abbr" => Cow::Borrowed("ABBR"),
+        b"area" => Cow::Borrowed("AREA"),
+        b"base" => Cow::Borrowed("BASE"),
+        b"body" => Cow::Borrowed("BODY"),
+        b"cite" => Cow::Borrowed("CITE"),
+        b"code" => Cow::Borrowed("CODE"),
+        b"data" => Cow::Borrowed("DATA"),
+        b"font" => Cow::Borrowed("FONT"),
+        b"form" => Cow::Borrowed("FORM"),
+        b"head" => Cow::Borrowed("HEAD"),
+        b"html" => Cow::Borrowed("HTML"),
+        b"link" => Cow::Borrowed("LINK"),
+        b"main" => Cow::Borrowed("MAIN"),
+        b"mark" => Cow::Borrowed("MARK"),
+        b"meta" => Cow::Borrowed("META"),
+        b"ruby" => Cow::Borrowed("RUBY"),
+        b"samp" => Cow::Borrowed("SAMP"),
+        b"slot" => Cow::Borrowed("SLOT"),
+        b"span" => Cow::Borrowed("SPAN"),
+        b"time" => Cow::Borrowed("TIME"),
+        // 5-char tags
+        b"aside" => Cow::Borrowed("ASIDE"),
+        b"audio" => Cow::Borrowed("AUDIO"),
+        b"embed" => Cow::Borrowed("EMBED"),
+        b"input" => Cow::Borrowed("INPUT"),
+        b"label" => Cow::Borrowed("LABEL"),
+        b"meter" => Cow::Borrowed("METER"),
+        b"small" => Cow::Borrowed("SMALL"),
+        b"style" => Cow::Borrowed("STYLE"),
+        b"table" => Cow::Borrowed("TABLE"),
+        b"tbody" => Cow::Borrowed("TBODY"),
+        b"tfoot" => Cow::Borrowed("TFOOT"),
+        b"thead" => Cow::Borrowed("THEAD"),
+        b"title" => Cow::Borrowed("TITLE"),
+        b"video" => Cow::Borrowed("VIDEO"),
+        // 6-char tags
+        b"button" => Cow::Borrowed("BUTTON"),
+        b"canvas" => Cow::Borrowed("CANVAS"),
+        b"figure" => Cow::Borrowed("FIGURE"),
+        b"footer" => Cow::Borrowed("FOOTER"),
+        b"header" => Cow::Borrowed("HEADER"),
+        b"iframe" => Cow::Borrowed("IFRAME"),
+        b"object" => Cow::Borrowed("OBJECT"),
+        b"option" => Cow::Borrowed("OPTION"),
+        b"output" => Cow::Borrowed("OUTPUT"),
+        b"script" => Cow::Borrowed("SCRIPT"),
+        b"select" => Cow::Borrowed("SELECT"),
+        b"source" => Cow::Borrowed("SOURCE"),
+        b"strong" => Cow::Borrowed("STRONG"),
+        // 7-char tags
+        b"address" => Cow::Borrowed("ADDRESS"),
+        b"article" => Cow::Borrowed("ARTICLE"),
+        b"caption" => Cow::Borrowed("CAPTION"),
+        b"details" => Cow::Borrowed("DETAILS"),
+        b"picture" => Cow::Borrowed("PICTURE"),
+        b"section" => Cow::Borrowed("SECTION"),
+        b"summary" => Cow::Borrowed("SUMMARY"),
+        // 8-char tags
+        b"colgroup" => Cow::Borrowed("COLGROUP"),
+        b"datalist" => Cow::Borrowed("DATALIST"),
+        b"fieldset" => Cow::Borrowed("FIELDSET"),
+        b"noscript" => Cow::Borrowed("NOSCRIPT"),
+        b"optgroup" => Cow::Borrowed("OPTGROUP"),
+        b"progress" => Cow::Borrowed("PROGRESS"),
+        b"template" => Cow::Borrowed("TEMPLATE"),
+        b"textarea" => Cow::Borrowed("TEXTAREA"),
+        // 10-char tags
+        b"blockquote" => Cow::Borrowed("BLOCKQUOTE"),
+        b"figcaption" => Cow::Borrowed("FIGCAPTION"),
         _ => Cow::Owned(name.to_ascii_uppercase()),
-    }
-}
-
-#[inline]
-fn match_tag_1(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("a") {
-        Cow::Borrowed("A")
-    } else if name.eq_ignore_ascii_case("b") {
-        Cow::Borrowed("B")
-    } else if name.eq_ignore_ascii_case("i") {
-        Cow::Borrowed("I")
-    } else if name.eq_ignore_ascii_case("p") {
-        Cow::Borrowed("P")
-    } else if name.eq_ignore_ascii_case("q") {
-        Cow::Borrowed("Q")
-    } else if name.eq_ignore_ascii_case("s") {
-        Cow::Borrowed("S")
-    } else if name.eq_ignore_ascii_case("u") {
-        Cow::Borrowed("U")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_2(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("br") {
-        Cow::Borrowed("BR")
-    } else if name.eq_ignore_ascii_case("dd") {
-        Cow::Borrowed("DD")
-    } else if name.eq_ignore_ascii_case("dl") {
-        Cow::Borrowed("DL")
-    } else if name.eq_ignore_ascii_case("dt") {
-        Cow::Borrowed("DT")
-    } else if name.eq_ignore_ascii_case("em") {
-        Cow::Borrowed("EM")
-    } else if name.eq_ignore_ascii_case("h1") {
-        Cow::Borrowed("H1")
-    } else if name.eq_ignore_ascii_case("h2") {
-        Cow::Borrowed("H2")
-    } else if name.eq_ignore_ascii_case("h3") {
-        Cow::Borrowed("H3")
-    } else if name.eq_ignore_ascii_case("h4") {
-        Cow::Borrowed("H4")
-    } else if name.eq_ignore_ascii_case("h5") {
-        Cow::Borrowed("H5")
-    } else if name.eq_ignore_ascii_case("h6") {
-        Cow::Borrowed("H6")
-    } else if name.eq_ignore_ascii_case("hr") {
-        Cow::Borrowed("HR")
-    } else if name.eq_ignore_ascii_case("li") {
-        Cow::Borrowed("LI")
-    } else if name.eq_ignore_ascii_case("ol") {
-        Cow::Borrowed("OL")
-    } else if name.eq_ignore_ascii_case("td") {
-        Cow::Borrowed("TD")
-    } else if name.eq_ignore_ascii_case("th") {
-        Cow::Borrowed("TH")
-    } else if name.eq_ignore_ascii_case("tr") {
-        Cow::Borrowed("TR")
-    } else if name.eq_ignore_ascii_case("ul") {
-        Cow::Borrowed("UL")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_3(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("div") {
-        Cow::Borrowed("DIV")
-    } else if name.eq_ignore_ascii_case("img") {
-        Cow::Borrowed("IMG")
-    } else if name.eq_ignore_ascii_case("pre") {
-        Cow::Borrowed("PRE")
-    } else if name.eq_ignore_ascii_case("svg") {
-        Cow::Borrowed("SVG")
-    } else if name.eq_ignore_ascii_case("col") {
-        Cow::Borrowed("COL")
-    } else if name.eq_ignore_ascii_case("nav") {
-        Cow::Borrowed("NAV")
-    } else if name.eq_ignore_ascii_case("sub") {
-        Cow::Borrowed("SUB")
-    } else if name.eq_ignore_ascii_case("sup") {
-        Cow::Borrowed("SUP")
-    } else if name.eq_ignore_ascii_case("wbr") {
-        Cow::Borrowed("WBR")
-    } else if name.eq_ignore_ascii_case("bdi") {
-        Cow::Borrowed("BDI")
-    } else if name.eq_ignore_ascii_case("bdo") {
-        Cow::Borrowed("BDO")
-    } else if name.eq_ignore_ascii_case("dfn") {
-        Cow::Borrowed("DFN")
-    } else if name.eq_ignore_ascii_case("kbd") {
-        Cow::Borrowed("KBD")
-    } else if name.eq_ignore_ascii_case("var") {
-        Cow::Borrowed("VAR")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_4(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("body") {
-        Cow::Borrowed("BODY")
-    } else if name.eq_ignore_ascii_case("code") {
-        Cow::Borrowed("CODE")
-    } else if name.eq_ignore_ascii_case("form") {
-        Cow::Borrowed("FORM")
-    } else if name.eq_ignore_ascii_case("head") {
-        Cow::Borrowed("HEAD")
-    } else if name.eq_ignore_ascii_case("html") {
-        Cow::Borrowed("HTML")
-    } else if name.eq_ignore_ascii_case("link") {
-        Cow::Borrowed("LINK")
-    } else if name.eq_ignore_ascii_case("main") {
-        Cow::Borrowed("MAIN")
-    } else if name.eq_ignore_ascii_case("meta") {
-        Cow::Borrowed("META")
-    } else if name.eq_ignore_ascii_case("span") {
-        Cow::Borrowed("SPAN")
-    } else if name.eq_ignore_ascii_case("abbr") {
-        Cow::Borrowed("ABBR")
-    } else if name.eq_ignore_ascii_case("area") {
-        Cow::Borrowed("AREA")
-    } else if name.eq_ignore_ascii_case("base") {
-        Cow::Borrowed("BASE")
-    } else if name.eq_ignore_ascii_case("cite") {
-        Cow::Borrowed("CITE")
-    } else if name.eq_ignore_ascii_case("data") {
-        Cow::Borrowed("DATA")
-    } else if name.eq_ignore_ascii_case("font") {
-        Cow::Borrowed("FONT")
-    } else if name.eq_ignore_ascii_case("mark") {
-        Cow::Borrowed("MARK")
-    } else if name.eq_ignore_ascii_case("ruby") {
-        Cow::Borrowed("RUBY")
-    } else if name.eq_ignore_ascii_case("samp") {
-        Cow::Borrowed("SAMP")
-    } else if name.eq_ignore_ascii_case("slot") {
-        Cow::Borrowed("SLOT")
-    } else if name.eq_ignore_ascii_case("time") {
-        Cow::Borrowed("TIME")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_5(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("aside") {
-        Cow::Borrowed("ASIDE")
-    } else if name.eq_ignore_ascii_case("embed") {
-        Cow::Borrowed("EMBED")
-    } else if name.eq_ignore_ascii_case("input") {
-        Cow::Borrowed("INPUT")
-    } else if name.eq_ignore_ascii_case("label") {
-        Cow::Borrowed("LABEL")
-    } else if name.eq_ignore_ascii_case("small") {
-        Cow::Borrowed("SMALL")
-    } else if name.eq_ignore_ascii_case("style") {
-        Cow::Borrowed("STYLE")
-    } else if name.eq_ignore_ascii_case("table") {
-        Cow::Borrowed("TABLE")
-    } else if name.eq_ignore_ascii_case("tbody") {
-        Cow::Borrowed("TBODY")
-    } else if name.eq_ignore_ascii_case("tfoot") {
-        Cow::Borrowed("TFOOT")
-    } else if name.eq_ignore_ascii_case("thead") {
-        Cow::Borrowed("THEAD")
-    } else if name.eq_ignore_ascii_case("title") {
-        Cow::Borrowed("TITLE")
-    } else if name.eq_ignore_ascii_case("video") {
-        Cow::Borrowed("VIDEO")
-    } else if name.eq_ignore_ascii_case("audio") {
-        Cow::Borrowed("AUDIO")
-    } else if name.eq_ignore_ascii_case("meter") {
-        Cow::Borrowed("METER")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_6(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("button") {
-        Cow::Borrowed("BUTTON")
-    } else if name.eq_ignore_ascii_case("figure") {
-        Cow::Borrowed("FIGURE")
-    } else if name.eq_ignore_ascii_case("footer") {
-        Cow::Borrowed("FOOTER")
-    } else if name.eq_ignore_ascii_case("header") {
-        Cow::Borrowed("HEADER")
-    } else if name.eq_ignore_ascii_case("iframe") {
-        Cow::Borrowed("IFRAME")
-    } else if name.eq_ignore_ascii_case("object") {
-        Cow::Borrowed("OBJECT")
-    } else if name.eq_ignore_ascii_case("option") {
-        Cow::Borrowed("OPTION")
-    } else if name.eq_ignore_ascii_case("script") {
-        Cow::Borrowed("SCRIPT")
-    } else if name.eq_ignore_ascii_case("select") {
-        Cow::Borrowed("SELECT")
-    } else if name.eq_ignore_ascii_case("source") {
-        Cow::Borrowed("SOURCE")
-    } else if name.eq_ignore_ascii_case("strong") {
-        Cow::Borrowed("STRONG")
-    } else if name.eq_ignore_ascii_case("canvas") {
-        Cow::Borrowed("CANVAS")
-    } else if name.eq_ignore_ascii_case("output") {
-        Cow::Borrowed("OUTPUT")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_7(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("address") {
-        Cow::Borrowed("ADDRESS")
-    } else if name.eq_ignore_ascii_case("article") {
-        Cow::Borrowed("ARTICLE")
-    } else if name.eq_ignore_ascii_case("caption") {
-        Cow::Borrowed("CAPTION")
-    } else if name.eq_ignore_ascii_case("picture") {
-        Cow::Borrowed("PICTURE")
-    } else if name.eq_ignore_ascii_case("section") {
-        Cow::Borrowed("SECTION")
-    } else if name.eq_ignore_ascii_case("details") {
-        Cow::Borrowed("DETAILS")
-    } else if name.eq_ignore_ascii_case("summary") {
-        Cow::Borrowed("SUMMARY")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_8(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("colgroup") {
-        Cow::Borrowed("COLGROUP")
-    } else if name.eq_ignore_ascii_case("fieldset") {
-        Cow::Borrowed("FIELDSET")
-    } else if name.eq_ignore_ascii_case("noscript") {
-        Cow::Borrowed("NOSCRIPT")
-    } else if name.eq_ignore_ascii_case("optgroup") {
-        Cow::Borrowed("OPTGROUP")
-    } else if name.eq_ignore_ascii_case("datalist") {
-        Cow::Borrowed("DATALIST")
-    } else if name.eq_ignore_ascii_case("progress") {
-        Cow::Borrowed("PROGRESS")
-    } else if name.eq_ignore_ascii_case("template") {
-        Cow::Borrowed("TEMPLATE")
-    } else if name.eq_ignore_ascii_case("textarea") {
-        Cow::Borrowed("TEXTAREA")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
-    }
-}
-
-#[inline]
-fn match_tag_10(name: &str) -> Cow<'static, str> {
-    if name.eq_ignore_ascii_case("blockquote") {
-        Cow::Borrowed("BLOCKQUOTE")
-    } else if name.eq_ignore_ascii_case("figcaption") {
-        Cow::Borrowed("FIGCAPTION")
-    } else {
-        Cow::Owned(name.to_ascii_uppercase())
     }
 }

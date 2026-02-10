@@ -229,6 +229,10 @@ pub fn is_whitespace(node: &Node<'_>) -> bool {
 
 /// Check if a node qualifies as phrasing content.
 pub fn is_phrasing_content(node: &Node<'_>) -> bool {
+    is_phrasing_content_depth(node, 0)
+}
+
+fn is_phrasing_content_depth(node: &Node<'_>, depth: u32) -> bool {
     if node.is_text() {
         return true;
     }
@@ -238,12 +242,13 @@ pub fn is_phrasing_content(node: &Node<'_>) -> bool {
             return true;
         }
 
-        // A, DEL, INS are phrasing content if all their children are
-        if tag == "A" || tag == "DEL" || tag == "INS" {
+        // A, DEL, INS are phrasing content if all their children are.
+        // Depth-limited to prevent excessive recursion on pathological DOMs.
+        if (tag == "A" || tag == "DEL" || tag == "INS") && depth < 10 {
             return node
                 .children()
                 .iter()
-                .all(|child| is_phrasing_content(child));
+                .all(|child| is_phrasing_content_depth(child, depth + 1));
         }
     }
 
@@ -396,18 +401,8 @@ pub fn has_single_tag_inside_element(node: &Node<'_>, tag: &str) -> bool {
 pub fn has_child_block_element(node: &Node<'_>) -> bool {
     use crate::constants::DIV_TO_P_ELEMS;
 
-    for child in node.children() {
-        if let Some(tag) = get_tag_name(&child)
-            && DIV_TO_P_ELEMS.contains(&*tag)
-        {
-            return true;
-        }
-        if child.is_element() && has_child_block_element(&child) {
-            return true;
-        }
-    }
-
-    false
+    node.descendants_it()
+        .any(|child| get_tag_name(&child).is_some_and(|tag| DIV_TO_P_ELEMS.contains(&*tag)))
 }
 
 /// Check if a node is probably visible (not hidden).
