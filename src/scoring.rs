@@ -352,8 +352,7 @@ pub fn is_element_without_content(node: &Node<'_>, selectors: &Selectors) -> boo
         return false;
     }
 
-    let text = node.text().trim().to_string();
-    if !text.is_empty() {
+    if !node.text().trim().is_empty() {
         return false;
     }
 
@@ -451,22 +450,25 @@ pub fn is_valid_byline(node: &Node<'_>, match_string: &str) -> bool {
     if let Some(rel) = node.attr("rel")
         && rel.as_ref() == "author"
     {
-        let text = node.text().trim().to_string();
-        return !text.is_empty() && text.chars().count() < 100;
+        let trimmed = node.text();
+        let trimmed = trimmed.trim();
+        return !trimmed.is_empty() && trimmed.chars().count() < 100;
     }
 
     // Check itemprop containing "author"
     if let Some(itemprop) = node.attr("itemprop")
         && itemprop.as_ref().contains("author")
     {
-        let text = node.text().trim().to_string();
-        return !text.is_empty() && text.chars().count() < 100;
+        let trimmed = node.text();
+        let trimmed = trimmed.trim();
+        return !trimmed.is_empty() && trimmed.chars().count() < 100;
     }
 
     // Check byline pattern in class/id
     if regexps::BYLINE.is_match(match_string) {
-        let text = node.text().trim().to_string();
-        return !text.is_empty() && text.chars().count() < 100;
+        let trimmed = node.text();
+        let trimmed = trimmed.trim();
+        return !trimmed.is_empty() && trimmed.chars().count() < 100;
     }
 
     false
