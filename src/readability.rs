@@ -323,6 +323,11 @@ impl<'a> Readability<'a> {
 
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+            let all_nodes_index: HashMap<NodeId, usize> = all_nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.id, i))
+                .collect();
 
             // Reusable buffer for building match_string to avoid allocations per node
             let mut match_string_buf = String::with_capacity(128);
@@ -478,11 +483,10 @@ impl<'a> Readability<'a> {
                 }
             }
 
-            // Remove marked nodes - use all_nodes which we already have
-            // instead of building a new NodeIndex
+            // Remove marked nodes using the HashMap index for O(1) lookups
             for node_id in &nodes_to_remove {
-                if let Some(node) = all_nodes.iter().find(|n| n.id == *node_id) {
-                    node.remove_from_parent();
+                if let Some(&idx) = all_nodes_index.get(node_id) {
+                    all_nodes[idx].remove_from_parent();
                 }
             }
 
