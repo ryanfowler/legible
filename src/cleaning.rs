@@ -656,7 +656,11 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
             .unwrap_or(false);
         let has_lazy_class = elem
             .attr("class")
-            .map(|c| c.to_lowercase().contains("lazy"))
+            .map(|c| {
+                c.as_ref()
+                    .split_whitespace()
+                    .any(|cls| cls.eq_ignore_ascii_case("lazy"))
+            })
             .unwrap_or(false);
 
         if (has_src || has_srcset) && !has_lazy_class {
@@ -790,10 +794,10 @@ pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
                         }
 
                         // If new img already has this attribute, prefix with data-old-
-                        let target_name = if new_img.has_attr(attr_name) {
-                            format!("data-old-{}", attr_name)
+                        let target_name: Cow<str> = if new_img.has_attr(attr_name) {
+                            format!("data-old-{}", attr_name).into()
                         } else {
-                            attr_name.to_string()
+                            Cow::Borrowed(attr_name)
                         };
 
                         new_img.set_attr(&target_name, attr_value);
@@ -802,8 +806,7 @@ pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
 
                 // Replace the entire previous element with the new img
                 // Build the new img HTML and replace prev element
-                let new_img_html = new_img.html().to_string();
-                prev.after_html(new_img_html.as_str());
+                prev.after_html(new_img.html());
                 prev.remove_from_parent();
                 noscript.remove_from_parent();
             }
@@ -843,11 +846,11 @@ pub fn simplify_nested_elements(article_content: &Node<'_>, selectors: &Selector
                 if let Some(child) = children.first() {
                     // Copy all attributes from node to child (like JS does)
                     for attr in node.attrs() {
-                        let name = attr.name.local.to_string();
-                        let value = attr.value.to_string();
+                        let name: &str = &attr.name.local;
+                        let value: &str = &attr.value;
                         // Only copy if child doesn't already have this attribute
-                        if child.attr(&name).is_none() {
-                            child.set_attr(&name, &value);
+                        if child.attr(name).is_none() {
+                            child.set_attr(name, value);
                         }
                     }
 

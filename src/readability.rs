@@ -1411,7 +1411,11 @@ impl<'a> Readability<'a> {
 
 /// Get ancestors of a node up to max_depth (0 = unlimited).
 fn get_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
-    let mut ancestors = Vec::new();
+    let mut ancestors = if max_depth > 0 {
+        Vec::with_capacity(max_depth)
+    } else {
+        Vec::new()
+    };
     let mut current = node.parent();
     let mut depth = 0;
 
