@@ -1,5 +1,7 @@
 //! DOM cleaning functions for Readability.
 
+use std::borrow::Cow;
+
 use crate::constants::{
     DEPRECATED_SIZE_ATTRIBUTE_ELEMS, PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension,
     has_image_src, has_image_srcset, regexps,
@@ -686,7 +688,8 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
                 } else if tag == "FIGURE" {
                     // Create img if figure doesn't have one
                     if node_select_matcher(&elem, &selectors.img_picture).length() == 0 {
-                        let html = format!("<img {}=\"{}\">", target, value);
+                        let escaped = escape_html_attr(value);
+                        let html = format!("<img {}=\"{}\">", target, escaped);
                         elem.set_html(html.as_str());
                     }
                 }
@@ -879,4 +882,22 @@ where
             n.remove_from_parent();
         }
     }
+}
+
+/// Escape special characters for use in an HTML attribute value.
+fn escape_html_attr<'a>(s: &'a str) -> Cow<'a, str> {
+    if !s.contains(['&', '"', '<', '>']) {
+        return Cow::Borrowed(s);
+    }
+    let mut result = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '"' => result.push_str("&quot;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            _ => result.push(c),
+        }
+    }
+    Cow::Owned(result)
 }
