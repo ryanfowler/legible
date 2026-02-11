@@ -16,6 +16,7 @@ cargo test test_name   # Run a specific test (test names are sanitized from test
 cargo fmt              # Format code - run after making changes
 cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
+prettier -w .          # Format other files
 ```
 
 ## Architecture
