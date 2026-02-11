@@ -257,7 +257,7 @@ impl<'a> Readability<'a> {
         // Get excerpt if not in metadata
         let excerpt = self.metadata.excerpt.take().or(article_content.excerpt);
 
-        let length = article_content.text_content.len();
+        let length = article_content.text_content.chars().count();
 
         Ok(Article {
             title: std::mem::take(&mut self.article_title),
