@@ -4,9 +4,9 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - '**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 env:
   CARGO_TERM_COLOR: always

@@ -1,6 +1,6 @@
 [package]
 name = "legible"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 authors = ["Ryan Fowler"]
 description = "A Rust port of Mozilla's Readability.js for extracting readable content from web pages"
@@ -9,7 +9,7 @@ repository = "https://github.com/ryanfowler/legible"
 documentation = "https://docs.rs/legible"
 keywords = ["readability", "article", "extraction", "html", "parser"]
 categories = ["parsing", "text-processing", "web-programming"]
-exclude = ["examples/", "tests/"]
+exclude = [".github/", "examples/", "tests/"]
 
 [lib]
 bench = false
@@ -17,17 +17,17 @@ bench = false
 [dependencies]
 dom_query = "0.25"
 hashbrown = "0.16"
-regex = "1.12"
 once_cell = "1.21"
+regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 url = "2.5"
 thiserror = "2.0"
 
 [dev-dependencies]
-pretty_assertions = "1.4"
-datatest-stable = "0.3"
 criterion = "0.8"
+datatest-stable = "0.3"
+pretty_assertions = "1.4"
 
 [[test]]
 name = "integration_tests"
@@ -36,6 +36,3 @@ harness = false
 [[bench]]
 name = "readability"
 harness = false
-
-[profile.release]
-debug = true
