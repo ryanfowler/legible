@@ -441,32 +441,20 @@ pub fn is_probably_visible(node: &Node<'_>) -> bool {
 
 /// Check if a node is a valid byline element.
 pub fn is_valid_byline(node: &Node<'_>, match_string: &str) -> bool {
-    // Check rel="author"
-    if let Some(rel) = node.attr("rel")
-        && rel.as_ref() == "author"
-    {
-        let trimmed = node.text();
-        let trimmed = trimmed.trim();
-        return !trimmed.is_empty() && trimmed.chars().count() < 100;
+    let is_byline_attr = node.attr("rel").is_some_and(|rel| rel.as_ref() == "author")
+        || node
+            .attr("itemprop")
+            .is_some_and(|ip| ip.as_ref().contains("author"))
+        || regexps::BYLINE.is_match(match_string);
+
+    if !is_byline_attr {
+        return false;
     }
 
-    // Check itemprop containing "author"
-    if let Some(itemprop) = node.attr("itemprop")
-        && itemprop.as_ref().contains("author")
-    {
-        let trimmed = node.text();
-        let trimmed = trimmed.trim();
-        return !trimmed.is_empty() && trimmed.chars().count() < 100;
-    }
-
-    // Check byline pattern in class/id
-    if regexps::BYLINE.is_match(match_string) {
-        let trimmed = node.text();
-        let trimmed = trimmed.trim();
-        return !trimmed.is_empty() && trimmed.chars().count() < 100;
-    }
-
-    false
+    let text = node.text();
+    let trimmed = text.trim();
+    // Short-circuit: a UTF-8 char is at most 4 bytes, so < 400 bytes means < 100 chars.
+    !trimmed.is_empty() && trimmed.len() < 400 && trimmed.chars().count() < 100
 }
 
 /// Check if node is image or contains exactly one image.

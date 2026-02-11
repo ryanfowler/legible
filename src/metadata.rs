@@ -150,17 +150,14 @@ pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -
         };
 
         // Verify schema.org context
+        static SCHEMA_ORG: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
+
         let context = parsed.get("@context");
         let is_schema_org = match context {
-            Some(Value::String(s)) => {
-                static SCHEMA_ORG: Lazy<Regex> =
-                    Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
-                SCHEMA_ORG.is_match(s)
-            }
+            Some(Value::String(s)) => SCHEMA_ORG.is_match(s),
             Some(Value::Object(obj)) => {
                 if let Some(Value::String(vocab)) = obj.get("@vocab") {
-                    static SCHEMA_ORG: Lazy<Regex> =
-                        Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
                     SCHEMA_ORG.is_match(vocab)
                 } else {
                     false
@@ -291,28 +288,29 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
         return String::new();
     }
 
-    let mut cur_title;
     let mut title_had_hierarchical_separators = false;
 
     fn word_count(s: &str) -> usize {
         s.split_whitespace().count()
     }
 
+    // Use Cow to avoid cloning orig_title in the common case where cur_title
+    // is just a slice of orig_title.
+    let mut cur_title: Cow<str> = Cow::Borrowed(&orig_title);
+    let orig_title_len = orig_title.chars().count();
+
     if regexps::TITLE_SEPARATOR.is_match(&orig_title) {
         // Check for hierarchical separators
         title_had_hierarchical_separators = regexps::TITLE_HIERARCHICAL.is_match(&orig_title);
 
         // Find all separators and split at the last one
-        cur_title = match regexps::TITLE_SEPARATOR.find_iter(&orig_title).last() {
-            Some(last_match) => orig_title[..last_match.start()].to_string(),
-            None => orig_title.clone(),
-        };
+        if let Some(last_match) = regexps::TITLE_SEPARATOR.find_iter(&orig_title).last() {
+            cur_title = Cow::Borrowed(&orig_title[..last_match.start()]);
+        }
 
         // If the resulting title is too short, remove the first part instead
         if word_count(&cur_title) < 3 {
-            cur_title = regexps::TITLE_FIRST_PART
-                .replace(&orig_title, "")
-                .to_string();
+            cur_title = regexps::TITLE_FIRST_PART.replace(&orig_title, "");
         }
     } else if orig_title.contains(": ") {
         // Check if we have a heading containing this exact string
@@ -323,7 +321,7 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
         if !has_match {
             // Extract title after the last colon
             if let Some(pos) = orig_title.rfind(": ") {
-                cur_title = orig_title[pos + 2..].to_string();
+                cur_title = Cow::Borrowed(&orig_title[pos + 2..]);
 
                 // If too short, try first colon
                 if word_count(&cur_title) < 3
@@ -331,35 +329,27 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
                 {
                     let before_colon = &orig_title[..pos];
                     if word_count(before_colon) <= 5 {
-                        cur_title = orig_title[pos + 2..].to_string();
+                        cur_title = Cow::Borrowed(&orig_title[pos + 2..]);
                     } else {
-                        cur_title = orig_title.clone();
+                        cur_title = Cow::Borrowed(&orig_title);
                     }
                 }
-            } else {
-                cur_title = orig_title.clone();
             }
-        } else {
-            cur_title = orig_title.clone();
         }
-    } else if orig_title.chars().count() > 150 || orig_title.chars().count() < 15 {
+    } else if !(15..=150).contains(&orig_title_len) {
         // Title too long or short, try H1
         let h1s = doc.select("h1");
         if h1s.length() == 1
             && let Some(h1) = h1s.nodes().first()
         {
-            cur_title = get_inner_text(h1, true);
-        } else {
-            cur_title = orig_title.clone();
+            cur_title = Cow::Owned(get_inner_text(h1, true));
         }
-    } else {
-        cur_title = orig_title.clone();
     }
 
     // Normalize whitespace
-    cur_title = regexps::NORMALIZE
+    let mut cur_title = regexps::NORMALIZE
         .replace_all(cur_title.trim(), " ")
-        .to_string();
+        .into_owned();
 
     // If we now have 4 words or fewer and conditions are met, use original title
     let cur_title_word_count = word_count(&cur_title);
@@ -407,12 +397,14 @@ pub fn get_article_metadata(
         if let Some(property) = meta.attr("property")
             && let Some(caps) = PROPERTY_PATTERN.captures(property.as_ref())
         {
-            let name = caps
+            let name: String = caps
                 .get(0)
                 .unwrap()
                 .as_str()
-                .to_lowercase()
-                .replace(char::is_whitespace, "");
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .flat_map(|c| c.to_lowercase())
+                .collect();
             values.insert(name, content.trim().to_string());
             continue;
         }
@@ -421,10 +413,15 @@ pub fn get_article_metadata(
         if let Some(name_attr) = meta.attr("name")
             && NAME_PATTERN.is_match(name_attr.as_ref())
         {
-            let name = name_attr
-                .to_lowercase()
-                .replace(char::is_whitespace, "")
-                .replace('.', ":");
+            let name: String = name_attr
+                .as_ref()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .flat_map(|c| {
+                    let c = if c == '.' { ':' } else { c };
+                    c.to_lowercase()
+                })
+                .collect();
             values.insert(name, content.trim().to_string());
         }
     }
