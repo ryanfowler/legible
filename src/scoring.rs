@@ -407,13 +407,13 @@ pub fn has_child_block_element(node: &Node<'_>) -> bool {
 
 /// Check if a node is probably visible (not hidden).
 pub fn is_probably_visible(node: &Node<'_>) -> bool {
-    // Check style attribute for display: none or visibility: hidden
+    // Check style attribute for display:none or visibility:hidden,
+    // ignoring case and whitespace variations.
     if let Some(style) = node.attr("style") {
         let style_str = style.as_ref();
-        if style_str.contains("display:none") || style_str.contains("display: none") {
-            return false;
-        }
-        if style_str.contains("visibility:hidden") || style_str.contains("visibility: hidden") {
+        if contains_ignore_ascii_ws_case(style_str, b"display:none")
+            || contains_ignore_ascii_ws_case(style_str, b"visibility:hidden")
+        {
             return false;
         }
     }
@@ -488,5 +488,32 @@ pub fn is_single_image(node: &Node<'_>) -> bool {
         current = children.into_iter().next();
     }
 
+    false
+}
+
+/// Check if `haystack` contains `needle` when ignoring ASCII whitespace and
+/// case. `needle` must be lowercase with no whitespace.
+fn contains_ignore_ascii_ws_case(haystack: &str, needle: &[u8]) -> bool {
+    let haystack = haystack.as_bytes();
+    let mut i = 0;
+    while i < haystack.len() {
+        let mut hi = i;
+        let mut ni = 0;
+        while ni < needle.len() && hi < haystack.len() {
+            if haystack[hi].is_ascii_whitespace() {
+                hi += 1;
+                continue;
+            }
+            if haystack[hi].to_ascii_lowercase() != needle[ni] {
+                break;
+            }
+            hi += 1;
+            ni += 1;
+        }
+        if ni == needle.len() {
+            return true;
+        }
+        i += 1;
+    }
     false
 }
