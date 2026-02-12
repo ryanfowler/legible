@@ -130,16 +130,14 @@ pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -
         };
 
         // Handle array of JSON-LD objects
-        let parsed = if let Value::Array(arr) = &parsed {
-            arr.iter()
-                .find(|it| {
-                    if let Some(type_val) = it.get("@type").and_then(|t| t.as_str()) {
-                        regexps::JSON_LD_ARTICLE_TYPES.is_match(type_val)
-                    } else {
-                        false
-                    }
-                })
-                .cloned()
+        let parsed = if let Value::Array(arr) = parsed {
+            arr.into_iter().find(|it| {
+                if let Some(type_val) = it.get("@type").and_then(|t| t.as_str()) {
+                    regexps::JSON_LD_ARTICLE_TYPES.is_match(type_val)
+                } else {
+                    false
+                }
+            })
         } else {
             Some(parsed)
         };
@@ -170,19 +168,20 @@ pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -
             continue;
         }
 
-        // Handle @graph structure
+        // Handle @graph structure - destructure to take ownership and avoid cloning
         let parsed = if parsed.get("@type").is_none() {
-            if let Some(Value::Array(graph)) = parsed.get("@graph") {
-                graph
-                    .iter()
-                    .find(|it| {
+            if let Value::Object(mut map) = parsed {
+                if let Some(Value::Array(graph)) = map.remove("@graph") {
+                    graph.into_iter().find(|it| {
                         if let Some(type_val) = it.get("@type").and_then(|t| t.as_str()) {
                             regexps::JSON_LD_ARTICLE_TYPES.is_match(type_val)
                         } else {
                             false
                         }
                     })
-                    .cloned()
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -485,24 +484,23 @@ pub fn get_article_metadata(
         .or_else(|| values.get("parsely-pub-date"))
         .cloned();
 
-    // Unescape HTML entities in metadata
-    metadata.title = metadata
-        .title
-        .map(|s| unescape_html_entities(&s).into_owned());
-    metadata.byline = metadata
-        .byline
-        .map(|s| unescape_html_entities(&s).into_owned());
-    metadata.excerpt = metadata
-        .excerpt
-        .map(|s| unescape_html_entities(&s).into_owned());
-    metadata.site_name = metadata
-        .site_name
-        .map(|s| unescape_html_entities(&s).into_owned());
-    metadata.published_time = metadata
-        .published_time
-        .map(|s| unescape_html_entities(&s).into_owned());
+    // Unescape HTML entities in metadata, reusing the original string when no entities exist
+    metadata.title = metadata.title.map(unescape_owned);
+    metadata.byline = metadata.byline.map(unescape_owned);
+    metadata.excerpt = metadata.excerpt.map(unescape_owned);
+    metadata.site_name = metadata.site_name.map(unescape_owned);
+    metadata.published_time = metadata.published_time.map(unescape_owned);
 
     metadata
+}
+
+/// Unescape HTML entities in an owned string, reusing the original allocation
+/// when no entities are present (i.e., when `unescape_html_entities` returns `Cow::Borrowed`).
+fn unescape_owned(s: String) -> String {
+    match unescape_html_entities(&s) {
+        Cow::Borrowed(_) => s,
+        Cow::Owned(unescaped) => unescaped,
+    }
 }
 
 /// Check if a string looks like a URL.

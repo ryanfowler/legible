@@ -10,9 +10,9 @@ use crate::dom::{
     NodeDataStore, build_match_string, get_tag_name, node_select, node_select_matcher,
 };
 use crate::scoring::{
-    get_class_weight, get_inner_text, get_link_density_cached, get_or_compute_stats,
-    get_text_density_cached, has_single_tag_inside_element, is_element_without_content,
-    is_phrasing_content,
+    get_class_weight, get_link_density_cached, get_or_compute_stats,
+    get_or_compute_stats_with_text, get_text_density_cached, has_single_tag_inside_element,
+    is_element_without_content, is_phrasing_content,
 };
 use crate::selectors::Selectors;
 use dom_query::{Document, Node};
@@ -159,9 +159,8 @@ pub fn clean_tags(node: &Node<'_>, tags: &[&str], allowed_video_regex: &Regex) {
             None => continue,
         };
 
-        // Check if this tag is in our target list (case-insensitive match via uppercase tag)
-        let tag_lower = tag.to_ascii_lowercase();
-        if !tags.iter().any(|&t| t == tag_lower) {
+        // Check if this tag is in our target list (case-insensitive without allocating)
+        if !tags.iter().any(|&t| t.eq_ignore_ascii_case(&tag)) {
             continue;
         }
 
@@ -326,8 +325,9 @@ fn should_remove_conditionally(
         }
     }
 
-    // Get or compute cached stats for this node
-    let stats = get_or_compute_stats(node, store);
+    // Get or compute cached stats for this node, also returning the inner text
+    // to avoid a redundant get_inner_text call for the AD_LOADING_SET check below.
+    let (stats, inner_text) = get_or_compute_stats_with_text(node, store);
     let content_length = stats.text_length;
 
     let is_list = tag == "ul" || tag == "ol";
@@ -409,7 +409,6 @@ fn should_remove_conditionally(
     }
 
     // Check for ad/loading words - use RegexSet for single-pass matching
-    let inner_text = get_inner_text(node, true);
     if regexps::AD_LOADING_SET.is_match(&inner_text) {
         return true;
     }

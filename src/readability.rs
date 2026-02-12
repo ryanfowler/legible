@@ -489,7 +489,7 @@ impl<'a> Readability<'a> {
             let cached_index = NodeIndex::new(&self.doc);
 
             // Score elements
-            let mut candidates: Vec<NodeId> = Vec::new();
+            let mut candidates: Vec<NodeId> = Vec::with_capacity(elements_to_score.len());
 
             for node_id in &elements_to_score {
                 let node = match cached_index.get(node_id) {
