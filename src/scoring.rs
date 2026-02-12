@@ -9,26 +9,77 @@ use dom_query::{Matcher, Node};
 /// This extracts the inner text once and computes all metrics from it.
 pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
     let text = get_inner_text(node, true);
-    NodeStats {
-        text_length: text.chars().count(),
-        // Count commas in various scripts using char filtering instead of regex
-        // See: https://en.wikipedia.org/wiki/Comma#Comma_variants
-        comma_count: text
-            .chars()
-            .filter(|&c| {
-                c == ','        // U+002C COMMA
-                    || c == '\u{060C}'  // Arabic comma
-                    || c == '\u{FE50}'  // Small comma
-                    || c == '\u{FE10}'  // Presentation form
-                    || c == '\u{FE11}'  // Presentation form
-                    || c == '\u{2E41}'  // Reversed comma
-                    || c == '\u{2E34}'  // Raised comma
-                    || c == '\u{2E32}'  // Turned comma
-                    || c == '\u{FF0C}' // Fullwidth comma
-            })
-            .count(),
-        has_sentence_end: regexps::SENTENCE_END.is_match(&text),
+    let mut text_length: usize = 0;
+    let mut comma_count: usize = 0;
+    for c in text.chars() {
+        text_length += 1;
+        if matches!(
+            c,
+            ',' | '\u{060C}'
+                | '\u{FE50}'
+                | '\u{FE10}'
+                | '\u{FE11}'
+                | '\u{2E41}'
+                | '\u{2E34}'
+                | '\u{2E32}'
+                | '\u{FF0C}'
+        ) {
+            comma_count += 1;
+        }
     }
+    NodeStats {
+        text_length,
+        comma_count,
+        has_sentence_end: has_sentence_end(&text),
+    }
+}
+
+/// Compute node stats and also return the inner text string.
+pub fn compute_node_stats_with_text(node: &Node<'_>) -> (NodeStats, String) {
+    let text = get_inner_text(node, true);
+    let mut text_length: usize = 0;
+    let mut comma_count: usize = 0;
+    for c in text.chars() {
+        text_length += 1;
+        if matches!(
+            c,
+            ',' | '\u{060C}'
+                | '\u{FE50}'
+                | '\u{FE10}'
+                | '\u{FE11}'
+                | '\u{2E41}'
+                | '\u{2E34}'
+                | '\u{2E32}'
+                | '\u{FF0C}'
+        ) {
+            comma_count += 1;
+        }
+    }
+    let stats = NodeStats {
+        text_length,
+        comma_count,
+        has_sentence_end: has_sentence_end(&text),
+    };
+    (stats, text)
+}
+
+/// Check if text contains a sentence-ending period (`. ` or `.` at end of string).
+/// Equivalent to the regex `\.( |$)` but avoids regex overhead.
+fn has_sentence_end(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'.' && (i + 1 >= bytes.len() || bytes[i + 1] == b' ') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a URL is a hash URL (starts with '#' and has content after it).
+/// Equivalent to the regex `^#.+` but avoids regex overhead.
+#[inline]
+fn is_hash_url(s: &str) -> bool {
+    s.starts_with('#') && s.len() > 1
 }
 
 /// Get or compute stats for a node, caching the result.
@@ -39,6 +90,20 @@ pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeS
     let stats = compute_node_stats(node);
     store.set_stats(node.id, stats);
     stats
+}
+
+/// Get or compute stats for a node, caching the result.
+/// Also returns the inner text string to avoid redundant extraction.
+pub fn get_or_compute_stats_with_text(
+    node: &Node<'_>,
+    store: &mut NodeDataStore,
+) -> (NodeStats, String) {
+    if let Some(stats) = store.get_stats(&node.id) {
+        return (*stats, get_inner_text(node, true));
+    }
+    let (stats, text) = compute_node_stats_with_text(node);
+    store.set_stats(node.id, stats);
+    (stats, text)
 }
 
 /// Compute the initial readability data for a node without storing it.
@@ -112,20 +177,38 @@ pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
     let text = node.text();
     let trimmed = text.trim();
     if normalize_spaces {
-        // Quick pre-check: only run regex if there are consecutive spaces
-        // The NORMALIZE regex matches \s{2,}, so if no "  " exists, regex is unnecessary
-        if trimmed.contains("  ") || trimmed.contains('\t') || trimmed.contains('\n') {
-            // replace_all returns Cow - only allocates if replacements were made
-            match regexps::NORMALIZE.replace_all(trimmed, " ") {
-                std::borrow::Cow::Borrowed(s) => s.to_string(),
-                std::borrow::Cow::Owned(s) => s, // reuse the already-allocated string
-            }
-        } else {
-            trimmed.to_string()
-        }
+        normalize_whitespace(trimmed)
     } else {
         trimmed.to_string()
     }
+}
+
+/// Collapse runs of 2+ whitespace characters into a single space.
+/// Returns the original string (as a new allocation) if no collapsing is needed.
+fn normalize_whitespace(s: &str) -> String {
+    // Quick pre-check: only allocate a new string if there are consecutive whitespace chars
+    let needs_normalize = s
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0].is_ascii_whitespace() && w[1].is_ascii_whitespace())
+        || s.bytes().any(|b| b == b'\t' || b == b'\n' || b == b'\r');
+    if !needs_normalize {
+        return s.to_string();
+    }
+    let mut result = String::with_capacity(s.len());
+    let mut prev_ws = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_ws {
+                result.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            result.push(c);
+            prev_ws = false;
+        }
+    }
+    result
 }
 
 /// Get the link density of an element with optional pre-extracted text.
@@ -148,7 +231,7 @@ pub fn get_link_density_with_text(
     for link in node_select_matcher(node, &selectors.a).nodes().iter() {
         // Check href directly without allocating a new String
         let coefficient = match link.attr("href") {
-            Some(href) if regexps::HASH_URL.is_match(href.as_ref()) => 0.3,
+            Some(href) if is_hash_url(href.as_ref()) => 0.3,
             _ => 1.0,
         };
         link_length += get_inner_text(link, true).chars().count() as f64 * coefficient;
@@ -182,7 +265,7 @@ pub fn get_link_density_cached(
 
         // Check href directly without allocating a new String
         let coefficient = match link.attr("href") {
-            Some(href) if regexps::HASH_URL.is_match(href.as_ref()) => 0.3,
+            Some(href) if is_hash_url(href.as_ref()) => 0.3,
             _ => 1.0,
         };
         link_length += link_stats.text_length as f64 * coefficient;
@@ -391,10 +474,13 @@ pub fn has_single_tag_inside_element(node: &Node<'_>, tag: &str) -> bool {
     }
 
     // And there should be no text nodes with real content
-    !node
-        .children()
-        .iter()
-        .any(|child| child.is_text() && regexps::HAS_CONTENT.is_match(child.text().as_ref()))
+    !node.children().iter().any(|child| {
+        child.is_text()
+            && child
+                .text()
+                .as_ref()
+                .ends_with(|c: char| !c.is_whitespace())
+    })
 }
 
 /// Check if an element has any children that are block-level elements.

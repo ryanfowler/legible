@@ -68,12 +68,6 @@ pub mod regexps {
     /// Tokenizes text on word boundaries.
     pub static TOKENIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\W+").unwrap());
 
-    /// Matches strings with content (non-whitespace at end).
-    pub static HAS_CONTENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\S$").unwrap());
-
-    /// Matches hash URLs.
-    pub static HASH_URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"^#.+").unwrap());
-
     /// Matches srcset URL patterns.
     pub static SRCSET_URL: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap());
@@ -100,9 +94,6 @@ pub mod regexps {
     pub static LOADING_WORDS: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?iu)^((loading|正在加载|Загрузка|chargement|cargando)(…|\.\.\.)?)$").unwrap()
     });
-
-    /// Matches sentence-ending periods.
-    pub static SENTENCE_END: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.( |$)").unwrap());
 
     /// Matches title separators surrounded by whitespace.
     pub static TITLE_SEPARATOR: Lazy<Regex> =
