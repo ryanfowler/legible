@@ -98,11 +98,18 @@ pub fn get_or_compute_stats_with_text(
     node: &Node<'_>,
     store: &mut NodeDataStore,
 ) -> (NodeStats, String) {
-    if let Some(stats) = store.get_stats(&node.id) {
-        return (*stats, get_inner_text(node, true));
+    if let Some(stats) = store.get_stats(&node.id).copied() {
+        if let Some(text) = store.get_text(&node.id) {
+            return (stats, text.to_string());
+        }
+
+        let text = get_inner_text(node, true);
+        store.set_text(node.id, text.clone());
+        return (stats, text);
     }
     let (stats, text) = compute_node_stats_with_text(node);
     store.set_stats(node.id, stats);
+    store.set_text(node.id, text.clone());
     (stats, text)
 }
 
@@ -338,7 +345,7 @@ fn is_phrasing_content_depth(node: &Node<'_>, depth: u32) -> bool {
     false
 }
 
-/// Wrap consecutive phrasing content in a DIV with P tags.
+/// Wrap consecutive phrasing content in P tags by moving existing nodes.
 /// This handles cases where text is placed directly inside DIVs without P tags.
 pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
     let children: Vec<_> = div.children();
@@ -386,42 +393,23 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
                 // Only wrap if we still have content after trimming
                 if start < end {
                     let trimmed_nodes = &phrasing_nodes[start..end];
-
-                    // Pre-calculate capacity for HTML string to avoid reallocations
-                    let estimated_size: usize = trimmed_nodes
-                        .iter()
-                        .map(|&idx| {
-                            let n = &children[idx];
-                            if n.is_text() {
-                                n.text().len()
-                            } else {
-                                n.html().len()
-                            }
-                        })
-                        .sum();
-
-                    // Build HTML for the phrasing content with pre-allocated capacity
-                    let mut html = String::with_capacity(estimated_size + 7); // +7 for <p></p>
-                    html.push_str("<p>");
-                    for &idx in trimmed_nodes {
-                        let n = &children[idx];
-                        if n.is_text() {
-                            html.push_str(n.text().as_ref());
-                        } else {
-                            html.push_str(&n.html());
-                        }
-                    }
-                    html.push_str("</p>");
-
-                    // Insert the P element before the first phrasing node
                     if let Some(first_node) = children.get(trimmed_nodes[0]) {
-                        first_node.before_html(html.as_str());
-                    }
+                        let p = div.tree.new_element("p");
+                        first_node.insert_before(&p);
 
-                    // Remove the original phrasing nodes (in reverse order to maintain indices)
-                    for &idx in phrasing_nodes.iter().rev() {
-                        if let Some(n) = children.get(idx) {
-                            n.remove_from_parent();
+                        for &idx in trimmed_nodes {
+                            if let Some(n) = children.get(idx) {
+                                p.append_child(n);
+                            }
+                        }
+
+                        for &idx in phrasing_nodes[..start]
+                            .iter()
+                            .chain(phrasing_nodes[end..].iter())
+                        {
+                            if let Some(n) = children.get(idx) {
+                                n.remove_from_parent();
+                            }
                         }
                     }
                 }
