@@ -308,21 +308,6 @@ impl<'a> Readability<'a> {
             let mut nodes_to_remove: HashSet<NodeId> = HashSet::new();
             let mut should_remove_title_header = true;
 
-            // Helper to check if any ancestor is scheduled for removal
-            fn has_ancestor_scheduled_for_removal(
-                node: &Node<'_>,
-                to_remove: &HashSet<NodeId>,
-            ) -> bool {
-                let mut parent = node.parent();
-                while let Some(p) = parent {
-                    if to_remove.contains(&p.id) {
-                        return true;
-                    }
-                    parent = p.parent();
-                }
-                false
-            }
-
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
             let all_nodes_index: HashMap<NodeId, usize> = all_nodes
@@ -333,12 +318,30 @@ impl<'a> Readability<'a> {
 
             // Reusable buffer for building match_string to avoid allocations per node
             let mut match_string_buf = String::with_capacity(128);
+            let mut active_removed_root: Option<NodeId> = None;
 
             for node in &all_nodes {
-                // Skip if this node or any ancestor is scheduled for removal
-                if nodes_to_remove.contains(&node.id)
-                    || has_ancestor_scheduled_for_removal(node, &nodes_to_remove)
-                {
+                // Document order is preorder, so only the most recent removed subtree
+                // can affect the current node.
+                if let Some(removed_root) = active_removed_root {
+                    let mut parent = node.parent();
+                    let mut still_in_removed_subtree = false;
+                    while let Some(p) = parent {
+                        if p.id == removed_root {
+                            still_in_removed_subtree = true;
+                            break;
+                        }
+                        parent = p.parent();
+                    }
+
+                    if still_in_removed_subtree {
+                        continue;
+                    }
+
+                    active_removed_root = None;
+                }
+
+                if nodes_to_remove.contains(&node.id) {
                     continue;
                 }
 
@@ -351,6 +354,7 @@ impl<'a> Readability<'a> {
                 if !is_probably_visible(node) {
                     debug_log!(self, "Removing hidden node: {}", match_string);
                     nodes_to_remove.insert(node.id);
+                    active_removed_root = Some(node.id);
                     continue;
                 }
 
@@ -365,6 +369,7 @@ impl<'a> Readability<'a> {
                         .unwrap_or(false)
                 {
                     nodes_to_remove.insert(node.id);
+                    active_removed_root = Some(node.id);
                     continue;
                 }
 
@@ -381,6 +386,7 @@ impl<'a> Readability<'a> {
                     let byline_node = itemprop_name.as_ref().unwrap_or(node);
                     self.article_byline = Some(byline_node.text().trim().to_string());
                     nodes_to_remove.insert(node.id);
+                    active_removed_root = Some(node.id);
                     continue;
                 }
 
@@ -394,6 +400,7 @@ impl<'a> Readability<'a> {
                     );
                     should_remove_title_header = false;
                     nodes_to_remove.insert(node.id);
+                    active_removed_root = Some(node.id);
                     continue;
                 }
 
@@ -409,6 +416,7 @@ impl<'a> Readability<'a> {
                         {
                             debug_log!(self, "Removing unlikely candidate: {}", match_string);
                             nodes_to_remove.insert(node.id);
+                            active_removed_root = Some(node.id);
                             continue;
                         }
                     }
@@ -423,6 +431,7 @@ impl<'a> Readability<'a> {
                             match_string
                         );
                         nodes_to_remove.insert(node.id);
+                        active_removed_root = Some(node.id);
                         continue;
                     }
                 }
@@ -434,6 +443,7 @@ impl<'a> Readability<'a> {
                 ) && is_element_without_content(node, &SELECTORS)
                 {
                     nodes_to_remove.insert(node.id);
+                    active_removed_root = Some(node.id);
                     continue;
                 }
 
