@@ -15,7 +15,7 @@ use crate::scoring::{
     is_element_without_content, is_phrasing_content,
 };
 use crate::selectors::Selectors;
-use dom_query::{Document, Node};
+use dom_query::{Document, Matcher, Node};
 use regex::Regex;
 
 /// Prepare the document for parsing by cleaning up styles, etc.
@@ -148,21 +148,16 @@ pub fn remove_scripts(doc: &Document, selectors: &Selectors) {
     }
 }
 
-/// Clean multiple tag types in a single descendant traversal.
+/// Clean matched tags using a precompiled selector.
 /// Embed-like tags (object, embed, iframe) get special handling for allowed video URLs.
-pub fn clean_tags(node: &Node<'_>, tags: &[&str], allowed_video_regex: &Regex) {
-    let elements: Vec<_> = node.descendants_it().filter(|n| n.is_element()).collect();
+pub fn clean_tags(node: &Node<'_>, matcher: &Matcher, allowed_video_regex: &Regex) {
+    let elements: Vec<_> = node_select_matcher(node, matcher).nodes().to_vec();
 
     for elem in elements {
         let tag = match get_tag_name(&elem) {
             Some(t) => t,
             None => continue,
         };
-
-        // Check if this tag is in our target list (case-insensitive without allocating)
-        if !tags.iter().any(|&t| t.eq_ignore_ascii_case(&tag)) {
-            continue;
-        }
 
         let is_embed = tag == "OBJECT" || tag == "EMBED" || tag == "IFRAME";
         if is_embed {

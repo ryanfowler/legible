@@ -39,6 +39,8 @@ pub struct Selectors {
     pub noscript: Matcher,
     pub caption: Matcher,
     pub itemprop: Matcher,
+    pub clean_tags_primary: Matcher,
+    pub clean_tags_secondary: Matcher,
 
     // Image/media related selectors
     pub img_picture_figure: Matcher,
@@ -91,6 +93,8 @@ impl Selectors {
             noscript: Matcher::new("noscript").unwrap(),
             caption: Matcher::new("caption").unwrap(),
             itemprop: Matcher::new("[itemprop*='name']").unwrap(),
+            clean_tags_primary: Matcher::new("object, embed, footer, link, aside").unwrap(),
+            clean_tags_secondary: Matcher::new("iframe, input, textarea, select, button").unwrap(),
 
             // Image/media related selectors
             img_picture_figure: Matcher::new("img, picture, figure").unwrap(),

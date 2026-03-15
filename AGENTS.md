@@ -39,6 +39,7 @@ The extraction pipeline flows through these stages:
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
 - **`dom/node.rs`** - `NodeDataStore` pattern for attaching score data to nodes (workaround for Rust's lack of arbitrary node data attachment like JS)
+- **`selectors.rs`** - Precompiled selector matchers for hot paths in parsing, cleanup, and readerability checks
 
 ### Scoring System
 

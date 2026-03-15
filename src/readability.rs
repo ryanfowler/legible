@@ -305,16 +305,11 @@ impl<'a> Readability<'a> {
             }
 
             // Track nodes to remove (use HashSet for efficient lookup)
-            let mut nodes_to_remove: HashSet<NodeId> = HashSet::new();
+            let mut nodes_to_remove: Vec<Node<'_>> = Vec::new();
             let mut should_remove_title_header = true;
 
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let all_nodes_index: HashMap<NodeId, usize> = all_nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.id, i))
-                .collect();
 
             // Reusable buffer for building match_string to avoid allocations per node
             let mut match_string_buf = String::with_capacity(128);
@@ -341,10 +336,6 @@ impl<'a> Readability<'a> {
                     active_removed_root = None;
                 }
 
-                if nodes_to_remove.contains(&node.id) {
-                    continue;
-                }
-
                 let tag_name = get_tag_name(node).unwrap_or_default();
                 // Build match_string for regex matching - reuse buffer to avoid allocations
                 build_match_string(node, &mut match_string_buf);
@@ -353,7 +344,7 @@ impl<'a> Readability<'a> {
                 // Check visibility
                 if !is_probably_visible(node) {
                     debug_log!(self, "Removing hidden node: {}", match_string);
-                    nodes_to_remove.insert(node.id);
+                    nodes_to_remove.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -368,7 +359,7 @@ impl<'a> Readability<'a> {
                         .map(|s| s.as_ref() == "dialog")
                         .unwrap_or(false)
                 {
-                    nodes_to_remove.insert(node.id);
+                    nodes_to_remove.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -385,7 +376,7 @@ impl<'a> Readability<'a> {
                         .cloned();
                     let byline_node = itemprop_name.as_ref().unwrap_or(node);
                     self.article_byline = Some(byline_node.text().trim().to_string());
-                    nodes_to_remove.insert(node.id);
+                    nodes_to_remove.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -399,7 +390,7 @@ impl<'a> Readability<'a> {
                         self.article_title.trim()
                     );
                     should_remove_title_header = false;
-                    nodes_to_remove.insert(node.id);
+                    nodes_to_remove.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -415,7 +406,7 @@ impl<'a> Readability<'a> {
                             && !has_ancestor_tag(node, "code", 3, None::<fn(&Node) -> bool>)
                         {
                             debug_log!(self, "Removing unlikely candidate: {}", match_string);
-                            nodes_to_remove.insert(node.id);
+                            nodes_to_remove.push(*node);
                             active_removed_root = Some(node.id);
                             continue;
                         }
@@ -430,7 +421,7 @@ impl<'a> Readability<'a> {
                             role,
                             match_string
                         );
-                        nodes_to_remove.insert(node.id);
+                        nodes_to_remove.push(*node);
                         active_removed_root = Some(node.id);
                         continue;
                     }
@@ -442,7 +433,7 @@ impl<'a> Readability<'a> {
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
                 ) && is_element_without_content(node, &SELECTORS)
                 {
-                    nodes_to_remove.insert(node.id);
+                    nodes_to_remove.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -488,11 +479,9 @@ impl<'a> Readability<'a> {
                 }
             }
 
-            // Remove marked nodes using the HashMap index for O(1) lookups
-            for node_id in &nodes_to_remove {
-                if let Some(&idx) = all_nodes_index.get(node_id) {
-                    all_nodes[idx].remove_from_parent();
-                }
+            // Remove marked nodes after the scan completes.
+            for node in nodes_to_remove {
+                node.remove_from_parent();
             }
 
             // Build node index once after removals - reuse for scoring, candidates, and sibling gathering
@@ -1117,11 +1106,7 @@ impl<'a> Readability<'a> {
             link_density_modifier,
             selectors,
         );
-        clean_tags(
-            article_content,
-            &["object", "embed", "footer", "link", "aside"],
-            video_regex,
-        );
+        clean_tags(article_content, &selectors.clean_tags_primary, video_regex);
 
         let share_threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
         for child in article_content.element_children() {
@@ -1133,7 +1118,7 @@ impl<'a> Readability<'a> {
 
         clean_tags(
             article_content,
-            &["iframe", "input", "textarea", "select", "button"],
+            &selectors.clean_tags_secondary,
             video_regex,
         );
 
