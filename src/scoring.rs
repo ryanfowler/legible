@@ -428,7 +428,7 @@ pub fn is_element_without_content(node: &Node<'_>, selectors: &Selectors) -> boo
         return false;
     }
 
-    if !node.text().trim().is_empty() {
+    if has_non_whitespace_text(node) {
         return false;
     }
 
@@ -543,7 +543,7 @@ pub fn is_single_image(node: &Node<'_>) -> bool {
         }
 
         let children = n.element_children();
-        if children.len() != 1 || !n.text().trim().is_empty() {
+        if children.len() != 1 || has_non_whitespace_text(&n) {
             return false;
         }
 
@@ -551,6 +551,19 @@ pub fn is_single_image(node: &Node<'_>) -> bool {
     }
 
     false
+}
+
+/// Check whether a node or any descendant text node contains non-whitespace text.
+/// This avoids constructing the full concatenated descendant text when callers only
+/// need an emptiness check.
+fn has_non_whitespace_text(node: &Node<'_>) -> bool {
+    if node.is_text() {
+        return node.text().chars().any(|c| !c.is_whitespace());
+    }
+
+    node.descendants_it().any(|descendant| {
+        descendant.is_text() && descendant.text().chars().any(|c| !c.is_whitespace())
+    })
 }
 
 /// Check if `haystack` contains `needle` when ignoring ASCII whitespace and

@@ -873,7 +873,7 @@ impl<'a> Readability<'a> {
                         self.remove_flag(FLAG_CLEAN_CONDITIONALLY);
                     } else {
                         self.attempts
-                            .sort_by(|a, b| b.text_length.cmp(&a.text_length));
+                            .sort_by_key(|attempt| std::cmp::Reverse(attempt.text_length));
 
                         if self.attempts.is_empty() || self.attempts[0].text_length == 0 {
                             return Err(Error::NoContent);
