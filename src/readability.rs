@@ -167,6 +167,7 @@ impl<'a> NodeIndex<'a> {
 struct ArticleContent {
     content_html: String,
     text_content: String,
+    text_length: usize,
     excerpt: Option<String>,
 }
 
@@ -257,7 +258,7 @@ impl<'a> Readability<'a> {
         // Get excerpt if not in metadata
         let excerpt = self.metadata.excerpt.take().or(article_content.excerpt);
 
-        let length = article_content.text_content.chars().count();
+        let length = article_content.text_length;
 
         Ok(Article {
             title: std::mem::take(&mut self.article_title),
@@ -894,6 +895,7 @@ impl<'a> Readability<'a> {
                             .cloned()
                         {
                             let text_content = get_inner_text(&body, true);
+                            let text_length = text_content.chars().count();
                             let excerpt = node_select_matcher(&body, &SELECTORS.p)
                                 .nodes()
                                 .first()
@@ -904,6 +906,7 @@ impl<'a> Readability<'a> {
                             return Ok(ArticleContent {
                                 content_html,
                                 text_content,
+                                text_length,
                                 excerpt,
                             });
                         }
@@ -940,6 +943,7 @@ impl<'a> Readability<'a> {
                 return Ok(ArticleContent {
                     content_html,
                     text_content,
+                    text_length,
                     excerpt,
                 });
             }
