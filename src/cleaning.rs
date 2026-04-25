@@ -607,89 +607,102 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
         .to_vec();
 
     for elem in elems {
-        // Check for base64 placeholder images
-        if let Some(src) = elem.attr("src")
-            && let Some(caps) = regexps::B64_DATA_URL.captures(src.as_ref())
-        {
-            let mime = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let tag = get_tag_name(&elem);
 
-            // Skip SVG as they can be meaningful at small sizes
-            if mime == "image/svg+xml" {
-                continue;
-            }
+        // Check for base64 placeholder images (uses the `src` attribute)
+        let mut has_b64_placeholder = false;
+        let mut has_other_img_attr = false;
 
-            // Check if there are other image attributes
-            let mut src_could_be_removed = false;
-            let attrs = elem.attrs();
-            for attr in attrs.iter() {
-                if attr.name.local.as_ref() == "src" {
-                    continue;
+        // Single pass: gather all relevant information from attributes
+        let mut has_src = false;
+        let mut has_srcset = false;
+        let mut has_lazy_class = false;
+        let mut lazy_src: Option<&str> = None;
+        let mut lazy_srcset: Option<&str> = None;
+
+        let attrs = elem.attrs();
+        for attr in attrs.iter() {
+            let name = attr.name.local.as_ref();
+            let value = attr.value.as_ref();
+
+            match name {
+                "src" => {
+                    has_src = !value.is_empty();
+                    if let Some(caps) = regexps::B64_DATA_URL.captures(value) {
+                        let mime = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                        if mime != "image/svg+xml" {
+                            has_b64_placeholder = true;
+                        }
+                    }
                 }
-                if has_image_extension(attr.value.as_ref()) {
-                    src_could_be_removed = true;
-                    break;
+                "srcset" => {
+                    has_srcset = !value.is_empty() && value != "null";
                 }
-            }
-
-            // Remove small placeholder images
-            if src_could_be_removed {
-                let b64_start = caps.get(0).map(|m| m.end()).unwrap_or(0);
-                let b64_length = src.len() - b64_start;
-                if b64_length < 133 {
-                    elem.remove_attr("src");
+                "class" => {
+                    has_lazy_class = value
+                        .split_whitespace()
+                        .any(|cls| cls.eq_ignore_ascii_case("lazy"));
+                }
+                _ => {
+                    if has_image_extension(value) {
+                        has_other_img_attr = true;
+                    }
+                    // Check for lazy-load image URLs in other attributes
+                    // Last matching value wins (mimics JS, where later iterations overwrite)
+                    if has_image_srcset(value) {
+                        lazy_srcset = Some(value);
+                    } else if has_image_src(value) {
+                        lazy_src = Some(value);
+                    }
                 }
             }
         }
 
-        // Check if already has src/srcset and not lazy
-        let has_src = elem.attr("src").is_some();
-        let has_srcset = elem
-            .attr("srcset")
-            .map(|s| !s.is_empty() && s.as_ref() != "null")
-            .unwrap_or(false);
-        let has_lazy_class = elem
-            .attr("class")
-            .map(|c| {
-                c.as_ref()
-                    .split_whitespace()
-                    .any(|cls| cls.eq_ignore_ascii_case("lazy"))
-            })
-            .unwrap_or(false);
+        // Handle base64 placeholder
+        if has_b64_placeholder && has_other_img_attr {
+            // Re-check b64 length (need the src value again)
+            if let Some(src) = elem.attr("src")
+                && let Some(caps) = regexps::B64_DATA_URL.captures(src.as_ref())
+            {
+                let b64_start = caps.get(0).map(|m| m.end()).unwrap_or(0);
+                let b64_length = src.len() - b64_start;
+                if b64_length < 133 {
+                    elem.remove_attr("src");
+                    has_src = false;
+                }
+            }
+        }
 
         if (has_src || has_srcset) && !has_lazy_class {
             continue;
         }
 
-        // Look for image URLs in other attributes
-        let attrs = elem.attrs();
-        for attr in attrs.iter() {
-            let name = attr.name.local.as_ref();
-            if name == "src" || name == "srcset" || name == "alt" {
-                continue;
-            }
-
-            let value = attr.value.as_ref();
-            let copy_to = if has_image_srcset(value) {
-                Some("srcset")
-            } else if has_image_src(value) {
-                Some("src")
-            } else {
-                None
-            };
-
-            if let Some(target) = copy_to
-                && let Some(tag) = get_tag_name(&elem)
+        // Apply the lazy image URL if found
+        if let Some(value) = lazy_srcset
+            && let Some(ref tag_str) = tag
+        {
+            let target = "srcset";
+            if tag_str == "IMG" || tag_str == "PICTURE" {
+                elem.set_attr(target, value);
+            } else if tag_str == "FIGURE"
+                && node_select_matcher(&elem, &selectors.img_picture).length() == 0
             {
-                if tag == "IMG" || tag == "PICTURE" {
-                    elem.set_attr(target, value);
-                } else if tag == "FIGURE" {
-                    // Create img if figure doesn't have one
-                    if node_select_matcher(&elem, &selectors.img_picture).length() == 0 {
-                        let escaped = escape_html_attr(value);
-                        let html = format!("<img {}=\"{}\">", target, escaped);
-                        elem.set_html(html.as_str());
-                    }
-                }
+                let escaped = escape_html_attr(value);
+                let html = format!("<img {}=\"{}\">", target, escaped);
+                elem.set_html(html.as_str());
+            }
+        } else if let Some(value) = lazy_src
+            && let Some(ref tag_str) = tag
+        {
+            let target = "src";
+            if tag_str == "IMG" || tag_str == "PICTURE" {
+                elem.set_attr(target, value);
+            } else if tag_str == "FIGURE"
+                && node_select_matcher(&elem, &selectors.img_picture).length() == 0
+            {
+                let escaped = escape_html_attr(value);
+                let html = format!("<img {}=\"{}\">", target, escaped);
+                elem.set_html(html.as_str());
             }
         }
     }
@@ -808,7 +821,7 @@ pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
 }
 
 /// Simplify nested elements by removing empty ones and unwrapping single-child containers.
-pub fn simplify_nested_elements(article_content: &Node<'_>, selectors: &Selectors) {
+pub fn simplify_nested_elements(article_content: &Node<'_>, _selectors: &Selectors) {
     let to_process: Vec<_> = article_content.descendants_it().collect();
 
     for node in to_process {
@@ -826,7 +839,7 @@ pub fn simplify_nested_elements(article_content: &Node<'_>, selectors: &Selector
                 continue;
             }
 
-            if is_element_without_content(&node, selectors) {
+            if is_element_without_content(&node) {
                 node.remove_from_parent();
                 continue;
             }

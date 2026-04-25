@@ -20,53 +20,62 @@ pub struct Metadata {
     pub published_time: Option<String>,
 }
 
-/// Unescape common HTML entities in a string using single-pass approach.
+/// Unescape common HTML entities in a string using byte-scanning for speed.
 /// Handles both named entities (&lt;, &gt;, etc.) and numeric entities (&#123;, &#xABC;).
 pub fn unescape_html_entities<'a>(s: &'a str) -> Cow<'a, str> {
     if s.is_empty() || !s.contains('&') {
         return Cow::Borrowed(s);
     }
 
+    let bytes = s.as_bytes();
     let mut result = String::with_capacity(s.len());
-    let mut chars = s.char_indices().peekable();
+    let mut pos = 0;
 
-    while let Some((i, c)) = chars.next() {
-        if c == '&' {
-            // Try to parse an entity
-            let remaining = &s[i..];
-            if let Some(semi_offset) = remaining.find(';') {
-                let entity_with_amp = &remaining[..semi_offset + 1];
-                let entity_content = &remaining[1..semi_offset];
+    while pos < bytes.len() {
+        let remaining = &bytes[pos..];
+        let amp_pos = match remaining.iter().position(|&b| b == b'&') {
+            Some(p) => p,
+            None => {
+                // Copy the rest and we're done
+                result.push_str(&s[pos..]);
+                break;
+            }
+        };
 
-                let replacement = if entity_content.starts_with('#') {
-                    // Numeric entity
-                    parse_numeric_entity(entity_content)
-                } else {
-                    // Named entity
-                    match entity_content {
-                        "lt" => Some('<'),
-                        "gt" => Some('>'),
-                        "amp" => Some('&'),
-                        "quot" => Some('"'),
-                        "apos" => Some('\''),
-                        _ => None,
-                    }
-                };
+        // Copy everything before the &
+        if amp_pos > 0 {
+            result.push_str(&s[pos..pos + amp_pos]);
+        }
+        pos += amp_pos;
 
-                if let Some(replacement_char) = replacement {
-                    result.push(replacement_char);
-                    // Skip past the entity in the input
-                    while let Some(&(next_i, _)) = chars.peek() {
-                        if next_i >= i + entity_with_amp.len() {
-                            break;
-                        }
-                        chars.next();
-                    }
-                    continue;
+        // Try to parse an entity starting at &
+        if let Some(semi_offset) = s[pos..].find(';') {
+            let entity_content = &s[pos + 1..pos + semi_offset];
+            let entity_end = pos + semi_offset + 1;
+
+            let replacement = if entity_content.starts_with('#') {
+                parse_numeric_entity(entity_content)
+            } else {
+                match entity_content {
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "amp" => Some('&'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    _ => None,
                 }
+            };
+
+            if let Some(replacement_char) = replacement {
+                result.push(replacement_char);
+                pos = entity_end;
+                continue;
             }
         }
-        result.push(c);
+
+        // Not a valid entity, keep the &
+        result.push('&');
+        pos += 1;
     }
 
     Cow::Owned(result)
