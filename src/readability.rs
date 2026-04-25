@@ -21,9 +21,9 @@ use crate::metadata::{
 use crate::options::Options;
 use crate::scoring::{
     compute_initial_readability_data, get_inner_text, get_link_density, get_link_density_cached,
-    get_or_compute_stats, has_child_block_element, has_single_tag_inside_element, initialize_node,
-    is_element_without_content, is_phrasing_content, is_probably_visible, is_valid_byline,
-    wrap_phrasing_content_in_p,
+    get_or_compute_stats, has_child_block_element, has_non_empty_inner_text,
+    has_single_tag_inside_element, initialize_node, is_element_without_content,
+    is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
 };
 use crate::selectors::{SELECTORS, Selectors};
 use dom_query::{Document, Node, NodeId};
@@ -296,7 +296,8 @@ impl<'a> Readability<'a> {
 
             // First, node prepping
             // Use HashSet for O(1) membership checks (Phase 1.2)
-            let mut elements_to_score: HashSet<NodeId> = HashSet::new();
+            // Pre-allocate with reasonable capacity estimate
+            let mut elements_to_score: HashSet<NodeId> = HashSet::with_capacity(256);
 
             // Get the HTML element for language
             if let Some(html) = self.doc.select_matcher(&SELECTORS.html).nodes().first()
@@ -306,16 +307,18 @@ impl<'a> Readability<'a> {
             }
 
             // Track nodes to remove (use HashSet for efficient lookup)
-            let mut nodes_to_remove: HashSet<NodeId> = HashSet::new();
+            let mut nodes_to_remove: HashSet<NodeId> = HashSet::with_capacity(64);
             let mut should_remove_title_header = true;
 
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let all_nodes_index: HashMap<NodeId, usize> = all_nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.id, i))
-                .collect();
+            let all_nodes_index: HashMap<NodeId, usize> = {
+                let mut index = HashMap::with_capacity(all_nodes.len());
+                for (i, node) in all_nodes.iter().enumerate() {
+                    index.insert(node.id, i);
+                }
+                index
+            };
 
             // Reusable buffer for building match_string to avoid allocations per node
             let mut match_string_buf = String::with_capacity(128);
@@ -441,7 +444,7 @@ impl<'a> Readability<'a> {
                 if matches!(
                     &*tag_name,
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-                ) && is_element_without_content(node, &SELECTORS)
+                ) && is_element_without_content(node)
                 {
                     nodes_to_remove.insert(node.id);
                     active_removed_root = Some(node.id);
@@ -1185,7 +1188,7 @@ impl<'a> Readability<'a> {
         for p in ps {
             let has_media =
                 node_select_matcher(&p, &selectors.img_embed_object_iframe).length() > 0;
-            let has_text = !get_inner_text(&p, false).is_empty();
+            let has_text = has_non_empty_inner_text(&p);
             if !has_media && !has_text {
                 p.remove_from_parent();
             }

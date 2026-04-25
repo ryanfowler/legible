@@ -31,17 +31,22 @@ pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
             if c == '.' {
                 last_was_dot = true;
             }
-            if matches!(
-                c,
-                ',' | '\u{060C}'
-                    | '\u{FE50}'
-                    | '\u{FE10}'
-                    | '\u{FE11}'
-                    | '\u{2E41}'
-                    | '\u{2E34}'
-                    | '\u{2E32}'
-                    | '\u{FF0C}'
-            ) {
+            // Fast path: ASCII comma is by far the most common;
+            // only check Unicode commas for non-ASCII characters
+            let is_comma = c == ','
+                || (c as u32 >= 0x0600
+                    && matches!(
+                        c,
+                        '\u{060C}'
+                            | '\u{FE50}'
+                            | '\u{FE10}'
+                            | '\u{FE11}'
+                            | '\u{2E41}'
+                            | '\u{2E34}'
+                            | '\u{2E32}'
+                            | '\u{FF0C}'
+                    ));
+            if is_comma {
                 comma_count += 1;
             }
             text_length += 1;
@@ -64,45 +69,69 @@ pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
     }
 }
 
-/// Compute node stats and also return the inner text string.
+/// Compute node stats and also return the normalized inner text string.
+/// Combines whitespace normalization and stats computation into a single pass
+/// over the raw text, avoiding the intermediate allocation of normalize_whitespace.
 pub fn compute_node_stats_with_text(node: &Node<'_>) -> (NodeStats, String) {
-    let text = get_inner_text(node, true);
+    let raw = node.text();
+    let mut normalized = String::with_capacity(raw.len());
     let mut text_length: usize = 0;
     let mut comma_count: usize = 0;
-    for c in text.chars() {
-        text_length += 1;
-        if matches!(
-            c,
-            ',' | '\u{060C}'
-                | '\u{FE50}'
-                | '\u{FE10}'
-                | '\u{FE11}'
-                | '\u{2E41}'
-                | '\u{2E34}'
-                | '\u{2E32}'
-                | '\u{FF0C}'
-        ) {
-            comma_count += 1;
+    let mut prev_ws = true;
+    let mut last_was_dot = false;
+    let mut has_sentence_end = false;
+
+    for c in raw.chars() {
+        if c.is_whitespace() {
+            if last_was_dot {
+                has_sentence_end = true;
+            }
+            last_was_dot = false;
+            if !prev_ws {
+                normalized.push(' ');
+                text_length += 1;
+                prev_ws = true;
+            }
+        } else {
+            last_was_dot = c == '.';
+            // Fast path: ASCII comma is by far the most common;
+            // only check Unicode commas for non-ASCII characters
+            let is_comma = c == ','
+                || (c as u32 >= 0x0600
+                    && matches!(
+                        c,
+                        '\u{060C}'
+                            | '\u{FE50}'
+                            | '\u{FE10}'
+                            | '\u{FE11}'
+                            | '\u{2E41}'
+                            | '\u{2E34}'
+                            | '\u{2E32}'
+                            | '\u{FF0C}'
+                    ));
+            if is_comma {
+                comma_count += 1;
+            }
+            normalized.push(c);
+            text_length += 1;
+            prev_ws = false;
         }
     }
+
+    if prev_ws && text_length > 0 {
+        text_length -= 1;
+        normalized.pop();
+    }
+    if last_was_dot {
+        has_sentence_end = true;
+    }
+
     let stats = NodeStats {
         text_length,
         comma_count,
-        has_sentence_end: has_sentence_end(&text),
+        has_sentence_end,
     };
-    (stats, text)
-}
-
-/// Check if text contains a sentence-ending period (`. ` or `.` at end of string).
-/// Equivalent to the regex `\.( |$)` but avoids regex overhead.
-fn has_sentence_end(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'.' && (i + 1 >= bytes.len() || bytes[i + 1] == b' ') {
-            return true;
-        }
-    }
-    false
+    (stats, normalized)
 }
 
 /// Check if a URL is a hash URL (starts with '#' and has content after it).
@@ -209,12 +238,24 @@ pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
     weight
 }
 
+/// Check if a node has non-whitespace inner text, without allocating a String.
+/// This is an optimized alternative to `!get_inner_text(n, false).is_empty()`.
+pub fn has_non_empty_inner_text(node: &Node<'_>) -> bool {
+    node.text().chars().any(|c| !c.is_whitespace())
+}
+
 /// Get the inner text of a node, optionally normalizing whitespace.
 pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
     let text = node.text();
     let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
     if normalize_spaces {
         normalize_whitespace(trimmed)
+    } else if trimmed.as_ptr() == text.as_ptr() && trimmed.len() == text.len() {
+        // Text is already trimmed — avoid allocation when callers need ownership
+        text.to_string()
     } else {
         trimmed.to_string()
     }
@@ -453,7 +494,7 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
 }
 
 /// Check if an element has no content.
-pub fn is_element_without_content(node: &Node<'_>, selectors: &Selectors) -> bool {
+pub fn is_element_without_content(node: &Node<'_>) -> bool {
     if !node.is_element() {
         return false;
     }
@@ -467,11 +508,13 @@ pub fn is_element_without_content(node: &Node<'_>, selectors: &Selectors) -> boo
         return true;
     }
 
-    // Check if all children are just BR or HR
-    let br_count = node_select_matcher(node, &selectors.br).length();
-    let hr_count = node_select_matcher(node, &selectors.hr).length();
-
-    children.len() == br_count + hr_count
+    // Check if all children are just BR or HR (uses element_children directly
+    // to avoid the overhead of selector engine queries)
+    children.iter().all(|child| {
+        get_tag_name(child)
+            .as_deref()
+            .is_some_and(|tag| tag == "BR" || tag == "HR")
+    })
 }
 
 /// Check if this node has only whitespace and a single element with given tag.
@@ -513,12 +556,11 @@ pub fn has_child_block_element(node: &Node<'_>) -> bool {
 /// Check if a node is probably visible (not hidden).
 pub fn is_probably_visible(node: &Node<'_>) -> bool {
     // Check style attribute for display:none or visibility:hidden,
-    // ignoring case and whitespace variations.
+    // ignoring case and whitespace variations. Both patterns are checked
+    // in a single pass through the style string.
     if let Some(style) = node.attr("style") {
         let style_str = style.as_ref();
-        if contains_ignore_ascii_ws_case(style_str, b"display:none")
-            || contains_ignore_ascii_ws_case(style_str, b"visibility:hidden")
-        {
+        if has_hidden_style(style_str) {
             return false;
         }
     }
@@ -597,26 +639,54 @@ fn has_non_whitespace_text(node: &Node<'_>) -> bool {
     })
 }
 
-/// Check if `haystack` contains `needle` when ignoring ASCII whitespace and
-/// case. `needle` must be lowercase with no whitespace.
-fn contains_ignore_ascii_ws_case(haystack: &str, needle: &[u8]) -> bool {
-    let haystack = haystack.as_bytes();
+/// Check if a style string contains "display:none" or "visibility:hidden"
+/// (case-insensitive, whitespace-tolerant). Scans the string once for both patterns.
+fn has_hidden_style(haystack: &str) -> bool {
+    let hbytes = haystack.as_bytes();
+    let hlen = hbytes.len();
+    if hlen == 0 {
+        return false;
+    }
+
+    // Both patterns contain no whitespace and are lowercase. We scan for
+    // 'd' (display) or 'v' (visibility) as starting anchors.
+    let display_pat: &[u8] = b"display:none";
+    let vis_pat: &[u8] = b"visibility:hidden";
+
     let mut i = 0;
-    while i < haystack.len() {
+    while i < hlen {
+        let b = hbytes[i].to_ascii_lowercase();
+        let needle = if b == b'd' {
+            display_pat
+        } else if b == b'v' {
+            vis_pat
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let needle_len = needle.len();
+        if i + needle_len > hlen {
+            i += 1;
+            continue;
+        }
+
         let mut hi = i;
         let mut ni = 0;
-        while ni < needle.len() && hi < haystack.len() {
-            if haystack[hi].is_ascii_whitespace() {
+        let mut matches = true;
+        while ni < needle_len && hi < hlen {
+            if hbytes[hi].is_ascii_whitespace() {
                 hi += 1;
                 continue;
             }
-            if haystack[hi].to_ascii_lowercase() != needle[ni] {
+            if hbytes[hi].to_ascii_lowercase() != needle[ni] {
+                matches = false;
                 break;
             }
             hi += 1;
             ni += 1;
         }
-        if ni == needle.len() {
+        if matches && ni == needle_len {
             return true;
         }
         i += 1;
