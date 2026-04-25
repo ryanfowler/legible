@@ -115,8 +115,7 @@ pub(crate) fn is_probably_readerable_doc(
         }
 
         // Check text content length
-        let text = node.text();
-        let text_length = text.trim().chars().count();
+        let text_length = node.normalized_char_count();
 
         if text_length < options.min_content_length {
             continue;
