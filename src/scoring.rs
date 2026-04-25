@@ -6,31 +6,61 @@ use crate::selectors::Selectors;
 use dom_query::{Matcher, Node};
 
 /// Compute and return text statistics for a node.
-/// This extracts the inner text once and computes all metrics from it.
+/// Processes the raw concatenated text directly without building a normalized
+/// string, saving an allocation and a pass over the text.
 pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
-    let text = get_inner_text(node, true);
-    let mut text_length: usize = 0;
-    let mut comma_count: usize = 0;
+    let text = node.text();
+    let mut text_length = 0usize;
+    let mut comma_count = 0usize;
+    let mut has_sentence_end = false;
+    let mut prev_ws = true; // true to skip leading whitespace
+    let mut last_was_dot = false;
+
     for c in text.chars() {
-        text_length += 1;
-        if matches!(
-            c,
-            ',' | '\u{060C}'
-                | '\u{FE50}'
-                | '\u{FE10}'
-                | '\u{FE11}'
-                | '\u{2E41}'
-                | '\u{2E34}'
-                | '\u{2E32}'
-                | '\u{FF0C}'
-        ) {
-            comma_count += 1;
+        if c.is_whitespace() {
+            if last_was_dot {
+                has_sentence_end = true;
+            }
+            last_was_dot = false;
+            if !prev_ws {
+                text_length += 1;
+                prev_ws = true;
+            }
+        } else {
+            last_was_dot = false;
+            if c == '.' {
+                last_was_dot = true;
+            }
+            if matches!(
+                c,
+                ',' | '\u{060C}'
+                    | '\u{FE50}'
+                    | '\u{FE10}'
+                    | '\u{FE11}'
+                    | '\u{2E41}'
+                    | '\u{2E34}'
+                    | '\u{2E32}'
+                    | '\u{FF0C}'
+            ) {
+                comma_count += 1;
+            }
+            text_length += 1;
+            prev_ws = false;
         }
     }
+
+    // Trim trailing whitespace
+    if prev_ws && text_length > 0 {
+        text_length -= 1;
+    }
+    if last_was_dot {
+        has_sentence_end = true;
+    }
+
     NodeStats {
         text_length,
         comma_count,
-        has_sentence_end: has_sentence_end(&text),
+        has_sentence_end,
     }
 }
 
@@ -227,7 +257,7 @@ pub fn get_link_density_with_text(
 ) -> f64 {
     let text_length = match node_text {
         Some(t) => t.chars().count(),
-        None => get_inner_text(node, true).chars().count(),
+        None => node.normalized_char_count(),
     };
     if text_length == 0 {
         return 0.0;
@@ -241,7 +271,7 @@ pub fn get_link_density_with_text(
             Some(href) if is_hash_url(href.as_ref()) => 0.3,
             _ => 1.0,
         };
-        link_length += get_inner_text(link, true).chars().count() as f64 * coefficient;
+        link_length += link.normalized_char_count() as f64 * coefficient;
     }
 
     link_length / text_length as f64
@@ -476,6 +506,7 @@ pub fn has_child_block_element(node: &Node<'_>) -> bool {
     use crate::constants::DIV_TO_P_ELEMS;
 
     node.descendants_it()
+        .filter(|child| child.is_element())
         .any(|child| get_tag_name(&child).is_some_and(|tag| DIV_TO_P_ELEMS.contains(&*tag)))
 }
 

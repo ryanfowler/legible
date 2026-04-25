@@ -326,6 +326,7 @@ fn should_remove_conditionally(
     }
 
     // Get or compute cached stats for this node, also returning the inner text
+    // Get or compute cached stats for this node, also returning the inner text
     // to avoid a redundant get_inner_text call for the AD_LOADING_SET check below.
     let (stats, inner_text) = get_or_compute_stats_with_text(node, store);
     let content_length = stats.text_length;
@@ -360,53 +361,46 @@ fn should_remove_conditionally(
         return false;
     }
 
-    // Various content-based checks - single traversal instead of 4 separate selector calls
-    let (p_count, img_count, li_count, input_count) = {
-        let mut p: usize = 0;
-        let mut img: usize = 0;
-        let mut li: usize = 0;
-        let mut input: usize = 0;
-        for descendant in node.descendants_it() {
-            if let Some(tag) = get_tag_name(&descendant) {
-                match &*tag {
-                    "P" => p += 1,
-                    "IMG" => img += 1,
-                    "LI" => li += 1,
-                    "INPUT" => input += 1,
-                    _ => {}
+    // Various content-based checks and embed video checks in a single traversal
+    let mut p_count = 0usize;
+    let mut img_count = 0usize;
+    let mut li_count = 0usize;
+    let mut input_count = 0usize;
+    let mut embed_count = 0usize;
+
+    for descendant in node.descendants_it() {
+        if let Some(desc_tag) = get_tag_name(&descendant) {
+            match &*desc_tag {
+                "P" => p_count += 1,
+                "IMG" => img_count += 1,
+                "LI" => li_count += 1,
+                "INPUT" => input_count += 1,
+                "OBJECT" | "EMBED" | "IFRAME" => {
+                    let attrs = descendant.attrs();
+                    let mut has_video = false;
+                    for attr in attrs.iter() {
+                        if allowed_video_regex.is_match(attr.value.as_ref()) {
+                            has_video = true;
+                            break;
+                        }
+                    }
+                    if has_video {
+                        return false;
+                    }
+                    if desc_tag == "OBJECT"
+                        && allowed_video_regex.is_match(descendant.inner_html().as_ref())
+                    {
+                        return false;
+                    }
+                    embed_count += 1;
                 }
+                _ => {}
             }
         }
-        (p, img, li.saturating_sub(100), input)
-    };
-    let heading_density = get_text_density_cached(node, content_length, &selectors.headings, store);
-
-    let mut embed_count = 0;
-    let embeds = node_select_matcher(node, &selectors.object_embed_iframe);
-    for embed in embeds.nodes().iter() {
-        // Check if embed has allowed video URL
-        let attrs = embed.attrs();
-        let mut has_video = false;
-        for attr in attrs.iter() {
-            if allowed_video_regex.is_match(attr.value.as_ref()) {
-                has_video = true;
-                break;
-            }
-        }
-        if has_video {
-            return false;
-        }
-
-        // Check object innerHTML
-        if let Some(etag) = get_tag_name(embed)
-            && etag == "OBJECT"
-            && allowed_video_regex.is_match(embed.inner_html().as_ref())
-        {
-            return false;
-        }
-
-        embed_count += 1;
     }
+    let li_count = li_count.saturating_sub(100);
+
+    let heading_density = get_text_density_cached(node, content_length, &selectors.headings, store);
 
     // Check for ad/loading words - use RegexSet for single-pass matching
     if regexps::AD_LOADING_SET.is_match(&inner_text) {

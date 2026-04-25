@@ -32,7 +32,6 @@ pub struct Selectors {
 
     // Compound selectors for hot paths
     pub ul_ol: Matcher,
-    pub object_embed_iframe: Matcher,
     pub script_noscript: Matcher,
     pub style: Matcher,
     pub font: Matcher,
@@ -84,7 +83,6 @@ impl Selectors {
 
             // Compound selectors for hot paths
             ul_ol: Matcher::new("ul, ol").unwrap(),
-            object_embed_iframe: Matcher::new("object, embed, iframe").unwrap(),
             script_noscript: Matcher::new("script, noscript").unwrap(),
             style: Matcher::new("style").unwrap(),
             font: Matcher::new("font").unwrap(),
