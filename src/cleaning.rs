@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 
 use crate::constants::{
-    DEPRECATED_SIZE_ATTRIBUTE_ELEMS, PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension,
-    has_image_src, has_image_srcset, regexps,
+    PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension, has_image_src, has_image_srcset,
+    is_deprecated_size_attribute_elem, regexps,
 };
 use crate::dom::{
     NodeDataStore, build_match_string, get_tag_name, node_select, node_select_matcher,
@@ -214,7 +214,7 @@ pub fn clean_styles(node: &Node<'_>) {
 
         // Remove deprecated size attributes on certain elements
         if let Some(tag) = get_tag_name(&current)
-            && DEPRECATED_SIZE_ATTRIBUTE_ELEMS.contains(&*tag)
+            && is_deprecated_size_attribute_elem(&tag)
         {
             current.remove_attr("width");
             current.remove_attr("height");

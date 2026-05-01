@@ -1,6 +1,6 @@
 //! Content scoring logic for Readability.
 
-use crate::constants::{PHRASING_ELEMS, flags::*, regexps};
+use crate::constants::{flags::*, is_div_to_p_elem, is_phrasing_elem, regexps};
 use crate::dom::{NodeDataStore, NodeStats, get_tag_name, node_select_matcher};
 use crate::selectors::Selectors;
 use dom_query::{Matcher, Node};
@@ -399,7 +399,7 @@ fn is_phrasing_content_depth(node: &Node<'_>, depth: u32) -> bool {
     }
 
     if let Some(tag) = get_tag_name(node) {
-        if PHRASING_ELEMS.contains(&*tag) {
+        if is_phrasing_elem(&tag) {
             return true;
         }
 
@@ -546,11 +546,9 @@ pub fn has_single_tag_inside_element(node: &Node<'_>, tag: &str) -> bool {
 
 /// Check if an element has any children that are block-level elements.
 pub fn has_child_block_element(node: &Node<'_>) -> bool {
-    use crate::constants::DIV_TO_P_ELEMS;
-
     node.descendants_it()
         .filter(|child| child.is_element())
-        .any(|child| get_tag_name(&child).is_some_and(|tag| DIV_TO_P_ELEMS.contains(&*tag)))
+        .any(|child| get_tag_name(&child).is_some_and(|tag| is_div_to_p_elem(&tag)))
 }
 
 /// Check if a node is probably visible (not hidden).

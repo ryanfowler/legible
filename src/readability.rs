@@ -8,7 +8,7 @@ use crate::cleaning::{
     unwrap_noscript_images,
 };
 use crate::constants::{
-    ALTER_TO_DIV_EXCEPTIONS, DEFAULT_TAGS_TO_SCORE, UNLIKELY_ROLES, flags::*, regexps,
+    flags::*, is_alter_to_div_exception, is_default_tag_to_score, is_unlikely_role, regexps,
 };
 use crate::dom::{
     NodeDataStore, build_match_string, get_tag_name, has_ancestor_tag, node_select_matcher,
@@ -426,7 +426,7 @@ impl<'a> Readability<'a> {
                     }
 
                     if let Some(role) = node.attr("role")
-                        && UNLIKELY_ROLES.contains(role.as_ref())
+                        && is_unlikely_role(role.as_ref())
                     {
                         debug_log!(
                             self,
@@ -452,7 +452,7 @@ impl<'a> Readability<'a> {
                 }
 
                 // Add to elements to score (HashSet handles duplicates automatically)
-                if DEFAULT_TAGS_TO_SCORE.contains(&*tag_name) {
+                if is_default_tag_to_score(&tag_name) {
                     elements_to_score.insert(node.id);
                 }
 
@@ -1067,7 +1067,7 @@ impl<'a> Readability<'a> {
             if let Some(sibling) = node_index.get(sibling_id) {
                 // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
                 if let Some(tag) = get_tag_name(&sibling)
-                    && !ALTER_TO_DIV_EXCEPTIONS.contains(&*tag)
+                    && !is_alter_to_div_exception(&tag)
                 {
                     debug_log!(self, "Altering sibling {} to div", tag);
                     sibling.rename("div");
