@@ -2,7 +2,6 @@
 
 use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
-use std::collections::HashSet;
 
 /// Parsing flags that control the behavior of the algorithm.
 pub mod flags {
@@ -17,13 +16,13 @@ pub mod defaults {
     pub const DEFAULT_CHAR_THRESHOLD: usize = 500;
 }
 
-/// Default tags to score.
-pub static DEFAULT_TAGS_TO_SCORE: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["SECTION", "H2", "H3", "H4", "H5", "H6", "P", "TD", "PRE"]
-        .iter()
-        .copied()
-        .collect()
-});
+#[inline]
+pub fn is_default_tag_to_score(tag: &str) -> bool {
+    matches!(
+        tag,
+        "SECTION" | "H2" | "H3" | "H4" | "H5" | "H6" | "P" | "TD" | "PRE"
+    )
+}
 
 /// Regular expressions used throughout the parser.
 pub mod regexps {
@@ -138,47 +137,26 @@ pub mod regexps {
     });
 }
 
-/// Roles that indicate unlikely content areas.
-pub static UNLIKELY_ROLES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    [
-        "menu",
-        "menubar",
-        "complementary",
-        "navigation",
-        "alert",
-        "alertdialog",
-        "dialog",
-    ]
-    .iter()
-    .copied()
-    .collect()
-});
+#[inline]
+pub fn is_unlikely_role(role: &str) -> bool {
+    matches!(
+        role,
+        "menu" | "menubar" | "complementary" | "navigation" | "alert" | "alertdialog" | "dialog"
+    )
+}
 
-/// Block-level elements that cause DIV to P conversion.
-pub static DIV_TO_P_ELEMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    [
-        "BLOCKQUOTE",
-        "DL",
-        "DIV",
-        "IMG",
-        "OL",
-        "P",
-        "PRE",
-        "TABLE",
-        "UL",
-    ]
-    .iter()
-    .copied()
-    .collect()
-});
+#[inline]
+pub fn is_div_to_p_elem(tag: &str) -> bool {
+    matches!(
+        tag,
+        "BLOCKQUOTE" | "DL" | "DIV" | "IMG" | "OL" | "P" | "PRE" | "TABLE" | "UL"
+    )
+}
 
-/// Elements that should not be converted to DIV during sibling joining.
-pub static ALTER_TO_DIV_EXCEPTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["DIV", "ARTICLE", "SECTION", "P", "OL", "UL"]
-        .iter()
-        .copied()
-        .collect()
-});
+#[inline]
+pub fn is_alter_to_div_exception(tag: &str) -> bool {
+    matches!(tag, "DIV" | "ARTICLE" | "SECTION" | "P" | "OL" | "UL")
+}
 
 /// Presentational attributes to remove.
 pub static PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
@@ -196,23 +174,58 @@ pub static PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
     "vspace",
 ];
 
-/// Elements with deprecated size attributes to remove.
-pub static DEPRECATED_SIZE_ATTRIBUTE_ELEMS: Lazy<HashSet<&'static str>> =
-    Lazy::new(|| ["TABLE", "TH", "TD", "HR", "PRE"].iter().copied().collect());
+#[inline]
+pub fn is_deprecated_size_attribute_elem(tag: &str) -> bool {
+    matches!(tag, "TABLE" | "TH" | "TD" | "HR" | "PRE")
+}
 
-/// Phrasing content elements.
-/// Note: CANVAS, IFRAME, SVG, VIDEO are excluded as they tend to be removed.
-pub static PHRASING_ELEMS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    [
-        "ABBR", "AUDIO", "B", "BDO", "BR", "BUTTON", "CITE", "CODE", "DATA", "DATALIST", "DFN",
-        "EM", "EMBED", "I", "IMG", "INPUT", "KBD", "LABEL", "MARK", "MATH", "METER", "NOSCRIPT",
-        "OBJECT", "OUTPUT", "PROGRESS", "Q", "RUBY", "SAMP", "SCRIPT", "SELECT", "SMALL", "SPAN",
-        "STRONG", "SUB", "SUP", "TEXTAREA", "TIME", "VAR", "WBR",
-    ]
-    .iter()
-    .copied()
-    .collect()
-});
+/// Check for phrasing content elements. CANVAS, IFRAME, SVG, VIDEO are excluded
+/// as they tend to be removed.
+#[inline]
+pub fn is_phrasing_elem(tag: &str) -> bool {
+    matches!(
+        tag,
+        "ABBR"
+            | "AUDIO"
+            | "B"
+            | "BDO"
+            | "BR"
+            | "BUTTON"
+            | "CITE"
+            | "CODE"
+            | "DATA"
+            | "DATALIST"
+            | "DFN"
+            | "EM"
+            | "EMBED"
+            | "I"
+            | "IMG"
+            | "INPUT"
+            | "KBD"
+            | "LABEL"
+            | "MARK"
+            | "MATH"
+            | "METER"
+            | "NOSCRIPT"
+            | "OBJECT"
+            | "OUTPUT"
+            | "PROGRESS"
+            | "Q"
+            | "RUBY"
+            | "SAMP"
+            | "SCRIPT"
+            | "SELECT"
+            | "SMALL"
+            | "SPAN"
+            | "STRONG"
+            | "SUB"
+            | "SUP"
+            | "TEXTAREA"
+            | "TIME"
+            | "VAR"
+            | "WBR"
+    )
+}
 
 /// Image extensions to check (without the dot, for suffix matching).
 const IMAGE_EXTS: [&[u8]; 5] = [b"jpg", b"jpeg", b"png", b"webp", b"avif"];
