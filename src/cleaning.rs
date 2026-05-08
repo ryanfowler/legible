@@ -6,9 +6,7 @@ use crate::constants::{
     PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension, has_image_src, has_image_srcset,
     is_deprecated_size_attribute_elem, regexps,
 };
-use crate::dom::{
-    NodeDataStore, build_match_string, get_tag_name, node_select, node_select_matcher,
-};
+use crate::dom::{NodeDataStore, build_match_string, get_tag_name, node_select_matcher};
 use crate::scoring::{
     get_class_weight, get_link_density_cached, get_or_compute_stats,
     get_or_compute_stats_with_text, get_text_density_cached, has_single_tag_inside_element,
@@ -207,17 +205,26 @@ pub fn clean_styles(node: &Node<'_>) {
             continue;
         }
 
-        // Remove presentational attributes
-        for attr in PRESENTATIONAL_ATTRIBUTES.iter() {
-            current.remove_attr(attr);
+        // Remove presentational attributes only if any are present
+        if PRESENTATIONAL_ATTRIBUTES
+            .iter()
+            .any(|attr| current.has_attr(attr))
+        {
+            for attr in PRESENTATIONAL_ATTRIBUTES.iter() {
+                current.remove_attr(attr);
+            }
         }
 
         // Remove deprecated size attributes on certain elements
         if let Some(tag) = get_tag_name(&current)
             && is_deprecated_size_attribute_elem(&tag)
         {
-            current.remove_attr("width");
-            current.remove_attr("height");
+            if current.has_attr("width") {
+                current.remove_attr("width");
+            }
+            if current.has_attr("height") {
+                current.remove_attr("height");
+            }
         }
     }
 }
@@ -238,8 +245,10 @@ pub fn clean_headers(node: &Node<'_>, flags: u32, selectors: &Selectors) {
 }
 
 /// Clean elements conditionally based on content analysis.
+#[allow(clippy::too_many_arguments)]
 pub fn clean_conditionally(
     node: &Node<'_>,
+    matcher: &dom_query::Matcher,
     tag: &str,
     flags: u32,
     allowed_video_regex: &Regex,
@@ -254,7 +263,7 @@ pub fn clean_conditionally(
     // Collect elements first, then process in reverse order like JS does.
     // Important: We evaluate and remove one at a time so that removing a
     // nested element affects the counts for parent elements.
-    let elements: Vec<_> = node_select(node, tag).nodes().to_vec();
+    let elements: Vec<_> = node_select_matcher(node, matcher).nodes().to_vec();
 
     // Process in reverse order (back to front) like JavaScript
     for elem in elements.into_iter().rev() {

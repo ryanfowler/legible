@@ -80,12 +80,12 @@ pub(crate) fn is_probably_readerable_doc(
 
     // Iterate directly over the collected nodes
     for node in nodes.iter() {
-        // Check visibility
+        // Check visibility (no match_string needed)
         if !is_probably_visible(node) {
             continue;
         }
 
-        // Build match_string for regex - reuse buffer to avoid allocations
+        // Build match_string lazily — only needed for regex check
         build_match_string(node, &mut match_string_buf);
 
         // Use RegexSet for single-pass matching of both patterns
