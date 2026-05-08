@@ -54,6 +54,11 @@ pub struct Selectors {
     pub headings: Matcher,
     pub textish_tags: Matcher,
 
+    // clean_conditionally tag selectors
+    pub form: Matcher,
+    pub fieldset: Matcher,
+    pub div: Matcher,
+
     // Readerable check
     pub p_pre_article: Matcher,
     pub div_br: Matcher,
@@ -109,6 +114,11 @@ impl Selectors {
                 "span, li, td, blockquote, dl, div, img, ol, p, pre, table, ul",
             )
             .unwrap(),
+
+            // clean_conditionally tag selectors
+            form: Matcher::new("form").unwrap(),
+            fieldset: Matcher::new("fieldset").unwrap(),
+            div: Matcher::new("div").unwrap(),
 
             // Readerable check
             p_pre_article: Matcher::new("p, pre, article").unwrap(),

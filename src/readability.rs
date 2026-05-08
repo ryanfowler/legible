@@ -10,9 +10,7 @@ use crate::cleaning::{
 use crate::constants::{
     flags::*, is_alter_to_div_exception, is_default_tag_to_score, is_unlikely_role, regexps,
 };
-use crate::dom::{
-    NodeDataStore, build_match_string, get_tag_name, has_ancestor_tag, node_select_matcher,
-};
+use crate::dom::{NodeDataStore, build_match_string, get_tag_name, node_select_matcher};
 use crate::error::{Error, Result};
 use crate::logging::debug_log;
 use crate::metadata::{
@@ -350,19 +348,16 @@ impl<'a> Readability<'a> {
                 }
 
                 let tag_name = get_tag_name(node).unwrap_or_default();
-                // Build match_string for regex matching - reuse buffer to avoid allocations
-                build_match_string(node, &mut match_string_buf);
-                let match_string = &match_string_buf;
 
-                // Check visibility
+                // Check visibility (no match_string needed)
                 if !is_probably_visible(node) {
-                    debug_log!(self, "Removing hidden node: {}", match_string);
+                    debug_log!(self, "Removing hidden node");
                     nodes_to_remove.insert(node.id);
                     active_removed_root = Some(node.id);
                     continue;
                 }
 
-                // Check aria-modal with role=dialog
+                // Check aria-modal with role=dialog (no match_string needed)
                 if node
                     .attr("aria-modal")
                     .map(|s| s.as_ref() == "true")
@@ -378,20 +373,20 @@ impl<'a> Readability<'a> {
                 }
 
                 // Check for byline
-                if self.article_byline.is_none()
-                    && self.metadata.byline.is_none()
-                    && is_valid_byline(node, match_string)
-                {
-                    // Look for itemprop="name" child
-                    let itemprop_name = node_select_matcher(node, &SELECTORS.itemprop)
-                        .nodes()
-                        .first()
-                        .cloned();
-                    let byline_node = itemprop_name.as_ref().unwrap_or(node);
-                    self.article_byline = Some(byline_node.text().trim().to_string());
-                    nodes_to_remove.insert(node.id);
-                    active_removed_root = Some(node.id);
-                    continue;
+                if self.article_byline.is_none() && self.metadata.byline.is_none() {
+                    build_match_string(node, &mut match_string_buf);
+                    if is_valid_byline(node, &match_string_buf) {
+                        // Look for itemprop="name" child
+                        let itemprop_name = node_select_matcher(node, &SELECTORS.itemprop)
+                            .nodes()
+                            .first()
+                            .cloned();
+                        let byline_node = itemprop_name.as_ref().unwrap_or(node);
+                        self.article_byline = Some(byline_node.text().trim().to_string());
+                        nodes_to_remove.insert(node.id);
+                        active_removed_root = Some(node.id);
+                        continue;
+                    }
                 }
 
                 // Check for duplicate title header
@@ -412,13 +407,14 @@ impl<'a> Readability<'a> {
                 if strip_unlikely_candidates {
                     // Check tag names first (cheap) before running regex (expensive)
                     if tag_name != "BODY" && tag_name != "A" {
-                        let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string);
+                        build_match_string(node, &mut match_string_buf);
+                        let candidate_matches =
+                            regexps::CANDIDATE_FILTER_SET.matches(&match_string_buf);
                         if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
                             && !candidate_matches.matched(1)  // OK_MAYBE_ITS_A_CANDIDATE
-                            && !has_ancestor_tag(node, "table", 3, None::<fn(&Node) -> bool>)
-                            && !has_ancestor_tag(node, "code", 3, None::<fn(&Node) -> bool>)
+                            && !has_ancestor_tags_any(node, &["table", "code"], 3)
                         {
-                            debug_log!(self, "Removing unlikely candidate: {}", match_string);
+                            debug_log!(self, "Removing unlikely candidate: {}", &match_string_buf);
                             nodes_to_remove.insert(node.id);
                             active_removed_root = Some(node.id);
                             continue;
@@ -432,7 +428,7 @@ impl<'a> Readability<'a> {
                             self,
                             "Removing element with role={}: {}",
                             role,
-                            match_string
+                            &match_string_buf
                         );
                         nodes_to_remove.insert(node.id);
                         active_removed_root = Some(node.id);
@@ -1108,6 +1104,7 @@ impl<'a> Readability<'a> {
 
         clean_conditionally(
             article_content,
+            &selectors.form,
             "form",
             flags,
             video_regex,
@@ -1117,6 +1114,7 @@ impl<'a> Readability<'a> {
         );
         clean_conditionally(
             article_content,
+            &selectors.fieldset,
             "fieldset",
             flags,
             video_regex,
@@ -1133,6 +1131,14 @@ impl<'a> Readability<'a> {
         let share_threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
         for child in article_content.element_children() {
             clean_matched_nodes(&child, |node, match_string| {
+                // Fast path: regex requires "share" or "sharedaddy" to be present
+                if !match_string
+                    .as_bytes()
+                    .windows(5)
+                    .any(|w| w.eq_ignore_ascii_case(b"share"))
+                {
+                    return false;
+                }
                 regexps::SHARE_ELEMENTS.is_match(match_string)
                     && node.text().len() < share_threshold
             });
@@ -1148,6 +1154,7 @@ impl<'a> Readability<'a> {
 
         clean_conditionally(
             article_content,
+            &selectors.table,
             "table",
             flags,
             video_regex,
@@ -1157,6 +1164,7 @@ impl<'a> Readability<'a> {
         );
         clean_conditionally(
             article_content,
+            &selectors.ul_ol,
             "ul",
             flags,
             video_regex,
@@ -1166,6 +1174,7 @@ impl<'a> Readability<'a> {
         );
         clean_conditionally(
             article_content,
+            &selectors.div,
             "div",
             flags,
             video_regex,
@@ -1424,6 +1433,29 @@ impl<'a> Readability<'a> {
         self.node_data.clear();
         Ok(())
     }
+}
+
+/// Check if a node has an ancestor with any of the given tag names, up to max_depth.
+/// This is more efficient than calling has_ancestor_tag multiple times.
+fn has_ancestor_tags_any(node: &Node<'_>, tags: &[&str], max_depth: usize) -> bool {
+    let mut depth = 0;
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if max_depth > 0 && depth >= max_depth {
+            return false;
+        }
+        if let Some(parent_tag) = parent.node_name() {
+            let pt = parent_tag.as_ref();
+            for tag in tags {
+                if pt.eq_ignore_ascii_case(tag) {
+                    return true;
+                }
+            }
+        }
+        current = parent.parent();
+        depth += 1;
+    }
+    false
 }
 
 /// Get ancestors of a node up to max_depth (0 = unlimited).

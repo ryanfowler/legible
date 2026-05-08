@@ -322,7 +322,7 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
         }
     } else if orig_title.contains(": ") {
         // Check if we have a heading containing this exact string
-        let headings = doc.select("h1, h2");
+        let headings = doc.select_matcher(&selectors.h1_h2);
         let trimmed_title = orig_title.trim();
         let has_match = headings.iter().any(|h| h.text().trim() == trimmed_title);
 
@@ -346,7 +346,7 @@ pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
         }
     } else if !(15..=150).contains(&orig_title_len) {
         // Title too long or short, try H1
-        let h1s = doc.select("h1");
+        let h1s = doc.select_matcher(&selectors.h1);
         if h1s.length() == 1
             && let Some(h1) = h1s.nodes().first()
         {
