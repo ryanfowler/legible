@@ -21,7 +21,6 @@ pub struct Selectors {
 
     // Common element selectors
     pub p: Matcher,
-    pub a: Matcher,
     pub br: Matcher,
     pub h1: Matcher,
     pub h1_h2: Matcher,
@@ -41,8 +40,6 @@ pub struct Selectors {
     // Image/media related selectors
     pub img_picture_figure: Matcher,
     pub img_picture: Matcher,
-    pub img_embed_object_iframe: Matcher,
-    pub img_picture_figure_video_audio_source: Matcher,
 
     // Table data detection
     pub table_data_elements: Matcher,
@@ -72,7 +69,6 @@ impl Selectors {
 
             // Common element selectors
             p: Matcher::new("p").unwrap(),
-            a: Matcher::new("a").unwrap(),
             br: Matcher::new("br").unwrap(),
             h1: Matcher::new("h1").unwrap(),
             h1_h2: Matcher::new("h1, h2").unwrap(),
@@ -92,11 +88,6 @@ impl Selectors {
             // Image/media related selectors
             img_picture_figure: Matcher::new("img, picture, figure").unwrap(),
             img_picture: Matcher::new("img, picture").unwrap(),
-            img_embed_object_iframe: Matcher::new("img, embed, object, iframe").unwrap(),
-            img_picture_figure_video_audio_source: Matcher::new(
-                "img, picture, figure, video, audio, source",
-            )
-            .unwrap(),
 
             // Table data detection
             table_data_elements: Matcher::new("col, colgroup, tfoot, thead, th").unwrap(),

@@ -1,7 +1,7 @@
 //! Content scoring logic for Readability.
 
 use crate::constants::{flags::*, is_div_to_p_elem, is_phrasing_elem, regexps};
-use crate::dom::{NodeDataStore, NodeStats, get_tag_name, node_select_matcher};
+use crate::dom::{NodeDataStore, NodeStats, get_tag_name, has_tag_name};
 use crate::selectors::Selectors;
 use dom_query::Node;
 
@@ -294,7 +294,7 @@ fn normalize_whitespace(s: &str) -> String {
 pub fn get_link_density_with_text(
     node: &Node<'_>,
     node_text: Option<&str>,
-    selectors: &Selectors,
+    _selectors: &Selectors,
 ) -> f64 {
     let text_length = match node_text {
         Some(t) => t.chars().count(),
@@ -306,7 +306,10 @@ pub fn get_link_density_with_text(
 
     let mut link_length = 0.0;
 
-    for link in node_select_matcher(node, &selectors.a).nodes().iter() {
+    for link in node
+        .descendants_it()
+        .filter(|descendant| has_tag_name(descendant, "a"))
+    {
         // Check href directly without allocating a new String
         let coefficient = match link.attr("href") {
             Some(href) if is_hash_url(href.as_ref()) => 0.3,
@@ -329,7 +332,7 @@ pub fn get_link_density_cached(
     node: &Node<'_>,
     parent_text_length: usize,
     store: &mut NodeDataStore,
-    selectors: &Selectors,
+    _selectors: &Selectors,
 ) -> f64 {
     if parent_text_length == 0 {
         return 0.0;
@@ -337,9 +340,12 @@ pub fn get_link_density_cached(
 
     let mut link_length = 0.0;
 
-    for link in node_select_matcher(node, &selectors.a).nodes().iter() {
+    for link in node
+        .descendants_it()
+        .filter(|descendant| has_tag_name(descendant, "a"))
+    {
         // Get or compute stats for the link
-        let link_stats = get_or_compute_stats(link, store);
+        let link_stats = get_or_compute_stats(&link, store);
 
         // Check href directly without allocating a new String
         let coefficient = match link.attr("href") {
