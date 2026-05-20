@@ -3,7 +3,7 @@
 use crate::constants::{flags::*, is_div_to_p_elem, is_phrasing_elem, regexps};
 use crate::dom::{NodeDataStore, NodeStats, get_tag_name, node_select_matcher};
 use crate::selectors::Selectors;
-use dom_query::{Matcher, Node};
+use dom_query::Node;
 
 /// Compute and return text statistics for a node.
 /// Processes the raw concatenated text directly without building a normalized
@@ -350,28 +350,6 @@ pub fn get_link_density_cached(
     }
 
     link_length / parent_text_length as f64
-}
-
-/// Get the text density using a pre-computed parent text length.
-/// Caches child text stats for efficiency.
-pub fn get_text_density_cached(
-    node: &Node<'_>,
-    parent_text_length: usize,
-    matcher: &Matcher,
-    store: &mut NodeDataStore,
-) -> f64 {
-    if parent_text_length == 0 {
-        return 0.0;
-    }
-
-    let mut children_length = 0;
-
-    for child in node_select_matcher(node, matcher).nodes().iter() {
-        let child_stats = get_or_compute_stats(child, store);
-        children_length += child_stats.text_length;
-    }
-
-    children_length as f64 / parent_text_length as f64
 }
 
 /// Check if a node is whitespace.

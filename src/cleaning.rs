@@ -9,8 +9,8 @@ use crate::constants::{
 use crate::dom::{NodeDataStore, build_match_string, get_tag_name, node_select_matcher};
 use crate::scoring::{
     get_class_weight, get_link_density_cached, get_or_compute_stats,
-    get_or_compute_stats_with_text, get_text_density_cached, has_single_tag_inside_element,
-    is_element_without_content, is_phrasing_content,
+    get_or_compute_stats_with_text, has_single_tag_inside_element, is_element_without_content,
+    is_phrasing_content,
 };
 use crate::selectors::Selectors;
 use dom_query::{Document, Node};
@@ -335,28 +335,9 @@ fn should_remove_conditionally(
     }
 
     // Get or compute cached stats for this node, also returning the inner text
-    // Get or compute cached stats for this node, also returning the inner text
     // to avoid a redundant get_inner_text call for the AD_LOADING_SET check below.
     let (stats, inner_text) = get_or_compute_stats_with_text(node, store);
     let content_length = stats.text_length;
-
-    let is_list = tag == "ul" || tag == "ol";
-    let is_list = if !is_list {
-        // Check if this element is mostly a list
-        let list_nodes = node_select_matcher(node, &selectors.ul_ol);
-        let mut list_length = 0;
-        for list in list_nodes.nodes().iter() {
-            let list_stats = get_or_compute_stats(list, store);
-            list_length += list_stats.text_length;
-        }
-        if content_length > 0 {
-            list_length as f64 / content_length as f64 > 0.9
-        } else {
-            false
-        }
-    } else {
-        is_list
-    };
 
     let weight = get_class_weight(node, flags);
 
@@ -376,14 +357,37 @@ fn should_remove_conditionally(
     let mut li_count = 0usize;
     let mut input_count = 0usize;
     let mut embed_count = 0usize;
+    let mut heading_length = 0usize;
+    let mut textish_length = 0usize;
+    let mut list_length = 0usize;
 
     for descendant in node.descendants_it() {
         if let Some(desc_tag) = get_tag_name(&descendant) {
             match &*desc_tag {
-                "P" => p_count += 1,
-                "IMG" => img_count += 1,
-                "LI" => li_count += 1,
+                "P" => {
+                    p_count += 1;
+                    textish_length += get_or_compute_stats(&descendant, store).text_length;
+                }
+                "IMG" => {
+                    img_count += 1;
+                    textish_length += get_or_compute_stats(&descendant, store).text_length;
+                }
+                "LI" => {
+                    li_count += 1;
+                    textish_length += get_or_compute_stats(&descendant, store).text_length;
+                }
                 "INPUT" => input_count += 1,
+                "UL" | "OL" => {
+                    let descendant_length = get_or_compute_stats(&descendant, store).text_length;
+                    list_length += descendant_length;
+                    textish_length += descendant_length;
+                }
+                "H1" | "H2" | "H3" | "H4" | "H5" | "H6" => {
+                    heading_length += get_or_compute_stats(&descendant, store).text_length;
+                }
+                "SPAN" | "TD" | "BLOCKQUOTE" | "DL" | "DIV" | "PRE" | "TABLE" => {
+                    textish_length += get_or_compute_stats(&descendant, store).text_length;
+                }
                 "OBJECT" | "EMBED" | "IFRAME" => {
                     let attrs = descendant.attrs();
                     let mut has_video = false;
@@ -409,7 +413,19 @@ fn should_remove_conditionally(
     }
     let li_count = li_count.saturating_sub(100);
 
-    let heading_density = get_text_density_cached(node, content_length, &selectors.headings, store);
+    let is_list = if tag == "ul" || tag == "ol" {
+        true
+    } else if content_length > 0 {
+        list_length as f64 / content_length as f64 > 0.9
+    } else {
+        false
+    };
+
+    let heading_density = if content_length > 0 {
+        heading_length as f64 / content_length as f64
+    } else {
+        0.0
+    };
 
     // Check for ad/loading words - use RegexSet for single-pass matching
     if regexps::AD_LOADING_SET.is_match(&inner_text) {
@@ -418,8 +434,11 @@ fn should_remove_conditionally(
 
     let link_density = get_link_density_cached(node, content_length, store, selectors);
 
-    let text_density =
-        get_text_density_cached(node, content_length, &selectors.textish_tags, store);
+    let text_density = if content_length > 0 {
+        textish_length as f64 / content_length as f64
+    } else {
+        0.0
+    };
 
     // Check if this is a child of figure
     let is_figure_child = {

@@ -25,7 +25,7 @@ use crate::scoring::{
 };
 use crate::selectors::{SELECTORS, Selectors};
 use dom_query::{Document, Node, NodeId};
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 use regex::Regex;
 use url::Url;
 
@@ -137,28 +137,6 @@ pub(crate) struct Readability<'a> {
 struct AttemptResult {
     content_html: String,
     text_length: usize,
-}
-
-/// Cached node index for O(1) lookups by NodeId.
-/// This avoids rebuilding the index multiple times during grab_article.
-struct NodeIndex<'a> {
-    nodes: Vec<Node<'a>>,
-    index: HashMap<NodeId, usize>,
-}
-
-impl<'a> NodeIndex<'a> {
-    /// Build a new node index from the document.
-    fn new(doc: &'a Document) -> Self {
-        let nodes: Vec<_> = doc.select("*").nodes().to_vec();
-        let index: HashMap<NodeId, usize> =
-            nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
-        Self { nodes, index }
-    }
-
-    /// Get a node by its ID in O(1) time.
-    fn get(&self, id: &NodeId) -> Option<Node<'a>> {
-        self.index.get(id).map(|&i| self.nodes[i])
-    }
 }
 
 /// Intermediate article content extracted by grab_article
@@ -310,13 +288,7 @@ impl<'a> Readability<'a> {
 
             // First pass: identify nodes to remove and score
             let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
-            let all_nodes_index: HashMap<NodeId, usize> = {
-                let mut index = HashMap::with_capacity(all_nodes.len());
-                for (i, node) in all_nodes.iter().enumerate() {
-                    index.insert(node.id, i);
-                }
-                index
-            };
+            let mut nodes_to_remove_ordered = Vec::with_capacity(64);
 
             // Reusable buffer for building match_string to avoid allocations per node
             let mut match_string_buf = String::with_capacity(128);
@@ -352,7 +324,9 @@ impl<'a> Readability<'a> {
                 // Check visibility (no match_string needed)
                 if !is_probably_visible(node) {
                     debug_log!(self, "Removing hidden node");
-                    nodes_to_remove.insert(node.id);
+                    if nodes_to_remove.insert(node.id) {
+                        nodes_to_remove_ordered.push(*node);
+                    }
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -367,7 +341,9 @@ impl<'a> Readability<'a> {
                         .map(|s| s.as_ref() == "dialog")
                         .unwrap_or(false)
                 {
-                    nodes_to_remove.insert(node.id);
+                    if nodes_to_remove.insert(node.id) {
+                        nodes_to_remove_ordered.push(*node);
+                    }
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -383,7 +359,9 @@ impl<'a> Readability<'a> {
                             .cloned();
                         let byline_node = itemprop_name.as_ref().unwrap_or(node);
                         self.article_byline = Some(byline_node.text().trim().to_string());
-                        nodes_to_remove.insert(node.id);
+                        if nodes_to_remove.insert(node.id) {
+                            nodes_to_remove_ordered.push(*node);
+                        }
                         active_removed_root = Some(node.id);
                         continue;
                     }
@@ -398,7 +376,9 @@ impl<'a> Readability<'a> {
                         self.article_title.trim()
                     );
                     should_remove_title_header = false;
-                    nodes_to_remove.insert(node.id);
+                    if nodes_to_remove.insert(node.id) {
+                        nodes_to_remove_ordered.push(*node);
+                    }
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -415,7 +395,9 @@ impl<'a> Readability<'a> {
                             && !has_ancestor_tags_any(node, &["table", "code"], 3)
                         {
                             debug_log!(self, "Removing unlikely candidate: {}", &match_string_buf);
-                            nodes_to_remove.insert(node.id);
+                            if nodes_to_remove.insert(node.id) {
+                                nodes_to_remove_ordered.push(*node);
+                            }
                             active_removed_root = Some(node.id);
                             continue;
                         }
@@ -430,7 +412,9 @@ impl<'a> Readability<'a> {
                             role,
                             &match_string_buf
                         );
-                        nodes_to_remove.insert(node.id);
+                        if nodes_to_remove.insert(node.id) {
+                            nodes_to_remove_ordered.push(*node);
+                        }
                         active_removed_root = Some(node.id);
                         continue;
                     }
@@ -442,7 +426,9 @@ impl<'a> Readability<'a> {
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
                 ) && is_element_without_content(node)
                 {
-                    nodes_to_remove.insert(node.id);
+                    if nodes_to_remove.insert(node.id) {
+                        nodes_to_remove_ordered.push(*node);
+                    }
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -488,21 +474,17 @@ impl<'a> Readability<'a> {
                 }
             }
 
-            // Remove marked nodes using the HashMap index for O(1) lookups
-            for node_id in &nodes_to_remove {
-                if let Some(&idx) = all_nodes_index.get(node_id) {
-                    all_nodes[idx].remove_from_parent();
-                }
+            // Remove marked nodes directly. Node IDs are arena indices, so we do not
+            // need to rebuild a document-wide lookup table after the first pass.
+            for node in nodes_to_remove_ordered {
+                node.remove_from_parent();
             }
-
-            // Build node index once after removals - reuse for scoring, candidates, and sibling gathering
-            let cached_index = NodeIndex::new(&self.doc);
 
             // Score elements
             let mut candidates: Vec<NodeId> = Vec::with_capacity(elements_to_score.len());
 
             for node_id in &elements_to_score {
-                let node = match cached_index.get(node_id) {
+                let node = match self.doc.tree.get(node_id) {
                     Some(n) => n,
                     None => continue,
                 };
@@ -566,7 +548,7 @@ impl<'a> Readability<'a> {
             let mut all_candidate_scores: Vec<(NodeId, f64)> = Vec::with_capacity(candidates.len());
 
             for candidate_id in &candidates {
-                let candidate = match cached_index.get(candidate_id) {
+                let candidate = match self.doc.tree.get(candidate_id) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -639,7 +621,7 @@ impl<'a> Readability<'a> {
                 (Some(container_id), true)
             } else {
                 let top_id = top_candidates[0].0;
-                let mut top_candidate = cached_index.get(&top_id);
+                let mut top_candidate = self.doc.tree.get(&top_id);
 
                 // Alternative candidate ancestors logic:
                 // Find a better top candidate node if it contains (at least three) nodes
@@ -653,7 +635,7 @@ impl<'a> Readability<'a> {
                     let mut alternative_candidate_ancestors: Vec<HashSet<NodeId>> = Vec::new();
                     for &(candidate_id, candidate_score) in top_candidates.iter().skip(1) {
                         if candidate_score / top_score >= 0.75
-                            && let Some(candidate_node) = cached_index.get(&candidate_id)
+                            && let Some(candidate_node) = self.doc.tree.get(&candidate_id)
                         {
                             let ancestors: HashSet<NodeId> = get_ancestors(&candidate_node, 0)
                                 .iter()
@@ -772,7 +754,7 @@ impl<'a> Readability<'a> {
                 // Like JS, we always create a container and move siblings into it
                 let sibling_ids = Self::gather_siblings(
                     top_candidate_id,
-                    &cached_index,
+                    &self.doc,
                     &mut self.node_data,
                     &SELECTORS,
                     self.options.debug,
@@ -786,8 +768,8 @@ impl<'a> Readability<'a> {
                     // Create container DIV and move siblings into it
                     // This includes the case of a single sibling - we still need a container
                     // so that the wrapper div is added correctly
-                    if let Some(top_candidate) = cached_index.get(&top_candidate_id) {
-                        self.create_article_container(&top_candidate, &sibling_ids, &cached_index)
+                    if let Some(top_candidate) = self.doc.tree.get(&top_candidate_id) {
+                        self.create_article_container(&top_candidate, &sibling_ids)
                     } else {
                         Some(top_candidate_id)
                     }
@@ -955,12 +937,12 @@ impl<'a> Readability<'a> {
     /// Returns a list of NodeIds that should be included.
     fn gather_siblings(
         top_candidate_id: NodeId,
-        node_index: &NodeIndex<'_>,
+        doc: &Document,
         node_data: &mut NodeDataStore,
         selectors: &Selectors,
         debug: bool,
     ) -> Vec<NodeId> {
-        let top_candidate = match node_index.get(&top_candidate_id) {
+        let top_candidate = match doc.tree.get(&top_candidate_id) {
             Some(tc) => tc,
             None => return vec![top_candidate_id],
         };
@@ -1044,7 +1026,6 @@ impl<'a> Readability<'a> {
         &self,
         top_candidate: &Node<'_>,
         sibling_ids: &[NodeId],
-        node_index: &NodeIndex<'_>,
     ) -> Option<NodeId> {
         let parent = top_candidate.parent()?;
 
@@ -1053,14 +1034,14 @@ impl<'a> Readability<'a> {
         let container_id = container.id;
 
         // Find the first sibling to insert before - O(1) lookup
-        let first_sibling = sibling_ids.first().and_then(|id| node_index.get(id))?;
+        let first_sibling = sibling_ids.first().and_then(|id| self.doc.tree.get(id))?;
 
         // Insert container before the first sibling
         first_sibling.insert_before(&container);
 
         // Move each qualifying sibling into the container
         for sibling_id in sibling_ids {
-            if let Some(sibling) = node_index.get(sibling_id) {
+            if let Some(sibling) = self.doc.tree.get(sibling_id) {
                 // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
                 if let Some(tag) = get_tag_name(&sibling)
                     && !is_alter_to_div_exception(&tag)
