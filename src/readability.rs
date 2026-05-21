@@ -10,7 +10,10 @@ use crate::cleaning::{
 use crate::constants::{
     flags::*, is_alter_to_div_exception, is_default_tag_to_score, is_unlikely_role, regexps,
 };
-use crate::dom::{NodeDataStore, build_match_string, get_tag_name, node_select_matcher};
+use crate::dom::{
+    NodeDataStore, build_match_string, get_tag_name, has_any_tag_name, has_tag_name,
+    node_select_matcher,
+};
 use crate::error::{Error, Result};
 use crate::logging::debug_log;
 use crate::metadata::{
@@ -1176,8 +1179,9 @@ impl<'a> Readability<'a> {
             .nodes()
             .to_vec();
         for p in ps {
-            let has_media =
-                node_select_matcher(&p, &selectors.img_embed_object_iframe).length() > 0;
+            let has_media = p.descendants_it().any(|descendant| {
+                has_any_tag_name(&descendant, &["img", "embed", "object", "iframe"])
+            });
             let has_text = has_non_empty_inner_text(&p);
             if !has_media && !has_text {
                 p.remove_from_parent();
@@ -1312,10 +1316,11 @@ impl<'a> Readability<'a> {
             None => return,
         };
 
-        for link in node_select_matcher(article_content, &SELECTORS.a)
-            .nodes()
-            .iter()
-        {
+        let links: Vec<_> = article_content
+            .descendants_it()
+            .filter(|descendant| has_tag_name(descendant, "a"))
+            .collect();
+        for link in links {
             if let Some(href) = link.attr("href") {
                 if href.starts_with('#') {
                     continue;
@@ -1335,13 +1340,11 @@ impl<'a> Readability<'a> {
             }
         }
 
-        for media in node_select_matcher(
-            article_content,
-            &SELECTORS.img_picture_figure_video_audio_source,
-        )
-        .nodes()
-        .iter()
-        {
+        let media_elements: Vec<_> = article_content
+            .descendants_it()
+            .filter(is_url_rewriting_media_element)
+            .collect();
+        for media in media_elements {
             if let Some(src) = media.attr("src")
                 && let Ok(absolute) = base_uri.join(src.as_ref())
             {
@@ -1459,6 +1462,14 @@ fn get_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
     }
 
     ancestors
+}
+
+#[inline]
+fn is_url_rewriting_media_element(node: &Node<'_>) -> bool {
+    has_any_tag_name(
+        node,
+        &["img", "picture", "figure", "video", "audio", "source"],
+    )
 }
 
 /// Escape HTML special characters using single-pass with pre-allocated buffer.

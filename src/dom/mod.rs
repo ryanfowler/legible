@@ -4,7 +4,7 @@ mod node;
 mod traversal;
 
 pub use node::*;
-pub use traversal::get_tag_name;
+pub use traversal::{get_tag_name, has_any_tag_name, has_tag_name};
 
 use dom_query::{Matcher, Node, Selection};
 

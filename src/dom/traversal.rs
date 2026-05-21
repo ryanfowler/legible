@@ -6,7 +6,24 @@ use std::borrow::Cow;
 /// Get the tag name of a node in uppercase.
 /// Uses Cow to avoid allocation for common HTML tags.
 pub fn get_tag_name(node: &Node<'_>) -> Option<Cow<'static, str>> {
-    node.node_name().map(|n| intern_tag_name(n.as_ref()))
+    node.qual_name_ref()
+        .map(|name| intern_tag_name(name.local.as_ref()))
+}
+
+/// Check whether a node has the requested tag name without cloning the name.
+#[inline]
+pub fn has_tag_name(node: &Node<'_>, name: &str) -> bool {
+    node.qual_name_ref()
+        .is_some_and(|tag| tag.local.as_ref().eq_ignore_ascii_case(name))
+}
+
+/// Check whether a node has any of the requested tag names without cloning the name.
+#[inline]
+pub fn has_any_tag_name(node: &Node<'_>, names: &[&str]) -> bool {
+    node.qual_name_ref().is_some_and(|tag| {
+        let tag = tag.local.as_ref();
+        names.iter().any(|name| tag.eq_ignore_ascii_case(name))
+    })
 }
 
 /// Intern common HTML tag names to avoid repeated allocations.

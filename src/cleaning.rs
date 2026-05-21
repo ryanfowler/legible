@@ -307,6 +307,7 @@ fn should_remove_conditionally(
     // This single walk checks multiple conditions instead of walking ancestors twice
     let mut parent = node.parent();
     let mut depth = 0;
+    let mut is_figure_child = false;
     while let Some(p) = parent {
         if let Some(ptag) = get_tag_name(&p) {
             // Check if inside a data table (no depth limit)
@@ -319,6 +320,9 @@ fn should_remove_conditionally(
             // Check if inside code element (depth limit of 3)
             if depth <= 3 && ptag == "CODE" {
                 return false;
+            }
+            if depth <= 3 && ptag == "FIGURE" {
+                is_figure_child = true;
             }
         }
         parent = p.parent();
@@ -438,27 +442,6 @@ fn should_remove_conditionally(
         textish_length as f64 / content_length as f64
     } else {
         0.0
-    };
-
-    // Check if this is a child of figure
-    let is_figure_child = {
-        let mut parent = node.parent();
-        let mut depth = 0;
-        let mut result = false;
-        while let Some(p) = parent {
-            if depth > 3 {
-                break;
-            }
-            if let Some(ptag) = get_tag_name(&p)
-                && ptag == "FIGURE"
-            {
-                result = true;
-                break;
-            }
-            parent = p.parent();
-            depth += 1;
-        }
-        result
     };
 
     // Apply removal checks - combine conditions since they all result in removal
