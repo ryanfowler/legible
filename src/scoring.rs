@@ -69,71 +69,6 @@ pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
     }
 }
 
-/// Compute node stats and also return the normalized inner text string.
-/// Combines whitespace normalization and stats computation into a single pass
-/// over the raw text, avoiding the intermediate allocation of normalize_whitespace.
-pub fn compute_node_stats_with_text(node: &Node<'_>) -> (NodeStats, String) {
-    let raw = node.text();
-    let mut normalized = String::with_capacity(raw.len());
-    let mut text_length: usize = 0;
-    let mut comma_count: usize = 0;
-    let mut prev_ws = true;
-    let mut last_was_dot = false;
-    let mut has_sentence_end = false;
-
-    for c in raw.chars() {
-        if c.is_whitespace() {
-            if last_was_dot {
-                has_sentence_end = true;
-            }
-            last_was_dot = false;
-            if !prev_ws {
-                normalized.push(' ');
-                text_length += 1;
-                prev_ws = true;
-            }
-        } else {
-            last_was_dot = c == '.';
-            // Fast path: ASCII comma is by far the most common;
-            // only check Unicode commas for non-ASCII characters
-            let is_comma = c == ','
-                || (c as u32 >= 0x0600
-                    && matches!(
-                        c,
-                        '\u{060C}'
-                            | '\u{FE50}'
-                            | '\u{FE10}'
-                            | '\u{FE11}'
-                            | '\u{2E41}'
-                            | '\u{2E34}'
-                            | '\u{2E32}'
-                            | '\u{FF0C}'
-                    ));
-            if is_comma {
-                comma_count += 1;
-            }
-            normalized.push(c);
-            text_length += 1;
-            prev_ws = false;
-        }
-    }
-
-    if prev_ws && text_length > 0 {
-        text_length -= 1;
-        normalized.pop();
-    }
-    if last_was_dot {
-        has_sentence_end = true;
-    }
-
-    let stats = NodeStats {
-        text_length,
-        comma_count,
-        has_sentence_end,
-    };
-    (stats, normalized)
-}
-
 /// Check if a URL is a hash URL (starts with '#' and has content after it).
 /// Equivalent to the regex `^#.+` but avoids regex overhead.
 #[inline]
@@ -149,27 +84,6 @@ pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeS
     let stats = compute_node_stats(node);
     store.set_stats(node.id, stats);
     stats
-}
-
-/// Get or compute stats for a node, caching the result.
-/// Also returns the inner text string to avoid redundant extraction.
-pub fn get_or_compute_stats_with_text(
-    node: &Node<'_>,
-    store: &mut NodeDataStore,
-) -> (NodeStats, String) {
-    if let Some(stats) = store.get_stats(&node.id).copied() {
-        if let Some(text) = store.get_text(&node.id) {
-            return (stats, text.to_string());
-        }
-
-        let text = get_inner_text(node, true);
-        store.set_text(node.id, text.clone());
-        return (stats, text);
-    }
-    let (stats, text) = compute_node_stats_with_text(node);
-    store.set_stats(node.id, stats);
-    store.set_text(node.id, text.clone());
-    (stats, text)
 }
 
 /// Compute the initial readability data for a node without storing it.

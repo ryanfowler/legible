@@ -40,8 +40,6 @@ pub struct NodeDataStore {
     data_tables: HashMap<NodeId, bool>,
     /// Cached text statistics for nodes.
     stats: HashMap<NodeId, NodeStats>,
-    /// Cached normalized inner text for nodes that need it repeatedly.
-    text: HashMap<NodeId, String>,
 }
 
 impl NodeDataStore {
@@ -51,7 +49,6 @@ impl NodeDataStore {
             data: HashMap::new(),
             data_tables: HashMap::new(),
             stats: HashMap::new(),
-            text: HashMap::new(),
         }
     }
 
@@ -117,7 +114,6 @@ impl NodeDataStore {
         self.data.clear();
         self.data_tables.clear();
         self.stats.clear();
-        self.text.clear();
     }
 
     /// Get the cached stats for a node, if they exist.
@@ -128,15 +124,5 @@ impl NodeDataStore {
     /// Set the cached stats for a node.
     pub fn set_stats(&mut self, node_id: NodeId, stats: NodeStats) {
         self.stats.insert(node_id, stats);
-    }
-
-    /// Get the cached normalized inner text for a node, if it exists.
-    pub fn get_text(&self, node_id: &NodeId) -> Option<&str> {
-        self.text.get(node_id).map(String::as_str)
-    }
-
-    /// Cache the normalized inner text for a node.
-    pub fn set_text(&mut self, node_id: NodeId, text: String) {
-        self.text.insert(node_id, text);
     }
 }

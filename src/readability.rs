@@ -263,8 +263,7 @@ impl<'a> Readability<'a> {
 
     /// The main content extraction algorithm.
     fn grab_article(&mut self) -> Result<ArticleContent> {
-        let body = self.doc.select_matcher(&SELECTORS.body);
-        if body.length() == 0 {
+        if self.doc.body().is_none() {
             return Err(Error::NoBody);
         }
 
@@ -285,8 +284,6 @@ impl<'a> Readability<'a> {
                 self.article_lang = Some(lang.to_string());
             }
 
-            // Track nodes to remove (use HashSet for efficient lookup)
-            let mut nodes_to_remove: HashSet<NodeId> = HashSet::with_capacity(64);
             let mut should_remove_title_header = true;
 
             // First pass: identify nodes to remove and score
@@ -318,18 +315,12 @@ impl<'a> Readability<'a> {
                     active_removed_root = None;
                 }
 
-                if nodes_to_remove.contains(&node.id) {
-                    continue;
-                }
-
                 let tag_name = get_tag_name(node).unwrap_or_default();
 
                 // Check visibility (no match_string needed)
                 if !is_probably_visible(node) {
                     debug_log!(self, "Removing hidden node");
-                    if nodes_to_remove.insert(node.id) {
-                        nodes_to_remove_ordered.push(*node);
-                    }
+                    nodes_to_remove_ordered.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -344,9 +335,7 @@ impl<'a> Readability<'a> {
                         .map(|s| s.as_ref() == "dialog")
                         .unwrap_or(false)
                 {
-                    if nodes_to_remove.insert(node.id) {
-                        nodes_to_remove_ordered.push(*node);
-                    }
+                    nodes_to_remove_ordered.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -362,9 +351,7 @@ impl<'a> Readability<'a> {
                             .cloned();
                         let byline_node = itemprop_name.as_ref().unwrap_or(node);
                         self.article_byline = Some(byline_node.text().trim().to_string());
-                        if nodes_to_remove.insert(node.id) {
-                            nodes_to_remove_ordered.push(*node);
-                        }
+                        nodes_to_remove_ordered.push(*node);
                         active_removed_root = Some(node.id);
                         continue;
                     }
@@ -379,9 +366,7 @@ impl<'a> Readability<'a> {
                         self.article_title.trim()
                     );
                     should_remove_title_header = false;
-                    if nodes_to_remove.insert(node.id) {
-                        nodes_to_remove_ordered.push(*node);
-                    }
+                    nodes_to_remove_ordered.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -398,9 +383,7 @@ impl<'a> Readability<'a> {
                             && !has_ancestor_tags_any(node, &["table", "code"], 3)
                         {
                             debug_log!(self, "Removing unlikely candidate: {}", &match_string_buf);
-                            if nodes_to_remove.insert(node.id) {
-                                nodes_to_remove_ordered.push(*node);
-                            }
+                            nodes_to_remove_ordered.push(*node);
                             active_removed_root = Some(node.id);
                             continue;
                         }
@@ -415,9 +398,7 @@ impl<'a> Readability<'a> {
                             role,
                             &match_string_buf
                         );
-                        if nodes_to_remove.insert(node.id) {
-                            nodes_to_remove_ordered.push(*node);
-                        }
+                        nodes_to_remove_ordered.push(*node);
                         active_removed_root = Some(node.id);
                         continue;
                     }
@@ -429,9 +410,7 @@ impl<'a> Readability<'a> {
                     "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
                 ) && is_element_without_content(node)
                 {
-                    if nodes_to_remove.insert(node.id) {
-                        nodes_to_remove_ordered.push(*node);
-                    }
+                    nodes_to_remove_ordered.push(*node);
                     active_removed_root = Some(node.id);
                     continue;
                 }
@@ -586,8 +565,7 @@ impl<'a> Readability<'a> {
 
             // Get top candidate
             // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
-            let body = self.doc.select_matcher(&SELECTORS.body);
-            let body_node = body.nodes().first().ok_or(Error::NoBody)?;
+            let body_node = self.doc.body().ok_or(Error::NoBody)?;
             let body_id = body_node.id;
 
             let needs_synthetic_candidate = top_candidates.is_empty()
@@ -871,13 +849,7 @@ impl<'a> Readability<'a> {
                             .set_html(best_attempt.content_html.as_str());
 
                         // Re-fetch to get text and excerpt
-                        if let Some(body) = self
-                            .doc
-                            .select_matcher(&SELECTORS.body)
-                            .nodes()
-                            .first()
-                            .cloned()
-                        {
+                        if let Some(body) = self.doc.body() {
                             let text_content = get_inner_text(&body, true);
                             let text_length = text_content.chars().count();
                             let excerpt = node_select_matcher(&body, &SELECTORS.p)
@@ -1405,7 +1377,7 @@ impl<'a> Readability<'a> {
         prep_document(&self.doc, &SELECTORS);
 
         // Verify body exists
-        if self.doc.select_matcher(&SELECTORS.body).length() == 0 {
+        if self.doc.body().is_none() {
             return Err(Error::NoBody);
         }
 
