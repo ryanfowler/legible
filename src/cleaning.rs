@@ -8,9 +8,8 @@ use crate::constants::{
 };
 use crate::dom::{NodeDataStore, build_match_string, get_tag_name, node_select_matcher};
 use crate::scoring::{
-    get_class_weight, get_link_density_cached, get_or_compute_stats,
-    get_or_compute_stats_with_text, has_single_tag_inside_element, is_element_without_content,
-    is_phrasing_content,
+    get_class_weight, get_inner_text, get_link_density_cached, get_or_compute_stats,
+    has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
 use crate::selectors::Selectors;
 use dom_query::{Document, Node};
@@ -25,8 +24,8 @@ pub fn prep_document(doc: &Document, selectors: &Selectors) {
     }
 
     // Replace double br's with p tags in body
-    if let Some(body) = doc.select_matcher(&selectors.body).nodes().first() {
-        replace_brs(body, selectors);
+    if let Some(body) = doc.body() {
+        replace_brs(&body, selectors);
     }
 
     // Replace font tags with span
@@ -338,9 +337,7 @@ fn should_remove_conditionally(
         }
     }
 
-    // Get or compute cached stats for this node, also returning the inner text
-    // to avoid a redundant get_inner_text call for the AD_LOADING_SET check below.
-    let (stats, inner_text) = get_or_compute_stats_with_text(node, store);
+    let stats = get_or_compute_stats(node, store);
     let content_length = stats.text_length;
 
     let weight = get_class_weight(node, flags);
@@ -431,8 +428,9 @@ fn should_remove_conditionally(
         0.0
     };
 
-    // Check for ad/loading words - use RegexSet for single-pass matching
-    if regexps::AD_LOADING_SET.is_match(&inner_text) {
+    // The ad/loading regexes are anchored exact-word checks. Avoid building
+    // normalized text for normal content that is far too long to match.
+    if content_length <= 32 && regexps::AD_LOADING_SET.is_match(&get_inner_text(node, true)) {
         return true;
     }
 
