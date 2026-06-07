@@ -13,8 +13,10 @@ pub fn get_tag_name(node: &Node<'_>) -> Option<Cow<'static, str>> {
 /// Check whether a node has the requested tag name without cloning the name.
 #[inline]
 pub fn has_tag_name(node: &Node<'_>, name: &str) -> bool {
-    node.qual_name_ref()
-        .is_some_and(|tag| tag.local.as_ref().eq_ignore_ascii_case(name))
+    node.qual_name_ref().is_some_and(|tag| {
+        let tag = tag.local.as_ref();
+        tag == name || tag.eq_ignore_ascii_case(name)
+    })
 }
 
 /// Check whether a node has any of the requested tag names without cloning the name.
@@ -22,7 +24,9 @@ pub fn has_tag_name(node: &Node<'_>, name: &str) -> bool {
 pub fn has_any_tag_name(node: &Node<'_>, names: &[&str]) -> bool {
     node.qual_name_ref().is_some_and(|tag| {
         let tag = tag.local.as_ref();
-        names.iter().any(|name| tag.eq_ignore_ascii_case(name))
+        names
+            .iter()
+            .any(|name| tag == *name || tag.eq_ignore_ascii_case(name))
     })
 }
 

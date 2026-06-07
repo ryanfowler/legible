@@ -1,10 +1,9 @@
 //! Functions to determine if a document is probably readerable.
 
 use crate::constants::regexps;
-use crate::dom::{build_match_string, get_tag_name};
+use crate::dom::{build_match_string, has_tag_name};
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
-use crate::selectors::SELECTORS;
 use dom_query::{Document, Node, NodeId};
 use hashbrown::HashSet;
 
@@ -55,81 +54,74 @@ pub(crate) fn is_probably_readerable_doc(
 ) -> bool {
     let options = options.unwrap_or_default();
 
-    // Collect actual nodes: p, pre, article
-    let mut nodes: Vec<Node<'_>> = doc
-        .select_matcher(&SELECTORS.p_pre_article)
-        .nodes()
-        .to_vec();
-
-    // Track seen IDs to avoid duplicates when adding parent divs
-    let mut seen_ids: HashSet<NodeId> = nodes.iter().map(|n| n.id).collect();
-
-    // Add parent divs of br elements (with deduplication)
-    for br in doc.select_matcher(&SELECTORS.div_br).nodes().iter() {
-        if let Some(parent) = br.parent()
-            && seen_ids.insert(parent.id)
-        {
-            nodes.push(parent);
-        }
-    }
-
     let mut score = 0.0;
+    let mut seen_div_ids: HashSet<NodeId> = HashSet::new();
 
     // Reusable buffer for match_string to avoid allocations per node
     let mut match_string_buf = String::with_capacity(128);
 
-    // Iterate directly over the collected nodes
-    for node in nodes.iter() {
-        // Check visibility (no match_string needed)
-        if !is_probably_visible(node) {
-            continue;
-        }
-
-        // Build match_string lazily — only needed for regex check
-        build_match_string(node, &mut match_string_buf);
-
-        // Use RegexSet for single-pass matching of both patterns
-        let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(&match_string_buf);
-        if candidate_matches.matched(0) && !candidate_matches.matched(1) {
-            continue;
-        }
-
-        // Check if li > p (skip list item paragraphs)
-        let is_li_p = {
-            let mut parent = node.parent();
-            let mut result = false;
-            while let Some(p) = parent {
-                if let Some(tag) = get_tag_name(&p)
-                    && tag == "LI"
-                {
-                    result = true;
-                    break;
-                }
-                parent = p.parent();
+    for node in doc.root().descendants_it().filter(|node| node.is_element()) {
+        if has_tag_name(&node, "p") || has_tag_name(&node, "pre") || has_tag_name(&node, "article")
+        {
+            if score_readerable_node(&node, &options, &mut score, &mut match_string_buf) {
+                return true;
             }
-            result
-        };
-
-        if is_li_p {
             continue;
         }
 
-        // Check text content length
-        let text_length = node.normalized_char_count();
-
-        if text_length < options.min_content_length {
-            continue;
-        }
-
-        // Add to score based on content length
-        score += ((text_length - options.min_content_length) as f64).sqrt();
-
-        if score > options.min_score {
+        if has_tag_name(&node, "br")
+            && let Some(parent) = node.parent()
+            && has_tag_name(&parent, "div")
+            && seen_div_ids.insert(parent.id)
+            && score_readerable_node(&parent, &options, &mut score, &mut match_string_buf)
+        {
             return true;
         }
     }
 
     false
+}
+
+fn score_readerable_node(
+    node: &Node<'_>,
+    options: &ReaderableOptions,
+    score: &mut f64,
+    match_string_buf: &mut String,
+) -> bool {
+    // Check visibility (no match_string needed)
+    if !is_probably_visible(node) {
+        return false;
+    }
+
+    // Build match_string lazily — only needed for regex check
+    build_match_string(node, match_string_buf);
+
+    // Use RegexSet for single-pass matching of both patterns
+    let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string_buf);
+    if candidate_matches.matched(0) && !candidate_matches.matched(1) {
+        return false;
+    }
+
+    // Check if li > p (skip list item paragraphs)
+    let mut parent = node.parent();
+    while let Some(p) = parent {
+        if has_tag_name(&p, "li") {
+            return false;
+        }
+        parent = p.parent();
+    }
+
+    // Check text content length
+    let text_length = node.normalized_char_count();
+
+    if text_length < options.min_content_length {
+        return false;
+    }
+
+    // Add to score based on content length
+    *score += ((text_length - options.min_content_length) as f64).sqrt();
+
+    *score > options.min_score
 }
 
 #[cfg(test)]
