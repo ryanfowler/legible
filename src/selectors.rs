@@ -51,10 +51,6 @@ pub struct Selectors {
     pub form: Matcher,
     pub fieldset: Matcher,
     pub div: Matcher,
-
-    // Readerable check
-    pub p_pre_article: Matcher,
-    pub div_br: Matcher,
 }
 
 impl Selectors {
@@ -99,10 +95,6 @@ impl Selectors {
             form: Matcher::new("form").unwrap(),
             fieldset: Matcher::new("fieldset").unwrap(),
             div: Matcher::new("div").unwrap(),
-
-            // Readerable check
-            p_pre_article: Matcher::new("p, pre, article").unwrap(),
-            div_br: Matcher::new("div > br").unwrap(),
         }
     }
 }
