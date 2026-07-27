@@ -3,71 +3,7 @@
 use crate::constants::{flags::*, is_div_to_p_elem, is_phrasing_elem, regexps};
 use crate::dom::{NodeDataStore, NodeStats, get_tag_name, has_tag_name};
 use crate::selectors::Selectors;
-use dom_query::Node;
-
-/// Compute and return text statistics for a node.
-/// Processes the raw concatenated text directly without building a normalized
-/// string, saving an allocation and a pass over the text.
-pub fn compute_node_stats(node: &Node<'_>) -> NodeStats {
-    let text = node.text();
-    let mut text_length = 0usize;
-    let mut comma_count = 0usize;
-    let mut has_sentence_end = false;
-    let mut prev_ws = true; // true to skip leading whitespace
-    let mut last_was_dot = false;
-
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if last_was_dot {
-                has_sentence_end = true;
-            }
-            last_was_dot = false;
-            if !prev_ws {
-                text_length += 1;
-                prev_ws = true;
-            }
-        } else {
-            last_was_dot = false;
-            if c == '.' {
-                last_was_dot = true;
-            }
-            // Fast path: ASCII comma is by far the most common;
-            // only check Unicode commas for non-ASCII characters
-            let is_comma = c == ','
-                || (c as u32 >= 0x0600
-                    && matches!(
-                        c,
-                        '\u{060C}'
-                            | '\u{FE50}'
-                            | '\u{FE10}'
-                            | '\u{FE11}'
-                            | '\u{2E41}'
-                            | '\u{2E34}'
-                            | '\u{2E32}'
-                            | '\u{FF0C}'
-                    ));
-            if is_comma {
-                comma_count += 1;
-            }
-            text_length += 1;
-            prev_ws = false;
-        }
-    }
-
-    // Trim trailing whitespace
-    if prev_ws && text_length > 0 {
-        text_length -= 1;
-    }
-    if last_was_dot {
-        has_sentence_end = true;
-    }
-
-    NodeStats {
-        text_length,
-        comma_count,
-        has_sentence_end,
-    }
-}
+use dom_query::{Node, NodeData};
 
 /// Check if a URL is a hash URL (starts with '#' and has content after it).
 /// Equivalent to the regex `^#.+` but avoids regex overhead.
@@ -81,9 +17,145 @@ pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeS
     if let Some(stats) = store.get_stats(&node.id) {
         return *stats;
     }
-    let stats = compute_node_stats(node);
-    store.set_stats(node.id, stats);
+
+    // Avoid populating the cache for every inline descendant of small subtrees.
+    // Those nodes are unlikely to be queried independently, so a single direct
+    // scan is cheaper than many hash-table insertions.
+    if let Some(stats) = stats_for_small_subtree(node, 64) {
+        store.set_stats(node.id, stats);
+        return stats;
+    }
+
+    // Compute the subtree bottom-up so each text node is scanned once even when
+    // stats are later requested for several nested ancestors.
+    let mut stack = vec![(*node, false)];
+    while let Some((current, expanded)) = stack.pop() {
+        if store.get_stats(&current.id).is_some() {
+            continue;
+        }
+
+        if !expanded {
+            stack.push((current, true));
+            let children: Vec<_> = current
+                .children_it(true)
+                .filter(|child| store.get_stats(&child.id).is_none())
+                .collect();
+            stack.extend(children.into_iter().map(|child| (child, false)));
+            continue;
+        }
+
+        let mut stats = current
+            .query(|tree_node| match &tree_node.data {
+                NodeData::Text { contents } => stats_for_text(contents),
+                _ => NodeStats::default(),
+            })
+            .unwrap_or_default();
+
+        for child in current.children_it(false) {
+            if let Some(child_stats) = store.get_stats(&child.id) {
+                append_stats(&mut stats, child_stats);
+            }
+        }
+        stats.has_sentence_end = stats.has_sentence_break || stats.ends_with_dot;
+        store.set_stats(current.id, stats);
+    }
+
+    store.get_stats(&node.id).copied().unwrap_or_default()
+}
+
+fn stats_for_small_subtree(node: &Node<'_>, max_nodes: usize) -> Option<NodeStats> {
+    let mut stats = NodeStats::default();
+
+    for (index, descendant) in std::iter::once(*node)
+        .chain(node.descendants_it())
+        .enumerate()
+    {
+        if index == max_nodes {
+            return None;
+        }
+        descendant.query(|tree_node| {
+            if let NodeData::Text { contents } = &tree_node.data {
+                append_stats(&mut stats, &stats_for_text(contents));
+            }
+        });
+    }
+
+    Some(stats)
+}
+
+fn stats_for_text(text: &str) -> NodeStats {
+    let mut stats = NodeStats {
+        has_text: !text.is_empty(),
+        starts_with_whitespace: text.starts_with(char::is_whitespace),
+        ends_with_whitespace: text.ends_with(char::is_whitespace),
+        ..NodeStats::default()
+    };
+    let mut previous_was_whitespace = true;
+    let mut last_was_dot = false;
+
+    for c in text.chars() {
+        if c.is_whitespace() {
+            stats.has_sentence_break |= last_was_dot;
+            last_was_dot = false;
+            if !previous_was_whitespace {
+                stats.text_length += 1;
+                previous_was_whitespace = true;
+            }
+        } else {
+            stats.has_non_whitespace = true;
+            last_was_dot = c == '.';
+            stats.comma_count += usize::from(
+                c == ','
+                    || (c as u32 >= 0x0600
+                        && matches!(
+                            c,
+                            '\u{060C}'
+                                | '\u{FE50}'
+                                | '\u{FE10}'
+                                | '\u{FE11}'
+                                | '\u{2E41}'
+                                | '\u{2E34}'
+                                | '\u{2E32}'
+                                | '\u{FF0C}'
+                        )),
+            );
+            stats.text_length += 1;
+            previous_was_whitespace = false;
+        }
+    }
+
+    if previous_was_whitespace && stats.text_length > 0 {
+        stats.text_length -= 1;
+    }
+    stats.ends_with_dot = last_was_dot;
+    stats.has_sentence_end = stats.has_sentence_break || stats.ends_with_dot;
     stats
+}
+
+fn append_stats(stats: &mut NodeStats, child: &NodeStats) {
+    if !child.has_text {
+        return;
+    }
+
+    if !stats.has_text {
+        *stats = *child;
+        return;
+    }
+
+    stats.has_sentence_break |=
+        child.has_sentence_break || (stats.ends_with_dot && child.starts_with_whitespace);
+    if stats.has_non_whitespace
+        && child.has_non_whitespace
+        && (stats.ends_with_whitespace || child.starts_with_whitespace)
+    {
+        stats.text_length += 1;
+    }
+    stats.text_length += child.text_length;
+    stats.comma_count += child.comma_count;
+    stats.has_non_whitespace |= child.has_non_whitespace;
+    stats.ends_with_whitespace = child.ends_with_whitespace;
+    stats.ends_with_dot = child.ends_with_dot;
+    stats.has_sentence_end = stats.has_sentence_break || stats.ends_with_dot;
 }
 
 /// Compute the initial readability data for a node without storing it.
@@ -588,4 +660,118 @@ fn has_hidden_style(haystack: &str) -> bool {
         i += 1;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dom_query::Document;
+
+    fn concatenated_stats(text: &str) -> NodeStats {
+        let mut expected = NodeStats::default();
+        let mut previous_was_whitespace = true;
+        let mut last_was_dot = false;
+        for c in text.chars() {
+            if c.is_whitespace() {
+                expected.has_sentence_end |= last_was_dot;
+                last_was_dot = false;
+                if !previous_was_whitespace {
+                    expected.text_length += 1;
+                    previous_was_whitespace = true;
+                }
+            } else {
+                last_was_dot = c == '.';
+                expected.comma_count += usize::from(
+                    c == ','
+                        || matches!(
+                            c,
+                            '\u{060C}'
+                                | '\u{FE50}'
+                                | '\u{FE10}'
+                                | '\u{FE11}'
+                                | '\u{2E41}'
+                                | '\u{2E34}'
+                                | '\u{2E32}'
+                                | '\u{FF0C}'
+                        ),
+                );
+                expected.text_length += 1;
+                previous_was_whitespace = false;
+            }
+        }
+        if previous_was_whitespace && expected.text_length > 0 {
+            expected.text_length -= 1;
+        }
+        expected.has_sentence_end |= last_was_dot;
+        expected
+    }
+
+    fn assert_stats_match(node: &Node<'_>, store: &mut NodeDataStore) {
+        let expected = concatenated_stats(&node.text());
+        let actual = get_or_compute_stats(node, store);
+        assert_eq!(actual.text_length, expected.text_length);
+        assert_eq!(actual.comma_count, expected.comma_count);
+        assert_eq!(actual.has_sentence_end, expected.has_sentence_end);
+    }
+
+    #[test]
+    fn cached_node_stats_match_concatenated_text_semantics() {
+        let cases = [
+            "<div>  alpha,<span> beta.</span>\n<strong>gamma\u{060c}</strong>  </div>",
+            "<div><span>not.</span><span>ended</span></div>",
+            "<div><span>end.</span><i> </i><span>next</span></div>",
+            "<div> \n <span>one</span><i></i> <b>two</b> </div>",
+        ];
+
+        for html in cases {
+            let doc = Document::from(html);
+            let node = doc.select("div").nodes().first().copied().unwrap();
+            assert_stats_match(&node, &mut NodeDataStore::new());
+        }
+    }
+
+    #[test]
+    fn bottom_up_stats_match_large_mixed_subtree() {
+        let mut html = String::from("<div> leading.");
+        for index in 0..70 {
+            match index % 4 {
+                0 => html.push_str("<span> word,</span>"),
+                1 => html.push_str("<i> </i>"),
+                2 => html.push_str("<b>sentence.</b>\n"),
+                _ => html.push_str("<em>joined</em><strong>text</strong>"),
+            }
+        }
+        html.push_str(" trailing\u{060c}</div>");
+
+        let doc = Document::from(html);
+        let node = doc.select("div").nodes().first().copied().unwrap();
+        assert!(node.descendants_it().count() > 64);
+        assert_stats_match(&node, &mut NodeDataStore::new());
+    }
+
+    #[test]
+    fn clearing_stats_recomputes_a_mutated_large_subtree() {
+        let mut html = String::from("<div>");
+        for _ in 0..70 {
+            html.push_str("<span>cached text, </span>");
+        }
+        html.push_str("</div>");
+
+        let doc = Document::from(html);
+        let node = doc.select("div").nodes().first().copied().unwrap();
+        let removed = doc.select("span").nodes().last().copied().unwrap();
+        let mut store = NodeDataStore::new();
+
+        let before = get_or_compute_stats(&node, &mut store);
+        removed.remove_from_parent();
+        let expected = concatenated_stats(&node.text());
+        assert_ne!(before.text_length, expected.text_length);
+        assert_eq!(
+            get_or_compute_stats(&node, &mut store).text_length,
+            before.text_length
+        );
+
+        store.clear_stats();
+        assert_stats_match(&node, &mut store);
+    }
 }
