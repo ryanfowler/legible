@@ -19,6 +19,12 @@ pub struct NodeStats {
     pub comma_count: usize,
     /// Whether the text ends with sentence-ending punctuation.
     pub has_sentence_end: bool,
+    pub(crate) has_text: bool,
+    pub(crate) has_non_whitespace: bool,
+    pub(crate) starts_with_whitespace: bool,
+    pub(crate) ends_with_whitespace: bool,
+    pub(crate) ends_with_dot: bool,
+    pub(crate) has_sentence_break: bool,
 }
 
 impl ReadabilityData {
@@ -113,6 +119,14 @@ impl NodeDataStore {
     pub fn clear(&mut self) {
         self.data.clear();
         self.data_tables.clear();
+        self.stats.clear();
+    }
+
+    /// Clear cached text statistics after structural DOM mutations.
+    ///
+    /// Readability scores and data-table classifications remain valid and are
+    /// intentionally preserved.
+    pub fn clear_stats(&mut self) {
         self.stats.clear();
     }
 

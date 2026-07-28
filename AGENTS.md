@@ -34,11 +34,11 @@ The extraction pipeline flows through these stages:
 - **`document.rs`** - Public `Document<'a>` struct for pre-parsing HTML once; delegates to `readerable` and `readability` internally
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
-- **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, text density
+- **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
-- **`dom/node.rs`** - `NodeDataStore` pattern for attaching score data to nodes (workaround for Rust's lack of arbitrary node data attachment like JS)
+- **`dom/node.rs`** - `NodeDataStore` pattern for attaching score data and composable subtree text statistics to nodes (workaround for Rust's lack of arbitrary node data attachment like JS)
 
 ### Scoring System
 

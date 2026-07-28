@@ -259,6 +259,11 @@ pub fn clean_conditionally(
         return;
     }
 
+    // Earlier cleanup stages may have removed descendants after scoring cached
+    // their text. Each conditional pass must observe the current DOM, while
+    // preserving readability scores and data-table classifications.
+    store.clear_stats();
+
     // Collect elements first, then process in reverse order like JS does.
     // Important: We evaluate and remove one at a time so that removing a
     // nested element affects the counts for parent elements.
