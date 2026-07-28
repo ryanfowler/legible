@@ -194,7 +194,12 @@ impl<'a> Readability<'a> {
 
         // Check element count limit
         if self.options.max_elems_to_parse > 0 {
-            let count = self.doc.select("*").length();
+            let count = self
+                .doc
+                .root()
+                .descendants_it()
+                .filter(|node| node.is_element())
+                .count();
             if count > self.options.max_elems_to_parse {
                 return Err(Error::TooManyElements(
                     count,
@@ -287,7 +292,12 @@ impl<'a> Readability<'a> {
             let mut should_remove_title_header = true;
 
             // First pass: identify nodes to remove and score
-            let all_nodes: Vec<_> = self.doc.select("*").nodes().to_vec();
+            let all_nodes: Vec<_> = self
+                .doc
+                .root()
+                .descendants_it()
+                .filter(|node| node.is_element())
+                .collect();
             let mut nodes_to_remove_ordered = Vec::with_capacity(64);
 
             // Reusable buffer for building match_string to avoid allocations per node
