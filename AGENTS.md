@@ -40,6 +40,12 @@ The extraction pipeline flows through these stages:
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
 - **`dom/node.rs`** - `NodeDataStore` pattern for attaching score data and composable subtree text statistics to nodes (workaround for Rust's lack of arbitrary node data attachment like JS)
 
+### Performance Notes
+
+- Prefer direct `Document::root().descendants_it()` traversal for document-wide element scans; universal CSS selection adds avoidable matcher and selection overhead.
+- When dispatching among several tag names in a hot loop, call `get_tag_name()` once and match on the result instead of repeatedly calling `has_tag_name()`.
+- Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or readerability heuristics, and preserve output compatibility with the Mozilla fixture suite.
+
 ### Scoring System
 
 Initial scores by tag: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, ADDRESS/OL/UL/DL/FORM -3. Class/ID patterns matching positive/negative regexes add ±25.

@@ -1,7 +1,7 @@
 //! Functions to determine if a document is probably readerable.
 
 use crate::constants::regexps;
-use crate::dom::{build_match_string, has_tag_name};
+use crate::dom::{build_match_string, get_tag_name, has_tag_name};
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
 use dom_query::{Document, Node, NodeId};
@@ -61,15 +61,15 @@ pub(crate) fn is_probably_readerable_doc(
     let mut match_string_buf = String::with_capacity(128);
 
     for node in doc.root().descendants_it().filter(|node| node.is_element()) {
-        if has_tag_name(&node, "p") || has_tag_name(&node, "pre") || has_tag_name(&node, "article")
-        {
+        let tag_name = get_tag_name(&node).unwrap_or_default();
+        if matches!(&*tag_name, "P" | "PRE" | "ARTICLE") {
             if score_readerable_node(&node, &options, &mut score, &mut match_string_buf) {
                 return true;
             }
             continue;
         }
 
-        if has_tag_name(&node, "br")
+        if tag_name == "BR"
             && let Some(parent) = node.parent()
             && has_tag_name(&parent, "div")
             && seen_div_ids.insert(parent.id)
