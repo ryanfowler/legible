@@ -227,7 +227,7 @@ pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
 /// Check if a node has non-whitespace inner text, without allocating a String.
 /// This is an optimized alternative to `!get_inner_text(n, false).is_empty()`.
 pub fn has_non_empty_inner_text(node: &Node<'_>) -> bool {
-    node.text().chars().any(|c| !c.is_whitespace())
+    has_non_whitespace_text(node)
 }
 
 /// Get the inner text of a node, optionally normalizing whitespace.
