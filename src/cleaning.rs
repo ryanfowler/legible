@@ -12,7 +12,7 @@ use crate::scoring::{
     has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
 use crate::selectors::Selectors;
-use dom_query::{Document, Node};
+use dom_query::{Document, Node, NodeData};
 use regex::Regex;
 
 /// Prepare the document for parsing by cleaning up styles, etc.
@@ -198,32 +198,41 @@ pub fn clean_styles(node: &Node<'_>) {
             continue;
         }
 
-        if let Some(tag) = get_tag_name(&current)
-            && tag == "SVG"
-        {
+        let Some(tag) = get_tag_name(&current) else {
+            continue;
+        };
+
+        if tag == "SVG" {
             continue;
         }
 
-        // Remove presentational attributes only if any are present
-        if PRESENTATIONAL_ATTRIBUTES
-            .iter()
-            .any(|attr| current.has_attr(attr))
-        {
-            for attr in PRESENTATIONAL_ATTRIBUTES.iter() {
-                current.remove_attr(attr);
-            }
+        // Inspect attributes once and avoid mutating nodes that have nothing
+        // to clean. This replaces repeated has_attr/remove_attr scans while
+        // preserving the cheap no-op path for ordinary elements.
+        let (has_presentational, has_deprecated_size) = current
+            .query(|tree_node| {
+                let NodeData::Element(element) = &tree_node.data else {
+                    return (false, false);
+                };
+
+                let mut has_presentational = false;
+                let mut has_deprecated_size = false;
+                for attr in &element.attrs {
+                    let name = attr.name.local.as_ref();
+                    has_presentational |= PRESENTATIONAL_ATTRIBUTES.contains(&name);
+                    has_deprecated_size |= name == "width" || name == "height";
+                }
+                (has_presentational, has_deprecated_size)
+            })
+            .unwrap_or((false, false));
+
+        if has_presentational {
+            current.remove_attrs(PRESENTATIONAL_ATTRIBUTES);
         }
 
         // Remove deprecated size attributes on certain elements
-        if let Some(tag) = get_tag_name(&current)
-            && is_deprecated_size_attribute_elem(&tag)
-        {
-            if current.has_attr("width") {
-                current.remove_attr("width");
-            }
-            if current.has_attr("height") {
-                current.remove_attr("height");
-            }
+        if has_deprecated_size && is_deprecated_size_attribute_elem(&tag) {
+            current.remove_attrs(&["width", "height"]);
         }
     }
 }
