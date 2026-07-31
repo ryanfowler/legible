@@ -35,6 +35,32 @@ pub fn has_any_tag_name(node: &Node<'_>, names: &[&str]) -> bool {
 /// Lowercases the input into a stack buffer and matches against known tags.
 #[inline]
 fn intern_tag_name(name: &str) -> Cow<'static, str> {
+    // html5ever stores standard HTML names in uppercase. Avoid the lowercase
+    // stack-buffer pass for the tags used by the hot extraction paths.
+    match name {
+        "A" => return Cow::Borrowed("A"),
+        "P" => return Cow::Borrowed("P"),
+        "DIV" => return Cow::Borrowed("DIV"),
+        "SPAN" => return Cow::Borrowed("SPAN"),
+        "IMG" => return Cow::Borrowed("IMG"),
+        "BR" => return Cow::Borrowed("BR"),
+        "BODY" => return Cow::Borrowed("BODY"),
+        "HTML" => return Cow::Borrowed("HTML"),
+        "H1" => return Cow::Borrowed("H1"),
+        "H2" => return Cow::Borrowed("H2"),
+        "H3" => return Cow::Borrowed("H3"),
+        "H4" => return Cow::Borrowed("H4"),
+        "H5" => return Cow::Borrowed("H5"),
+        "H6" => return Cow::Borrowed("H6"),
+        "TABLE" => return Cow::Borrowed("TABLE"),
+        "UL" => return Cow::Borrowed("UL"),
+        "OL" => return Cow::Borrowed("OL"),
+        "LI" => return Cow::Borrowed("LI"),
+        "SECTION" => return Cow::Borrowed("SECTION"),
+        "ARTICLE" => return Cow::Borrowed("ARTICLE"),
+        _ => {}
+    }
+
     // Stack buffer for lowercased tag name (max HTML tag is 10 chars)
     let mut buf = [0u8; 16];
     let len = name.len();
@@ -160,5 +186,39 @@ fn intern_tag_name(name: &str) -> Cow<'static, str> {
         b"blockquote" => Cow::Borrowed("BLOCKQUOTE"),
         b"figcaption" => Cow::Borrowed("FIGCAPTION"),
         _ => Cow::Owned(name.to_ascii_uppercase()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intern_tag_name_normalizes_common_and_unknown_names() {
+        for name in [
+            "A", "P", "DIV", "SPAN", "IMG", "BR", "BODY", "HTML", "H1", "H2", "H3", "H4", "H5",
+            "H6", "TABLE", "UL", "OL", "LI", "SECTION", "ARTICLE",
+        ] {
+            assert!(matches!(
+                intern_tag_name(name),
+                Cow::Borrowed(value) if value == name
+            ));
+        }
+
+        for (name, expected) in [("a", "A"), ("dIv", "DIV"), ("article", "ARTICLE")] {
+            assert!(matches!(
+                intern_tag_name(name),
+                Cow::Borrowed(value) if value == expected
+            ));
+        }
+
+        assert!(matches!(
+            intern_tag_name("custom-element"),
+            Cow::Owned(value) if value == "CUSTOM-ELEMENT"
+        ));
+        assert!(matches!(
+            intern_tag_name("a-very-long-custom-element"),
+            Cow::Owned(value) if value == "A-VERY-LONG-CUSTOM-ELEMENT"
+        ));
     }
 }
