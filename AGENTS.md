@@ -46,6 +46,7 @@ The extraction pipeline flows through these stages:
 - When dispatching among several tag names in a hot loop, call `get_tag_name()` once and match on the result instead of repeatedly calling `has_tag_name()`.
 - When only checking whether an element contains non-whitespace text, use the direct `has_non_whitespace_text` traversal path rather than constructing the concatenated `Node::text()` string.
 - In `clean_styles`, inspect an element's attributes once and guard bulk removal calls so ordinary elements keep the no-op fast path.
+- Standard HTML tag names are uppercase in the parsed DOM; keep `get_tag_name`'s uppercase fast path allocation-free.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or readerability heuristics, and preserve output compatibility with the Mozilla fixture suite.
 
 ### Scoring System
