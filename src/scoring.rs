@@ -36,11 +36,12 @@ pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeS
 
         if !expanded {
             stack.push((current, true));
-            let children: Vec<_> = current
-                .children_it(true)
-                .filter(|child| store.get_stats(&child.id).is_none())
-                .collect();
-            stack.extend(children.into_iter().map(|child| (child, false)));
+            stack.extend(
+                current
+                    .children_it(true)
+                    .filter(|child| store.get_stats(&child.id).is_none())
+                    .map(|child| (child, false)),
+            );
             continue;
         }
 
@@ -397,61 +398,45 @@ pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
 
         // If this is phrasing content, collect consecutive phrasing content nodes
         if is_phrasing_content(child) {
-            let mut phrasing_nodes = Vec::new();
             let mut j = i;
+            let mut has_content = false;
 
             // Collect all consecutive phrasing content
             while j < children.len() && is_phrasing_content(&children[j]) {
-                phrasing_nodes.push(j);
+                let node = &children[j];
+                has_content |= !node.is_text() || !node.text().trim().is_empty();
                 j += 1;
             }
 
             // Only wrap if we collected content (not just whitespace)
-            let has_content = phrasing_nodes.iter().any(|&idx| {
-                let n = &children[idx];
-                if n.is_text() {
-                    !n.text().trim().is_empty()
-                } else {
-                    true
-                }
-            });
-
-            if has_content && !phrasing_nodes.is_empty() {
+            if has_content {
                 // Trim leading/trailing whitespace using index tracking - O(n) instead of O(n²)
-                let mut start = 0;
-                let mut end = phrasing_nodes.len();
+                let mut start = i;
+                let mut end = j;
 
                 // Trim leading whitespace nodes
-                while start < end && is_whitespace(&children[phrasing_nodes[start]]) {
+                while start < end && is_whitespace(&children[start]) {
                     start += 1;
                 }
 
                 // Trim trailing whitespace nodes
-                while start < end && is_whitespace(&children[phrasing_nodes[end - 1]]) {
+                while start < end && is_whitespace(&children[end - 1]) {
                     end -= 1;
                 }
 
                 // Only wrap if we still have content after trimming
-                if start < end {
-                    let trimmed_nodes = &phrasing_nodes[start..end];
-                    if let Some(first_node) = children.get(trimmed_nodes[0]) {
-                        let p = div.tree.new_element("p");
-                        first_node.insert_before(&p);
+                if start < end
+                    && let Some(first_node) = children.get(start)
+                {
+                    let p = div.tree.new_element("p");
+                    first_node.insert_before(&p);
 
-                        for &idx in trimmed_nodes {
-                            if let Some(n) = children.get(idx) {
-                                p.append_child(n);
-                            }
-                        }
+                    for node in &children[start..end] {
+                        p.append_child(node);
+                    }
 
-                        for &idx in phrasing_nodes[..start]
-                            .iter()
-                            .chain(phrasing_nodes[end..].iter())
-                        {
-                            if let Some(n) = children.get(idx) {
-                                n.remove_from_parent();
-                            }
-                        }
+                    for node in children[i..start].iter().chain(children[end..j].iter()) {
+                        node.remove_from_parent();
                     }
                 }
             }
@@ -473,45 +458,33 @@ pub fn is_element_without_content(node: &Node<'_>) -> bool {
         return false;
     }
 
-    let children = node.element_children();
-    if children.is_empty() {
-        return true;
-    }
-
-    // Check if all children are just BR or HR (uses element_children directly
-    // to avoid the overhead of selector engine queries)
-    children.iter().all(|child| {
-        get_tag_name(child)
-            .as_deref()
-            .is_some_and(|tag| tag == "BR" || tag == "HR")
-    })
+    // Check direct element children without allocating an intermediate Vec.
+    node.children_it(false)
+        .filter(|child| child.is_element())
+        .all(|child| has_tag_name(&child, "BR") || has_tag_name(&child, "HR"))
 }
 
 /// Check if this node has only whitespace and a single element with given tag.
 pub fn has_single_tag_inside_element(node: &Node<'_>, tag: &str) -> bool {
-    let children = node.element_children();
+    let mut found_element = false;
 
-    // There should be exactly 1 element child with given tag
-    if children.len() != 1 {
-        return false;
-    }
-
-    if let Some(child_tag) = get_tag_name(&children[0]) {
-        if child_tag != tag {
-            return false;
-        }
-    } else {
-        return false;
-    }
-
-    // And there should be no text nodes with real content
-    !node.children().iter().any(|child| {
-        child.is_text()
+    for child in node.children_it(false) {
+        if child.is_element() {
+            if found_element || !has_tag_name(&child, tag) {
+                return false;
+            }
+            found_element = true;
+        } else if child.is_text()
             && child
                 .text()
                 .as_ref()
                 .ends_with(|c: char| !c.is_whitespace())
-    })
+        {
+            return false;
+        }
+    }
+
+    found_element
 }
 
 /// Check if an element has any children that are block-level elements.
@@ -574,24 +547,37 @@ pub fn is_valid_byline(node: &Node<'_>, match_string: &str) -> bool {
 
 /// Check if node is image or contains exactly one image.
 pub fn is_single_image(node: &Node<'_>) -> bool {
-    let mut current = Some(*node);
+    let mut current = *node;
+    let mut checked_text = false;
 
-    while let Some(n) = current {
+    loop {
+        let n = current;
         if let Some(tag) = get_tag_name(&n)
             && tag == "IMG"
         {
             return true;
         }
 
-        let children = n.element_children();
-        if children.len() != 1 || has_non_whitespace_text(&n) {
+        // If the outer subtree has no text, none of the nested single-child
+        // wrappers can have text either. Avoid rescanning the same subtree at
+        // each level.
+        if !checked_text {
+            if has_non_whitespace_text(&n) {
+                return false;
+            }
+            checked_text = true;
+        }
+
+        let mut children = n.children_it(false).filter(|child| child.is_element());
+        let Some(child) = children.next() else {
+            return false;
+        };
+        if children.next().is_some() {
             return false;
         }
 
-        current = children.into_iter().next();
+        current = child;
     }
-
-    false
 }
 
 /// Check whether a node or any descendant text node contains non-whitespace text.

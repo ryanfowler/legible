@@ -18,8 +18,8 @@ use regex::Regex;
 /// Prepare the document for parsing by cleaning up styles, etc.
 pub fn prep_document(doc: &Document, selectors: &Selectors) {
     // Remove all style tags in head
-    let styles: Vec<_> = doc.select_matcher(&selectors.style).nodes().to_vec();
-    for style in styles {
+    let styles = doc.select_matcher(&selectors.style);
+    for style in styles.nodes() {
         style.remove_from_parent();
     }
 
@@ -29,8 +29,8 @@ pub fn prep_document(doc: &Document, selectors: &Selectors) {
     }
 
     // Replace font tags with span
-    let fonts: Vec<_> = doc.select_matcher(&selectors.font).nodes().to_vec();
-    for font in fonts {
+    let fonts = doc.select_matcher(&selectors.font);
+    for font in fonts.nodes() {
         font.rename("span");
     }
 }
@@ -55,15 +55,15 @@ fn next_element<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 /// Following phrasing content is moved into the new P until we hit a block element
 /// or another BR pair.
 fn replace_brs(elem: &Node<'_>, selectors: &Selectors) {
-    let brs: Vec<_> = node_select_matcher(elem, &selectors.br).nodes().to_vec();
+    let brs = node_select_matcher(elem, &selectors.br);
 
-    for br in brs {
+    for br in brs.nodes() {
         // Check if this BR has been removed (as part of a previous BR chain)
         if br.parent().is_none() {
             continue;
         }
 
-        let mut next = next_element(&br);
+        let mut next = next_element(br);
         let mut replaced = false;
 
         // Remove consecutive BR elements after this one
@@ -136,11 +136,8 @@ fn replace_brs(elem: &Node<'_>, selectors: &Selectors) {
 
 /// Remove script and noscript tags from the document.
 pub fn remove_scripts(doc: &Document, selectors: &Selectors) {
-    let scripts: Vec<_> = doc
-        .select_matcher(&selectors.script_noscript)
-        .nodes()
-        .to_vec();
-    for script in scripts {
+    let scripts = doc.select_matcher(&selectors.script_noscript);
+    for script in scripts.nodes() {
         script.remove_from_parent();
     }
 }
@@ -239,16 +236,11 @@ pub fn clean_styles(node: &Node<'_>) {
 
 /// Clean spurious headers from an element.
 pub fn clean_headers(node: &Node<'_>, flags: u32, selectors: &Selectors) {
-    // Collect only the headings that need removal, avoiding intermediate Vec
-    let to_remove: Vec<_> = node_select_matcher(node, &selectors.h1_h2)
-        .nodes()
-        .iter()
-        .filter(|h| get_class_weight(h, flags) < 0)
-        .cloned()
-        .collect();
-
-    for heading in to_remove {
-        heading.remove_from_parent();
+    let headings = node_select_matcher(node, &selectors.h1_h2);
+    for heading in headings.nodes() {
+        if get_class_weight(heading, flags) < 0 {
+            heading.remove_from_parent();
+        }
     }
 }
 
@@ -268,25 +260,28 @@ pub fn clean_conditionally(
         return;
     }
 
-    // Earlier cleanup stages may have removed descendants after scoring cached
-    // their text. Each conditional pass must observe the current DOM, while
-    // preserving readability scores and data-table classifications.
-    store.clear_stats();
-
     // Collect elements first, then process in reverse order like JS does.
     // Important: We evaluate and remove one at a time so that removing a
     // nested element affects the counts for parent elements.
-    let elements: Vec<_> = node_select_matcher(node, matcher).nodes().to_vec();
+    let elements = node_select_matcher(node, matcher);
+    if elements.length() == 0 {
+        return;
+    }
+
+    // Earlier cleanup stages may have removed descendants after scoring cached
+    // their text. Each non-empty conditional pass must observe the current DOM,
+    // while preserving readability scores and data-table classifications.
+    store.clear_stats();
 
     // Process in reverse order (back to front) like JavaScript
-    for elem in elements.into_iter().rev() {
+    for elem in elements.nodes().iter().rev() {
         // Skip if element was already removed (e.g., its parent was removed)
         if elem.parent().is_none() {
             continue;
         }
 
         if should_remove_conditionally(
-            &elem,
+            elem,
             tag,
             flags,
             allowed_video_regex,
@@ -499,9 +494,9 @@ fn should_remove_conditionally(
 
 /// Mark tables as data tables or layout tables.
 pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore, selectors: &Selectors) {
-    let tables: Vec<_> = node_select_matcher(root, &selectors.table).nodes().to_vec();
+    let tables = node_select_matcher(root, &selectors.table);
 
-    for table in tables {
+    for table in tables.nodes() {
         // Check role="presentation"
         if let Some(role) = table.attr("role")
             && role.as_ref() == "presentation"
@@ -525,10 +520,10 @@ pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore, selectors: &
         }
 
         // Has caption with content
-        let captions = node_select_matcher(&table, &selectors.caption);
+        let captions = node_select_matcher(table, &selectors.caption);
         if captions.length() > 0
             && let Some(caption) = captions.nodes().first()
-            && !caption.children().is_empty()
+            && caption.children_it(false).next().is_some()
         {
             store.set_data_table(table.id, true);
             continue;
@@ -536,7 +531,7 @@ pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore, selectors: &
 
         // Has data-related descendants
         let has_data_descendant =
-            node_select_matcher(&table, &selectors.table_data_elements).length() > 0;
+            node_select_matcher(table, &selectors.table_data_elements).length() > 0;
 
         if has_data_descendant {
             store.set_data_table(table.id, true);
@@ -544,13 +539,13 @@ pub fn mark_data_tables(root: &Node<'_>, store: &mut NodeDataStore, selectors: &
         }
 
         // Has nested table - it's a layout table
-        if node_select_matcher(&table, &selectors.table).length() > 0 {
+        if node_select_matcher(table, &selectors.table).length() > 0 {
             store.set_data_table(table.id, false);
             continue;
         }
 
         // Count rows and columns
-        let (rows, columns) = get_row_and_column_count(&table);
+        let (rows, columns) = get_row_and_column_count(table);
 
         if columns == 1 || rows == 1 {
             store.set_data_table(table.id, false);
@@ -625,12 +620,10 @@ fn count_row(tr: &Node<'_>) -> (usize, usize) {
 
 /// Fix lazy-loaded images.
 pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
-    let elems: Vec<_> = node_select_matcher(root, &selectors.img_picture_figure)
-        .nodes()
-        .to_vec();
+    let elems = node_select_matcher(root, &selectors.img_picture_figure);
 
-    for elem in elems {
-        let tag = get_tag_name(&elem);
+    for elem in elems.nodes() {
+        let tag = get_tag_name(elem);
 
         // Check for base64 placeholder images (uses the `src` attribute)
         let mut has_b64_placeholder = false;
@@ -708,7 +701,7 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
             if tag_str == "IMG" || tag_str == "PICTURE" {
                 elem.set_attr(target, value);
             } else if tag_str == "FIGURE"
-                && node_select_matcher(&elem, &selectors.img_picture).length() == 0
+                && node_select_matcher(elem, &selectors.img_picture).length() == 0
             {
                 let escaped = escape_html_attr(value);
                 let html = format!("<img {}=\"{}\">", target, escaped);
@@ -721,7 +714,7 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
             if tag_str == "IMG" || tag_str == "PICTURE" {
                 elem.set_attr(target, value);
             } else if tag_str == "FIGURE"
-                && node_select_matcher(&elem, &selectors.img_picture).length() == 0
+                && node_select_matcher(elem, &selectors.img_picture).length() == 0
             {
                 let escaped = escape_html_attr(value);
                 let html = format!("<img {}=\"{}\">", target, escaped);
@@ -734,8 +727,8 @@ pub fn fix_lazy_images(root: &Node<'_>, selectors: &Selectors) {
 /// Unwrap images from noscript tags.
 pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
     // First, remove images without useful sources
-    let imgs: Vec<_> = doc.select_matcher(&selectors.img).nodes().to_vec();
-    for img in imgs {
+    let imgs = doc.select_matcher(&selectors.img);
+    for img in imgs.nodes() {
         let mut has_useful_attr = false;
         let attrs = img.attrs();
         for attr in attrs.iter() {
@@ -759,11 +752,11 @@ pub fn unwrap_noscript_images(doc: &Document, selectors: &Selectors) {
     }
 
     // Process noscript tags
-    let noscripts: Vec<_> = doc.select_matcher(&selectors.noscript).nodes().to_vec();
-    for noscript in noscripts {
+    let noscripts = doc.select_matcher(&selectors.noscript);
+    for noscript in noscripts.nodes() {
         use crate::scoring::is_single_image;
 
-        if !is_single_image(&noscript) {
+        if !is_single_image(noscript) {
             continue;
         }
 
