@@ -192,37 +192,37 @@ pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
         return 0;
     }
 
-    let mut weight: i32 = 0;
+    // Inspect the element's attributes in place. `Node::attr` performs a query
+    // and clones the value for every lookup; this function is called for most
+    // scored nodes, so doing two such lookups is surprisingly expensive.
+    node.query(|tree_node| {
+        let Some(element) = tree_node.as_element() else {
+            return 0;
+        };
 
-    // Check class name using RegexSet for 2 matches in single pass
-    if let Some(class_name) = node.attr("class") {
-        let class_str = class_name.as_ref();
-        if !class_str.is_empty() {
-            let matches = regexps::CLASS_WEIGHT_SET.matches(class_str);
+        let mut weight = 0;
+        for attr in &element.attrs {
+            let name = attr.name.local.as_ref();
+            if name != "class" && name != "id" {
+                continue;
+            }
+
+            let value = attr.value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            let matches = regexps::CLASS_WEIGHT_SET.matches(value);
             if matches.matched(0) {
-                weight -= 25; // NEGATIVE matched
+                weight -= 25;
             }
             if matches.matched(1) {
-                weight += 25; // POSITIVE matched
+                weight += 25;
             }
         }
-    }
-
-    // Check ID using RegexSet for 2 matches in single pass
-    if let Some(id) = node.attr("id") {
-        let id_str = id.as_ref();
-        if !id_str.is_empty() {
-            let matches = regexps::CLASS_WEIGHT_SET.matches(id_str);
-            if matches.matched(0) {
-                weight -= 25; // NEGATIVE matched
-            }
-            if matches.matched(1) {
-                weight += 25; // POSITIVE matched
-            }
-        }
-    }
-
-    weight
+        weight
+    })
+    .unwrap_or(0)
 }
 
 /// Check if a node has non-whitespace inner text, without allocating a String.
@@ -378,9 +378,8 @@ fn is_phrasing_content_depth(node: &Node<'_>, depth: u32) -> bool {
         // Depth-limited to prevent excessive recursion on pathological DOMs.
         if (tag == "A" || tag == "DEL" || tag == "INS") && depth < 10 {
             return node
-                .children()
-                .iter()
-                .all(|child| is_phrasing_content_depth(child, depth + 1));
+                .children_it(false)
+                .all(|child| is_phrasing_content_depth(&child, depth + 1));
         }
     }
 

@@ -49,6 +49,7 @@ The extraction pipeline flows through these stages:
 - When a `Selection` already owns the matched node list, iterate `selection.nodes()` directly instead of cloning it with `to_vec()`; the stored node references remain usable while their DOM nodes are renamed or detached.
 - In bottom-up tree algorithms, extend the existing work stack from `children_it(true)` directly rather than collecting a temporary child vector for every expanded node.
 - In `clean_styles`, inspect an element's attributes once and guard bulk removal calls so ordinary elements keep the no-op fast path.
+- In hot attribute predicates such as class weighting, use one borrowed `Node::query` over the element instead of repeated cloning `attr()` lookups.
 - Standard HTML tag names are uppercase in the parsed DOM; keep `get_tag_name`'s uppercase fast path allocation-free.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or readerability heuristics, and preserve output compatibility with the Mozilla fixture suite.
 
