@@ -2,6 +2,7 @@
 
 use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
+use smallvec::SmallVec;
 use tendril::StrTendril;
 impl Dom {
     fn ensure_no_cycle(&self, parent: NodeId, child: NodeId) {
@@ -138,17 +139,17 @@ impl Dom {
         let _ = parent;
     }
     pub(crate) fn move_children(&mut self, from: NodeId, to: NodeId) {
-        let ids: Vec<_> = self.children(from).collect();
-        for id in ids {
+        if from == to {
+            return;
+        }
+        while let Some(id) = self.first_child(from) {
             self.append_child(to, id)
         }
     }
-    pub(crate) fn detach_children(&mut self, parent: NodeId) -> Vec<NodeId> {
-        let ids = self.children(parent).collect();
-        for &id in &ids {
+    pub(crate) fn detach_children(&mut self, parent: NodeId) {
+        while let Some(id) = self.first_child(parent) {
             self.detach(id)
         }
-        ids
     }
     pub(crate) fn rename_html(&mut self, node: NodeId, tag: Tag) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
@@ -205,7 +206,7 @@ impl Dom {
     pub(crate) fn set_inner_html(&mut self, node: NodeId, html: &str) -> Result<(), DomError> {
         let source = Dom::parse_fragment(html, self.tag(node).unwrap_or(Tag::Div))?;
         self.detach_children(node);
-        let roots: Vec<_> = source.children(source.root()).collect();
+        let roots: SmallVec<[NodeId; 4]> = source.children(source.root()).collect();
         for id in roots {
             let imported = self.import_subtree(&source, id)?;
             self.append_child(node, imported)
@@ -216,14 +217,14 @@ impl Dom {
         &mut self,
         node: NodeId,
         html: &str,
-    ) -> Result<Vec<NodeId>, DomError> {
+    ) -> Result<SmallVec<[NodeId; 4]>, DomError> {
         let source = Dom::parse_fragment(
             html,
             self.tag(self.parent(node).unwrap_or(self.root))
                 .unwrap_or(Tag::Div),
         )?;
-        let roots: Vec<_> = source.children(source.root()).collect();
-        let mut out = Vec::new();
+        let roots: SmallVec<[NodeId; 4]> = source.children(source.root()).collect();
+        let mut out = SmallVec::<[NodeId; 4]>::new();
         let mut at = node;
         for id in roots {
             let x = self.import_subtree(&source, id)?;

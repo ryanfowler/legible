@@ -6,8 +6,8 @@ use crate::scoring::get_inner_text;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::HashSet;
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub title: Option<String>,
@@ -247,7 +247,9 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
     static NP: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)^\s*(?:(dc|dcterm|og|twitter|parsely|weibo:(article|webpage))\s*[-\.:]?\s*)?(author|creator|pub-date|description|title|site_name)\s*$").unwrap()
     });
-    let mut vals = std::collections::HashMap::new();
+    // Metadata uses a small, fixed set of keys. A short linear table avoids a
+    // hash allocation for the common case while preserving last-value-wins.
+    let mut vals: SmallVec<[(String, String); 8]> = SmallVec::new();
     for id in dom
         .descendants(dom.root())
         .filter(|&x| dom.tag(x) == Some(Tag::Meta))
@@ -267,7 +269,7 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
                 .filter(|c| !c.is_whitespace())
                 .flat_map(char::to_lowercase)
                 .collect::<String>();
-            vals.insert(n, c.trim().into());
+            insert_metadata_value(&mut vals, n, c.trim().into());
         } else if let Some(n) = dom.attr(id, AttrName::Name).filter(|n| NP.is_match(n)) {
             let n = n
                 .chars()
@@ -275,10 +277,16 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
                 .map(|c| if c == '.' { ':' } else { c })
                 .flat_map(char::to_lowercase)
                 .collect::<String>();
-            vals.insert(n, c.trim().into());
+            insert_metadata_value(&mut vals, n, c.trim().into());
         }
     }
-    let pick = |keys: &[&str]| keys.iter().find_map(|k| vals.get(*k).cloned());
+    let pick = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            vals.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        })
+    };
     let mut m = Metadata::default();
     m.title = json
         .title
@@ -297,7 +305,9 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
         })
         .or_else(|| (!title.is_empty()).then(|| title.into()));
     let author = vals
-        .get("article:author")
+        .iter()
+        .find(|(name, _)| name == "article:author")
+        .map(|(_, value)| value)
         .filter(|v| url::Url::parse(v).is_err())
         .cloned();
     m.byline = json
@@ -334,14 +344,26 @@ fn unescape_owned(s: String) -> String {
         Cow::Owned(x) => x,
     }
 }
+fn insert_metadata_value(
+    values: &mut SmallVec<[(String, String); 8]>,
+    name: String,
+    value: String,
+) {
+    if let Some((_, existing)) = values.iter_mut().find(|(key, _)| key == &name) {
+        *existing = value;
+    } else {
+        values.push((name, value));
+    }
+}
+
 pub fn text_similarity(a: &str, b: &str) -> f64 {
     let aa = a.to_lowercase();
     let bb = b.to_lowercase();
-    let set: HashSet<_> = regexps::TOKENIZE
+    let set: SmallVec<[&str; 16]> = regexps::TOKENIZE
         .split(&aa)
         .filter(|s| !s.is_empty())
         .collect();
-    let tokens: Vec<_> = regexps::TOKENIZE
+    let tokens: SmallVec<[&str; 16]> = regexps::TOKENIZE
         .split(&bb)
         .filter(|s| !s.is_empty())
         .collect();
