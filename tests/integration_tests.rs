@@ -157,7 +157,7 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
     // Check content by comparing text (to avoid HTML serialization differences)
     if let Some(expected) = expected_html {
         let expected_text = extract_text_content(&expected);
-        let got_text = extract_text_content(&article.content);
+        let got_text = extract_text_content(&article.html());
 
         let similarity = text_similarity(&expected_text, &got_text);
         if similarity < 0.9 {

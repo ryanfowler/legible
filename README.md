@@ -13,7 +13,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-legible = "0.4"
+legible = "0.5"
 ```
 
 ## Usage
@@ -40,8 +40,8 @@ let html = r#"
 match parse(html, Some("https://example.com"), None) {
     Ok(article) => {
         println!("Title: {}", article.title);
-        println!("Content: {}", article.content);
-        println!("Text: {}", article.text_content);
+        println!("Content: {}", article.html());
+        println!("Text: {}", article.text());
     }
     Err(e) => eprintln!("Error: {}", e),
 }
@@ -82,11 +82,11 @@ if doc.is_probably_readerable(None) {
 
 The `Article` struct contains:
 
-| Field            | Type             | Description                       |
+| Member           | Type             | Description                       |
 | ---------------- | ---------------- | --------------------------------- |
 | `title`          | `String`         | The article title                 |
-| `content`        | `String`         | The article content as HTML       |
-| `text_content`   | `String`         | The article content as plain text |
+| `html()`         | `String`         | The article content as HTML       |
+| `text()`         | `String`         | The article content as plain text |
 | `byline`         | `Option<String>` | The author byline                 |
 | `excerpt`        | `Option<String>` | A short excerpt from the article  |
 | `site_name`      | `Option<String>` | The site name                     |
@@ -94,6 +94,10 @@ The `Article` struct contains:
 | `dir`            | `Option<String>` | Text direction (ltr or rtl)       |
 | `lang`           | `Option<String>` | Document language                 |
 | `length`         | `usize`          | Length of the text content        |
+
+The legacy `content` and `text_content` fields are deprecated. They remain available
+for migration, but new code should use `html()` and `text()`. They will be removed
+in a future breaking release.
 
 ## Configuration
 
@@ -134,7 +138,7 @@ use legible::parse;
 let article = parse(html, Some(url), None)?;
 
 // Sanitize before rendering
-let safe_html = ammonia::clean(&article.content);
+let safe_html = ammonia::clean(&article.html());
 ```
 
 ## How It Works

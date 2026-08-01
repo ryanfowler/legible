@@ -1,6 +1,7 @@
 use super::{AttrName, DomError, ElementData, Node, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
 
+#[derive(Clone, Debug)]
 pub(crate) struct Dom {
     pub(crate) nodes: Vec<Node>,
     pub(crate) root: NodeId,
@@ -35,6 +36,48 @@ impl Dom {
             .map_err(|_| DomError("DOM exceeds NodeId capacity".into()))?;
         self.nodes.push(Node::new(data));
         Ok(NodeId(i))
+    }
+    pub(crate) fn clone_subtree(&self, root: NodeId) -> Result<(Self, NodeId), DomError> {
+        let mut output = Self::new(NodeData::Fragment);
+        let mut stack = vec![(root, output.root)];
+        let mut output_root = None;
+
+        while let Some((source, parent)) = stack.pop() {
+            let data = match &self.node(source).data {
+                NodeData::Element(e) => NodeData::Element(ElementData {
+                    name: e.name.clone(),
+                    tag: e.tag,
+                    attrs: e.attrs.clone(),
+                    template_contents: NodeLink::NONE,
+                    mathml_annotation_xml_integration_point: e
+                        .mathml_annotation_xml_integration_point,
+                }),
+                data => data.clone(),
+            };
+            let target = output.create(data)?;
+            output.append_child(parent, target);
+            if output_root.is_none() {
+                output_root = Some(target);
+            }
+
+            if let NodeData::Element(e) = &self.node(source).data
+                && let Some(template) = e.template_contents.get()
+            {
+                let target_template = output.create(NodeData::Fragment)?;
+                if let NodeData::Element(target_element) = &mut output.node_mut(target).data {
+                    target_element.template_contents = NodeLink::from_option(Some(target_template));
+                }
+                let mut children: Vec<_> = self.children(template).collect();
+                children.reverse();
+                stack.extend(children.into_iter().map(|child| (child, target_template)));
+            }
+
+            let mut children: Vec<_> = self.children(source).collect();
+            children.reverse();
+            stack.extend(children.into_iter().map(|child| (child, target)));
+        }
+
+        Ok((output, output_root.expect("subtree root must be cloned")))
     }
     pub(crate) fn create_element(&mut self, name: QualName) -> Result<NodeId, DomError> {
         self.create(NodeData::Element(ElementData {

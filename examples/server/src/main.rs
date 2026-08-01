@@ -146,7 +146,7 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
     };
 
     // Sanitize the HTML content
-    let sanitized_content = sanitize_html(&article.content);
+    let sanitized_content = sanitize_html(&article.html());
 
     // Build the article page
     let byline_html = article

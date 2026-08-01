@@ -33,8 +33,8 @@
 //!     Ok(article) => {
 //!         println!("Title: {}", article.title);
 //!         println!("Byline: {:?}", article.byline);
-//!         println!("Content: {}", article.content);
-//!         println!("Text: {}", article.text_content);
+//!         println!("Content: {}", article.html());
+//!         println!("Text: {}", article.text());
 //!     }
 //!     Err(e) => eprintln!("Error: {}", e),
 //! }
@@ -42,8 +42,8 @@
 //!
 //! The returned [`Article`] contains:
 //! - `title` - The article title
-//! - `content` - The article content as HTML
-//! - `text_content` - The article content as plain text
+//! - [`Article::html()`] - The article content as HTML
+//! - [`Article::text()`] - The article content as plain text
 //! - `byline` - The author byline
 //! - `excerpt` - A short excerpt from the article
 //! - `site_name` - The site name
@@ -127,7 +127,7 @@
 //!
 //! ```rust,ignore
 //! let article = parse(html, Some(url), None)?;
-//! let safe_html = ammonia::clean(&article.content);
+//! let safe_html = ammonia::clean(&article.html());
 //! ```
 //!
 //! ## How It Works

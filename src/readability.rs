@@ -4,7 +4,7 @@ use crate::cleaning::*;
 use crate::constants::{
     flags::*, is_alter_to_div_exception, is_default_tag_to_score, is_unlikely_role, regexps,
 };
-use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
+use crate::dom::{AttrName, Dom, NodeData, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata};
@@ -12,6 +12,7 @@ use crate::options::Options;
 use crate::scoring::*;
 use regex::Regex;
 use smallvec::SmallVec;
+use std::fmt;
 use url::Url;
 
 /// The extracted article content and metadata.
@@ -26,20 +27,21 @@ use url::Url;
 /// if let Ok(article) = parse(html, None, None) {
 ///     println!("Title: {}", article.title);
 ///     println!("Author: {:?}", article.byline);
-///     println!("HTML length: {} bytes", article.content.len());
-///     println!("Text length: {} chars", article.length);
+///     println!("HTML length: {} bytes", article.html().len());
+///     println!("Text length: {} chars", article.text().len());
 /// }
 /// ```
 ///
 /// # Security
 ///
-/// The [`content`](Article::content) field contains unsanitized HTML. Sanitize it before
-/// you render it in a context where scripts or other unsafe content can execute.
+/// The HTML returned by [`Article::html()`] is unsanitized. Sanitize it before you
+/// render it in a context where scripts or other unsafe content can execute.
 ///
 /// ```rust,ignore
-/// let safe_html = ammonia::clean(&article.content);
+/// let safe_html = ammonia::clean(&article.html());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+#[non_exhaustive]
 pub struct Article {
     /// The article title.
     ///
@@ -56,14 +58,14 @@ pub struct Article {
     pub lang: Option<String>,
 
     /// The cleaned article content as HTML.
-    ///
-    /// This HTML is unsanitized. Sanitize it before you render it.
+    #[deprecated(since = "0.5.0", note = "use `Article::html()` instead")]
     pub content: String,
 
     /// The article content as plain text.
+    #[deprecated(since = "0.5.0", note = "use `Article::text()` instead")]
     pub text_content: String,
 
-    /// The length of [`text_content`](Article::text_content) in characters.
+    /// The length of the article text in characters.
     pub length: usize,
 
     /// A short article excerpt.
@@ -74,6 +76,48 @@ pub struct Article {
 
     /// The publication time as an ISO 8601 string.
     pub published_time: Option<String>,
+
+    /// The processed article DOM. Keep this private so callers use the owned,
+    /// lazy accessors instead of depending on the representation.
+    output_dom: Dom,
+    output_root: NodeId,
+}
+
+#[allow(deprecated)]
+impl fmt::Debug for Article {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Article")
+            .field("title", &self.title)
+            .field("byline", &self.byline)
+            .field("dir", &self.dir)
+            .field("lang", &self.lang)
+            .field("content", &self.content)
+            .field("text_content", &self.text_content)
+            .field("length", &self.length)
+            .field("excerpt", &self.excerpt)
+            .field("site_name", &self.site_name)
+            .field("published_time", &self.published_time)
+            .finish()
+    }
+}
+
+impl Article {
+    /// Returns the cleaned article content as an owned HTML string.
+    ///
+    /// The HTML is freshly serialized on every call. It is unsanitized;
+    /// sanitize it before you render it.
+    pub fn html(&self) -> String {
+        self.output_dom
+            .inner_html(self.output_root)
+            .unwrap_or_default()
+    }
+
+    /// Returns the article content as an owned plain-text string.
+    ///
+    /// Text is freshly generated from the processed DOM on every call.
+    pub fn text(&self) -> String {
+        get_inner_text(&self.output_dom, self.output_root, true)
+    }
 }
 pub(crate) struct Readability<'a> {
     dom: Dom,
@@ -95,6 +139,8 @@ struct AttemptResult {
     text_length: usize,
 }
 struct ArticleContent {
+    dom: Dom,
+    root: NodeId,
     content_html: String,
     text_content: String,
     text_length: usize,
@@ -158,14 +204,20 @@ impl<'a> Readability<'a> {
         if let Some(t) = self.metadata.title.take() {
             self.article_title = t
         }
-        let content = self.grab_article()?;
+        let mut content = self.grab_article()?;
+        content.text_content = get_inner_text(&content.dom, content.root, true);
+        content.text_length = content.text_content.chars().count();
         let excerpt = self.metadata.excerpt.take().or(content.excerpt);
         Ok(Article {
             title: std::mem::take(&mut self.article_title),
             byline: self.metadata.byline.take().or(self.article_byline.take()),
             dir: self.article_dir.take(),
             lang: self.article_lang.take(),
+            output_dom: content.dom,
+            output_root: content.root,
+            #[allow(deprecated)]
             content: content.content_html,
+            #[allow(deprecated)]
             text_content: content.text_content,
             length: content.text_length,
             excerpt,
@@ -515,9 +567,13 @@ impl<'a> Readability<'a> {
                         .first_descendant_by_tag(body, Tag::P)
                         .map(|x| get_inner_text(&self.dom, x, false))
                         .filter(|x| !x.is_empty());
-                    let html = self.post_process(body);
+                    let root = self.post_process(body);
+                    let content_html = self.dom.inner_html(root).unwrap_or_default();
+                    let (dom, root) = self.take_output_dom(root).map_err(|_| Error::NoContent)?;
                     return Ok(ArticleContent {
-                        content_html: html,
+                        dom,
+                        root,
+                        content_html,
                         text_content: text.clone(),
                         text_length: text.chars().count(),
                         excerpt: ex,
@@ -539,9 +595,13 @@ impl<'a> Readability<'a> {
                 .first_descendant_by_tag(article_id, Tag::P)
                 .map(|x| get_inner_text(&self.dom, x, false))
                 .filter(|x| !x.is_empty());
-            let html = self.post_process(article_id);
+            let root = self.post_process(article_id);
+            let content_html = self.dom.inner_html(root).unwrap_or_default();
+            let (dom, root) = self.take_output_dom(root).map_err(|_| Error::NoContent)?;
             return Ok(ArticleContent {
-                content_html: html,
+                dom,
+                root,
+                content_html,
                 text_content: text,
                 text_length: len,
                 excerpt: ex,
@@ -760,7 +820,15 @@ impl<'a> Readability<'a> {
             }
         }
     }
-    fn post_process(&mut self, root: NodeId) -> String {
+    fn take_output_dom(
+        &mut self,
+        root: NodeId,
+    ) -> std::result::Result<(Dom, NodeId), crate::dom::DomError> {
+        let output = self.dom.clone_subtree(root);
+        self.dom = Dom::new(NodeData::Document);
+        output
+    }
+    fn post_process(&mut self, root: NodeId) -> NodeId {
         self.fix_relative_uris(root);
         simplify_nested_elements(&mut self.dom, root);
         let ids: Vec<_> = self.dom.descendants(root).collect();
@@ -788,7 +856,7 @@ impl<'a> Readability<'a> {
         for x in comments {
             self.dom.detach(x)
         }
-        self.dom.inner_html(root).unwrap_or_default()
+        root
     }
     fn fix_relative_uris(&mut self, root: NodeId) {
         let Some(base) = self.base_uri.clone() else {

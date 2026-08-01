@@ -40,6 +40,7 @@ The extraction pipeline flows through these stages:
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
 - **`src/dom/`** - Compact arena storage, typed tags and attributes, iterative traversal, centralized mutation, fragment parsing, and `html5ever` serialization
 - **`dom/state.rs`** - Dense Readability state indexed by stable `NodeId` values
+- **`Article`** - Retains the processed output DOM and generates HTML and text strings through accessors; legacy `content` and `text_content` fields remain deprecated compatibility snapshots.
 
 ### Performance Notes
 
@@ -81,7 +82,7 @@ Extraction with default options must return `Error::NoContent` when the best ret
 use legible::{parse, Options, is_probably_readerable, Document};
 
 // Full extraction
-let article = parse(html, Some("https://example.com"), None)?;  // Returns Article with title, content, text_content, byline, excerpt, etc.
+let article = parse(html, Some("https://example.com"), None)?;  // Returns Article with title, html(), text(), byline, excerpt, etc.
 
 // Quick check without full parsing
 if is_probably_readerable(html, None) { /* ... */ }

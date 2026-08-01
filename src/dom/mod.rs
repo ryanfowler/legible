@@ -41,6 +41,41 @@ mod tests {
     }
 
     #[test]
+    fn clone_subtree_discards_unrelated_nodes() {
+        let dom = Dom::parse_document(
+            "<html><body><aside>discarded</aside><article><p>kept</p></article></body></html>",
+        )
+        .unwrap();
+        let article = dom
+            .first_descendant_by_tag(dom.root(), Tag::Article)
+            .unwrap();
+
+        let (clone, root) = dom.clone_subtree(article).unwrap();
+
+        assert_eq!(clone.inner_html(root).unwrap(), "<p>kept</p>");
+        assert_eq!(clone.len(), 4);
+        assert!(!clone.text(root).contains("discarded"));
+    }
+
+    #[test]
+    fn clone_subtree_preserves_templates_and_foreign_namespaces() {
+        let dom = Dom::parse_document(
+            "<article><template><span>inside</span></template><svg><foreignObject><p>svg</p></foreignObject></svg></article>",
+        )
+        .unwrap();
+        let root = dom
+            .first_descendant_by_tag(dom.root(), Tag::Article)
+            .unwrap();
+
+        let (clone, clone_root) = dom.clone_subtree(root).unwrap();
+
+        assert_eq!(
+            clone.inner_html(clone_root).unwrap(),
+            dom.inner_html(root).unwrap()
+        );
+    }
+
+    #[test]
     fn mutation_preserves_links_and_ids() {
         let mut dom = Dom::parse_document("<div id=a><p>one</p><p>two</p></div>").unwrap();
         let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
