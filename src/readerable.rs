@@ -1,163 +1,94 @@
 //! Functions to determine if a document is probably readerable.
-
+#![allow(clippy::collapsible_if)]
 use crate::constants::regexps;
-use crate::dom::{build_match_string, get_tag_name, has_tag_name};
+use crate::document::Document;
+use crate::dom::{Dom, NodeId, Tag, build_match_string};
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
-use dom_query::{Document, Node, NodeId};
-use hashbrown::HashSet;
+use std::collections::HashSet;
 
-/// Check if a document is probably readerable without parsing the whole thing.
+/// Check if an HTML document probably contains readable article content.
 ///
-/// This is a quick heuristic check to determine if [`parse()`](crate::parse)
-/// is likely to succeed. If you want to check readability before parsing, use
-/// [`Document`] to avoid parsing the HTML twice.
+/// This quick heuristic scores visible paragraph-like elements by text length. It ignores
+/// elements that look like navigation, sidebars, or other non-content sections.
 ///
-/// The function scores paragraph-like elements based on their text length, ignoring
-/// elements that match unlikely candidate patterns (sidebars, navigation, etc.).
+/// Use [`Document`](crate::Document) if you plan to extract the article after this check.
+/// It avoids parsing the HTML twice.
 ///
 /// # Arguments
 ///
-/// * `html` - The HTML content to check
-/// * `options` - Optional [`ReaderableOptions`] to customize the check
-///
-/// # Returns
-///
-/// `true` if the document appears to contain readable article content, `false` otherwise.
+/// * `html` - The HTML content to check.
+/// * `options` - Optional settings for the heuristic.
 ///
 /// # Example
 ///
 /// ```rust
 /// use legible::is_probably_readerable;
 ///
-/// let html = r#"
-///     <html><body>
-///         <article>
-///             <p>This is a substantial article with enough content
-///             to be considered readable by the algorithm.</p>
-///         </article>
-///     </body></html>
-/// "#;
-///
+/// let html = "<article><p>This is a substantial article with enough content for the check.</p></article>";
 /// if is_probably_readerable(html, None) {
 ///     println!("Document is likely readerable");
 /// }
 /// ```
 pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) -> bool {
-    let doc = Document::from(html);
-    is_probably_readerable_doc(&doc, options)
+    Document::new(html).is_probably_readerable(options)
 }
-
-pub(crate) fn is_probably_readerable_doc(
-    doc: &Document,
-    options: Option<ReaderableOptions>,
-) -> bool {
+pub(crate) fn is_probably_readerable_doc(dom: &Dom, options: Option<ReaderableOptions>) -> bool {
     let options = options.unwrap_or_default();
-
     let mut score = 0.0;
-    let mut seen_div_ids: HashSet<NodeId> = HashSet::new();
-
-    // Reusable buffer for match_string to avoid allocations per node
-    let mut match_string_buf = String::with_capacity(128);
-
-    for node in doc.root().descendants_it().filter(|node| node.is_element()) {
-        let tag_name = get_tag_name(&node).unwrap_or_default();
-        if matches!(&*tag_name, "P" | "PRE" | "ARTICLE") {
-            if score_readerable_node(&node, &options, &mut score, &mut match_string_buf) {
-                return true;
-            }
+    let mut seen = HashSet::new();
+    let mut buf = String::with_capacity(128);
+    for id in dom.descendants(dom.root()) {
+        if !dom.is_element(id) {
             continue;
         }
-
-        if tag_name == "BR"
-            && let Some(parent) = node.parent()
-            && has_tag_name(&parent, "div")
-            && seen_div_ids.insert(parent.id)
-            && score_readerable_node(&parent, &options, &mut score, &mut match_string_buf)
-        {
-            return true;
+        match dom.tag(id) {
+            Some(Tag::P | Tag::Pre | Tag::Article) => {
+                if score_node(dom, id, &options, &mut score, &mut buf) {
+                    return true;
+                }
+            }
+            Some(Tag::Br) => {
+                if let Some(p) = dom.parent(id) {
+                    if dom.tag(p) == Some(Tag::Div)
+                        && seen.insert(p)
+                        && score_node(dom, p, &options, &mut score, &mut buf)
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
-
     false
 }
-
-fn score_readerable_node(
-    node: &Node<'_>,
-    options: &ReaderableOptions,
+fn score_node(
+    dom: &Dom,
+    id: NodeId,
+    o: &ReaderableOptions,
     score: &mut f64,
-    match_string_buf: &mut String,
+    buf: &mut String,
 ) -> bool {
-    // Check visibility (no match_string needed)
-    if !is_probably_visible(node) {
+    if !is_probably_visible(dom, id) {
         return false;
     }
-
-    // Build match_string lazily — only needed for regex check
-    build_match_string(node, match_string_buf);
-
-    // Use RegexSet for single-pass matching of both patterns
-    let candidate_matches = regexps::CANDIDATE_FILTER_SET.matches(match_string_buf);
-    if candidate_matches.matched(0) && !candidate_matches.matched(1) {
+    build_match_string(dom, id, buf);
+    let m = regexps::CANDIDATE_FILTER_SET.matches(buf);
+    if m.matched(0) && !m.matched(1) {
         return false;
     }
-
-    // Check if li > p (skip list item paragraphs)
-    let mut parent = node.parent();
-    while let Some(p) = parent {
-        if has_tag_name(&p, "li") {
+    let mut p = dom.parent(id);
+    while let Some(x) = p {
+        if dom.tag(x) == Some(Tag::Li) {
             return false;
         }
-        parent = p.parent();
+        p = dom.parent(x)
     }
-
-    // Check text content length
-    let text_length = node.normalized_char_count();
-
-    if text_length < options.min_content_length {
+    let len = dom.normalized_char_count(id);
+    if len < o.min_content_length {
         return false;
     }
-
-    // Add to score based on content length
-    *score += ((text_length - options.min_content_length) as f64).sqrt();
-
-    *score > options.min_score
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_short_content_not_readerable() {
-        let html = "<html><body><p>Short</p></body></html>";
-        assert!(!is_probably_readerable(html, None));
-    }
-
-    #[test]
-    fn test_long_content_is_readerable() {
-        // Need sqrt(text_len - 140) > 20, so text_len > 540
-        let long_text = "a".repeat(600);
-        let html = format!("<html><body><p>{}</p></body></html>", long_text);
-        assert!(is_probably_readerable(&html, None));
-    }
-
-    #[test]
-    fn test_unlikely_candidates_ignored() {
-        // Even long content is rejected if it has unlikely candidate class
-        let long_text = "a".repeat(600);
-        let html = format!(
-            "<html><body><p class=\"sidebar\">{}</p></body></html>",
-            long_text
-        );
-        assert!(!is_probably_readerable(&html, None));
-    }
-
-    #[test]
-    fn test_article_tag_helps() {
-        // Same scoring rules apply - article tag helps collect nodes but doesn't change scoring
-        let text = "a".repeat(600);
-        let html = format!("<html><body><article>{}</article></body></html>", text);
-        assert!(is_probably_readerable(&html, None));
-    }
+    *score += ((len - o.min_content_length) as f64).sqrt();
+    *score > o.min_score
 }

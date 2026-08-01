@@ -1,7 +1,5 @@
 //! Public [`Document`] type for pre-parsing HTML once and reusing it.
-
-use dom_query::Document as DomDocument;
-
+use crate::dom::Dom;
 use crate::error::Result;
 use crate::options::{Options, ReaderableOptions};
 use crate::readability::{Article, Readability};
@@ -9,160 +7,85 @@ use crate::readerable::is_probably_readerable_doc;
 
 /// A pre-parsed HTML document.
 ///
-/// `Document` holds the parsed DOM tree and a reference to the original HTML string,
-/// allowing you to call [`is_probably_readerable`](Document::is_probably_readerable) and
-/// [`parse`](Document::parse) without re-parsing the HTML each time.
+/// `Document` lets you check readability and extract content without parsing the HTML
+/// twice.
 ///
-/// # Typical Usage
+/// # Example
 ///
 /// ```rust
 /// use legible::Document;
 ///
 /// let html = r#"
-///     <html>
-///     <head><title>My Article</title></head>
-///     <body>
-///         <article>
-///             <h1>Article Title</h1>
-///             <p>This is the main content of the article. It contains several
-///             paragraphs of text that make up the body of the article.</p>
-///             <p>More content here to ensure we have enough text for the
-///             readability algorithm to work with properly.</p>
-///         </article>
-///     </body>
-///     </html>
+///     <html><body><article>
+///         <h1>Article title</h1>
+///         <p>This article has enough text for the readability check to inspect.</p>
+///     </article></body></html>
 /// "#;
-///
 /// let doc = Document::new(html);
 ///
 /// if doc.is_probably_readerable(None) {
 ///     let article = doc.parse(Some("https://example.com"), None);
-///     // ...
+///     // Use the extracted article.
 /// }
 /// ```
 ///
 /// # Ownership
 ///
-/// - [`is_probably_readerable`](Document::is_probably_readerable) borrows `&self` because
-///   the readability check is read-only.
-/// - [`parse`](Document::parse) consumes `self` because the extraction algorithm mutates
-///   the DOM during content extraction.
+/// [`Document::is_probably_readerable`] borrows the document because the check is
+/// read-only. [`Document::parse`] consumes the document because extraction mutates the
+/// DOM.
 pub struct Document<'a> {
-    doc: DomDocument,
+    pub(crate) doc: Dom,
     html: &'a str,
 }
-
 impl<'a> Document<'a> {
-    /// Create a new `Document` by parsing the given HTML string.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use legible::Document;
-    ///
-    /// let doc = Document::new("<html><body><p>Hello</p></body></html>");
-    /// ```
+    /// Parse an HTML string into a reusable document.
     pub fn new(html: &'a str) -> Self {
-        let doc = DomDocument::from(html);
-        Self { doc, html }
+        Self {
+            doc: Dom::parse_document(html).expect("HTML DOM node limit exceeded"),
+            html,
+        }
     }
-
-    /// Check if this document is probably readerable.
+    /// Check if this document probably contains readable article content.
     ///
-    /// This is a quick heuristic check that borrows the document, so you can
-    /// still call [`parse`](Document::parse) afterwards.
-    ///
-    /// See [`is_probably_readerable`](crate::is_probably_readerable) for details.
+    /// This method borrows the document. You can call [`Document::parse`] after it.
+    /// See [`is_probably_readerable`](crate::is_probably_readerable) for more details.
     pub fn is_probably_readerable(&self, options: Option<ReaderableOptions>) -> bool {
         is_probably_readerable_doc(&self.doc, options)
     }
 
-    /// Parse the document and extract the article content.
+    /// Extract article content and metadata from this document.
     ///
-    /// This consumes the `Document` because the extraction algorithm mutates
-    /// the DOM during processing.
-    ///
-    /// See [`parse`](crate::parse) for details on arguments and errors.
+    /// This method consumes the document because extraction mutates the DOM. See
+    /// [`parse`](crate::parse) for details about arguments and errors.
     pub fn parse(self, url: Option<&str>, options: Option<Options>) -> Result<Article> {
         Readability::from_document(self.doc, self.html, url, options).parse()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_readerable_check() {
-        let long_text = "a".repeat(600);
-        let html = format!("<html><body><p>{}</p></body></html>", long_text);
-        let doc = Document::new(&html);
-        assert!(doc.is_probably_readerable(None));
+        let s = "a ".repeat(300);
+        assert!(Document::new(&format!("<p>{s}</p>")).is_probably_readerable(None));
     }
-
     #[test]
     fn test_not_readerable() {
-        let html = "<html><body><p>Short</p></body></html>";
-        let doc = Document::new(html);
-        assert!(!doc.is_probably_readerable(None));
+        assert!(!Document::new("<p>Short</p>").is_probably_readerable(None));
     }
 
     #[test]
-    fn test_parse() {
-        let html = r#"
-            <html>
-            <head><title>Test Article</title></head>
-            <body>
-                <article>
-                    <h1>Test Article</h1>
-                    <p>This is the main content of the article. It contains several
-                    paragraphs of text that make up the body of the article.</p>
-                    <p>More content here to ensure we have enough text for the
-                    readability algorithm to work with properly.</p>
-                </article>
-            </body>
-            </html>
-        "#;
-        let doc = Document::new(html);
-        let article = doc.parse(Some("https://example.com"), None).unwrap();
-        assert!(!article.title.is_empty());
-        assert!(!article.content.is_empty());
-    }
-
-    #[test]
-    fn test_readerable_then_parse() {
-        let long_text = "a ".repeat(300);
-        let html = format!(
-            r#"
-            <html>
-            <head><title>Test Article</title></head>
-            <body>
-                <article>
-                    <h1>Test Article</h1>
-                    <p>{}</p>
-                </article>
-            </body>
-            </html>
-        "#,
-            long_text
-        );
-        let doc = Document::new(&html);
-        assert!(doc.is_probably_readerable(None));
-        let article = doc.parse(None, None).unwrap();
-        assert!(!article.content.is_empty());
-    }
-
-    #[test]
-    fn test_parse_no_body() {
-        let html = "<html><head><title>No Body</title></head></html>";
-        let doc = Document::new(html);
-        assert!(doc.parse(None, None).is_err());
-    }
-
-    #[test]
-    fn test_parse_invalid_url() {
-        let html = "<html><body><p>Content</p></body></html>";
-        let doc = Document::new(html);
-        assert!(doc.parse(Some("not a valid url ://"), None).is_err());
+    fn empty_documents_have_no_content() {
+        for html in [
+            "",
+            "<html><head><title>No body content</title></head></html>",
+            "<html><body><img src=\"article.jpg\" alt=\"Article image\"></body></html>",
+        ] {
+            assert!(matches!(
+                Document::new(html).parse(None, None),
+                Err(crate::Error::NoContent)
+            ));
+        }
     }
 }

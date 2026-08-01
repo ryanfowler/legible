@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::{is_probably_readerable, parse};
+use legible::{Document, is_probably_readerable, parse};
 use std::fs;
 use std::hint::black_box;
 
@@ -108,5 +108,35 @@ fn bench_complex_pages(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_parse, bench_readerable, bench_complex_pages);
+/// Benchmark parser scaling on adversarial deeply nested markup.
+fn bench_deeply_nested(c: &mut Criterion) {
+    let mut group = c.benchmark_group("deeply_nested_document");
+
+    for depth in [1_000, 2_000, 4_000, 8_000] {
+        let mut html = String::with_capacity(depth * 11);
+        html.push_str("<!doctype html>");
+        for _ in 0..depth {
+            html.push_str("<div>");
+        }
+        html.push('x');
+        for _ in 0..depth {
+            html.push_str("</div>");
+        }
+
+        group.throughput(Throughput::Elements(depth as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &html, |b, html| {
+            b.iter(|| Document::new(black_box(html)))
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_parse,
+    bench_readerable,
+    bench_complex_pages,
+    bench_deeply_nested
+);
 criterion_main!(benches);

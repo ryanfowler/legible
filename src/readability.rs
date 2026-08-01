@@ -1,41 +1,20 @@
-//! Main Readability parser implementation.
-
-use std::borrow::Cow;
-
-use crate::cleaning::{
-    clean_conditionally, clean_headers, clean_matched_nodes, clean_styles, clean_tags,
-    fix_lazy_images, mark_data_tables, prep_document, remove_scripts, simplify_nested_elements,
-    unwrap_noscript_images,
-};
+//! Main Readability extraction algorithm.
+#![allow(clippy::collapsible_if)]
+use crate::cleaning::*;
 use crate::constants::{
     flags::*, is_alter_to_div_exception, is_default_tag_to_score, is_unlikely_role, regexps,
 };
-use crate::dom::{
-    NodeDataStore, build_match_string, get_tag_name, has_any_tag_name, has_tag_name,
-    node_select_matcher,
-};
+use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
 use crate::logging::debug_log;
-use crate::metadata::{
-    Metadata, get_article_metadata, get_article_title, get_json_ld, text_similarity,
-};
+use crate::metadata::{self, Metadata};
 use crate::options::Options;
-use crate::scoring::{
-    compute_initial_readability_data, get_inner_text, get_link_density, get_link_density_cached,
-    get_or_compute_stats, has_child_block_element, has_non_empty_inner_text,
-    has_single_tag_inside_element, initialize_node, is_element_without_content,
-    is_phrasing_content, is_probably_visible, is_valid_byline, wrap_phrasing_content_in_p,
-};
-use crate::selectors::{SELECTORS, Selectors};
-use dom_query::{Document, Node, NodeId};
-use hashbrown::HashSet;
+use crate::scoring::*;
 use regex::Regex;
+use std::collections::HashSet;
 use url::Url;
 
-/// The extracted article content.
-///
-/// This struct contains the main article content extracted from an HTML document,
-/// along with metadata like title, author, and publication date.
+/// The extracted article content and metadata.
 ///
 /// # Example
 ///
@@ -54,9 +33,8 @@ use url::Url;
 ///
 /// # Security
 ///
-/// The [`content`](Article::content) field contains unsanitized HTML extracted from the
-/// source document. Before rendering this HTML in a browser or other context where scripts
-/// could execute, you should sanitize it using a library like [`ammonia`](https://docs.rs/ammonia):
+/// The [`content`](Article::content) field contains unsanitized HTML. Sanitize it before
+/// you render it in a context where scripts or other unsafe content can execute.
 ///
 /// ```rust,ignore
 /// let safe_html = ammonia::clean(&article.content);
@@ -65,1440 +43,855 @@ use url::Url;
 pub struct Article {
     /// The article title.
     ///
-    /// Extracted from the document's `<title>` tag, `<h1>`, or metadata (JSON-LD, OpenGraph).
+    /// This value can come from the `<title>` tag, a heading, or document metadata.
     pub title: String,
 
     /// The author byline.
-    ///
-    /// Extracted from byline elements, `rel="author"` links, or metadata.
     pub byline: Option<String>,
 
-    /// The text direction (`"ltr"` or `"rtl"`).
-    ///
-    /// Inherited from the `dir` attribute of ancestor elements.
+    /// The text direction, such as `"ltr"` or `"rtl"`.
     pub dir: Option<String>,
 
-    /// The document language (e.g., `"en"`, `"fr"`).
-    ///
-    /// Extracted from the `lang` attribute of the `<html>` element.
+    /// The document language, such as `"en"` or `"fr"`.
     pub lang: Option<String>,
 
-    /// The article content as HTML.
+    /// The cleaned article content as HTML.
     ///
-    /// This is the cleaned, extracted article content wrapped in a container div.
-    /// The HTML structure is simplified and non-content elements are removed.
-    ///
-    /// **Warning:** This HTML is unsanitized and may contain malicious scripts or other
-    /// dangerous content. Always sanitize before rendering (e.g., with the `ammonia` crate).
+    /// This HTML is unsanitized. Sanitize it before you render it.
     pub content: String,
 
     /// The article content as plain text.
-    ///
-    /// All HTML tags are stripped, leaving only the text content.
     pub text_content: String,
 
-    /// The length of the text content in characters.
+    /// The length of [`text_content`](Article::text_content) in characters.
     pub length: usize,
 
-    /// A short excerpt from the article.
-    ///
-    /// Typically the first paragraph or the meta description.
+    /// A short article excerpt.
     pub excerpt: Option<String>,
 
-    /// The site name (e.g., `"The New York Times"`).
-    ///
-    /// Extracted from OpenGraph `og:site_name` or JSON-LD metadata.
+    /// The site name.
     pub site_name: Option<String>,
 
-    /// The published time as an ISO 8601 string.
-    ///
-    /// Extracted from `article:published_time` meta tag or JSON-LD metadata.
+    /// The publication time as an ISO 8601 string.
     pub published_time: Option<String>,
 }
-
-/// The Readability parser for extracting article content from HTML.
-///
-/// This is an internal implementation detail. Use the public [`parse()`](crate::parse)
-/// function instead.
 pub(crate) struct Readability<'a> {
-    doc: Document,
+    dom: Dom,
     original_html: &'a str,
     options: Options,
     flags: u32,
-    node_data: NodeDataStore,
+    node_data: NodeStateStore,
     article_title: String,
     article_byline: Option<String>,
     article_dir: Option<String>,
     article_lang: Option<String>,
-    article_site_name: Option<String>,
     metadata: Metadata,
     base_uri: Option<Url>,
     url_error: Option<url::ParseError>,
     attempts: Vec<AttemptResult>,
 }
-
 struct AttemptResult {
     content_html: String,
     text_length: usize,
 }
-
-/// Intermediate article content extracted by grab_article
 struct ArticleContent {
     content_html: String,
     text_content: String,
     text_length: usize,
     excerpt: Option<String>,
 }
-
 impl<'a> Readability<'a> {
-    /// Create a new Readability parser from a pre-parsed document.
     pub(crate) fn from_document(
-        doc: Document,
+        dom: Dom,
         original_html: &'a str,
         url: Option<&str>,
         options: Option<Options>,
     ) -> Self {
-        let options = options.unwrap_or_default();
-
         let (base_uri, url_error) = match url {
-            Some(u) => match Url::parse(u) {
-                Ok(parsed) => (Some(parsed), None),
+            Some(x) => match Url::parse(x) {
+                Ok(u) => (Some(u), None),
                 Err(e) => (None, Some(e)),
             },
             None => (None, None),
         };
         Self {
-            doc,
+            dom,
             original_html,
-            options,
+            options: options.unwrap_or_default(),
             flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
-            node_data: NodeDataStore::new(),
+            node_data: NodeStateStore::new(),
             article_title: String::new(),
             article_byline: None,
             article_dir: None,
             article_lang: None,
-            article_site_name: None,
             metadata: Metadata::default(),
             base_uri,
             url_error,
             attempts: Vec::new(),
         }
     }
-
-    /// Parse the document and extract the article content.
     pub(crate) fn parse(mut self) -> Result<Article> {
-        // Check for URL parsing error
         if let Some(e) = self.url_error {
             return Err(Error::InvalidUrl(e));
         }
-
-        // Check element count limit
         if self.options.max_elems_to_parse > 0 {
-            let count = self
-                .doc
-                .root()
-                .descendants_it()
-                .filter(|node| node.is_element())
+            let n = self
+                .dom
+                .descendants(self.dom.root())
+                .filter(|&x| self.dom.is_element(x))
                 .count();
-            if count > self.options.max_elems_to_parse {
-                return Err(Error::TooManyElements(
-                    count,
-                    self.options.max_elems_to_parse,
-                ));
+            if n > self.options.max_elems_to_parse {
+                return Err(Error::TooManyElements(n, self.options.max_elems_to_parse));
             }
         }
-
-        // Unwrap images from noscript tags
-        unwrap_noscript_images(&self.doc, &SELECTORS);
-
-        // Get article title early (needed for JSON-LD disambiguation)
-        let article_title = get_article_title(&self.doc, &SELECTORS);
-
-        // Extract JSON-LD metadata before removing scripts
-        let json_ld = if self.options.disable_json_ld {
+        unwrap_noscript_images(&mut self.dom);
+        let title = metadata::get_article_title(&self.dom);
+        let json = if self.options.disable_json_ld {
             Metadata::default()
         } else {
-            get_json_ld(&self.doc, &article_title, &SELECTORS)
+            metadata::get_json_ld(&self.dom, &title)
         };
-
-        // Remove scripts
-        remove_scripts(&self.doc, &SELECTORS);
-
-        // Prepare document
-        prep_document(&self.doc, &SELECTORS);
-
-        // Store article title
-        self.article_title = article_title;
-
-        // Get metadata
-        self.metadata = get_article_metadata(&self.doc, &json_ld, &self.article_title, &SELECTORS);
-        if self.metadata.title.is_some() {
-            self.article_title = self.metadata.title.take().unwrap_or_default();
+        remove_scripts(&mut self.dom);
+        prep_document(&mut self.dom);
+        self.article_title = title;
+        self.metadata = metadata::get_article_metadata(&self.dom, &json, &self.article_title);
+        if let Some(t) = self.metadata.title.take() {
+            self.article_title = t
         }
-
-        // Grab the article
-        let article_content = self.grab_article()?;
-
-        // Get excerpt if not in metadata
-        let excerpt = self.metadata.excerpt.take().or(article_content.excerpt);
-
-        let length = article_content.text_length;
-
+        let content = self.grab_article()?;
+        let excerpt = self.metadata.excerpt.take().or(content.excerpt);
         Ok(Article {
             title: std::mem::take(&mut self.article_title),
-            byline: self
-                .metadata
-                .byline
-                .take()
-                .or_else(|| self.article_byline.take()),
+            byline: self.metadata.byline.take().or(self.article_byline.take()),
             dir: self.article_dir.take(),
             lang: self.article_lang.take(),
-            content: article_content.content_html,
-            text_content: article_content.text_content,
-            length,
+            content: content.content_html,
+            text_content: content.text_content,
+            length: content.text_length,
             excerpt,
-            site_name: self
-                .metadata
-                .site_name
-                .take()
-                .or_else(|| self.article_site_name.take()),
+            site_name: self.metadata.site_name.take(),
             published_time: self.metadata.published_time.take(),
         })
     }
-
-    /// The main content extraction algorithm.
     fn grab_article(&mut self) -> Result<ArticleContent> {
-        if self.doc.body().is_none() {
+        if self.dom.body().is_none() {
             return Err(Error::NoBody);
         }
-
         loop {
-            debug_log!(self, "Starting grabArticle loop");
-
-            let strip_unlikely_candidates = self.flag_is_active(FLAG_STRIP_UNLIKELYS);
-
-            // First, node prepping
-            // Use HashSet for O(1) membership checks (Phase 1.2)
-            // Pre-allocate with reasonable capacity estimate
-            let mut elements_to_score: HashSet<NodeId> = HashSet::with_capacity(256);
-
-            // Get the HTML element for language
-            if let Some(html) = self.doc.select_matcher(&SELECTORS.html).nodes().first()
-                && let Some(lang) = html.attr("lang")
-            {
-                self.article_lang = Some(lang.to_string());
+            let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
+            let mut to_score = Vec::with_capacity(256);
+            if let Some(html) = self.dom.html_element() {
+                if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
+                    self.article_lang = Some(lang.into())
+                }
+                if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
+                    self.article_dir = Some(dir.into())
+                }
             }
-
-            let mut should_remove_title_header = true;
-
-            // First pass: identify nodes to remove and score
-            let all_nodes: Vec<_> = self
-                .doc
-                .root()
-                .descendants_it()
-                .filter(|node| node.is_element())
-                .collect();
-            let mut nodes_to_remove_ordered = Vec::with_capacity(64);
-
-            // Reusable buffer for building match_string to avoid allocations per node
-            let mut match_string_buf = String::with_capacity(128);
-            let mut active_removed_root: Option<NodeId> = None;
-
-            for node in &all_nodes {
-                // Document order is preorder, so only the most recent removed subtree
-                // can affect the current node.
-                if let Some(removed_root) = active_removed_root {
-                    let mut parent = node.parent();
-                    let mut still_in_removed_subtree = false;
-                    while let Some(p) = parent {
-                        if p.id == removed_root {
-                            still_in_removed_subtree = true;
-                            break;
-                        }
-                        parent = p.parent();
-                    }
-
-                    if still_in_removed_subtree {
+            let mut remove = Vec::new();
+            // Tree repair can make arena order differ from document order. Record
+            // only attached elements in preorder before this pass starts mutating.
+            // Snapshot depths identify removed subtrees without ancestor walks.
+            let initial_nodes = self
+                .dom
+                .element_descendants_snapshot_with_depth(self.dom.root());
+            let mut buf = String::new();
+            let mut removed_depth = None;
+            let mut remove_title = true;
+            for (id, depth) in initial_nodes {
+                if let Some(root_depth) = removed_depth {
+                    if depth > root_depth {
                         continue;
                     }
-
-                    active_removed_root = None;
+                    removed_depth = None
                 }
-
-                let tag_name = get_tag_name(node).unwrap_or_default();
-
-                // Check visibility (no match_string needed)
-                if !is_probably_visible(node) {
-                    debug_log!(self, "Removing hidden node");
-                    nodes_to_remove_ordered.push(*node);
-                    active_removed_root = Some(node.id);
+                let tag = self
+                    .dom
+                    .tag(id)
+                    .expect("element snapshot must contain only elements");
+                if !is_probably_visible(&self.dom, id) {
+                    remove.push(id);
+                    removed_depth = Some(depth);
                     continue;
                 }
-
-                // Check aria-modal with role=dialog (no match_string needed)
-                if node
-                    .attr("aria-modal")
-                    .map(|s| s.as_ref() == "true")
-                    .unwrap_or(false)
-                    && node
-                        .attr("role")
-                        .map(|s| s.as_ref() == "dialog")
-                        .unwrap_or(false)
+                if self.dom.attr(id, AttrName::AriaModal) == Some("true")
+                    && self.dom.attr(id, AttrName::Role) == Some("dialog")
                 {
-                    nodes_to_remove_ordered.push(*node);
-                    active_removed_root = Some(node.id);
+                    remove.push(id);
+                    removed_depth = Some(depth);
                     continue;
                 }
-
-                // Check for byline
                 if self.article_byline.is_none() && self.metadata.byline.is_none() {
-                    build_match_string(node, &mut match_string_buf);
-                    if is_valid_byline(node, &match_string_buf) {
-                        // Look for itemprop="name" child
-                        let itemprop_name = node_select_matcher(node, &SELECTORS.itemprop)
-                            .nodes()
-                            .first()
-                            .cloned();
-                        let byline_node = itemprop_name.as_ref().unwrap_or(node);
-                        self.article_byline = Some(byline_node.text().trim().to_string());
-                        nodes_to_remove_ordered.push(*node);
-                        active_removed_root = Some(node.id);
+                    build_match_string(&self.dom, id, &mut buf);
+                    if is_valid_byline(&self.dom, id, &buf) {
+                        let mut names = Vec::new();
+                        self.dom
+                            .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
+                        let n = names.first().copied().unwrap_or(id);
+                        self.article_byline =
+                            Some(get_inner_text(&self.dom, n, false).trim().into());
+                        remove.push(id);
+                        removed_depth = Some(depth);
                         continue;
                     }
                 }
-
-                // Check for duplicate title header
-                if should_remove_title_header && self.header_duplicates_title(node) {
-                    debug_log!(
-                        self,
-                        "Removing header: {} / {}",
-                        node.text().trim(),
-                        self.article_title.trim()
-                    );
-                    should_remove_title_header = false;
-                    nodes_to_remove_ordered.push(*node);
-                    active_removed_root = Some(node.id);
-                    continue;
-                }
-
-                // Remove unlikely candidates - check cheap conditions first, then regex
-                if strip_unlikely_candidates {
-                    // Check tag names first (cheap) before running regex (expensive)
-                    if tag_name != "BODY" && tag_name != "A" {
-                        build_match_string(node, &mut match_string_buf);
-                        let candidate_matches =
-                            regexps::CANDIDATE_FILTER_SET.matches(&match_string_buf);
-                        if candidate_matches.matched(0)  // UNLIKELY_CANDIDATES
-                            && !candidate_matches.matched(1)  // OK_MAYBE_ITS_A_CANDIDATE
-                            && !has_ancestor_tags_any(node, &["table", "code"], 3)
-                        {
-                            debug_log!(self, "Removing unlikely candidate: {}", &match_string_buf);
-                            nodes_to_remove_ordered.push(*node);
-                            active_removed_root = Some(node.id);
-                            continue;
-                        }
-                    }
-
-                    if let Some(role) = node.attr("role")
-                        && is_unlikely_role(role.as_ref())
-                    {
-                        debug_log!(
-                            self,
-                            "Removing element with role={}: {}",
-                            role,
-                            &match_string_buf
-                        );
-                        nodes_to_remove_ordered.push(*node);
-                        active_removed_root = Some(node.id);
-                        continue;
-                    }
-                }
-
-                // Remove empty DIV, SECTION, HEADER, H1-H6
-                if matches!(
-                    &*tag_name,
-                    "DIV" | "SECTION" | "HEADER" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-                ) && is_element_without_content(node)
+                if remove_title
+                    && matches!(tag, Tag::H1 | Tag::H2)
+                    && metadata::text_similarity(
+                        &self.article_title,
+                        &get_inner_text(&self.dom, id, false),
+                    ) > 0.75
                 {
-                    nodes_to_remove_ordered.push(*node);
-                    active_removed_root = Some(node.id);
+                    remove_title = false;
+                    remove.push(id);
+                    removed_depth = Some(depth);
                     continue;
                 }
-
-                // Add to elements to score (HashSet handles duplicates automatically)
-                if is_default_tag_to_score(&tag_name) {
-                    elements_to_score.insert(node.id);
-                }
-
-                // Process DIVs - wrap phrasing content in P tags
-                if tag_name == "DIV" {
-                    // First, wrap any loose phrasing content in P tags
-                    wrap_phrasing_content_in_p(node);
-
-                    // Now check if DIV should be converted or scored
-                    if has_single_tag_inside_element(node, "P")
-                        && get_link_density(node, &SELECTORS) < 0.25
+                if strip && tag != Tag::Body && tag != Tag::A {
+                    build_match_string(&self.dom, id, &mut buf);
+                    let m = regexps::CANDIDATE_FILTER_SET.matches(&buf);
+                    if m.matched(0)
+                        && !m.matched(1)
+                        && !has_ancestor_tags_any(&self.dom, id, &[Tag::Table, Tag::Code], 3)
                     {
-                        // Sites like http://mobile.slate.com enclose each paragraph with a DIV
-                        // element. DIVs with only a P element inside and no text content can be
-                        // safely converted into plain P elements to avoid confusing the scoring
-                        // algorithm with DIVs with are, in practice, paragraphs.
-                        if let Some(p_child) = node.first_element_child() {
-                            let p_id = p_child.id;
-                            node.replace_with(&p_child);
-                            elements_to_score.insert(p_id);
+                        remove.push(id);
+                        removed_depth = Some(depth);
+                        continue;
+                    }
+                    if self
+                        .dom
+                        .attr(id, AttrName::Role)
+                        .is_some_and(is_unlikely_role)
+                    {
+                        remove.push(id);
+                        removed_depth = Some(depth);
+                        continue;
+                    }
+                }
+                if matches!(
+                    tag,
+                    Tag::Div
+                        | Tag::Section
+                        | Tag::Header
+                        | Tag::H1
+                        | Tag::H2
+                        | Tag::H3
+                        | Tag::H4
+                        | Tag::H5
+                        | Tag::H6
+                ) && is_element_without_content(&self.dom, id)
+                {
+                    remove.push(id);
+                    removed_depth = Some(depth);
+                    continue;
+                }
+                if is_default_tag_to_score(tag) && self.node_data.mark_score_seen(id) {
+                    to_score.push(id)
+                }
+                if tag == Tag::Div {
+                    wrap_phrasing_content_in_p(&mut self.dom, id);
+                    if has_single_tag_inside_element(&self.dom, id, Tag::P)
+                        && get_link_density(&self.dom, id) < 0.25
+                    {
+                        if let Some(p) = self.dom.element_children(id).next() {
+                            let pid = p;
+                            self.dom.replace_with(id, pid);
+                            if self.node_data.mark_score_seen(pid) {
+                                to_score.push(pid)
+                            }
                         }
-                    } else if !has_child_block_element(node) {
-                        node.rename("p");
-                        elements_to_score.insert(node.id);
+                    } else if !has_child_block_element(&self.dom, id) {
+                        self.dom.rename_html(id, Tag::P);
+                        if self.node_data.mark_score_seen(id) {
+                            to_score.push(id)
+                        }
                     } else {
-                        // DIV stays as DIV - add any P children to elements_to_score
-                        // (these may have been created by wrap_phrasing_content_in_p)
-                        // This mimics JS behavior where tree walker visits children
-                        for child in node.children_it(false).filter(|child| child.is_element()) {
-                            if let Some(child_tag) = get_tag_name(&child)
-                                && child_tag == "P"
-                            {
-                                elements_to_score.insert(child.id);
+                        for p in self
+                            .dom
+                            .element_children(id)
+                            .filter(|&x| self.dom.tag(x) == Some(Tag::P))
+                        {
+                            if self.node_data.mark_score_seen(p) {
+                                to_score.push(p)
                             }
                         }
                     }
                 }
             }
-
-            // Remove marked nodes directly. Node IDs are arena indices, so we do not
-            // need to rebuild a document-wide lookup table after the first pass.
-            for node in nodes_to_remove_ordered {
-                node.remove_from_parent();
+            for id in remove {
+                if self.dom.parent(id).is_some() {
+                    self.dom.detach(id)
+                }
             }
-
-            // Score elements
-            let mut candidates: Vec<NodeId> = Vec::with_capacity(elements_to_score.len());
-
-            for node_id in &elements_to_score {
-                let node = match self.doc.tree.get(node_id) {
-                    Some(n) => n,
-                    None => continue,
+            self.node_data.sync_len(self.dom.len());
+            let mut candidates = Vec::new();
+            for id in to_score {
+                let Some(parent) = self.dom.parent(id).filter(|&x| self.dom.is_element(x)) else {
+                    continue;
                 };
-
-                let parent = match node.parent() {
-                    Some(p) if p.is_element() => p,
-                    _ => continue,
-                };
-
-                // Get or compute cached stats for this node
-                let stats = get_or_compute_stats(&node, &mut self.node_data);
-                let inner_text_len = stats.text_length;
-                if inner_text_len < 25 {
+                let stats = get_or_compute_stats(&self.dom, id, &mut self.node_data);
+                if stats.text_length < 25 {
                     continue;
                 }
-
-                // Calculate content score
-                // Note: stats.comma_count is the raw count, add 1 to match JS split().length behavior
-                let mut content_score = 1.0;
-                content_score += (stats.comma_count + 1) as f64;
-                content_score += (inner_text_len / 100).min(3) as f64;
-
-                // Score ancestors
-                let mut ancestor = Some(parent);
+                let cs =
+                    1.0 + (stats.comma_count + 1) as f64 + (stats.text_length / 100).min(3) as f64;
+                let mut a = Some(parent);
                 for level in 0..5 {
-                    let Some(current) = ancestor else {
-                        break;
-                    };
-                    ancestor = current.parent();
-
-                    if !current.is_element() {
+                    let Some(x) = a else { break };
+                    a = self.dom.parent(x);
+                    if !self.dom.is_element(x) || !a.is_some_and(|z| self.dom.is_element(z)) {
                         continue;
                     }
-
-                    if !ancestor.map(|p| p.is_element()).unwrap_or(false) {
-                        continue;
+                    if Self::initialize_node_once(&self.dom, x, &mut self.node_data, self.flags) {
+                        candidates.push(x)
                     }
-
-                    {
-                        let data = compute_initial_readability_data(&current, self.flags);
-                        if self.node_data.initialize_if_absent(current.id, data) {
-                            candidates.push(current.id);
-                        }
-                    }
-
-                    let score_divider = if level == 0 {
+                    let div = if level == 0 {
                         1.0
                     } else if level == 1 {
                         2.0
                     } else {
                         (level * 3) as f64
                     };
-
-                    self.node_data
-                        .add_content_score(current.id, content_score / score_divider);
+                    self.node_data.add_content_score(x, cs / div)
                 }
             }
-
-            // Find top candidates
-            // Collect all scores first, then sort once at the end (Phase 3.2)
-            let mut all_candidate_scores: Vec<(NodeId, f64)> = Vec::with_capacity(candidates.len());
-
-            for candidate_id in &candidates {
-                let candidate = match self.doc.tree.get(candidate_id) {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                let score = self.node_data.get_content_score(candidate_id);
-                // Get or compute stats for cached link density calculation
-                let stats = get_or_compute_stats(&candidate, &mut self.node_data);
-                let link_density = get_link_density_cached(
-                    &candidate,
-                    stats.text_length,
-                    &mut self.node_data,
-                    &SELECTORS,
-                );
-                let final_score = score * (1.0 - link_density);
-
-                if let Some(data) = self.node_data.get_mut(candidate_id) {
-                    data.content_score = final_score;
-                }
-
-                debug_log!(self, "Candidate with score {:.2}", final_score);
-
-                all_candidate_scores.push((*candidate_id, final_score));
-            }
-
-            // Sort by score descending and take top N (Phase 3.2 - O(n log n) vs O(n²))
-            all_candidate_scores
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top_candidates: Vec<(NodeId, f64)> = all_candidate_scores
-                .into_iter()
-                .take(self.options.nb_top_candidates)
+            let mut scored: Vec<_> = candidates
+                .iter()
+                .enumerate()
+                .map(|(order, &id)| {
+                    let s = self.node_data.get_content_score(id);
+                    let len = get_or_compute_stats(&self.dom, id, &mut self.node_data).text_length;
+                    let d = get_link_density_cached(&self.dom, id, len, &mut self.node_data);
+                    let f = s * (1.0 - d);
+                    self.node_data.set_score(id, f);
+                    (id, f, order)
+                })
                 .collect();
-
-            // Get top candidate
-            // Check if we need to create a synthetic top candidate (when no candidates or top is BODY)
-            let body_node = self.doc.body().ok_or(Error::NoBody)?;
-            let body_id = body_node.id;
-
-            let needs_synthetic_candidate = top_candidates.is_empty()
-                || top_candidates
-                    .first()
-                    .map(|(id, _)| *id == body_id)
-                    .unwrap_or(false);
-
-            let (top_candidate_id, needed_to_create_top_candidate) = if needs_synthetic_candidate {
-                // Move all of the page's children into a new DIV
-                // (like JS: create DIV, move everything into it, append to page)
-                let container = self.doc.tree.new_element("div");
-                let container_id = container.id;
-
-                // Collect all body children first to avoid mutation while iterating
-                let children: Vec<_> = body_node.children();
-
-                // Move all children (including text nodes) into the container
-                for child in children {
-                    debug_log!(
-                        self,
-                        "Moving child out: {}",
-                        get_tag_name(&child).unwrap_or_default()
-                    );
-                    container.append_child(&child);
+            let top_count = self.options.nb_top_candidates.min(scored.len());
+            if top_count < scored.len() {
+                scored.select_nth_unstable_by(top_count, |a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.2.cmp(&b.2))
+                });
+                scored.truncate(top_count);
+            }
+            scored.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            let top = scored;
+            let body = self.dom.body().ok_or(Error::NoBody)?;
+            let (top_id, synthetic) = if top.is_empty() || top[0].0 == body {
+                let c = self
+                    .dom
+                    .create_html_element(Tag::Div)
+                    .map_err(|_| Error::NoContent)?;
+                let children = self.dom.children(body).collect::<Vec<_>>();
+                for x in children {
+                    self.dom.append_child(c, x)
                 }
-
-                // Append the container to body
-                body_node.append_child(&container);
-
-                // Initialize the new container node
-                initialize_node(&container, &mut self.node_data, self.flags);
-
-                (Some(container_id), true)
+                self.dom.append_child(body, c);
+                initialize_node(&self.dom, c, &mut self.node_data, self.flags);
+                (c, true)
             } else {
-                let top_id = top_candidates[0].0;
-                let mut top_candidate = self.doc.tree.get(&top_id);
-
-                // Alternative candidate ancestors logic:
-                // Find a better top candidate node if it contains (at least three) nodes
-                // which belong to top_candidates array and whose scores are close to the
-                // current top_candidate score.
-                if let Some(ref tc) = top_candidate {
-                    let top_score = top_candidates[0].1;
-
-                    // Collect ancestor sets for candidates with score >= 75% of top score
-                    // Use HashSet for O(1) lookups instead of Vec::contains() O(n)
-                    let mut alternative_candidate_ancestors: Vec<HashSet<NodeId>> = Vec::new();
-                    for &(candidate_id, candidate_score) in top_candidates.iter().skip(1) {
-                        if candidate_score / top_score >= 0.75
-                            && let Some(candidate_node) = self.doc.tree.get(&candidate_id)
-                        {
-                            let ancestors: HashSet<NodeId> = get_ancestors(&candidate_node, 0)
-                                .iter()
-                                .map(|n| n.id)
-                                .collect();
-                            alternative_candidate_ancestors.push(ancestors);
-                        }
-                    }
-
-                    const MINIMUM_TOPCANDIDATES: usize = 3;
-                    if alternative_candidate_ancestors.len() >= MINIMUM_TOPCANDIDATES {
-                        let mut parent = tc.parent();
-                        while let Some(p) = parent {
-                            if let Some(ptag) = get_tag_name(&p)
-                                && ptag == "BODY"
-                            {
-                                break;
-                            }
-
-                            let mut lists_containing_this_ancestor = 0;
-                            for ancestor_list in &alternative_candidate_ancestors {
-                                if ancestor_list.contains(&p.id) {
-                                    lists_containing_this_ancestor += 1;
-                                }
-                                // Early exit optimization (matches JS behavior)
-                                if lists_containing_this_ancestor >= MINIMUM_TOPCANDIDATES {
-                                    break;
-                                }
-                            }
-
-                            if lists_containing_this_ancestor >= MINIMUM_TOPCANDIDATES {
-                                top_candidate = Some(p);
-                                break;
-                            }
-
-                            parent = p.parent();
-                        }
-                    }
-                }
-
-                // Ensure new top candidate has readability data initialized
-                if let Some(ref tc) = top_candidate
-                    && !self.node_data.has(&tc.id)
-                {
-                    initialize_node(tc, &mut self.node_data, self.flags);
-                }
-
-                // Walk up the tree looking for a better parent.
-                // JavaScript comment: "Because of our bonus system, parents of candidates
-                // might have scores themselves. They get half of the node. There won't be
-                // nodes with higher scores than our topCandidate, but if we see the score
-                // going *up* in the first few steps up the tree, that's a decent sign that
-                // there might be more content lurking in other places that we want to unify in."
-                if let Some(ref tc) = top_candidate {
-                    let mut parent = tc.parent();
-                    let top_score = self.node_data.get_content_score(&tc.id);
-                    let score_threshold = top_score / 3.0;
-                    let mut last_score = top_score;
-
-                    while let Some(p) = parent {
-                        if let Some(ptag) = get_tag_name(&p)
-                            && ptag == "BODY"
-                        {
+                let mut tc = top[0].0;
+                let top_score = top[0].1;
+                let alternatives: Vec<HashSet<NodeId>> = top
+                    .iter()
+                    .skip(1)
+                    .filter(|(_, score, _)| *score / top_score >= 0.75)
+                    .map(|(id, _, _)| self.dom.ancestors(*id).collect())
+                    .collect();
+                if alternatives.len() >= 3 {
+                    let mut p = self.dom.parent(tc);
+                    while let Some(x) = p {
+                        if x == body {
                             break;
                         }
-
-                        if let Some(parent_data) = self.node_data.get(&p.id) {
-                            let parent_score = parent_data.content_score;
-                            if parent_score < score_threshold {
-                                break;
-                            }
-                            // If score is increasing, we found a better parent
-                            if parent_score > last_score {
-                                top_candidate = Some(p);
-                                break;
-                            }
-                            last_score = parent_score;
+                        if alternatives.iter().filter(|a| a.contains(&x)).count() >= 3 {
+                            tc = x;
+                            break;
                         }
-
-                        parent = p.parent();
-                    }
-
-                    // If the top candidate is the only child, use parent instead.
-                    // This will help sibling joining logic when adjacent content
-                    // is actually located in parent's sibling node.
-                    if let Some(ref mut tc) = top_candidate {
-                        let mut parent_of_tc = tc.parent();
-                        while let Some(p) = parent_of_tc {
-                            if let Some(ptag) = get_tag_name(&p)
-                                && ptag == "BODY"
-                            {
-                                break;
-                            }
-                            let mut element_children =
-                                p.children_it(false).filter(|child| child.is_element());
-                            if element_children.next().is_some()
-                                && element_children.next().is_none()
-                            {
-                                *tc = p;
-                                parent_of_tc = tc.parent();
-                            } else {
-                                break;
-                            }
-                        }
+                        p = self.dom.parent(x)
                     }
                 }
-
-                (top_candidate.map(|tc| tc.id), false)
+                if !self.node_data.has(tc) {
+                    initialize_node(&self.dom, tc, &mut self.node_data, self.flags)
+                }
+                let mut p = self.dom.parent(tc);
+                let threshold = self.node_data.get_content_score(tc) / 3.;
+                let mut last = self.node_data.get_content_score(tc);
+                while let Some(x) = p {
+                    if x == body {
+                        break;
+                    }
+                    if let Some(s) = self.node_data.get(x).map(|e| e.content_score) {
+                        if s < threshold {
+                            break;
+                        }
+                        if s > last {
+                            tc = x;
+                            break;
+                        }
+                        last = s
+                    }
+                    p = self.dom.parent(x)
+                }
+                while let Some(p) = self.dom.parent(tc) {
+                    if p == body {
+                        break;
+                    }
+                    let mut ec = self.dom.element_children(p);
+                    if ec.next().is_some() && ec.next().is_none() {
+                        tc = p
+                    } else {
+                        break;
+                    }
+                }
+                (tc, false)
             };
-
-            let top_candidate_id = top_candidate_id.ok_or(Error::NoContent)?;
-
-            // Get the article node ID to use
-            let article_node_id = if needed_to_create_top_candidate {
-                // No siblings to gather when we created a synthetic candidate
-                // Use the container DIV we created (already stored in top_candidate_id)
-                Some(top_candidate_id)
+            let article_id = if synthetic {
+                top_id
             } else {
-                // Gather siblings and potentially create container DIV
-                // Like JS, we always create a container and move siblings into it
-                let sibling_ids = Self::gather_siblings(
-                    top_candidate_id,
-                    &self.doc,
+                let sib = Self::gather_siblings(
+                    &self.dom,
+                    top_id,
                     &mut self.node_data,
-                    &SELECTORS,
                     self.options.debug,
                 );
-
-                if sibling_ids.is_empty() {
-                    // No siblings qualified (shouldn't happen since top candidate always included)
-                    // Fall back to using top candidate directly
-                    Some(top_candidate_id)
-                } else {
-                    // Create container DIV and move siblings into it
-                    // This includes the case of a single sibling - we still need a container
-                    // so that the wrapper div is added correctly
-                    if let Some(top_candidate) = self.doc.tree.get(&top_candidate_id) {
-                        self.create_article_container(&top_candidate, &sibling_ids)
-                    } else {
-                        Some(top_candidate_id)
-                    }
-                }
+                self.create_container(top_id, &sib).unwrap_or(top_id)
             };
-
-            let article_node_id = article_node_id.ok_or(Error::NoContent)?;
-
-            // Get article node directly by ID - O(1) instead of rebuilding full index
-            let article_node = self.doc.tree.get(&article_node_id);
-
-            // Prepare article content
-            if let Some(article_node) = article_node {
-                // Use reference to avoid cloning the regex
-                let video_regex: &Regex = self
-                    .options
-                    .allowed_video_regex
-                    .as_ref()
-                    .unwrap_or(&regexps::VIDEOS);
-
-                Self::prep_article(
-                    &article_node,
-                    &mut self.node_data,
-                    self.flags,
-                    video_regex,
-                    self.options.link_density_modifier,
-                    &SELECTORS,
-                );
-
-                // Re-fetch the article node after prep_article mutated the DOM - O(1) lookup
-                let article_node = self
-                    .doc
-                    .tree
-                    .get(&article_node_id)
-                    .ok_or(Error::NoContent)?;
-
-                // Add readability-page-1 wrapper div
-                // In JS: if neededToCreateTopCandidate, set id/class on topCandidate
-                //        else create wrapper div, move children into it, append to articleContent
-                // Since both cases result in articleContent.innerHTML starting with
-                // <div id="readability-page-1" class="page">, we create a wrapper in all cases.
-                if needed_to_create_top_candidate {
-                    // Set id/class directly on the synthetic container
-                    article_node.set_attr("id", "readability-page-1");
-                    article_node.set_attr("class", "page");
-                } else {
-                    // Create wrapper div and move all children into it
-                    let wrapper = self.doc.tree.new_element("div");
-                    wrapper.set_attr("id", "readability-page-1");
-                    wrapper.set_attr("class", "page");
-
-                    // Move all children of article_node into wrapper
-                    let children: Vec<_> = article_node.children();
-                    for child in children {
-                        wrapper.append_child(&child);
-                    }
-
-                    // Append wrapper to article_node
-                    article_node.append_child(&wrapper);
+            let video = self
+                .options
+                .allowed_video_regex
+                .clone()
+                .unwrap_or_else(|| regexps::VIDEOS.clone());
+            self.prep_article(article_id, &video);
+            if synthetic {
+                self.dom
+                    .set_attr(article_id, AttrName::Id, "readability-page-1");
+                self.dom.set_attr(article_id, AttrName::Class, "page")
+            } else {
+                let w = self
+                    .dom
+                    .create_html_element(Tag::Div)
+                    .map_err(|_| Error::NoContent)?;
+                self.dom.set_attr(w, AttrName::Id, "readability-page-1");
+                self.dom.set_attr(w, AttrName::Class, "page");
+                let children = self.dom.children(article_id).collect::<Vec<_>>();
+                for x in children {
+                    self.dom.append_child(w, x)
                 }
-
-                // Re-fetch the article node after wrapping - O(1) lookup
-                let article_node = self
-                    .doc
-                    .tree
-                    .get(&article_node_id)
-                    .ok_or(Error::NoContent)?;
-
-                let text_content = get_inner_text(&article_node, true);
-                let text_length = text_content.chars().count();
-
-                if text_length < self.options.char_threshold {
-                    self.attempts.push(AttemptResult {
-                        content_html: article_node.html().to_string(),
-                        text_length,
-                    });
-
-                    if self.flag_is_active(FLAG_STRIP_UNLIKELYS) {
-                        self.remove_flag(FLAG_STRIP_UNLIKELYS);
-                    } else if self.flag_is_active(FLAG_WEIGHT_CLASSES) {
-                        self.remove_flag(FLAG_WEIGHT_CLASSES);
-                    } else if self.flag_is_active(FLAG_CLEAN_CONDITIONALLY) {
-                        self.remove_flag(FLAG_CLEAN_CONDITIONALLY);
-                    } else {
-                        self.attempts
-                            .sort_by_key(|attempt| std::cmp::Reverse(attempt.text_length));
-
-                        if self.attempts.is_empty() || self.attempts[0].text_length == 0 {
-                            return Err(Error::NoContent);
-                        }
-
-                        // Use the best attempt - set its content as body and extract text/excerpt
-                        let best_attempt = &self.attempts[0];
-                        self.doc
-                            .select_matcher(&SELECTORS.body)
-                            .set_html(best_attempt.content_html.as_str());
-
-                        // Re-fetch to get text and excerpt
-                        if let Some(body) = self.doc.body() {
-                            let text_content = get_inner_text(&body, true);
-                            let text_length = text_content.chars().count();
-                            let excerpt = node_select_matcher(&body, &SELECTORS.p)
-                                .nodes()
-                                .first()
-                                .map(|p| p.text().trim().to_string())
-                                .filter(|s| !s.is_empty());
-                            let content_html = self.post_process_content_node(&body);
-
-                            return Ok(ArticleContent {
-                                content_html,
-                                text_content,
-                                text_length,
-                                excerpt,
-                            });
-                        }
-
+                self.dom.append_child(article_id, w)
+            }
+            let text = get_inner_text(&self.dom, article_id, true);
+            let len = text.chars().count();
+            if len < self.options.char_threshold {
+                self.attempts.push(AttemptResult {
+                    content_html: self.dom.html(article_id).unwrap_or_default(),
+                    text_length: len,
+                });
+                if self.flags & FLAG_STRIP_UNLIKELYS != 0 {
+                    self.flags &= !FLAG_STRIP_UNLIKELYS
+                } else if self.flags & FLAG_WEIGHT_CLASSES != 0 {
+                    self.flags &= !FLAG_WEIGHT_CLASSES
+                } else if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
+                    self.flags &= !FLAG_CLEAN_CONDITIONALLY
+                } else {
+                    self.attempts
+                        .sort_by_key(|a| std::cmp::Reverse(a.text_length));
+                    let best = self.attempts.first().ok_or(Error::NoContent)?;
+                    if best.text_length == 0 {
                         return Err(Error::NoContent);
                     }
-
-                    // Reparse document from original HTML for retry
-                    self.reparse_and_prepare()?;
-                    continue;
+                    self.dom
+                        .set_inner_html(body, &best.content_html)
+                        .map_err(|_| Error::NoContent)?;
+                    let text = get_inner_text(&self.dom, body, true);
+                    let ex = self
+                        .dom
+                        .first_descendant_by_tag(body, Tag::P)
+                        .map(|x| get_inner_text(&self.dom, x, false))
+                        .filter(|x| !x.is_empty());
+                    let html = self.post_process(body);
+                    return Ok(ArticleContent {
+                        content_html: html,
+                        text_content: text.clone(),
+                        text_length: text.chars().count(),
+                        excerpt: ex,
+                    });
                 }
-
-                // Find dir attribute from ancestors - O(1) lookup
-                if let Some(tc) = self.doc.tree.get(&top_candidate_id) {
-                    let mut current = Some(tc);
-                    while let Some(node) = current {
-                        if let Some(dir) = node.attr("dir") {
-                            self.article_dir = Some(dir.to_string());
-                            break;
-                        }
-                        current = node.parent();
-                    }
-                }
-
-                // Extract excerpt from the first paragraph
-                let excerpt = node_select_matcher(&article_node, &SELECTORS.p)
-                    .nodes()
-                    .first()
-                    .map(|p| p.text().trim().to_string())
-                    .filter(|s| !s.is_empty());
-
-                // Post-process and extract content
-                let content_html = self.post_process_content_node(&article_node);
-
-                return Ok(ArticleContent {
-                    content_html,
-                    text_content,
-                    text_length,
-                    excerpt,
-                });
+                self.reparse_prepare()?;
+                continue;
             }
-
-            return Err(Error::NoContent);
+            let mut p = Some(top_id);
+            while let Some(x) = p {
+                if let Some(d) = self.dom.attr(x, AttrName::Dir) {
+                    self.article_dir = Some(d.into());
+                    break;
+                }
+                p = self.dom.parent(x)
+            }
+            let ex = self
+                .dom
+                .first_descendant_by_tag(article_id, Tag::P)
+                .map(|x| get_inner_text(&self.dom, x, false))
+                .filter(|x| !x.is_empty());
+            let html = self.post_process(article_id);
+            return Ok(ArticleContent {
+                content_html: html,
+                text_content: text,
+                text_length: len,
+                excerpt: ex,
+            });
         }
     }
-
-    /// Gather sibling nodes of the top candidate that should be included in the article.
-    /// Returns a list of NodeIds that should be included.
+    fn initialize_node_once(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) -> bool {
+        let score = compute_initial_readability_data(dom, id, flags);
+        store.initialize_if_absent(id, score)
+    }
     fn gather_siblings(
-        top_candidate_id: NodeId,
-        doc: &Document,
-        node_data: &mut NodeDataStore,
-        selectors: &Selectors,
+        dom: &Dom,
+        top: NodeId,
+        store: &mut NodeStateStore,
         debug: bool,
     ) -> Vec<NodeId> {
-        let top_candidate = match doc.tree.get(&top_candidate_id) {
-            Some(tc) => tc,
-            None => return vec![top_candidate_id],
+        let Some(parent) = dom.parent(top) else {
+            return vec![top];
         };
-
-        let parent = match top_candidate.parent() {
-            Some(p) => p,
-            None => return vec![top_candidate_id],
-        };
-
-        // Calculate sibling score threshold
-        let top_score = node_data.get_content_score(&top_candidate_id);
-        let sibling_score_threshold = (10.0_f64).max(top_score * 0.2);
-
-        // Get top candidate's class for bonus calculation - keep as Cow to avoid allocation
-        let top_class = top_candidate.attr("class");
-
-        let mut siblings_to_include = Vec::new();
-
-        // Iterate through parent's element children
-        for sibling in parent.element_children() {
-            let mut should_append = false;
-
-            if sibling.id == top_candidate_id {
-                // Always include the top candidate itself
-                should_append = true;
-            } else {
-                let mut content_bonus = 0.0;
-
-                // Give a bonus if sibling and top candidate have the same non-empty class
-                // Compare Cow<str> directly without allocating String
-                let sibling_class = sibling.attr("class");
-                if let (Some(top), Some(sib)) = (&top_class, &sibling_class)
-                    && !sib.is_empty()
-                    && sib.as_ref() == top.as_ref()
-                {
-                    content_bonus = top_score * 0.2;
+        let threshold = 10f64.max(store.get_content_score(top) * 0.2);
+        let class = dom.attr(top, AttrName::Class);
+        let mut out = Vec::new();
+        for x in dom.element_children(parent) {
+            let mut yes = x == top;
+            if !yes {
+                let bonus = if class.is_some() && dom.attr(x, AttrName::Class) == class {
+                    store.get_content_score(top) * 0.2
+                } else {
+                    0.
+                };
+                if store.has(x) && store.get_content_score(x) + bonus >= threshold {
+                    yes = true
                 }
-
-                // Check if sibling has a readability score that qualifies
-                if node_data.has(&sibling.id) {
-                    let sibling_score = node_data.get_content_score(&sibling.id);
-                    if sibling_score + content_bonus >= sibling_score_threshold {
-                        should_append = true;
-                    }
-                }
-
-                // Special case for P elements without scores
-                if !should_append
-                    && let Some(tag) = get_tag_name(&sibling)
-                    && tag == "P"
-                {
-                    // Get or compute cached stats for the sibling
-                    let stats = get_or_compute_stats(&sibling, node_data);
-                    let node_length = stats.text_length;
-                    let link_density =
-                        get_link_density_cached(&sibling, node_length, node_data, selectors);
-
-                    if (node_length > 80 && link_density < 0.25)
-                        || (node_length < 80
-                            && node_length > 0
-                            && link_density == 0.0
-                            && stats.has_sentence_end)
-                    {
-                        should_append = true;
-                    }
+                if !yes && dom.tag(x) == Some(Tag::P) {
+                    let s = get_or_compute_stats(dom, x, store);
+                    let d = get_link_density_cached(dom, x, s.text_length, store);
+                    yes = (s.text_length > 80 && d < 0.25)
+                        || (s.text_length < 80
+                            && s.text_length > 0
+                            && d == 0.0
+                            && s.has_sentence_end)
                 }
             }
-
-            if should_append {
-                debug_log!(@bool debug, "Appending sibling node: {:?}", sibling.id);
-                siblings_to_include.push(sibling.id);
+            if yes {
+                debug_log!(@bool debug,"Appending sibling node: {:?}",x);
+                out.push(x)
             }
         }
-
-        siblings_to_include
+        out
     }
-
-    /// Create a container DIV and move the gathered siblings into it.
-    /// Returns the NodeId of the new container.
-    fn create_article_container(
-        &self,
-        top_candidate: &Node<'_>,
-        sibling_ids: &[NodeId],
-    ) -> Option<NodeId> {
-        let parent = top_candidate.parent()?;
-
-        // Create a new DIV element as container
-        let container = self.doc.tree.new_element("div");
-        let container_id = container.id;
-
-        // Find the first sibling to insert before - O(1) lookup
-        let first_sibling = sibling_ids.first().and_then(|id| self.doc.tree.get(id))?;
-
-        // Insert container before the first sibling
-        first_sibling.insert_before(&container);
-
-        // Move each qualifying sibling into the container
-        for sibling_id in sibling_ids {
-            if let Some(sibling) = self.doc.tree.get(sibling_id) {
-                // Convert tag to DIV if not in ALTER_TO_DIV_EXCEPTIONS
-                if let Some(tag) = get_tag_name(&sibling)
-                    && !is_alter_to_div_exception(&tag)
-                {
-                    debug_log!(self, "Altering sibling {} to div", tag);
-                    sibling.rename("div");
+    fn create_container(&mut self, _top: NodeId, siblings: &[NodeId]) -> Option<NodeId> {
+        let first = *siblings.first()?;
+        let c = self.dom.create_html_element(Tag::Div).ok()?;
+        self.dom.insert_before(first, c);
+        for &x in siblings {
+            if let Some(t) = self.dom.tag(x) {
+                if !is_alter_to_div_exception(t) {
+                    self.dom.rename_html(x, Tag::Div)
                 }
-
-                // Append to container
-                container.append_child(&sibling);
             }
+            self.dom.append_child(c, x)
         }
-
-        // Verify we added the container to the parent
-        if parent
-            .element_children()
-            .iter()
-            .any(|c| c.id == container_id)
-        {
-            Some(container_id)
-        } else {
-            // Container insertion failed, return top candidate
-            Some(top_candidate.id)
-        }
+        Some(c)
     }
-
-    /// Prepare the article for display.
-    fn prep_article(
-        article_content: &Node<'_>,
-        node_data: &mut NodeDataStore,
-        flags: u32,
-        video_regex: &Regex,
-        link_density_modifier: f64,
-        selectors: &Selectors,
-    ) {
-        clean_styles(article_content);
-
-        mark_data_tables(article_content, node_data, selectors);
-
-        fix_lazy_images(article_content, selectors);
-
+    fn prep_article(&mut self, root: NodeId, video: &Regex) {
+        clean_styles(&mut self.dom, root);
+        mark_data_tables(&self.dom, root, &mut self.node_data);
+        fix_lazy_images(&mut self.dom, root);
         clean_conditionally(
-            article_content,
-            &selectors.form,
-            "form",
-            flags,
-            video_regex,
-            node_data,
-            link_density_modifier,
-            selectors,
+            &mut self.dom,
+            root,
+            &[Tag::Form],
+            Tag::Form,
+            self.flags,
+            video,
+            &mut self.node_data,
+            self.options.link_density_modifier,
         );
         clean_conditionally(
-            article_content,
-            &selectors.fieldset,
-            "fieldset",
-            flags,
-            video_regex,
-            node_data,
-            link_density_modifier,
-            selectors,
+            &mut self.dom,
+            root,
+            &[Tag::Fieldset],
+            Tag::Fieldset,
+            self.flags,
+            video,
+            &mut self.node_data,
+            self.options.link_density_modifier,
         );
         clean_tags(
-            article_content,
-            &["object", "embed", "footer", "link", "aside"],
-            video_regex,
+            &mut self.dom,
+            root,
+            &[Tag::Object, Tag::Embed, Tag::Footer, Tag::Link, Tag::Aside],
+            video,
         );
-
-        let share_threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
-        for child in article_content.element_children() {
-            clean_matched_nodes(&child, |node, match_string| {
-                // Fast path: regex requires "share" or "sharedaddy" to be present
-                if !match_string
-                    .as_bytes()
+        let threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
+        let children: Vec<_> = self.dom.element_children(root).collect();
+        for c in children {
+            clean_matched_nodes(&mut self.dom, c, |d, id, m| {
+                m.as_bytes()
                     .windows(5)
                     .any(|w| w.eq_ignore_ascii_case(b"share"))
-                {
-                    return false;
-                }
-                regexps::SHARE_ELEMENTS.is_match(match_string)
-                    && node.text().len() < share_threshold
-            });
+                    && regexps::SHARE_ELEMENTS.is_match(m)
+                    && get_inner_text(d, id, false).len() < threshold
+            })
         }
-
         clean_tags(
-            article_content,
-            &["iframe", "input", "textarea", "select", "button"],
-            video_regex,
+            &mut self.dom,
+            root,
+            &[
+                Tag::Iframe,
+                Tag::Input,
+                Tag::Textarea,
+                Tag::Select,
+                Tag::Button,
+            ],
+            video,
         );
-
-        clean_headers(article_content, flags, selectors);
-
+        clean_headers(&mut self.dom, root, self.flags);
         clean_conditionally(
-            article_content,
-            &selectors.table,
-            "table",
-            flags,
-            video_regex,
-            node_data,
-            link_density_modifier,
-            selectors,
-        );
-        clean_conditionally(
-            article_content,
-            &selectors.ul_ol,
-            "ul",
-            flags,
-            video_regex,
-            node_data,
-            link_density_modifier,
-            selectors,
+            &mut self.dom,
+            root,
+            &[Tag::Table],
+            Tag::Table,
+            self.flags,
+            video,
+            &mut self.node_data,
+            self.options.link_density_modifier,
         );
         clean_conditionally(
-            article_content,
-            &selectors.div,
-            "div",
-            flags,
-            video_regex,
-            node_data,
-            link_density_modifier,
-            selectors,
+            &mut self.dom,
+            root,
+            &[Tag::Ul, Tag::Ol],
+            Tag::Ul,
+            self.flags,
+            video,
+            &mut self.node_data,
+            self.options.link_density_modifier,
         );
-
-        for h1 in node_select_matcher(article_content, &selectors.h1)
-            .nodes()
-            .iter()
-        {
-            h1.rename("h2");
+        clean_conditionally(
+            &mut self.dom,
+            root,
+            &[Tag::Div],
+            Tag::Div,
+            self.flags,
+            video,
+            &mut self.node_data,
+            self.options.link_density_modifier,
+        );
+        let hs: Vec<_> = self
+            .dom
+            .descendants(root)
+            .filter(|&x| self.dom.tag(x) == Some(Tag::H1))
+            .collect();
+        for x in hs {
+            self.dom.rename_html(x, Tag::H2)
         }
-
-        // Query P elements once and remove empty ones directly
-        let ps = node_select_matcher(article_content, &selectors.p);
-        for p in ps.nodes() {
-            let has_media = p.descendants_it().any(|descendant| {
-                has_any_tag_name(&descendant, &["img", "embed", "object", "iframe"])
+        let ps: Vec<_> = self
+            .dom
+            .descendants(root)
+            .filter(|&x| self.dom.tag(x) == Some(Tag::P))
+            .collect();
+        for p in ps {
+            let media = self.dom.descendants(p).any(|x| {
+                matches!(
+                    self.dom.tag(x),
+                    Some(Tag::Img | Tag::Embed | Tag::Object | Tag::Iframe)
+                )
             });
-            let has_text = has_non_empty_inner_text(p);
-            if !has_media && !has_text {
-                p.remove_from_parent();
+            if !media && !has_non_empty_inner_text(&self.dom, p) {
+                self.dom.detach(p)
             }
         }
-
-        for br in node_select_matcher(article_content, &selectors.br)
-            .nodes()
-            .iter()
-        {
-            if let Some(next) = br.next_sibling()
-                && next.is_element()
-                && let Some(tag) = get_tag_name(&next)
-                && tag == "P"
+        let brs: Vec<_> = self
+            .dom
+            .descendants(root)
+            .filter(|&x| self.dom.tag(x) == Some(Tag::Br))
+            .collect();
+        for br in brs {
+            if self
+                .dom
+                .next_sibling(br)
+                .is_some_and(|x| self.dom.is_element(x) && self.dom.tag(x) == Some(Tag::P))
             {
-                br.remove_from_parent();
+                self.dom.detach(br)
             }
         }
-
-        let tables = node_select_matcher(article_content, &selectors.table);
-        for table in tables.nodes() {
-            let tbody = if has_single_tag_inside_element(table, "TBODY") {
-                table.first_element_child()
+        let tables: Vec<_> = self
+            .dom
+            .descendants(root)
+            .filter(|&x| self.dom.tag(x) == Some(Tag::Table))
+            .collect();
+        for t in tables {
+            let tb = if has_single_tag_inside_element(&self.dom, t, Tag::Tbody) {
+                self.dom.element_children(t).next()
             } else {
-                Some(*table)
+                Some(t)
             };
-
-            if let Some(tbody) = tbody
-                && has_single_tag_inside_element(&tbody, "TR")
-                && let Some(row) = tbody.first_element_child()
-                && has_single_tag_inside_element(&row, "TD")
-                && let Some(cell) = row.first_element_child()
-            {
-                let all_phrasing = cell
-                    .children_it(false)
-                    .all(|child| is_phrasing_content(&child));
-                let new_tag = if all_phrasing { "p" } else { "div" };
-                cell.rename(new_tag);
-                // Move the cell (now renamed) to replace the table directly
-                // This avoids the serialize/deserialize cycle of inner_html + set_html
-                table.replace_with(&cell);
-            }
-        }
-    }
-
-    /// Post-process the extracted content from a Node.
-    /// Combines multiple traversals into optimized passes for better performance.
-    fn post_process_content_node(&self, node: &Node<'_>) -> String {
-        // These use targeted selectors, so they remain separate
-        self.fix_relative_uris(node);
-
-        // This may modify tree structure, so it runs before the combined pass
-        simplify_nested_elements(node, &SELECTORS);
-
-        // Combined single-pass traversal for:
-        // - clean_classes (if not keeping classes)
-        // - remove_comments
-        // - escape_attribute_values
-        self.post_process_single_pass(node);
-
-        node.inner_html().to_string()
-    }
-
-    /// Single-pass post-processing that handles multiple cleanup operations per node.
-    /// Combines clean_classes, remove_comments, and escape_attribute_values into one traversal.
-    fn post_process_single_pass(&self, node: &Node<'_>) {
-        // DOM iterators keep the arena borrowed, so collect before mutating
-        // attributes or removing comments.
-        let descendants: Vec<_> = node.descendants_it().collect();
-
-        // Track comment nodes to remove (can't remove during iteration)
-        let mut comments_to_remove = Vec::new();
-
-        for descendant in descendants {
-            if descendant.is_element() {
-                // Clean classes (unless keeping them)
-                if !self.options.keep_classes
-                    && let Some(class_attr) = descendant.attr("class")
-                {
-                    // Build preserved classes string directly without intermediate Vec
-                    let mut preserved = String::new();
-                    for class in class_attr.split_whitespace() {
-                        if self.options.classes_to_preserve.iter().any(|p| p == class) {
-                            if !preserved.is_empty() {
-                                preserved.push(' ');
+            if let Some(tb) = tb {
+                if has_single_tag_inside_element(&self.dom, tb, Tag::Tr) {
+                    if let Some(row) = self.dom.element_children(tb).next() {
+                        if has_single_tag_inside_element(&self.dom, row, Tag::Td) {
+                            if let Some(cell) = self.dom.element_children(row).next() {
+                                let phr = self
+                                    .dom
+                                    .children(cell)
+                                    .all(|x| is_phrasing_content(&self.dom, x));
+                                self.dom
+                                    .rename_html(cell, if phr { Tag::P } else { Tag::Div });
+                                self.dom.replace_with(t, cell)
                             }
-                            preserved.push_str(class);
                         }
                     }
-
-                    if preserved.is_empty() {
-                        descendant.remove_attr("class");
-                    } else {
-                        descendant.set_attr("class", &preserved);
-                    }
                 }
-
-                // Escape < and > in attribute values
-                // Check on borrowed value first, only allocate if escaping is needed
-                // Read attributes in place so ordinary elements do not clone
-                // their entire attribute list just to discover that nothing
-                // needs escaping.
-                let attrs_to_fix: Vec<_> = descendant
-                    .query(|tree_node| {
-                        let Some(element) = tree_node.as_element() else {
-                            return Vec::new();
-                        };
-                        element
-                            .attrs
-                            .iter()
-                            .filter_map(|attr| {
-                                let value = attr.value.as_ref();
-                                if value.contains('<') || value.contains('>') {
-                                    Some((attr.name.local.to_string(), value.to_string()))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                for (name, value) in attrs_to_fix {
-                    let escaped = escape_angle_brackets(&value);
-                    descendant.set_attr(&name, escaped.as_ref());
-                }
-            } else if !descendant.is_text() {
-                // It's a comment node - mark for removal
-                comments_to_remove.push(descendant);
             }
-        }
-
-        // Remove comment nodes after traversal
-        for comment in comments_to_remove {
-            comment.remove_from_parent();
         }
     }
-
-    /// Convert relative URIs to absolute.
-    fn fix_relative_uris(&self, article_content: &Node<'_>) {
-        let base_uri = match &self.base_uri {
-            Some(u) => u,
-            None => return,
-        };
-
-        let links: Vec<_> = article_content
-            .descendants_it()
-            .filter(|descendant| has_tag_name(descendant, "a"))
-            .collect();
-        for link in links {
-            if let Some(href) = link.attr("href") {
-                if href.starts_with('#') {
-                    continue;
-                }
-
-                if href.starts_with("javascript:") {
-                    let text = link.text();
-                    let escaped = html_escape(&text);
-                    link.set_html(escaped.as_ref());
-                    link.rename("span");
-                    continue;
-                }
-
-                if let Ok(absolute) = base_uri.join(href.as_ref()) {
-                    link.set_attr("href", absolute.as_str());
-                }
-            }
-        }
-
-        let media_elements: Vec<_> = article_content
-            .descendants_it()
-            .filter(is_url_rewriting_media_element)
-            .collect();
-        for media in media_elements {
-            if let Some(src) = media.attr("src")
-                && let Ok(absolute) = base_uri.join(src.as_ref())
-            {
-                media.set_attr("src", absolute.as_str());
-            }
-
-            if let Some(poster) = media.attr("poster")
-                && let Ok(absolute) = base_uri.join(poster.as_ref())
-            {
-                media.set_attr("poster", absolute.as_str());
-            }
-
-            if let Some(srcset) = media.attr("srcset") {
-                let new_srcset =
-                    regexps::SRCSET_URL.replace_all(srcset.as_ref(), |caps: &regex::Captures| {
-                        let url = &caps[1];
-                        let descriptor = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-                        let comma = &caps[3];
-
-                        if let Ok(absolute) = base_uri.join(url) {
-                            format!("{}{}{}", absolute.as_str(), descriptor, comma)
+    fn post_process(&mut self, root: NodeId) -> String {
+        self.fix_relative_uris(root);
+        simplify_nested_elements(&mut self.dom, root);
+        let ids: Vec<_> = self.dom.descendants(root).collect();
+        let mut comments = Vec::new();
+        for id in ids {
+            if self.dom.is_element(id) {
+                if !self.options.keep_classes {
+                    if let Some(c) = self.dom.attr(id, AttrName::Class) {
+                        let keep = c
+                            .split_whitespace()
+                            .filter(|x| self.options.classes_to_preserve.iter().any(|p| p == x))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if keep.is_empty() {
+                            self.dom.remove_attr(id, AttrName::Class)
                         } else {
-                            caps[0].to_string()
+                            self.dom.set_attr(id, AttrName::Class, &keep)
                         }
-                    });
-                media.set_attr("srcset", &new_srcset);
+                    }
+                }
+            } else if self.dom.is_comment(id) {
+                comments.push(id)
+            }
+        }
+        for x in comments {
+            self.dom.detach(x)
+        }
+        self.dom.inner_html(root).unwrap_or_default()
+    }
+    fn fix_relative_uris(&mut self, root: NodeId) {
+        let Some(base) = self.base_uri.clone() else {
+            return;
+        };
+        let links: Vec<_> = self
+            .dom
+            .descendants(root)
+            .filter(|&x| self.dom.tag(x) == Some(Tag::A))
+            .collect();
+        for x in links {
+            if let Some(h) = self.dom.attr(x, AttrName::Href).map(str::to_string) {
+                if h.starts_with('#') {
+                    continue;
+                }
+                if h.starts_with("javascript:") {
+                    let t = html_escape(&self.dom.text(x));
+                    let _ = self.dom.set_inner_html(x, &t);
+                    self.dom.rename_html(x, Tag::Span)
+                } else if let Ok(u) = base.join(&h) {
+                    self.dom.set_attr(x, AttrName::Href, u.as_str())
+                }
+            }
+        }
+        let media: Vec<_> = self
+            .dom
+            .descendants(root)
+            .filter(|&x| {
+                matches!(
+                    self.dom.tag(x),
+                    Some(
+                        Tag::Img
+                            | Tag::Picture
+                            | Tag::Figure
+                            | Tag::Video
+                            | Tag::Audio
+                            | Tag::Source
+                    )
+                )
+            })
+            .collect();
+        for x in media {
+            for a in [AttrName::Src, AttrName::Poster] {
+                if let Some(v) = self.dom.attr(x, a).map(str::to_string) {
+                    if let Ok(u) = base.join(&v) {
+                        self.dom.set_attr(x, a, u.as_str())
+                    }
+                }
+            }
+            if let Some(v) = self.dom.attr(x, AttrName::Srcset).map(str::to_string) {
+                let n = regexps::SRCSET_URL.replace_all(&v, |c: &regex::Captures| {
+                    let u = base
+                        .join(&c[1])
+                        .map(|x| x.to_string())
+                        .unwrap_or_else(|_| c[1].into());
+                    format!(
+                        "{}{}{}",
+                        u,
+                        c.get(2).map_or("", |x| x.as_str()),
+                        c.get(3).map_or("", |x| x.as_str())
+                    )
+                });
+                self.dom.set_attr(x, AttrName::Srcset, &n)
             }
         }
     }
-
-    /// Check if a header duplicates the article title.
-    fn header_duplicates_title(&self, node: &Node<'_>) -> bool {
-        let tag = get_tag_name(node).unwrap_or_default();
-        if tag != "H1" && tag != "H2" {
-            return false;
-        }
-
-        let heading = get_inner_text(node, false);
-        text_similarity(&self.article_title, &heading) > 0.75
-    }
-
-    fn flag_is_active(&self, flag: u32) -> bool {
-        (self.flags & flag) > 0
-    }
-
-    fn remove_flag(&mut self, flag: u32) {
-        self.flags &= !flag;
-    }
-
-    /// Reparse the document from original HTML and re-run preparation steps.
-    /// Used during retry logic to restore document to prepared state.
-    fn reparse_and_prepare(&mut self) -> Result<()> {
-        self.doc = Document::from(self.original_html);
-
-        // Re-run preparation (but NOT metadata extraction - already stored)
-        unwrap_noscript_images(&self.doc, &SELECTORS);
-        remove_scripts(&self.doc, &SELECTORS);
-        prep_document(&self.doc, &SELECTORS);
-
-        // Verify body exists
-        if self.doc.body().is_none() {
-            return Err(Error::NoBody);
-        }
-
-        // Reset state that could have been set during failed attempt
+    fn reparse_prepare(&mut self) -> Result<()> {
+        self.dom = Dom::parse_document(self.original_html).map_err(|_| Error::NoContent)?;
+        unwrap_noscript_images(&mut self.dom);
+        remove_scripts(&mut self.dom);
+        prep_document(&mut self.dom);
         self.article_byline = None;
         self.article_dir = None;
         self.article_lang = None;
-
         self.node_data.clear();
-        Ok(())
-    }
-}
-
-/// Check if a node has an ancestor with any of the given tag names, up to max_depth.
-/// This is more efficient than calling has_ancestor_tag multiple times.
-fn has_ancestor_tags_any(node: &Node<'_>, tags: &[&str], max_depth: usize) -> bool {
-    let mut depth = 0;
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if max_depth > 0 && depth >= max_depth {
-            return false;
+        if self.dom.body().is_none() {
+            Err(Error::NoBody)
+        } else {
+            Ok(())
         }
-        if let Some(parent_tag) = parent.node_name() {
-            let pt = parent_tag.as_ref();
-            for tag in tags {
-                if pt.eq_ignore_ascii_case(tag) {
-                    return true;
-                }
-            }
-        }
-        current = parent.parent();
-        depth += 1;
     }
-    false
 }
-
-/// Get ancestors of a node up to max_depth (0 = unlimited).
-fn get_ancestors<'a>(node: &Node<'a>, max_depth: usize) -> Vec<Node<'a>> {
-    let mut ancestors = if max_depth > 0 {
-        Vec::with_capacity(max_depth)
-    } else {
-        Vec::new()
-    };
-    let mut current = node.parent();
-    let mut depth = 0;
-
-    while let Some(parent) = current {
-        ancestors.push(parent);
-        depth += 1;
-        if max_depth > 0 && depth >= max_depth {
-            break;
-        }
-        current = parent.parent();
+fn has_ancestor_tags_any(dom: &Dom, id: NodeId, tags: &[Tag], max: usize) -> bool {
+    dom.ancestors(id)
+        .take(max)
+        .any(|x| dom.tag(x).is_some_and(|t| tags.contains(&t)))
+}
+fn html_escape(s: &str) -> String {
+    if !s
+        .bytes()
+        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return s.to_owned();
     }
 
-    ancestors
-}
-
-#[inline]
-fn is_url_rewriting_media_element(node: &Node<'_>) -> bool {
-    has_any_tag_name(
-        node,
-        &["img", "picture", "figure", "video", "audio", "source"],
-    )
-}
-
-/// Escape HTML special characters using single-pass with pre-allocated buffer.
-fn html_escape<'a>(s: &'a str) -> Cow<'a, str> {
-    if !s.contains(['&', '<', '>', '"', '\'']) {
-        return Cow::Borrowed(s);
-    }
-    let mut result = String::with_capacity(s.len() + 16);
+    let mut escaped = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
-            '"' => result.push_str("&quot;"),
-            '\'' => result.push_str("&#39;"),
-            _ => result.push(c),
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            c => escaped.push(c),
         }
     }
-    Cow::Owned(result)
-}
-
-/// Escape only angle brackets using single-pass to avoid intermediate string allocations.
-fn escape_angle_brackets<'a>(s: &'a str) -> Cow<'a, str> {
-    if !s.contains(['<', '>']) {
-        return Cow::Borrowed(s);
-    }
-    let mut result = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
-            _ => result.push(c),
-        }
-    }
-    Cow::Owned(result)
+    escaped
 }

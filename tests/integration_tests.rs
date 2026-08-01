@@ -12,12 +12,9 @@ struct ExpectedMetadata {
     byline: Option<String>,
     excerpt: Option<String>,
     site_name: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
     published_time: Option<String>,
-    #[allow(dead_code)]
     dir: Option<String>,
-    #[allow(dead_code)]
     lang: Option<String>,
     #[allow(dead_code)]
     readerable: Option<bool>,
@@ -126,12 +123,32 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
             .into());
         }
 
+        if let Some(expected_published_time) = expected.published_time
+            && article.published_time.as_deref() != Some(&expected_published_time)
+        {
+            return Err(format!(
+                "Published time mismatch:\n  Expected: {}\n  Got: {:?}",
+                expected_published_time, article.published_time
+            )
+            .into());
+        }
+
         if let Some(expected_dir) = expected.dir
             && article.dir.as_deref() != Some(&expected_dir)
         {
             return Err(format!(
                 "Direction mismatch:\n  Expected: {}\n  Got: {:?}",
                 expected_dir, article.dir
+            )
+            .into());
+        }
+
+        if let Some(expected_lang) = expected.lang
+            && article.lang.as_deref() != Some(&expected_lang)
+        {
+            return Err(format!(
+                "Language mismatch:\n  Expected: {}\n  Got: {:?}",
+                expected_lang, article.lang
             )
             .into());
         }
