@@ -45,6 +45,9 @@ The extraction pipeline flows through these stages:
 - Prefer direct `Document::root().descendants_it()` traversal for document-wide element scans; universal CSS selection adds avoidable matcher and selection overhead.
 - When dispatching among several tag names in a hot loop, call `get_tag_name()` once and match on the result instead of repeatedly calling `has_tag_name()`.
 - When only checking whether an element contains non-whitespace text, use the direct `has_non_whitespace_text` traversal path rather than constructing the concatenated `Node::text()` string.
+- Use `children_it` for child cardinality and tag checks; `children()` and `element_children()` allocate a `Vec` even when the caller only needs to find zero, one, or two children.
+- When a `Selection` already owns the matched node list, iterate `selection.nodes()` directly instead of cloning it with `to_vec()`; the stored node references remain usable while their DOM nodes are renamed or detached.
+- In bottom-up tree algorithms, extend the existing work stack from `children_it(true)` directly rather than collecting a temporary child vector for every expanded node.
 - In `clean_styles`, inspect an element's attributes once and guard bulk removal calls so ordinary elements keep the no-op fast path.
 - Standard HTML tag names are uppercase in the parsed DOM; keep `get_tag_name`'s uppercase fast path allocation-free.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or readerability heuristics, and preserve output compatibility with the Mozilla fixture suite.

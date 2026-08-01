@@ -481,7 +481,7 @@ impl<'a> Readability<'a> {
                     None => continue,
                 };
 
-                let _parent = match node.parent() {
+                let parent = match node.parent() {
                     Some(p) if p.is_element() => p,
                     _ => continue,
                 };
@@ -493,12 +493,6 @@ impl<'a> Readability<'a> {
                     continue;
                 }
 
-                // Get ancestors (up to 5 levels)
-                let ancestors = get_ancestors(&node, 5);
-                if ancestors.is_empty() {
-                    continue;
-                }
-
                 // Calculate content score
                 // Note: stats.comma_count is the raw count, add 1 to match JS split().length behavior
                 let mut content_score = 1.0;
@@ -506,19 +500,25 @@ impl<'a> Readability<'a> {
                 content_score += (inner_text_len / 100).min(3) as f64;
 
                 // Score ancestors
-                for (level, ancestor) in ancestors.iter().enumerate() {
-                    if !ancestor.is_element() {
+                let mut ancestor = Some(parent);
+                for level in 0..5 {
+                    let Some(current) = ancestor else {
+                        break;
+                    };
+                    ancestor = current.parent();
+
+                    if !current.is_element() {
                         continue;
                     }
 
-                    if !ancestor.parent().map(|p| p.is_element()).unwrap_or(false) {
+                    if !ancestor.map(|p| p.is_element()).unwrap_or(false) {
                         continue;
                     }
 
                     {
-                        let data = compute_initial_readability_data(ancestor, self.flags);
-                        if self.node_data.initialize_if_absent(ancestor.id, data) {
-                            candidates.push(ancestor.id);
+                        let data = compute_initial_readability_data(&current, self.flags);
+                        if self.node_data.initialize_if_absent(current.id, data) {
+                            candidates.push(current.id);
                         }
                     }
 
@@ -531,7 +531,7 @@ impl<'a> Readability<'a> {
                     };
 
                     self.node_data
-                        .add_content_score(ancestor.id, content_score / score_divider);
+                        .add_content_score(current.id, content_score / score_divider);
                 }
             }
 
@@ -887,12 +887,13 @@ impl<'a> Readability<'a> {
 
                 // Find dir attribute from ancestors - O(1) lookup
                 if let Some(tc) = self.doc.tree.get(&top_candidate_id) {
-                    let ancestors = get_ancestors(&tc, 0);
-                    for ancestor in std::iter::once(tc).chain(ancestors) {
-                        if let Some(dir) = ancestor.attr("dir") {
+                    let mut current = Some(tc);
+                    while let Some(node) = current {
+                        if let Some(dir) = node.attr("dir") {
                             self.article_dir = Some(dir.to_string());
                             break;
                         }
+                        current = node.parent();
                     }
                 }
 
@@ -1157,14 +1158,12 @@ impl<'a> Readability<'a> {
         }
 
         // Query P elements once and remove empty ones directly
-        let ps: Vec<_> = node_select_matcher(article_content, &selectors.p)
-            .nodes()
-            .to_vec();
-        for p in ps {
+        let ps = node_select_matcher(article_content, &selectors.p);
+        for p in ps.nodes() {
             let has_media = p.descendants_it().any(|descendant| {
                 has_any_tag_name(&descendant, &["img", "embed", "object", "iframe"])
             });
-            let has_text = has_non_empty_inner_text(&p);
+            let has_text = has_non_empty_inner_text(p);
             if !has_media && !has_text {
                 p.remove_from_parent();
             }
@@ -1183,28 +1182,26 @@ impl<'a> Readability<'a> {
             }
         }
 
-        let tables: Vec<_> = node_select_matcher(article_content, &selectors.table)
-            .nodes()
-            .to_vec();
-        for table in tables {
-            let tbody = if has_single_tag_inside_element(&table, "TBODY") {
-                table.element_children().first().cloned()
+        let tables = node_select_matcher(article_content, &selectors.table);
+        for table in tables.nodes() {
+            let tbody = if has_single_tag_inside_element(table, "TBODY") {
+                table.first_element_child()
             } else {
-                Some(table)
+                Some(*table)
             };
 
             if let Some(tbody) = tbody
                 && has_single_tag_inside_element(&tbody, "TR")
-                && let Some(row) = tbody.element_children().first()
-                && has_single_tag_inside_element(row, "TD")
-                && let Some(cell) = row.element_children().first()
+                && let Some(row) = tbody.first_element_child()
+                && has_single_tag_inside_element(&row, "TD")
+                && let Some(cell) = row.first_element_child()
             {
                 let all_phrasing = cell.children().iter().all(|c| is_phrasing_content(c));
                 let new_tag = if all_phrasing { "p" } else { "div" };
                 cell.rename(new_tag);
                 // Move the cell (now renamed) to replace the table directly
                 // This avoids the serialize/deserialize cycle of inner_html + set_html
-                table.replace_with(cell);
+                table.replace_with(&cell);
             }
         }
     }
@@ -1230,7 +1227,8 @@ impl<'a> Readability<'a> {
     /// Single-pass post-processing that handles multiple cleanup operations per node.
     /// Combines clean_classes, remove_comments, and escape_attribute_values into one traversal.
     fn post_process_single_pass(&self, node: &Node<'_>) {
-        // Collect all descendants first to avoid mutation issues during traversal
+        // DOM iterators keep the arena borrowed, so collect before mutating
+        // attributes or removing comments.
         let descendants: Vec<_> = node.descendants_it().collect();
 
         // Track comment nodes to remove (can't remove during iteration)
