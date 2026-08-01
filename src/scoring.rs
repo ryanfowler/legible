@@ -150,7 +150,13 @@ pub fn get_inner_text(dom: &Dom, id: NodeId, normalize: bool) -> String {
         return String::new();
     }
     if !normalize {
-        return t.to_string();
+        // Most text nodes already have clean boundaries. Return the buffer
+        // instead of allocating a second String for the trimmed view.
+        return if t.len() == raw.len() {
+            raw
+        } else {
+            t.to_owned()
+        };
     }
     let mut out = String::with_capacity(t.len());
     let mut ws = false;

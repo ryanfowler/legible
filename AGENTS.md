@@ -47,7 +47,7 @@ The extraction pipeline flows through these stages:
 - Keep post-parse DOM access free of `RefCell`; parser-only interior mutability belongs in `dom/parse.rs`.
 - Use borrowed attribute values for hot reads and `Tag`/`AttrName` for common predicates.
 - Collect attached preorder snapshots before mutation when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots with depth when a pass processes only elements and can skip removed subtrees.
-- Use `SmallVec` for hot, short-lived traversal stacks and small child snapshots. Keep full-document snapshots in `Vec`.
+- Use `SmallVec` for hot, short-lived traversal stacks, scoring candidates, metadata tables, and small child snapshots. Keep full-document snapshots in `Vec`.
 - Keep structural mutation in `dom/mutation.rs` and validate links in debug builds.
 - Preserve the O(1) leaf fast path in DOM cycle checks. The parser appends new leaf nodes, so do not add another depth-dependent scan to this path.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.

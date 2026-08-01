@@ -11,7 +11,7 @@ use crate::metadata::{self, Metadata};
 use crate::options::Options;
 use crate::scoring::*;
 use regex::Regex;
-use std::collections::HashSet;
+use smallvec::SmallVec;
 use url::Url;
 
 /// The extracted article content and metadata.
@@ -88,7 +88,7 @@ pub(crate) struct Readability<'a> {
     metadata: Metadata,
     base_uri: Option<Url>,
     url_error: Option<url::ParseError>,
-    attempts: Vec<AttemptResult>,
+    attempts: SmallVec<[AttemptResult; 4]>,
 }
 struct AttemptResult {
     content_html: String,
@@ -127,7 +127,7 @@ impl<'a> Readability<'a> {
             metadata: Metadata::default(),
             base_uri,
             url_error,
-            attempts: Vec::new(),
+            attempts: SmallVec::new(),
         }
     }
     pub(crate) fn parse(mut self) -> Result<Article> {
@@ -179,7 +179,7 @@ impl<'a> Readability<'a> {
         }
         loop {
             let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
-            let mut to_score = Vec::with_capacity(256);
+            let mut to_score = SmallVec::<[NodeId; 256]>::new();
             if let Some(html) = self.dom.html_element() {
                 if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
                     self.article_lang = Some(lang.into())
@@ -188,7 +188,7 @@ impl<'a> Readability<'a> {
                     self.article_dir = Some(dir.into())
                 }
             }
-            let mut remove = Vec::new();
+            let mut remove = SmallVec::<[NodeId; 64]>::new();
             // Tree repair can make arena order differ from document order. Record
             // only attached elements in preorder before this pass starts mutating.
             // Snapshot depths identify removed subtrees without ancestor walks.
@@ -324,7 +324,7 @@ impl<'a> Readability<'a> {
                 }
             }
             self.node_data.sync_len(self.dom.len());
-            let mut candidates = Vec::new();
+            let mut candidates = SmallVec::<[NodeId; 256]>::new();
             for id in to_score {
                 let Some(parent) = self.dom.parent(id).filter(|&x| self.dom.is_element(x)) else {
                     continue;
@@ -355,7 +355,7 @@ impl<'a> Readability<'a> {
                     self.node_data.add_content_score(x, cs / div)
                 }
             }
-            let mut scored: Vec<_> = candidates
+            let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
                 .iter()
                 .enumerate()
                 .map(|(order, &id)| {
@@ -388,7 +388,7 @@ impl<'a> Readability<'a> {
                     .dom
                     .create_html_element(Tag::Div)
                     .map_err(|_| Error::NoContent)?;
-                let children = self.dom.children(body).collect::<Vec<_>>();
+                let children: SmallVec<[NodeId; 16]> = self.dom.children(body).collect();
                 for x in children {
                     self.dom.append_child(c, x)
                 }
@@ -398,7 +398,7 @@ impl<'a> Readability<'a> {
             } else {
                 let mut tc = top[0].0;
                 let top_score = top[0].1;
-                let alternatives: Vec<HashSet<NodeId>> = top
+                let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = top
                     .iter()
                     .skip(1)
                     .filter(|(_, score, _)| *score / top_score >= 0.75)
@@ -480,7 +480,7 @@ impl<'a> Readability<'a> {
                     .map_err(|_| Error::NoContent)?;
                 self.dom.set_attr(w, AttrName::Id, "readability-page-1");
                 self.dom.set_attr(w, AttrName::Class, "page");
-                let children = self.dom.children(article_id).collect::<Vec<_>>();
+                let children: SmallVec<[NodeId; 16]> = self.dom.children(article_id).collect();
                 for x in children {
                     self.dom.append_child(w, x)
                 }
@@ -557,13 +557,15 @@ impl<'a> Readability<'a> {
         top: NodeId,
         store: &mut NodeStateStore,
         debug: bool,
-    ) -> Vec<NodeId> {
+    ) -> SmallVec<[NodeId; 8]> {
         let Some(parent) = dom.parent(top) else {
-            return vec![top];
+            let mut out = SmallVec::new();
+            out.push(top);
+            return out;
         };
         let threshold = 10f64.max(store.get_content_score(top) * 0.2);
         let class = dom.attr(top, AttrName::Class);
-        let mut out = Vec::new();
+        let mut out = SmallVec::<[NodeId; 8]>::new();
         for x in dom.element_children(parent) {
             let mut yes = x == top;
             if !yes {
@@ -637,7 +639,7 @@ impl<'a> Readability<'a> {
             video,
         );
         let threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
-        let children: Vec<_> = self.dom.element_children(root).collect();
+        let children: SmallVec<[NodeId; 16]> = self.dom.element_children(root).collect();
         for c in children {
             clean_matched_nodes(&mut self.dom, c, |d, id, m| {
                 m.as_bytes()
@@ -690,7 +692,7 @@ impl<'a> Readability<'a> {
             &mut self.node_data,
             self.options.link_density_modifier,
         );
-        let hs: Vec<_> = self
+        let hs: SmallVec<[NodeId; 4]> = self
             .dom
             .descendants(root)
             .filter(|&x| self.dom.tag(x) == Some(Tag::H1))
@@ -698,7 +700,7 @@ impl<'a> Readability<'a> {
         for x in hs {
             self.dom.rename_html(x, Tag::H2)
         }
-        let ps: Vec<_> = self
+        let ps: SmallVec<[NodeId; 64]> = self
             .dom
             .descendants(root)
             .filter(|&x| self.dom.tag(x) == Some(Tag::P))
@@ -714,7 +716,7 @@ impl<'a> Readability<'a> {
                 self.dom.detach(p)
             }
         }
-        let brs: Vec<_> = self
+        let brs: SmallVec<[NodeId; 32]> = self
             .dom
             .descendants(root)
             .filter(|&x| self.dom.tag(x) == Some(Tag::Br))
@@ -728,7 +730,7 @@ impl<'a> Readability<'a> {
                 self.dom.detach(br)
             }
         }
-        let tables: Vec<_> = self
+        let tables: SmallVec<[NodeId; 16]> = self
             .dom
             .descendants(root)
             .filter(|&x| self.dom.tag(x) == Some(Tag::Table))
@@ -762,7 +764,7 @@ impl<'a> Readability<'a> {
         self.fix_relative_uris(root);
         simplify_nested_elements(&mut self.dom, root);
         let ids: Vec<_> = self.dom.descendants(root).collect();
-        let mut comments = Vec::new();
+        let mut comments = SmallVec::<[NodeId; 32]>::new();
         for id in ids {
             if self.dom.is_element(id) {
                 if !self.options.keep_classes {

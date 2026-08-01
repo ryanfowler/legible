@@ -5,7 +5,7 @@ use crate::document::Document;
 use crate::dom::{Dom, NodeId, Tag, build_match_string};
 use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
-use std::collections::HashSet;
+use smallvec::SmallVec;
 
 /// Check if an HTML document probably contains readable article content.
 ///
@@ -36,7 +36,7 @@ pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) ->
 pub(crate) fn is_probably_readerable_doc(dom: &Dom, options: Option<ReaderableOptions>) -> bool {
     let options = options.unwrap_or_default();
     let mut score = 0.0;
-    let mut seen = HashSet::new();
+    let mut seen = SmallVec::<[NodeId; 16]>::new();
     let mut buf = String::with_capacity(128);
     for id in dom.descendants(dom.root()) {
         if !dom.is_element(id) {
@@ -50,11 +50,11 @@ pub(crate) fn is_probably_readerable_doc(dom: &Dom, options: Option<ReaderableOp
             }
             Some(Tag::Br) => {
                 if let Some(p) = dom.parent(id) {
-                    if dom.tag(p) == Some(Tag::Div)
-                        && seen.insert(p)
-                        && score_node(dom, p, &options, &mut score, &mut buf)
-                    {
-                        return true;
+                    if dom.tag(p) == Some(Tag::Div) && !seen.contains(&p) {
+                        seen.push(p);
+                        if score_node(dom, p, &options, &mut score, &mut buf) {
+                            return true;
+                        }
                     }
                 }
             }
