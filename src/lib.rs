@@ -152,7 +152,6 @@ mod options;
 mod readability;
 mod readerable;
 mod scoring;
-mod selectors;
 
 pub use document::Document;
 pub use error::{Error, Result};

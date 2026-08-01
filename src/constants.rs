@@ -1,5 +1,6 @@
 //! Constants and regex patterns used by Readability.
 
+use crate::dom::{AttrName, Tag};
 use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
 
@@ -17,10 +18,18 @@ pub mod defaults {
 }
 
 #[inline]
-pub fn is_default_tag_to_score(tag: &str) -> bool {
+pub fn is_default_tag_to_score(tag: Tag) -> bool {
     matches!(
         tag,
-        "SECTION" | "H2" | "H3" | "H4" | "H5" | "H6" | "P" | "TD" | "PRE"
+        Tag::Section
+            | Tag::H2
+            | Tag::H3
+            | Tag::H4
+            | Tag::H5
+            | Tag::H6
+            | Tag::P
+            | Tag::Td
+            | Tag::Pre
     )
 }
 
@@ -146,84 +155,95 @@ pub fn is_unlikely_role(role: &str) -> bool {
 }
 
 #[inline]
-pub fn is_div_to_p_elem(tag: &str) -> bool {
+pub fn is_div_to_p_elem(tag: Tag) -> bool {
     matches!(
         tag,
-        "BLOCKQUOTE" | "DL" | "DIV" | "IMG" | "OL" | "P" | "PRE" | "TABLE" | "UL"
+        Tag::Blockquote
+            | Tag::Dl
+            | Tag::Div
+            | Tag::Img
+            | Tag::Ol
+            | Tag::P
+            | Tag::Pre
+            | Tag::Table
+            | Tag::Ul
     )
 }
 
 #[inline]
-pub fn is_alter_to_div_exception(tag: &str) -> bool {
-    matches!(tag, "DIV" | "ARTICLE" | "SECTION" | "P" | "OL" | "UL")
+pub fn is_alter_to_div_exception(tag: Tag) -> bool {
+    matches!(
+        tag,
+        Tag::Div | Tag::Article | Tag::Section | Tag::P | Tag::Ol | Tag::Ul
+    )
 }
 
 /// Presentational attributes to remove.
-pub static PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
-    "align",
-    "background",
-    "bgcolor",
-    "border",
-    "cellpadding",
-    "cellspacing",
-    "frame",
-    "hspace",
-    "rules",
-    "style",
-    "valign",
-    "vspace",
+pub static PRESENTATIONAL_ATTRIBUTES: &[AttrName] = &[
+    AttrName::Align,
+    AttrName::Background,
+    AttrName::BgColor,
+    AttrName::Border,
+    AttrName::CellPadding,
+    AttrName::CellSpacing,
+    AttrName::Frame,
+    AttrName::HSpace,
+    AttrName::Rules,
+    AttrName::Style,
+    AttrName::VAlign,
+    AttrName::VSpace,
 ];
 
 #[inline]
-pub fn is_deprecated_size_attribute_elem(tag: &str) -> bool {
-    matches!(tag, "TABLE" | "TH" | "TD" | "HR" | "PRE")
+pub fn is_deprecated_size_attribute_elem(tag: Tag) -> bool {
+    matches!(tag, Tag::Table | Tag::Th | Tag::Td | Tag::Hr | Tag::Pre)
 }
 
 /// Check for phrasing content elements. CANVAS, IFRAME, SVG, VIDEO are excluded
 /// as they tend to be removed.
 #[inline]
-pub fn is_phrasing_elem(tag: &str) -> bool {
+pub fn is_phrasing_elem(tag: Tag) -> bool {
     matches!(
         tag,
-        "ABBR"
-            | "AUDIO"
-            | "B"
-            | "BDO"
-            | "BR"
-            | "BUTTON"
-            | "CITE"
-            | "CODE"
-            | "DATA"
-            | "DATALIST"
-            | "DFN"
-            | "EM"
-            | "EMBED"
-            | "I"
-            | "IMG"
-            | "INPUT"
-            | "KBD"
-            | "LABEL"
-            | "MARK"
-            | "MATH"
-            | "METER"
-            | "NOSCRIPT"
-            | "OBJECT"
-            | "OUTPUT"
-            | "PROGRESS"
-            | "Q"
-            | "RUBY"
-            | "SAMP"
-            | "SCRIPT"
-            | "SELECT"
-            | "SMALL"
-            | "SPAN"
-            | "STRONG"
-            | "SUB"
-            | "SUP"
-            | "TEXTAREA"
-            | "TIME"
-            | "VAR"
-            | "WBR"
+        Tag::Abbr
+            | Tag::Audio
+            | Tag::B
+            | Tag::Bdo
+            | Tag::Br
+            | Tag::Button
+            | Tag::Cite
+            | Tag::Code
+            | Tag::Data
+            | Tag::Datalist
+            | Tag::Dfn
+            | Tag::Em
+            | Tag::Embed
+            | Tag::I
+            | Tag::Img
+            | Tag::Input
+            | Tag::Kbd
+            | Tag::Label
+            | Tag::Mark
+            | Tag::Math
+            | Tag::Meter
+            | Tag::Noscript
+            | Tag::Object
+            | Tag::Output
+            | Tag::Progress
+            | Tag::Q
+            | Tag::Ruby
+            | Tag::Samp
+            | Tag::Script
+            | Tag::Select
+            | Tag::Small
+            | Tag::Span
+            | Tag::Strong
+            | Tag::Sub
+            | Tag::Sup
+            | Tag::Textarea
+            | Tag::Time
+            | Tag::Var
+            | Tag::Wbr
     )
 }
 

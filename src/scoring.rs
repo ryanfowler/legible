@@ -1,762 +1,365 @@
-//! Content scoring logic for Readability.
-
+//! Content scoring and DOM text helpers.
 use crate::constants::{flags::*, is_div_to_p_elem, is_phrasing_elem, regexps};
-use crate::dom::{NodeDataStore, NodeStats, get_tag_name, has_tag_name};
-use crate::selectors::Selectors;
-use dom_query::{Node, NodeData};
-
-/// Check if a URL is a hash URL (starts with '#' and has content after it).
-/// Equivalent to the regex `^#.+` but avoids regex overhead.
-#[inline]
+use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
+use smallvec::SmallVec;
 fn is_hash_url(s: &str) -> bool {
     s.starts_with('#') && s.len() > 1
 }
-
-/// Get or compute stats for a node, caching the result.
-pub fn get_or_compute_stats(node: &Node<'_>, store: &mut NodeDataStore) -> NodeStats {
-    if let Some(stats) = store.get_stats(&node.id) {
-        return *stats;
-    }
-
-    // Avoid populating the cache for every inline descendant of small subtrees.
-    // Those nodes are unlikely to be queried independently, so a single direct
-    // scan is cheaper than many hash-table insertions.
-    if let Some(stats) = stats_for_small_subtree(node, 64) {
-        store.set_stats(node.id, stats);
-        return stats;
-    }
-
-    // Compute the subtree bottom-up so each text node is scanned once even when
-    // stats are later requested for several nested ancestors.
-    let mut stack = vec![(*node, false)];
-    while let Some((current, expanded)) = stack.pop() {
-        if store.get_stats(&current.id).is_some() {
-            continue;
-        }
-
-        if !expanded {
-            stack.push((current, true));
-            stack.extend(
-                current
-                    .children_it(true)
-                    .filter(|child| store.get_stats(&child.id).is_none())
-                    .map(|child| (child, false)),
-            );
-            continue;
-        }
-
-        let mut stats = current
-            .query(|tree_node| match &tree_node.data {
-                NodeData::Text { contents } => stats_for_text(contents),
-                _ => NodeStats::default(),
-            })
-            .unwrap_or_default();
-
-        for child in current.children_it(false) {
-            if let Some(child_stats) = store.get_stats(&child.id) {
-                append_stats(&mut stats, child_stats);
-            }
-        }
-        stats.has_sentence_end = stats.has_sentence_break || stats.ends_with_dot;
-        store.set_stats(current.id, stats);
-    }
-
-    store.get_stats(&node.id).copied().unwrap_or_default()
-}
-
-fn stats_for_small_subtree(node: &Node<'_>, max_nodes: usize) -> Option<NodeStats> {
-    let mut stats = NodeStats::default();
-
-    for (index, descendant) in std::iter::once(*node)
-        .chain(node.descendants_it())
-        .enumerate()
-    {
-        if index == max_nodes {
-            return None;
-        }
-        descendant.query(|tree_node| {
-            if let NodeData::Text { contents } = &tree_node.data {
-                append_stats(&mut stats, &stats_for_text(contents));
-            }
-        });
-    }
-
-    Some(stats)
-}
-
 fn stats_for_text(text: &str) -> NodeStats {
-    let mut stats = NodeStats {
+    let mut s = NodeStats {
         has_text: !text.is_empty(),
         starts_with_whitespace: text.starts_with(char::is_whitespace),
         ends_with_whitespace: text.ends_with(char::is_whitespace),
-        ..NodeStats::default()
+        ..Default::default()
     };
-    let mut previous_was_whitespace = true;
-    let mut last_was_dot = false;
-
+    let mut prev = true;
+    let mut dot = false;
     for c in text.chars() {
         if c.is_whitespace() {
-            stats.has_sentence_break |= last_was_dot;
-            last_was_dot = false;
-            if !previous_was_whitespace {
-                stats.text_length += 1;
-                previous_was_whitespace = true;
+            s.has_sentence_break |= dot;
+            dot = false;
+            if !prev {
+                s.text_length += 1;
+                prev = true
             }
         } else {
-            stats.has_non_whitespace = true;
-            last_was_dot = c == '.';
-            stats.comma_count += usize::from(
+            s.has_non_whitespace = true;
+            dot = c == '.';
+            s.comma_count += usize::from(
                 c == ','
-                    || (c as u32 >= 0x0600
-                        && matches!(
-                            c,
-                            '\u{060C}'
-                                | '\u{FE50}'
-                                | '\u{FE10}'
-                                | '\u{FE11}'
-                                | '\u{2E41}'
-                                | '\u{2E34}'
-                                | '\u{2E32}'
-                                | '\u{FF0C}'
-                        )),
+                    || matches!(
+                        c,
+                        '\u{060C}'
+                            | '\u{FE50}'
+                            | '\u{FE10}'
+                            | '\u{FE11}'
+                            | '\u{2E41}'
+                            | '\u{2E34}'
+                            | '\u{2E32}'
+                            | '\u{FF0C}'
+                    ),
             );
-            stats.text_length += 1;
-            previous_was_whitespace = false;
+            s.text_length += 1;
+            prev = false
         }
     }
-
-    if previous_was_whitespace && stats.text_length > 0 {
-        stats.text_length -= 1;
+    if prev && s.text_length > 0 {
+        s.text_length -= 1
     }
-    stats.ends_with_dot = last_was_dot;
-    stats.has_sentence_end = stats.has_sentence_break || stats.ends_with_dot;
-    stats
+    s.ends_with_dot = dot;
+    s.has_sentence_end = s.has_sentence_break || dot;
+    s
 }
-
-fn append_stats(stats: &mut NodeStats, child: &NodeStats) {
-    if !child.has_text {
+fn append_stats(a: &mut NodeStats, b: &NodeStats) {
+    if !b.has_text {
         return;
     }
-
-    if !stats.has_text {
-        *stats = *child;
+    if !a.has_text {
+        *a = *b;
         return;
     }
-
-    stats.has_sentence_break |=
-        child.has_sentence_break || (stats.ends_with_dot && child.starts_with_whitespace);
-    if stats.has_non_whitespace
-        && child.has_non_whitespace
-        && (stats.ends_with_whitespace || child.starts_with_whitespace)
+    a.has_sentence_break |= b.has_sentence_break || (a.ends_with_dot && b.starts_with_whitespace);
+    if a.has_non_whitespace
+        && b.has_non_whitespace
+        && (a.ends_with_whitespace || b.starts_with_whitespace)
     {
-        stats.text_length += 1;
+        a.text_length += 1
     }
-    stats.text_length += child.text_length;
-    stats.comma_count += child.comma_count;
-    stats.has_non_whitespace |= child.has_non_whitespace;
-    stats.ends_with_whitespace = child.ends_with_whitespace;
-    stats.ends_with_dot = child.ends_with_dot;
-    stats.has_sentence_end = stats.has_sentence_break || stats.ends_with_dot;
+    a.text_length += b.text_length;
+    a.comma_count += b.comma_count;
+    a.has_non_whitespace |= b.has_non_whitespace;
+    a.ends_with_whitespace = b.ends_with_whitespace;
+    a.ends_with_dot = b.ends_with_dot;
+    a.has_sentence_end = a.has_sentence_break || a.ends_with_dot
 }
-
-/// Compute the initial readability data for a node without storing it.
-/// Used with NodeDataStore::initialize_if_absent for single-lookup initialization.
-pub fn compute_initial_readability_data(
-    node: &Node<'_>,
-    flags: u32,
-) -> crate::dom::ReadabilityData {
-    let initial_score = match get_tag_name(node).as_deref() {
-        Some("DIV") => 5.0,
-        Some("PRE") | Some("TD") | Some("BLOCKQUOTE") => 3.0,
-        Some("ADDRESS") | Some("OL") | Some("UL") | Some("DL") | Some("DD") | Some("DT")
-        | Some("LI") | Some("FORM") => -3.0,
-        Some("H1") | Some("H2") | Some("H3") | Some("H4") | Some("H5") | Some("H6")
-        | Some("TH") => -5.0,
-        _ => 0.0,
+pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
+    if let Some(s) = store.get_stats(id) {
+        return *s;
+    }
+    let mut stack = SmallVec::<[(NodeId, bool); 16]>::new();
+    stack.push((id, false));
+    while let Some((n, expanded)) = stack.pop() {
+        if store.get_stats(n).is_some() {
+            continue;
+        }
+        if !expanded {
+            stack.push((n, true));
+            for c in dom.children_rev(n) {
+                if store.get_stats(c).is_none() {
+                    stack.push((c, false))
+                }
+            }
+            continue;
+        }
+        let mut s = match dom.text_node(n) {
+            Some(t) => stats_for_text(t),
+            None => NodeStats::default(),
+        };
+        for c in dom.children(n) {
+            if let Some(cs) = store.get_stats(c) {
+                append_stats(&mut s, cs)
+            }
+        }
+        s.has_sentence_end = s.has_sentence_break || s.ends_with_dot;
+        store.set_stats(n, s)
+    }
+    store.get_stats(id).copied().unwrap_or_default()
+}
+pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, flags: u32) -> f64 {
+    let score = match dom.tag(id) {
+        Some(Tag::Div) => 5.,
+        Some(Tag::Pre | Tag::Td | Tag::Blockquote) => 3.,
+        Some(
+            Tag::Address | Tag::Ol | Tag::Ul | Tag::Dl | Tag::Dd | Tag::Dt | Tag::Li | Tag::Form,
+        ) => -3.,
+        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::Th) => -5.,
+        _ => 0.,
     };
-
-    let class_weight = get_class_weight(node, flags);
-    crate::dom::ReadabilityData::with_score(initial_score + class_weight as f64)
+    score + get_class_weight(dom, id, flags) as f64
 }
-
-/// Initialize a node with readability data and initial score based on tag.
-pub fn initialize_node(node: &Node<'_>, store: &mut NodeDataStore, flags: u32) {
-    store.set(node.id, compute_initial_readability_data(node, flags));
+pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) {
+    store.initialize_if_absent(id, compute_initial_readability_data(dom, id, flags));
 }
-
-/// Get the class/id weight of an element.
-/// Positive weight for content-like classes, negative for non-content.
-/// Uses RegexSet for efficient single-pass matching.
-pub fn get_class_weight(node: &Node<'_>, flags: u32) -> i32 {
-    if (flags & FLAG_WEIGHT_CLASSES) == 0 {
+pub fn get_class_weight(dom: &Dom, id: NodeId, flags: u32) -> i32 {
+    if flags & FLAG_WEIGHT_CLASSES == 0 {
         return 0;
     }
-
-    // Inspect the element's attributes in place. `Node::attr` performs a query
-    // and clones the value for every lookup; this function is called for most
-    // scored nodes, so doing two such lookups is surprisingly expensive.
-    node.query(|tree_node| {
-        let Some(element) = tree_node.as_element() else {
-            return 0;
-        };
-
-        let mut weight = 0;
-        for attr in &element.attrs {
-            let name = attr.name.local.as_ref();
-            if name != "class" && name != "id" {
-                continue;
-            }
-
-            let value = attr.value.as_ref();
-            if value.is_empty() {
-                continue;
-            }
-
-            let matches = regexps::CLASS_WEIGHT_SET.matches(value);
-            if matches.matched(0) {
-                weight -= 25;
-            }
-            if matches.matched(1) {
-                weight += 25;
-            }
+    let mut w = 0;
+    for a in dom.attrs(id) {
+        if !matches!(a.known, AttrName::Class | AttrName::Id) || a.value.is_empty() {
+            continue;
         }
-        weight
-    })
-    .unwrap_or(0)
+        let m = regexps::CLASS_WEIGHT_SET.matches(a.value.as_ref());
+        if m.matched(0) {
+            w -= 25
+        }
+        if m.matched(1) {
+            w += 25
+        }
+    }
+    w
 }
-
-/// Check if a node has non-whitespace inner text, without allocating a String.
-/// This is an optimized alternative to `!get_inner_text(n, false).is_empty()`.
-pub fn has_non_empty_inner_text(node: &Node<'_>) -> bool {
-    has_non_whitespace_text(node)
+pub fn has_non_empty_inner_text(dom: &Dom, id: NodeId) -> bool {
+    dom.has_non_whitespace_text(id)
 }
-
-/// Get the inner text of a node, optionally normalizing whitespace.
-pub fn get_inner_text(node: &Node<'_>, normalize_spaces: bool) -> String {
-    let text = node.text();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+pub fn get_inner_text(dom: &Dom, id: NodeId, normalize: bool) -> String {
+    let mut raw = String::new();
+    dom.append_text(id, &mut raw);
+    let t = raw.trim();
+    if t.is_empty() {
         return String::new();
     }
-    if normalize_spaces {
-        normalize_whitespace(trimmed)
-    } else if trimmed.as_ptr() == text.as_ptr() && trimmed.len() == text.len() {
-        // Text is already trimmed — avoid allocation when callers need ownership
-        text.to_string()
-    } else {
-        trimmed.to_string()
+    if !normalize {
+        return t.to_string();
     }
-}
-
-/// Collapse runs of 2+ whitespace characters into a single space.
-/// Returns the original string (as a new allocation) if no collapsing is needed.
-fn normalize_whitespace(s: &str) -> String {
-    // Quick pre-check: only allocate a new string if there are consecutive whitespace chars
-    let needs_normalize = s
-        .as_bytes()
-        .windows(2)
-        .any(|w| w[0].is_ascii_whitespace() && w[1].is_ascii_whitespace())
-        || s.bytes().any(|b| b == b'\t' || b == b'\n' || b == b'\r');
-    if !needs_normalize {
-        return s.to_string();
-    }
-    let mut result = String::with_capacity(s.len());
-    let mut prev_ws = false;
-    for c in s.chars() {
+    let mut out = String::with_capacity(t.len());
+    let mut ws = false;
+    for c in t.chars() {
         if c.is_whitespace() {
-            if !prev_ws {
-                result.push(' ');
+            if !ws {
+                out.push(' ')
             }
-            prev_ws = true;
+            ws = true
         } else {
-            result.push(c);
-            prev_ws = false;
+            out.push(c);
+            ws = false
         }
     }
-    result
+    out
 }
-
-/// Get the link density of an element with optional pre-extracted text.
-/// Use this when you already have the inner text to avoid redundant extraction.
 pub fn get_link_density_with_text(
-    node: &Node<'_>,
-    node_text: Option<&str>,
-    _selectors: &Selectors,
+    dom: &Dom,
+    id: NodeId,
+    text: Option<&str>,
+    mut store: Option<&mut NodeStateStore>,
 ) -> f64 {
-    let text_length = match node_text {
-        Some(t) => t.chars().count(),
-        None => node.normalized_char_count(),
-    };
-    if text_length == 0 {
-        return 0.0;
+    let total = text.map_or_else(|| dom.normalized_char_count(id), |x| x.chars().count());
+    if total == 0 {
+        return 0.;
     }
-
-    let mut link_length = 0.0;
-
-    for link in node
-        .descendants_it()
-        .filter(|descendant| has_tag_name(descendant, "a"))
-    {
-        // Check href directly without allocating a new String
-        let coefficient = match link.attr("href") {
-            Some(href) if is_hash_url(href.as_ref()) => 0.3,
-            _ => 1.0,
+    let mut links = 0.;
+    for x in dom.descendants(id) {
+        if dom.tag(x) != Some(Tag::A) {
+            continue;
+        }
+        let len = if let Some(st) = store.as_deref_mut() {
+            get_or_compute_stats(dom, x, st).text_length
+        } else {
+            dom.normalized_char_count(x)
         };
-        link_length += link.normalized_char_count() as f64 * coefficient;
+        links += len as f64
+            * if dom.attr(x, AttrName::Href).is_some_and(is_hash_url) {
+                0.3
+            } else {
+                1.
+            }
     }
-
-    link_length / text_length as f64
+    links / total as f64
 }
-
-/// Get the link density of an element (ratio of link text to total text).
-pub fn get_link_density(node: &Node<'_>, selectors: &Selectors) -> f64 {
-    get_link_density_with_text(node, None, selectors)
+pub fn get_link_density(dom: &Dom, id: NodeId) -> f64 {
+    get_link_density_with_text(dom, id, None, None)
 }
-
-/// Get the link density using a pre-computed parent text length.
-/// Caches link text stats for efficiency.
 pub fn get_link_density_cached(
-    node: &Node<'_>,
-    parent_text_length: usize,
-    store: &mut NodeDataStore,
-    _selectors: &Selectors,
+    dom: &Dom,
+    id: NodeId,
+    len: usize,
+    store: &mut NodeStateStore,
 ) -> f64 {
-    if parent_text_length == 0 {
-        return 0.0;
+    if len == 0 {
+        return 0.;
     }
-
-    let mut link_length = 0.0;
-
-    for link in node
-        .descendants_it()
-        .filter(|descendant| has_tag_name(descendant, "a"))
-    {
-        // Get or compute stats for the link
-        let link_stats = get_or_compute_stats(&link, store);
-
-        // Check href directly without allocating a new String
-        let coefficient = match link.attr("href") {
-            Some(href) if is_hash_url(href.as_ref()) => 0.3,
-            _ => 1.0,
-        };
-        link_length += link_stats.text_length as f64 * coefficient;
+    let mut links = 0.;
+    for x in dom.descendants(id) {
+        if dom.tag(x) == Some(Tag::A) {
+            let n = get_or_compute_stats(dom, x, store).text_length;
+            links += n as f64
+                * if dom.attr(x, AttrName::Href).is_some_and(is_hash_url) {
+                    0.3
+                } else {
+                    1.
+                }
+        }
     }
-
-    link_length / parent_text_length as f64
+    links / len as f64
 }
-
-/// Check if a node is whitespace.
-pub fn is_whitespace(node: &Node<'_>) -> bool {
-    if node.is_text() {
-        let text = node.text();
-        return text.trim().is_empty();
-    }
-    if node.is_element()
-        && let Some(tag) = get_tag_name(node)
-    {
-        return tag == "BR";
-    }
-    false
+pub fn is_whitespace(dom: &Dom, id: NodeId) -> bool {
+    dom.text_node(id).is_some_and(|t| t.trim().is_empty()) || dom.tag(id) == Some(Tag::Br)
 }
-
-/// Check if a node qualifies as phrasing content.
-pub fn is_phrasing_content(node: &Node<'_>) -> bool {
-    is_phrasing_content_depth(node, 0)
-}
-
-fn is_phrasing_content_depth(node: &Node<'_>, depth: u32) -> bool {
-    if node.is_text() {
-        return true;
-    }
-
-    if let Some(tag) = get_tag_name(node) {
-        if is_phrasing_elem(&tag) {
+pub fn is_phrasing_content(dom: &Dom, id: NodeId) -> bool {
+    fn go(d: &Dom, n: NodeId, depth: u32) -> bool {
+        if d.is_text(n) {
             return true;
         }
-
-        // A, DEL, INS are phrasing content if all their children are.
-        // Depth-limited to prevent excessive recursion on pathological DOMs.
-        if (tag == "A" || tag == "DEL" || tag == "INS") && depth < 10 {
-            return node
-                .children_it(false)
-                .all(|child| is_phrasing_content_depth(&child, depth + 1));
+        let Some(t) = d.tag(n) else { return false };
+        if is_phrasing_elem(t) {
+            return true;
         }
+        matches!(t, Tag::A | Tag::Del | Tag::Ins)
+            && depth < 10
+            && d.children(n).all(|c| go(d, c, depth + 1))
     }
-
-    false
+    go(dom, id, 0)
 }
-
-/// Wrap consecutive phrasing content in P tags by moving existing nodes.
-/// This handles cases where text is placed directly inside DIVs without P tags.
-pub fn wrap_phrasing_content_in_p(div: &Node<'_>) {
-    let children: Vec<_> = div.children();
+pub fn wrap_phrasing_content_in_p(dom: &mut Dom, div: NodeId) {
+    let children: SmallVec<[NodeId; 8]> = dom.children(div).collect();
     let mut i = 0;
-
     while i < children.len() {
-        let child = &children[i];
-
-        // If this is phrasing content, collect consecutive phrasing content nodes
-        if is_phrasing_content(child) {
-            let mut j = i;
-            let mut has_content = false;
-
-            // Collect all consecutive phrasing content
-            while j < children.len() && is_phrasing_content(&children[j]) {
-                let node = &children[j];
-                has_content |= !node.is_text() || !node.text().trim().is_empty();
-                j += 1;
-            }
-
-            // Only wrap if we collected content (not just whitespace)
-            if has_content {
-                // Trim leading/trailing whitespace using index tracking - O(n) instead of O(n²)
-                let mut start = i;
-                let mut end = j;
-
-                // Trim leading whitespace nodes
-                while start < end && is_whitespace(&children[start]) {
-                    start += 1;
-                }
-
-                // Trim trailing whitespace nodes
-                while start < end && is_whitespace(&children[end - 1]) {
-                    end -= 1;
-                }
-
-                // Only wrap if we still have content after trimming
-                if start < end
-                    && let Some(first_node) = children.get(start)
-                {
-                    let p = div.tree.new_element("p");
-                    first_node.insert_before(&p);
-
-                    for node in &children[start..end] {
-                        p.append_child(node);
-                    }
-
-                    for node in children[i..start].iter().chain(children[end..j].iter()) {
-                        node.remove_from_parent();
-                    }
-                }
-            }
-
-            i = j;
-        } else {
+        if !is_phrasing_content(dom, children[i]) {
             i += 1;
+            continue;
         }
+        let mut j = i;
+        let mut content = false;
+        while j < children.len() && is_phrasing_content(dom, children[j]) {
+            content |= !dom.is_text(children[j])
+                || dom
+                    .text_node(children[j])
+                    .is_some_and(|t| !t.trim().is_empty());
+            j += 1
+        }
+        if content {
+            let mut a = i;
+            let mut b = j;
+            while a < b && is_whitespace(dom, children[a]) {
+                a += 1
+            }
+            while a < b && is_whitespace(dom, children[b - 1]) {
+                b -= 1
+            }
+            if a < b {
+                let p = dom.create_html_element(Tag::P).expect("DOM node limit");
+                dom.insert_before(children[a], p);
+                for &x in &children[a..b] {
+                    dom.append_child(p, x)
+                }
+                for &x in children[i..a].iter().chain(children[b..j].iter()) {
+                    dom.detach(x)
+                }
+            }
+        }
+        i = j
     }
 }
-
-/// Check if an element has no content.
-pub fn is_element_without_content(node: &Node<'_>) -> bool {
-    if !node.is_element() {
-        return false;
-    }
-
-    if has_non_whitespace_text(node) {
-        return false;
-    }
-
-    // Check direct element children without allocating an intermediate Vec.
-    node.children_it(false)
-        .filter(|child| child.is_element())
-        .all(|child| has_tag_name(&child, "BR") || has_tag_name(&child, "HR"))
+pub fn is_element_without_content(dom: &Dom, id: NodeId) -> bool {
+    dom.is_element(id)
+        && !dom.has_non_whitespace_text(id)
+        && dom
+            .element_children(id)
+            .all(|c| matches!(dom.tag(c), Some(Tag::Br | Tag::Hr)))
 }
-
-/// Check if this node has only whitespace and a single element with given tag.
-pub fn has_single_tag_inside_element(node: &Node<'_>, tag: &str) -> bool {
-    let mut found_element = false;
-
-    for child in node.children_it(false) {
-        if child.is_element() {
-            if found_element || !has_tag_name(&child, tag) {
+pub fn has_single_tag_inside_element(dom: &Dom, id: NodeId, tag: Tag) -> bool {
+    let mut found = false;
+    for c in dom.children(id) {
+        if dom.is_element(c) {
+            if found || dom.tag(c) != Some(tag) {
                 return false;
             }
-            found_element = true;
-        } else if child.is_text()
-            && child
-                .text()
-                .as_ref()
-                .ends_with(|c: char| !c.is_whitespace())
+            found = true
+        } else if dom.is_text(c)
+            && dom
+                .text_node(c)
+                .is_some_and(|t| t.ends_with(|x: char| !x.is_whitespace()))
         {
             return false;
         }
     }
-
-    found_element
+    found
 }
-
-/// Check if an element has any children that are block-level elements.
-pub fn has_child_block_element(node: &Node<'_>) -> bool {
-    node.descendants_it()
-        .filter(|child| child.is_element())
-        .any(|child| get_tag_name(&child).is_some_and(|tag| is_div_to_p_elem(&tag)))
+pub fn has_child_block_element(dom: &Dom, id: NodeId) -> bool {
+    dom.descendants(id)
+        .any(|x| dom.is_element(x) && dom.tag(x).is_some_and(is_div_to_p_elem))
 }
-
-/// Check if a node is probably visible (not hidden).
-pub fn is_probably_visible(node: &Node<'_>) -> bool {
-    // Check style attribute for display:none or visibility:hidden,
-    // ignoring case and whitespace variations. Both patterns are checked
-    // in a single pass through the style string.
-    if let Some(style) = node.attr("style") {
-        let style_str = style.as_ref();
-        if has_hidden_style(style_str) {
-            return false;
-        }
-    }
-
-    // Check for hidden attribute
-    if node.has_attr("hidden") {
+pub fn is_probably_visible(dom: &Dom, id: NodeId) -> bool {
+    if dom.attr(id, AttrName::Style).is_some_and(has_hidden_style)
+        || dom.has_attr(id, AttrName::Hidden)
+    {
         return false;
     }
-
-    // Check aria-hidden, but allow fallback-image class
-    if let Some(aria_hidden) = node.attr("aria-hidden")
-        && aria_hidden.as_ref() == "true"
+    if dom.attr(id, AttrName::AriaHidden) == Some("true")
+        && !dom
+            .attr(id, AttrName::Class)
+            .is_some_and(|x| x.contains("fallback-image"))
     {
-        if let Some(class) = node.attr("class") {
-            if !class.as_ref().contains("fallback-image") {
-                return false;
-            }
-        } else {
-            return false;
-        }
+        return false;
     }
-
     true
 }
-
-/// Check if a node is a valid byline element.
-pub fn is_valid_byline(node: &Node<'_>, match_string: &str) -> bool {
-    let is_byline_attr = node.attr("rel").is_some_and(|rel| rel.as_ref() == "author")
-        || node
-            .attr("itemprop")
-            .is_some_and(|ip| ip.as_ref().contains("author"))
-        || regexps::BYLINE.is_match(match_string);
-
-    if !is_byline_attr {
+pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str) -> bool {
+    let ok = dom.attr(id, AttrName::Rel) == Some("author")
+        || dom
+            .attr(id, AttrName::ItemProp)
+            .is_some_and(|x| x.contains("author"))
+        || regexps::BYLINE.is_match(ms);
+    if !ok {
         return false;
     }
-
-    let text = node.text();
-    let trimmed = text.trim();
-    // Short-circuit: a UTF-8 char is at most 4 bytes, so < 400 bytes means < 100 chars.
-    !trimmed.is_empty() && trimmed.len() < 400 && trimmed.chars().count() < 100
+    let t = get_inner_text(dom, id, false);
+    !t.is_empty() && t.len() < 400 && t.chars().count() < 100
 }
-
-/// Check if node is image or contains exactly one image.
-pub fn is_single_image(node: &Node<'_>) -> bool {
-    let mut current = *node;
-    let mut checked_text = false;
-
-    loop {
-        let n = current;
-        if let Some(tag) = get_tag_name(&n)
-            && tag == "IMG"
-        {
-            return true;
-        }
-
-        // If the outer subtree has no text, none of the nested single-child
-        // wrappers can have text either. Avoid rescanning the same subtree at
-        // each level.
-        if !checked_text {
-            if has_non_whitespace_text(&n) {
-                return false;
-            }
-            checked_text = true;
-        }
-
-        let mut children = n.children_it(false).filter(|child| child.is_element());
-        let Some(child) = children.next() else {
-            return false;
-        };
-        if children.next().is_some() {
-            return false;
-        }
-
-        current = child;
-    }
-}
-
-/// Check whether a node or any descendant text node contains non-whitespace text.
-/// This avoids constructing the full concatenated descendant text when callers only
-/// need an emptiness check.
-fn has_non_whitespace_text(node: &Node<'_>) -> bool {
-    if node.is_text() {
-        return node.text().chars().any(|c| !c.is_whitespace());
-    }
-
-    node.descendants_it().any(|descendant| {
-        descendant.is_text() && descendant.text().chars().any(|c| !c.is_whitespace())
+fn has_hidden_style(style: &str) -> bool {
+    let style = style.as_bytes();
+    (0..style.len()).any(|start| {
+        matches_style_declaration(style, start, b"display", b"none")
+            || matches_style_declaration(style, start, b"visibility", b"hidden")
     })
 }
 
-/// Check if a style string contains "display:none" or "visibility:hidden"
-/// (case-insensitive, whitespace-tolerant). Scans the string once for both patterns.
-fn has_hidden_style(haystack: &str) -> bool {
-    let hbytes = haystack.as_bytes();
-    let hlen = hbytes.len();
-    if hlen == 0 {
+fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value: &[u8]) -> bool {
+    let property_end = start + property.len();
+    if property_end > style.len() || !style[start..property_end].eq_ignore_ascii_case(property) {
         return false;
     }
-
-    // Both patterns contain no whitespace and are lowercase. We scan for
-    // 'd' (display) or 'v' (visibility) as starting anchors.
-    let display_pat: &[u8] = b"display:none";
-    let vis_pat: &[u8] = b"visibility:hidden";
-
-    let mut i = 0;
-    while i < hlen {
-        let b = hbytes[i].to_ascii_lowercase();
-        let needle = if b == b'd' {
-            display_pat
-        } else if b == b'v' {
-            vis_pat
-        } else {
-            i += 1;
-            continue;
-        };
-
-        let needle_len = needle.len();
-        if i + needle_len > hlen {
-            i += 1;
-            continue;
-        }
-
-        let mut hi = i;
-        let mut ni = 0;
-        let mut matches = true;
-        while ni < needle_len && hi < hlen {
-            if hbytes[hi].is_ascii_whitespace() {
-                hi += 1;
-                continue;
-            }
-            if hbytes[hi].to_ascii_lowercase() != needle[ni] {
-                matches = false;
-                break;
-            }
-            hi += 1;
-            ni += 1;
-        }
-        if matches && ni == needle_len {
-            return true;
-        }
-        i += 1;
+    let mut cursor = property_end;
+    while style.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
     }
-    false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dom_query::Document;
-
-    fn concatenated_stats(text: &str) -> NodeStats {
-        let mut expected = NodeStats::default();
-        let mut previous_was_whitespace = true;
-        let mut last_was_dot = false;
-        for c in text.chars() {
-            if c.is_whitespace() {
-                expected.has_sentence_end |= last_was_dot;
-                last_was_dot = false;
-                if !previous_was_whitespace {
-                    expected.text_length += 1;
-                    previous_was_whitespace = true;
-                }
-            } else {
-                last_was_dot = c == '.';
-                expected.comma_count += usize::from(
-                    c == ','
-                        || matches!(
-                            c,
-                            '\u{060C}'
-                                | '\u{FE50}'
-                                | '\u{FE10}'
-                                | '\u{FE11}'
-                                | '\u{2E41}'
-                                | '\u{2E34}'
-                                | '\u{2E32}'
-                                | '\u{FF0C}'
-                        ),
-                );
-                expected.text_length += 1;
-                previous_was_whitespace = false;
-            }
-        }
-        if previous_was_whitespace && expected.text_length > 0 {
-            expected.text_length -= 1;
-        }
-        expected.has_sentence_end |= last_was_dot;
-        expected
+    if style.get(cursor) != Some(&b':') {
+        return false;
     }
-
-    fn assert_stats_match(node: &Node<'_>, store: &mut NodeDataStore) {
-        let expected = concatenated_stats(&node.text());
-        let actual = get_or_compute_stats(node, store);
-        assert_eq!(actual.text_length, expected.text_length);
-        assert_eq!(actual.comma_count, expected.comma_count);
-        assert_eq!(actual.has_sentence_end, expected.has_sentence_end);
+    cursor += 1;
+    while style.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
     }
-
-    #[test]
-    fn cached_node_stats_match_concatenated_text_semantics() {
-        let cases = [
-            "<div>  alpha,<span> beta.</span>\n<strong>gamma\u{060c}</strong>  </div>",
-            "<div><span>not.</span><span>ended</span></div>",
-            "<div><span>end.</span><i> </i><span>next</span></div>",
-            "<div> \n <span>one</span><i></i> <b>two</b> </div>",
-        ];
-
-        for html in cases {
-            let doc = Document::from(html);
-            let node = doc.select("div").nodes().first().copied().unwrap();
-            assert_stats_match(&node, &mut NodeDataStore::new());
-        }
-    }
-
-    #[test]
-    fn bottom_up_stats_match_large_mixed_subtree() {
-        let mut html = String::from("<div> leading.");
-        for index in 0..70 {
-            match index % 4 {
-                0 => html.push_str("<span> word,</span>"),
-                1 => html.push_str("<i> </i>"),
-                2 => html.push_str("<b>sentence.</b>\n"),
-                _ => html.push_str("<em>joined</em><strong>text</strong>"),
-            }
-        }
-        html.push_str(" trailing\u{060c}</div>");
-
-        let doc = Document::from(html);
-        let node = doc.select("div").nodes().first().copied().unwrap();
-        assert!(node.descendants_it().count() > 64);
-        assert_stats_match(&node, &mut NodeDataStore::new());
-    }
-
-    #[test]
-    fn clearing_stats_recomputes_a_mutated_large_subtree() {
-        let mut html = String::from("<div>");
-        for _ in 0..70 {
-            html.push_str("<span>cached text, </span>");
-        }
-        html.push_str("</div>");
-
-        let doc = Document::from(html);
-        let node = doc.select("div").nodes().first().copied().unwrap();
-        let removed = doc.select("span").nodes().last().copied().unwrap();
-        let mut store = NodeDataStore::new();
-
-        let before = get_or_compute_stats(&node, &mut store);
-        removed.remove_from_parent();
-        let expected = concatenated_stats(&node.text());
-        assert_ne!(before.text_length, expected.text_length);
-        assert_eq!(
-            get_or_compute_stats(&node, &mut store).text_length,
-            before.text_length
-        );
-
-        store.clear_stats();
-        assert_stats_match(&node, &mut store);
-    }
+    let value_end = cursor + value.len();
+    value_end <= style.len() && style[cursor..value_end].eq_ignore_ascii_case(value)
 }

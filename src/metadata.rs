@@ -1,16 +1,13 @@
 //! Metadata extraction from HTML documents.
-
+#![allow(clippy::collapsible_if, clippy::field_reassign_with_default)]
 use crate::constants::regexps;
+use crate::dom::{AttrName, Dom, Tag};
 use crate::scoring::get_inner_text;
-use crate::selectors::Selectors;
-use dom_query::Document;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashSet;
-
-/// Metadata extracted from an article.
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub title: Option<String>,
@@ -19,540 +16,349 @@ pub struct Metadata {
     pub site_name: Option<String>,
     pub published_time: Option<String>,
 }
-
-/// Unescape common HTML entities in a string using byte-scanning for speed.
-/// Handles both named entities (&lt;, &gt;, etc.) and numeric entities (&#123;, &#xABC;).
 pub fn unescape_html_entities<'a>(s: &'a str) -> Cow<'a, str> {
     if s.is_empty() || !s.contains('&') {
         return Cow::Borrowed(s);
     }
-
-    let bytes = s.as_bytes();
-    let mut result = String::with_capacity(s.len());
-    let mut pos = 0;
-
-    while pos < bytes.len() {
-        let remaining = &bytes[pos..];
-        let amp_pos = match remaining.iter().position(|&b| b == b'&') {
-            Some(p) => p,
-            None => {
-                // Copy the rest and we're done
-                result.push_str(&s[pos..]);
-                break;
-            }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        let Some(a) = rest.find('&') else {
+            out.push_str(rest);
+            break;
         };
-
-        // Copy everything before the &
-        if amp_pos > 0 {
-            result.push_str(&s[pos..pos + amp_pos]);
-        }
-        pos += amp_pos;
-
-        // Try to parse an entity starting at &
-        if let Some(semi_offset) = s[pos..].find(';') {
-            let entity_content = &s[pos + 1..pos + semi_offset];
-            let entity_end = pos + semi_offset + 1;
-
-            let replacement = if entity_content.starts_with('#') {
-                parse_numeric_entity(entity_content)
-            } else {
-                match entity_content {
-                    "lt" => Some('<'),
-                    "gt" => Some('>'),
-                    "amp" => Some('&'),
-                    "quot" => Some('"'),
-                    "apos" => Some('\''),
-                    _ => None,
-                }
+        out.push_str(&rest[..a]);
+        i += a;
+        if let Some(semi) = s[i..].find(';') {
+            let c = &s[i + 1..i + semi];
+            let r = match c {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => parse_numeric(c),
             };
-
-            if let Some(replacement_char) = replacement {
-                result.push(replacement_char);
-                pos = entity_end;
+            if let Some(ch) = r {
+                out.push(ch);
+                i += semi + 1;
                 continue;
             }
         }
-
-        // Not a valid entity, keep the &
-        result.push('&');
-        pos += 1;
+        out.push('&');
+        i += 1
     }
-
-    Cow::Owned(result)
+    Cow::Owned(out)
 }
-
-/// Parse a numeric entity like "#123" or "#xABCD" (without the & and ;).
-/// Returns the replacement character for invalid entities per HTML spec.
-fn parse_numeric_entity(content: &str) -> Option<char> {
-    if !content.starts_with('#') || content.len() < 2 {
+fn parse_numeric(s: &str) -> Option<char> {
+    if !s.starts_with('#') {
         return None;
     }
-
-    let num_str = &content[1..];
-    let num = if num_str.starts_with('x') || num_str.starts_with('X') {
-        if num_str.len() < 2 {
-            return None;
-        }
-        // Try to parse, return replacement char if invalid hex
-        match u32::from_str_radix(&num_str[1..], 16) {
-            Ok(n) => n,
-            Err(_) => return None, // Invalid hex like &#xg;
-        }
+    let n = if s[1..].starts_with(['x', 'X']) {
+        u32::from_str_radix(&s[2..], 16).ok()?
     } else {
-        match num_str.parse::<u32>() {
-            Ok(n) => n,
-            Err(_) => return None, // Invalid decimal
-        }
+        s[1..].parse().ok()?
     };
-
-    // Handle invalid character references as per HTML spec:
-    // - Code point 0 or > 0x10FFFF or surrogate range -> replacement char
-    if num == 0 || num > 0x10FFFF || (0xD800..=0xDFFF).contains(&num) {
-        return Some('\u{FFFD}');
+    if n == 0 || n > 0x10ffff || (0xd800..=0xdfff).contains(&n) {
+        Some('\u{fffd}')
+    } else {
+        char::from_u32(n).or(Some('\u{fffd}'))
     }
-
-    char::from_u32(num).or(Some('\u{FFFD}'))
 }
-
-/// Extract JSON-LD metadata from the document.
-pub fn get_json_ld(doc: &Document, article_title: &str, selectors: &Selectors) -> Metadata {
-    let mut metadata = Metadata::default();
-
-    let scripts = doc.select_matcher(&selectors.json_ld_script);
-
-    for script in scripts.iter() {
-        let content = script.text();
-        if content.is_empty() {
-            continue;
-        }
-
-        // Strip CDATA markers if present
+pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
+    let mut out = Metadata::default();
+    let mut scripts = Vec::new();
+    dom.collect_tag_attr_eq(
+        dom.root(),
+        Tag::Script,
+        AttrName::Type,
+        "application/ld+json",
+        false,
+        &mut scripts,
+    );
+    for id in scripts {
+        let content = dom.text(id);
         let content = content
             .trim()
             .trim_start_matches("<![CDATA[")
             .trim_end_matches("]]>")
             .trim();
-
-        let parsed: Value = match serde_json::from_str(content) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(mut parsed) = serde_json::from_str::<Value>(content) else {
+            continue;
         };
-
-        // Handle array of JSON-LD objects
-        let parsed = if let Value::Array(arr) = parsed {
-            arr.into_iter().find(|it| {
-                if let Some(type_val) = it.get("@type").and_then(|t| t.as_str()) {
-                    regexps::JSON_LD_ARTICLE_TYPES.is_match(type_val)
-                } else {
-                    false
-                }
-            })
-        } else {
-            Some(parsed)
-        };
-
-        let parsed = match parsed {
-            Some(p) => p,
-            None => continue,
-        };
-
-        // Verify schema.org context
-        static SCHEMA_ORG: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
-
-        let context = parsed.get("@context");
-        let is_schema_org = match context {
-            Some(Value::String(s)) => SCHEMA_ORG.is_match(s),
-            Some(Value::Object(obj)) => {
-                if let Some(Value::String(vocab)) = obj.get("@vocab") {
-                    SCHEMA_ORG.is_match(vocab)
-                } else {
-                    false
-                }
+        if let Value::Array(a) = parsed {
+            parsed = match a.into_iter().find(|v| {
+                v.get("@type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| regexps::JSON_LD_ARTICLE_TYPES.is_match(t))
+            }) {
+                Some(v) => v,
+                None => continue,
             }
+        }
+        let Some(obj) = parsed.as_object() else {
+            continue;
+        };
+        let schema = match obj.get("@context") {
+            Some(Value::String(s)) => SCHEMA.is_match(s),
+            Some(Value::Object(o)) => o
+                .get("@vocab")
+                .and_then(Value::as_str)
+                .is_some_and(|s| SCHEMA.is_match(s)),
             _ => false,
         };
-
-        if !is_schema_org {
+        if !schema {
             continue;
         }
-
-        // Handle @graph structure - destructure to take ownership and avoid cloning
-        let parsed = if parsed.get("@type").is_none() {
-            if let Value::Object(mut map) = parsed {
-                if let Some(Value::Array(graph)) = map.remove("@graph") {
-                    graph.into_iter().find(|it| {
-                        if let Some(type_val) = it.get("@type").and_then(|t| t.as_str()) {
-                            regexps::JSON_LD_ARTICLE_TYPES.is_match(type_val)
-                        } else {
-                            false
-                        }
-                    })
+        let mut value = parsed;
+        if value.get("@type").is_none() {
+            if let Some(g) = value.get_mut("@graph").and_then(|v| v.as_array_mut()) {
+                if let Some(v) = g.iter().find(|v| {
+                    v.get("@type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| regexps::JSON_LD_ARTICLE_TYPES.is_match(t))
+                }) {
+                    value = v.clone()
                 } else {
-                    None
+                    continue;
                 }
-            } else {
-                None
             }
-        } else {
-            Some(parsed)
-        };
-
-        let parsed = match parsed {
-            Some(p) => p,
-            None => continue,
-        };
-
-        // Verify it's an article type
-        let type_val = parsed.get("@type").and_then(|t| t.as_str());
-        if let Some(t) = type_val {
-            if !regexps::JSON_LD_ARTICLE_TYPES.is_match(t) {
-                continue;
-            }
-        } else {
+        }
+        let Some(o) = value.as_object() else { continue };
+        if !o
+            .get("@type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| regexps::JSON_LD_ARTICLE_TYPES.is_match(t))
+        {
             continue;
         }
-
-        // Extract title
-        let name = parsed.get("name").and_then(|v| v.as_str());
-        let headline = parsed.get("headline").and_then(|v| v.as_str());
-
-        metadata.title = match (name, headline) {
+        let name = o.get("name").and_then(Value::as_str);
+        let headline = o.get("headline").and_then(Value::as_str);
+        out.title = match (name, headline) {
             (Some(n), Some(h)) if n != h => {
-                // Both exist and differ - check which one matches the HTML title better.
-                // Some sites put their site name in "name" and the article title in "headline"
-                // (e.g., aktualne.cz), while others like Wikipedia put the article title in
-                // "name" and a description in "headline".
-                let name_matches = text_similarity(n, article_title) > 0.75;
-                let headline_matches = text_similarity(h, article_title) > 0.75;
-
-                if headline_matches && !name_matches {
-                    Some(h.trim().to_string())
+                if text_similarity(h, title) > 0.75 && text_similarity(n, title) <= 0.75 {
+                    Some(h.trim().into())
                 } else {
-                    Some(n.trim().to_string())
+                    Some(n.trim().into())
                 }
             }
-            (Some(n), _) => Some(n.trim().to_string()),
-            (_, Some(h)) => Some(h.trim().to_string()),
+            (Some(n), _) => Some(n.trim().into()),
+            (_, Some(h)) => Some(h.trim().into()),
             _ => None,
         };
-
-        // Extract author/byline
-        if let Some(author) = parsed.get("author") {
-            if let Some(author_name) = author.get("name").and_then(|v| v.as_str()) {
-                let trimmed = author_name.trim();
-                if !trimmed.is_empty() {
-                    metadata.byline = Some(trimmed.to_string());
+        if let Some(a) = o.get("author") {
+            if let Some(n) = a.get("name").and_then(Value::as_str) {
+                if !n.trim().is_empty() {
+                    out.byline = Some(n.trim().into())
                 }
-            } else if let Value::Array(authors) = author {
-                let mut byline = String::new();
-                for a in authors {
-                    if let Some(name) = a.get("name").and_then(|v| v.as_str()) {
-                        let trimmed = name.trim();
-                        if !trimmed.is_empty() {
-                            if !byline.is_empty() {
-                                byline.push_str(", ");
-                            }
-                            byline.push_str(trimmed);
-                        }
-                    }
-                }
-                if !byline.is_empty() {
-                    metadata.byline = Some(byline);
+            } else if let Some(arr) = a.as_array() {
+                let names: Vec<_> = arr
+                    .iter()
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !names.is_empty() {
+                    out.byline = Some(names.join(", "))
                 }
             }
         }
-
-        // Extract description/excerpt
-        if let Some(desc) = parsed.get("description").and_then(|v| v.as_str()) {
-            metadata.excerpt = Some(desc.trim().to_string());
-        }
-
-        // Extract site name
-        if let Some(publisher) = parsed.get("publisher")
-            && let Some(pub_name) = publisher.get("name").and_then(|v| v.as_str())
-        {
-            metadata.site_name = Some(pub_name.trim().to_string());
-        }
-
-        // Extract published time
-        if let Some(date) = parsed.get("datePublished").and_then(|v| v.as_str()) {
-            metadata.published_time = Some(date.trim().to_string());
-        }
-
-        // Found valid JSON-LD, stop looking
+        out.excerpt = o
+            .get("description")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().into());
+        out.site_name = o
+            .get("publisher")
+            .and_then(|v| v.get("name"))
+            .and_then(Value::as_str)
+            .map(|s| s.trim().into());
+        out.published_time = o
+            .get("datePublished")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().into());
         break;
     }
-
-    metadata
+    out
 }
-
-/// Get the article title from the document.
-pub fn get_article_title(doc: &Document, selectors: &Selectors) -> String {
-    let title_elem = doc.select_matcher(&selectors.title);
-    let orig_title = title_elem.text().trim().to_string();
-
-    if orig_title.is_empty() {
+static SCHEMA: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
+pub fn get_article_title(dom: &Dom) -> String {
+    let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
+    };
+    let orig = get_inner_text(dom, id, false);
+    if orig.is_empty() {
+        return orig;
     }
-
-    let mut title_had_hierarchical_separators = false;
-
-    fn word_count(s: &str) -> usize {
+    let mut cur = Cow::Borrowed(orig.as_str());
+    let mut hierarchical = false;
+    fn wc(s: &str) -> usize {
         s.split_whitespace().count()
     }
-
-    // Use Cow to avoid cloning orig_title in the common case where cur_title
-    // is just a slice of orig_title.
-    let mut cur_title: Cow<str> = Cow::Borrowed(&orig_title);
-    let orig_title_len = orig_title.chars().count();
-
-    if regexps::TITLE_SEPARATOR.is_match(&orig_title) {
-        // Check for hierarchical separators
-        title_had_hierarchical_separators = regexps::TITLE_HIERARCHICAL.is_match(&orig_title);
-
-        // Find all separators and split at the last one
-        if let Some(last_match) = regexps::TITLE_SEPARATOR.find_iter(&orig_title).last() {
-            cur_title = Cow::Borrowed(&orig_title[..last_match.start()]);
+    if regexps::TITLE_SEPARATOR.is_match(&orig) {
+        hierarchical = regexps::TITLE_HIERARCHICAL.is_match(&orig);
+        if let Some(m) = regexps::TITLE_SEPARATOR.find_iter(&orig).last() {
+            cur = Cow::Borrowed(&orig[..m.start()])
         }
-
-        // If the resulting title is too short, remove the first part instead
-        if word_count(&cur_title) < 3 {
-            cur_title = regexps::TITLE_FIRST_PART.replace(&orig_title, "");
+        if wc(&cur) < 3 {
+            cur = regexps::TITLE_FIRST_PART.replace(&orig, "")
         }
-    } else if orig_title.contains(": ") {
-        // Check if we have a heading containing this exact string
-        let headings = doc.select_matcher(&selectors.h1_h2);
-        let trimmed_title = orig_title.trim();
-        let has_match = headings.iter().any(|h| h.text().trim() == trimmed_title);
-
-        if !has_match {
-            // Extract title after the last colon
-            if let Some(pos) = orig_title.rfind(": ") {
-                cur_title = Cow::Borrowed(&orig_title[pos + 2..]);
-
-                // If too short, try first colon
-                if word_count(&cur_title) < 3
-                    && let Some(pos) = orig_title.find(": ")
+    } else if orig.contains(": ") {
+        let has = dom
+            .descendants(dom.root())
+            .filter(|&x| matches!(dom.tag(x), Some(Tag::H1 | Tag::H2)))
+            .any(|x| get_inner_text(dom, x, false).trim() == orig.trim());
+        if !has {
+            if let Some(p) = orig.rfind(": ") {
+                cur = Cow::Borrowed(&orig[p + 2..]);
+                if wc(&cur) < 3
+                    && let Some(q) = orig.find(": ")
                 {
-                    let before_colon = &orig_title[..pos];
-                    if word_count(before_colon) <= 5 {
-                        cur_title = Cow::Borrowed(&orig_title[pos + 2..]);
+                    cur = if wc(&orig[..q]) <= 5 {
+                        Cow::Borrowed(&orig[q + 2..])
                     } else {
-                        cur_title = Cow::Borrowed(&orig_title);
+                        Cow::Borrowed(&orig)
                     }
                 }
             }
         }
-    } else if !(15..=150).contains(&orig_title_len) {
-        // Title too long or short, try H1
-        let h1s = doc.select_matcher(&selectors.h1);
-        if h1s.length() == 1
-            && let Some(h1) = h1s.nodes().first()
-        {
-            cur_title = Cow::Owned(get_inner_text(h1, true));
+    } else if !(15..=150).contains(&orig.chars().count()) {
+        let hs: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&x| dom.tag(x) == Some(Tag::H1))
+            .collect();
+        if hs.len() == 1 {
+            cur = Cow::Owned(get_inner_text(dom, hs[0], true))
         }
     }
-
-    // Normalize whitespace
-    let mut cur_title = regexps::NORMALIZE
-        .replace_all(cur_title.trim(), " ")
-        .into_owned();
-
-    // If we now have 4 words or fewer and conditions are met, use original title
-    let cur_title_word_count = word_count(&cur_title);
-    if cur_title_word_count <= 4 {
-        let orig_without_separators = regexps::TITLE_SEPARATOR.replace_all(&orig_title, "");
-        let orig_word_count = word_count(&orig_without_separators);
-
-        if !title_had_hierarchical_separators || cur_title_word_count != orig_word_count - 1 {
-            cur_title = orig_title;
+    let mut cur = regexps::NORMALIZE.replace_all(cur.trim(), " ").into_owned();
+    if wc(&cur) <= 4 {
+        let without = regexps::TITLE_SEPARATOR.replace_all(&orig, "");
+        if !hierarchical || wc(&cur) != wc(&without).saturating_sub(1) {
+            cur = orig
         }
     }
-
-    cur_title
+    cur
 }
-
-/// Get article metadata from meta tags and JSON-LD.
-pub fn get_article_metadata(
-    doc: &Document,
-    json_ld: &Metadata,
-    article_title: &str,
-    selectors: &Selectors,
-) -> Metadata {
-    let mut metadata = Metadata::default();
-
-    // Property pattern: article:author, og:title, etc.
-    static PROPERTY_PATTERN: Lazy<Regex> = Lazy::new(|| {
+pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata {
+    static PP: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)\s*(article|dc|dcterm|og|twitter)\s*:\s*(author|creator|description|published_time|title|site_name)\s*").unwrap()
     });
-
-    // Name pattern for meta name attributes
-    static NAME_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    static NP: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)^\s*(?:(dc|dcterm|og|twitter|parsely|weibo:(article|webpage))\s*[-\.:]?\s*)?(author|creator|pub-date|description|title|site_name)\s*$").unwrap()
     });
-
-    let mut values: hashbrown::HashMap<String, String> = hashbrown::HashMap::new();
-
-    let metas = doc.select_matcher(&selectors.meta);
-    for meta in metas.iter() {
-        let content = match meta.attr("content") {
-            Some(c) if !c.is_empty() => c,
-            _ => continue,
+    let mut vals = std::collections::HashMap::new();
+    for id in dom
+        .descendants(dom.root())
+        .filter(|&x| dom.tag(x) == Some(Tag::Meta))
+    {
+        let Some(c) = dom.attr(id, AttrName::Content).filter(|x| !x.is_empty()) else {
+            continue;
         };
-
-        // Check property attribute
-        if let Some(property) = meta.attr("property")
-            && let Some(caps) = PROPERTY_PATTERN.captures(property.as_ref())
+        if let Some(p) = dom
+            .attr(id, AttrName::Property)
+            .and_then(|p| PP.captures(p))
         {
-            let name: String = caps
+            let n = p
                 .get(0)
                 .unwrap()
                 .as_str()
                 .chars()
                 .filter(|c| !c.is_whitespace())
-                .flat_map(|c| c.to_lowercase())
-                .collect();
-            values.insert(name, content.trim().to_string());
-            continue;
-        }
-
-        // Check name attribute
-        if let Some(name_attr) = meta.attr("name")
-            && NAME_PATTERN.is_match(name_attr.as_ref())
-        {
-            let name: String = name_attr
-                .as_ref()
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            vals.insert(n, c.trim().into());
+        } else if let Some(n) = dom.attr(id, AttrName::Name).filter(|n| NP.is_match(n)) {
+            let n = n
                 .chars()
                 .filter(|c| !c.is_whitespace())
-                .flat_map(|c| {
-                    let c = if c == '.' { ':' } else { c };
-                    c.to_lowercase()
-                })
-                .collect();
-            values.insert(name, content.trim().to_string());
+                .map(|c| if c == '.' { ':' } else { c })
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            vals.insert(n, c.trim().into());
         }
     }
-
-    // Get title from various sources - use as_ref() to avoid cloning until we find the value
-    metadata.title = json_ld
+    let pick = |keys: &[&str]| keys.iter().find_map(|k| vals.get(*k).cloned());
+    let mut m = Metadata::default();
+    m.title = json
         .title
-        .as_ref()
-        .or_else(|| values.get("dc:title"))
-        .or_else(|| values.get("dcterm:title"))
-        .or_else(|| values.get("og:title"))
-        .or_else(|| values.get("weibo:article:title"))
-        .or_else(|| values.get("weibo:webpage:title"))
-        .or_else(|| values.get("title"))
-        .or_else(|| values.get("twitter:title"))
-        .or_else(|| values.get("parsely-title"))
+        .clone()
+        .or_else(|| {
+            pick(&[
+                "dc:title",
+                "dcterm:title",
+                "og:title",
+                "weibo:article:title",
+                "weibo:webpage:title",
+                "title",
+                "twitter:title",
+                "parsely-title",
+            ])
+        })
+        .or_else(|| (!title.is_empty()).then(|| title.into()));
+    let author = vals
+        .get("article:author")
+        .filter(|v| url::Url::parse(v).is_err())
         .cloned();
-
-    if metadata.title.is_none() && !article_title.is_empty() {
-        metadata.title = Some(article_title.to_string());
-    }
-
-    // Get author/byline
-    let article_author = values.get("article:author").filter(|v| !is_url(v));
-
-    metadata.byline = json_ld
+    m.byline = json
         .byline
-        .as_ref()
-        .or_else(|| values.get("dc:creator"))
-        .or_else(|| values.get("dcterm:creator"))
-        .or_else(|| values.get("author"))
-        .or_else(|| values.get("parsely-author"))
-        .or(article_author)
-        .cloned();
-
-    // Get excerpt/description
-    metadata.excerpt = json_ld
-        .excerpt
-        .as_ref()
-        .or_else(|| values.get("dc:description"))
-        .or_else(|| values.get("dcterm:description"))
-        .or_else(|| values.get("og:description"))
-        .or_else(|| values.get("weibo:article:description"))
-        .or_else(|| values.get("weibo:webpage:description"))
-        .or_else(|| values.get("description"))
-        .or_else(|| values.get("twitter:description"))
-        .cloned();
-
-    // Get site name
-    metadata.site_name = json_ld
-        .site_name
-        .as_ref()
-        .or_else(|| values.get("og:site_name"))
-        .cloned();
-
-    // Get published time
-    metadata.published_time = json_ld
+        .clone()
+        .or_else(|| pick(&["dc:creator", "dcterm:creator", "author", "parsely-author"]))
+        .or(author);
+    m.excerpt = json.excerpt.clone().or_else(|| {
+        pick(&[
+            "dc:description",
+            "dcterm:description",
+            "og:description",
+            "weibo:article:description",
+            "weibo:webpage:description",
+            "description",
+            "twitter:description",
+        ])
+    });
+    m.site_name = json.site_name.clone().or_else(|| pick(&["og:site_name"]));
+    m.published_time = json
         .published_time
-        .as_ref()
-        .or_else(|| values.get("article:published_time"))
-        .or_else(|| values.get("parsely-pub-date"))
-        .cloned();
-
-    // Unescape HTML entities in metadata, reusing the original string when no entities exist
-    metadata.title = metadata.title.map(unescape_owned);
-    metadata.byline = metadata.byline.map(unescape_owned);
-    metadata.excerpt = metadata.excerpt.map(unescape_owned);
-    metadata.site_name = metadata.site_name.map(unescape_owned);
-    metadata.published_time = metadata.published_time.map(unescape_owned);
-
-    metadata
+        .clone()
+        .or_else(|| pick(&["article:published_time", "parsely-pub-date"]));
+    m.title = m.title.map(unescape_owned);
+    m.byline = m.byline.map(unescape_owned);
+    m.excerpt = m.excerpt.map(unescape_owned);
+    m.site_name = m.site_name.map(unescape_owned);
+    m.published_time = m.published_time.map(unescape_owned);
+    m
 }
-
-/// Unescape HTML entities in an owned string, reusing the original allocation
-/// when no entities are present (i.e., when `unescape_html_entities` returns `Cow::Borrowed`).
 fn unescape_owned(s: String) -> String {
     match unescape_html_entities(&s) {
         Cow::Borrowed(_) => s,
-        Cow::Owned(unescaped) => unescaped,
+        Cow::Owned(x) => x,
     }
 }
-
-/// Check if a string looks like a URL.
-fn is_url(s: &str) -> bool {
-    url::Url::parse(s).is_ok()
-}
-
-/// Calculate text similarity between two strings.
-/// Returns a value between 0 (completely different) and 1 (identical).
-pub fn text_similarity(text_a: &str, text_b: &str) -> f64 {
-    let text_a_lower = text_a.to_lowercase();
-    let text_b_lower = text_b.to_lowercase();
-
-    let tokens_a: HashSet<&str> = regexps::TOKENIZE
-        .split(&text_a_lower)
+pub fn text_similarity(a: &str, b: &str) -> f64 {
+    let aa = a.to_lowercase();
+    let bb = b.to_lowercase();
+    let set: HashSet<_> = regexps::TOKENIZE
+        .split(&aa)
         .filter(|s| !s.is_empty())
         .collect();
-
-    let tokens_b: Vec<&str> = regexps::TOKENIZE
-        .split(&text_b_lower)
+    let tokens: Vec<_> = regexps::TOKENIZE
+        .split(&bb)
         .filter(|s| !s.is_empty())
         .collect();
-
-    if tokens_a.is_empty() || tokens_b.is_empty() {
-        return 0.0;
+    if set.is_empty() || tokens.is_empty() {
+        return 0.;
     }
-
-    let tokens_b_len: usize = tokens_b.iter().map(|s| s.chars().count()).sum::<usize>()
-        + tokens_b.len().saturating_sub(1);
-
-    // Compute unique_b stats in single pass without intermediate Vec
-    let (unique_count, unique_len_sum): (usize, usize) = tokens_b
+    let total =
+        tokens.iter().map(|s| s.chars().count()).sum::<usize>() + tokens.len().saturating_sub(1);
+    let unique = tokens
         .iter()
-        .filter(|t| !tokens_a.contains(*t))
-        .fold((0, 0), |(count, len), t| {
-            (count + 1, len + t.chars().count())
-        });
-    let unique_b_len: usize = unique_len_sum + unique_count.saturating_sub(1);
-
-    if tokens_b_len == 0 {
-        return 0.0;
-    }
-
-    let distance_b = unique_b_len as f64 / tokens_b_len as f64;
-    1.0 - distance_b
+        .filter(|s| !set.contains(*s))
+        .map(|s| s.chars().count())
+        .sum::<usize>()
+        + tokens
+            .iter()
+            .filter(|s| !set.contains(*s))
+            .count()
+            .saturating_sub(1);
+    1. - unique as f64 / total as f64
 }
