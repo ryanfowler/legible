@@ -112,15 +112,11 @@ fn replace_brs(elem: &Node<'_>, selectors: &Selectors) {
             }
 
             // Trim trailing whitespace text nodes from the P
-            loop {
-                if let Some(last) = p.children().last()
-                    && last.is_text()
-                    && last.text().trim().is_empty()
-                {
-                    last.remove_from_parent();
-                    continue;
-                }
-                break;
+            while let Some(last) = p.last_child()
+                && last.is_text()
+                && last.text().trim().is_empty()
+            {
+                last.remove_from_parent();
             }
 
             // If the P is inside another P, convert the parent to DIV
@@ -477,9 +473,13 @@ fn should_remove_conditionally(
 
     // Allow simple lists of images to remain
     if is_list && have_to_remove {
-        let children = node.element_children();
-        for child in &children {
-            if child.element_children().len() > 1 {
+        for child in node.children_it(false).filter(|child| child.is_element()) {
+            if child
+                .children_it(false)
+                .filter(|grandchild| grandchild.is_element())
+                .nth(1)
+                .is_some()
+            {
                 return have_to_remove;
             }
         }
@@ -864,8 +864,7 @@ pub fn simplify_nested_elements(article_content: &Node<'_>, _selectors: &Selecto
                 || has_single_tag_inside_element(&node, "SECTION")
             {
                 // Replace node with its single child, copying attributes from node to child
-                let children = node.element_children();
-                if let Some(child) = children.first() {
+                if let Some(child) = node.first_element_child() {
                     // Copy all attributes from node to child (like JS does)
                     for attr in node.attrs() {
                         let name: &str = &attr.name.local;
@@ -877,7 +876,7 @@ pub fn simplify_nested_elements(article_content: &Node<'_>, _selectors: &Selecto
                     }
 
                     // Replace node with child in the DOM tree
-                    node.insert_after(child);
+                    node.insert_after(&child);
                     node.remove_from_parent();
                 }
             }

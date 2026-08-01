@@ -443,9 +443,9 @@ impl<'a> Readability<'a> {
                         // element. DIVs with only a P element inside and no text content can be
                         // safely converted into plain P elements to avoid confusing the scoring
                         // algorithm with DIVs with are, in practice, paragraphs.
-                        if let Some(p_child) = node.element_children().first() {
+                        if let Some(p_child) = node.first_element_child() {
                             let p_id = p_child.id;
-                            node.replace_with(p_child);
+                            node.replace_with(&p_child);
                             elements_to_score.insert(p_id);
                         }
                     } else if !has_child_block_element(node) {
@@ -455,7 +455,7 @@ impl<'a> Readability<'a> {
                         // DIV stays as DIV - add any P children to elements_to_score
                         // (these may have been created by wrap_phrasing_content_in_p)
                         // This mimics JS behavior where tree walker visits children
-                        for child in node.element_children() {
+                        for child in node.children_it(false).filter(|child| child.is_element()) {
                             if let Some(child_tag) = get_tag_name(&child)
                                 && child_tag == "P"
                             {
@@ -720,7 +720,11 @@ impl<'a> Readability<'a> {
                             {
                                 break;
                             }
-                            if p.element_children().len() == 1 {
+                            let mut element_children =
+                                p.children_it(false).filter(|child| child.is_element());
+                            if element_children.next().is_some()
+                                && element_children.next().is_none()
+                            {
                                 *tc = p;
                                 parent_of_tc = tc.parent();
                             } else {
@@ -1196,7 +1200,9 @@ impl<'a> Readability<'a> {
                 && has_single_tag_inside_element(&row, "TD")
                 && let Some(cell) = row.first_element_child()
             {
-                let all_phrasing = cell.children().iter().all(|c| is_phrasing_content(c));
+                let all_phrasing = cell
+                    .children_it(false)
+                    .all(|child| is_phrasing_content(&child));
                 let new_tag = if all_phrasing { "p" } else { "div" };
                 cell.rename(new_tag);
                 // Move the cell (now renamed) to replace the table directly
@@ -1260,18 +1266,28 @@ impl<'a> Readability<'a> {
 
                 // Escape < and > in attribute values
                 // Check on borrowed value first, only allocate if escaping is needed
+                // Read attributes in place so ordinary elements do not clone
+                // their entire attribute list just to discover that nothing
+                // needs escaping.
                 let attrs_to_fix: Vec<_> = descendant
-                    .attrs()
-                    .iter()
-                    .filter_map(|attr| {
-                        let value_ref = attr.value.as_ref();
-                        if value_ref.contains('<') || value_ref.contains('>') {
-                            Some((attr.name.local.to_string(), value_ref.to_string()))
-                        } else {
-                            None
-                        }
+                    .query(|tree_node| {
+                        let Some(element) = tree_node.as_element() else {
+                            return Vec::new();
+                        };
+                        element
+                            .attrs
+                            .iter()
+                            .filter_map(|attr| {
+                                let value = attr.value.as_ref();
+                                if value.contains('<') || value.contains('>') {
+                                    Some((attr.name.local.to_string(), value.to_string()))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     })
-                    .collect();
+                    .unwrap_or_default();
 
                 for (name, value) in attrs_to_fix {
                     let escaped = escape_angle_brackets(&value);
