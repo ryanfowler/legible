@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::{Document, is_probably_readerable, parse};
+use legible::{Document, Options, is_probably_readerable, parse};
 use std::fs;
 use std::hint::black_box;
 
@@ -63,6 +63,21 @@ fn bench_parse(c: &mut Criterion) {
     }
 
     group.finish();
+}
+
+/// Benchmark the full four-pass fallback path.
+fn bench_parse_retries(c: &mut Criterion) {
+    let html = load_test_page("medium-2");
+    let options = Options::new().char_threshold(usize::MAX);
+    c.bench_function("parse_retries/medium-2", |b| {
+        b.iter(|| {
+            parse(
+                black_box(&html),
+                Some("https://medium.com"),
+                Some(options.clone()),
+            )
+        })
+    });
 }
 
 /// Benchmark is_probably_readerable check
@@ -135,6 +150,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_parse,
+    bench_parse_retries,
     bench_readerable,
     bench_complex_pages,
     bench_deeply_nested

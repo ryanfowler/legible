@@ -88,11 +88,15 @@ pub(crate) struct Readability<'a> {
     metadata: Metadata,
     base_uri: Option<Url>,
     url_error: Option<url::ParseError>,
-    attempts: SmallVec<[AttemptResult; 4]>,
+    best_attempt: Option<BestAttempt>,
 }
-struct AttemptResult {
-    content_html: String,
-    text_length: usize,
+struct BestAttempt {
+    content: FrozenContent,
+    text_len_chars: usize,
+    excerpt: Option<String>,
+}
+struct FrozenContent {
+    dom: Dom,
 }
 struct ArticleContent {
     content_html: String,
@@ -127,7 +131,7 @@ impl<'a> Readability<'a> {
             metadata: Metadata::default(),
             base_uri,
             url_error,
-            attempts: SmallVec::new(),
+            best_attempt: None,
         }
     }
     pub(crate) fn parse(mut self) -> Result<Article> {
@@ -486,45 +490,60 @@ impl<'a> Readability<'a> {
                 }
                 self.dom.append_child(article_id, w)
             }
-            let text = get_inner_text(&self.dom, article_id, true);
-            let len = text.chars().count();
-            if len < self.options.char_threshold {
-                self.attempts.push(AttemptResult {
-                    content_html: self.dom.html(article_id).unwrap_or_default(),
-                    text_length: len,
-                });
-                if self.flags & FLAG_STRIP_UNLIKELYS != 0 {
-                    self.flags &= !FLAG_STRIP_UNLIKELYS
-                } else if self.flags & FLAG_WEIGHT_CLASSES != 0 {
-                    self.flags &= !FLAG_WEIGHT_CLASSES
-                } else if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
-                    self.flags &= !FLAG_CLEAN_CONDITIONALLY
-                } else {
-                    self.attempts
-                        .sort_by_key(|a| std::cmp::Reverse(a.text_length));
-                    let best = self.attempts.first().ok_or(Error::NoContent)?;
-                    if best.text_length == 0 {
-                        return Err(Error::NoContent);
-                    }
-                    self.dom
-                        .set_inner_html(body, &best.content_html)
-                        .map_err(|_| Error::NoContent)?;
-                    let text = get_inner_text(&self.dom, body, true);
-                    let ex = self
+            if let Some(len) = self
+                .dom
+                .normalized_char_count_below(article_id, self.options.char_threshold)
+            {
+                if self
+                    .best_attempt
+                    .as_ref()
+                    .is_none_or(|best| len > best.text_len_chars)
+                {
+                    let excerpt = self.article_excerpt(article_id);
+                    self.post_process(article_id);
+                    let dom = self
                         .dom
-                        .first_descendant_by_tag(body, Tag::P)
-                        .map(|x| get_inner_text(&self.dom, x, false))
-                        .filter(|x| !x.is_empty());
-                    let html = self.post_process(body);
-                    return Ok(ArticleContent {
-                        content_html: html,
-                        text_content: text.clone(),
-                        text_length: text.chars().count(),
-                        excerpt: ex,
+                        .copy_subtree_as_fragment(article_id)
+                        .map_err(|_| Error::NoContent)?;
+                    self.best_attempt = Some(BestAttempt {
+                        content: FrozenContent { dom },
+                        text_len_chars: len,
+                        excerpt,
                     });
                 }
-                self.reparse_prepare()?;
-                continue;
+                let retry = if self.flags & FLAG_STRIP_UNLIKELYS != 0 {
+                    self.flags &= !FLAG_STRIP_UNLIKELYS;
+                    true
+                } else if self.flags & FLAG_WEIGHT_CLASSES != 0 {
+                    self.flags &= !FLAG_WEIGHT_CLASSES;
+                    true
+                } else if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
+                    self.flags &= !FLAG_CLEAN_CONDITIONALLY;
+                    true
+                } else {
+                    false
+                };
+                if retry {
+                    self.reparse_prepare()?;
+                    continue;
+                }
+                let best = self.best_attempt.take().ok_or(Error::NoContent)?;
+                if best.text_len_chars == 0 {
+                    return Err(Error::NoContent);
+                }
+                self.dom = best.content.dom;
+                let root = self.dom.root();
+                let (text, _) = self.dom.normalized_text(root, best.text_len_chars);
+                let mut html = String::new();
+                self.dom
+                    .serialize_children(root, &mut html)
+                    .map_err(|_| Error::NoContent)?;
+                return Ok(ArticleContent {
+                    content_html: html,
+                    text_content: text,
+                    text_length: best.text_len_chars,
+                    excerpt: best.excerpt,
+                });
             }
             let mut p = Some(top_id);
             while let Some(x) = p {
@@ -534,17 +553,20 @@ impl<'a> Readability<'a> {
                 }
                 p = self.dom.parent(x)
             }
-            let ex = self
+            let excerpt = self.article_excerpt(article_id);
+            self.post_process(article_id);
+            let (text, len) = self
                 .dom
-                .first_descendant_by_tag(article_id, Tag::P)
-                .map(|x| get_inner_text(&self.dom, x, false))
-                .filter(|x| !x.is_empty());
-            let html = self.post_process(article_id);
+                .normalized_text(article_id, self.options.char_threshold);
+            let mut html = String::new();
+            self.dom
+                .serialize_children(article_id, &mut html)
+                .map_err(|_| Error::NoContent)?;
             return Ok(ArticleContent {
                 content_html: html,
                 text_content: text,
                 text_length: len,
-                excerpt: ex,
+                excerpt,
             });
         }
     }
@@ -760,7 +782,13 @@ impl<'a> Readability<'a> {
             }
         }
     }
-    fn post_process(&mut self, root: NodeId) -> String {
+    fn article_excerpt(&self, root: NodeId) -> Option<String> {
+        self.dom
+            .first_descendant_by_tag(root, Tag::P)
+            .map(|id| get_inner_text(&self.dom, id, false))
+            .filter(|text| !text.is_empty())
+    }
+    fn post_process(&mut self, root: NodeId) {
         self.fix_relative_uris(root);
         simplify_nested_elements(&mut self.dom, root);
         let ids: Vec<_> = self.dom.descendants(root).collect();
@@ -788,7 +816,6 @@ impl<'a> Readability<'a> {
         for x in comments {
             self.dom.detach(x)
         }
-        self.dom.inner_html(root).unwrap_or_default()
     }
     fn fix_relative_uris(&mut self, root: NodeId) {
         let Some(base) = self.base_uri.clone() else {
@@ -805,8 +832,11 @@ impl<'a> Readability<'a> {
                     continue;
                 }
                 if h.starts_with("javascript:") {
-                    let t = html_escape(&self.dom.text(x));
-                    let _ = self.dom.set_inner_html(x, &t);
+                    let text = self.dom.text(x);
+                    self.dom.detach_children(x);
+                    if let Ok(text_node) = self.dom.create_text(&text) {
+                        self.dom.append_child(x, text_node)
+                    }
                     self.dom.rename_html(x, Tag::Span)
                 } else if let Ok(u) = base.join(&h) {
                     self.dom.set_attr(x, AttrName::Href, u.as_str())
@@ -875,25 +905,4 @@ fn has_ancestor_tags_any(dom: &Dom, id: NodeId, tags: &[Tag], max: usize) -> boo
     dom.ancestors(id)
         .take(max)
         .any(|x| dom.tag(x).is_some_and(|t| tags.contains(&t)))
-}
-fn html_escape(s: &str) -> String {
-    if !s
-        .bytes()
-        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
-    {
-        return s.to_owned();
-    }
-
-    let mut escaped = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            c => escaped.push(c),
-        }
-    }
-    escaped
 }

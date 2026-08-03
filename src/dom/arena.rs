@@ -1,5 +1,6 @@
 use super::{AttrName, DomError, ElementData, Node, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
+use tendril::StrTendril;
 
 pub(crate) struct Dom {
     pub(crate) nodes: Vec<Node>,
@@ -51,6 +52,9 @@ impl Dom {
             ns!(html),
             LocalName::from(tag.as_lowercase_str()),
         ))
+    }
+    pub(crate) fn create_text(&mut self, text: &str) -> Result<NodeId, DomError> {
+        self.create(NodeData::Text(StrTendril::from(text)))
     }
     pub(crate) fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).parent.get()

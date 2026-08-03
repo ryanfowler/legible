@@ -229,6 +229,68 @@ impl Dom {
         }
         count
     }
+    /// Returns the exact normalized length when it is below `threshold`.
+    /// Stops as soon as the content reaches the threshold.
+    pub(crate) fn normalized_char_count_below(
+        &self,
+        root: NodeId,
+        threshold: usize,
+    ) -> Option<usize> {
+        if threshold == 0 {
+            return None;
+        }
+        let mut count = 0;
+        let mut has_text = false;
+        let mut pending_whitespace = false;
+        for id in std::iter::once(root).chain(self.descendants(root)) {
+            let Some(text) = self.text_node(id) else {
+                continue;
+            };
+            for c in text.chars() {
+                if c.is_whitespace() {
+                    pending_whitespace |= has_text;
+                    continue;
+                }
+                if pending_whitespace {
+                    count += 1;
+                    if count >= threshold {
+                        return None;
+                    }
+                    pending_whitespace = false;
+                }
+                count += 1;
+                if count >= threshold {
+                    return None;
+                }
+                has_text = true;
+            }
+        }
+        Some(count)
+    }
+    pub(crate) fn normalized_text(&self, root: NodeId, initial_capacity: usize) -> (String, usize) {
+        let mut out = String::with_capacity(initial_capacity);
+        let mut char_count = 0;
+        let mut pending_whitespace = false;
+        for id in std::iter::once(root).chain(self.descendants(root)) {
+            let Some(text) = self.text_node(id) else {
+                continue;
+            };
+            for c in text.chars() {
+                if c.is_whitespace() {
+                    pending_whitespace |= !out.is_empty();
+                } else {
+                    if pending_whitespace {
+                        out.push(' ');
+                        char_count += 1;
+                        pending_whitespace = false;
+                    }
+                    out.push(c);
+                    char_count += 1;
+                }
+            }
+        }
+        (out, char_count)
+    }
     pub(crate) fn has_non_whitespace_text(&self, root: NodeId) -> bool {
         if self
             .text_node(root)
