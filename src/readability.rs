@@ -35,6 +35,8 @@ use url::Url;
 ///
 /// The [`content`](Article::content) field contains unsanitized HTML. Sanitize it before
 /// you render it in a context where scripts or other unsafe content can execute.
+/// [`markdown_content`](Article::markdown_content) does not contain active raw HTML and
+/// omits destinations that use unsafe URI schemes.
 ///
 /// ```rust,ignore
 /// let safe_html = ammonia::clean(&article.content);
@@ -62,6 +64,14 @@ pub struct Article {
 
     /// The article content as plain text.
     pub text_content: String,
+
+    /// The article content as Markdown.
+    ///
+    /// This field is generated directly from the same cleaned DOM subtree as
+    /// [`content`](Article::content). Text cannot become raw HTML or Markdown syntax.
+    /// Links allow HTTP, HTTPS, email, telephone, fragment, and relative destinations.
+    /// Images allow only HTTP, HTTPS, and relative destinations.
+    pub markdown_content: String,
 
     /// The length of [`text_content`](Article::text_content) in characters.
     pub length: usize,
@@ -103,6 +113,9 @@ struct ArticleContent {
     text_content: String,
     text_length: usize,
     excerpt: Option<String>,
+    /// The node whose children produce the serialized content.
+    /// Valid in `self.dom` after `grab_article` returns.
+    article_root: NodeId,
 }
 impl<'a> Readability<'a> {
     pub(crate) fn from_document(
@@ -170,6 +183,7 @@ impl<'a> Readability<'a> {
             dir: self.article_dir.take(),
             lang: self.article_lang.take(),
             content: content.content_html,
+            markdown_content: crate::markdown::dom_to_markdown(&self.dom, content.article_root),
             text_content: content.text_content,
             length: content.text_length,
             excerpt,
@@ -546,6 +560,7 @@ impl<'a> Readability<'a> {
                     text_content: text,
                     text_length: best.text_len_chars,
                     excerpt: best.excerpt,
+                    article_root: root,
                 });
             }
             let mut p = Some(top_id);
@@ -570,6 +585,7 @@ impl<'a> Readability<'a> {
                 text_content: text,
                 text_length: len,
                 excerpt,
+                article_root: article_id,
             });
         }
     }

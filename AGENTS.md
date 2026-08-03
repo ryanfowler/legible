@@ -37,6 +37,7 @@ The extraction pipeline flows through these stages:
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
+- **`markdown.rs`** - Iterative, direct DOM-to-CommonMark serialization of cleaned article content
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
 - **`src/dom/`** - Compact arena storage, typed tags and attributes, iterative traversal, centralized mutation, fragment parsing, and `html5ever` serialization
 - **`dom/state.rs`** - Dense Readability state indexed by stable `NodeId` values
@@ -57,6 +58,7 @@ The extraction pipeline flows through these stages:
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.
 - Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Serialize only the final selected article for `Article::content`.
+- Generate `Article::markdown_content` directly from the final cleaned DOM. Keep Markdown traversal iterative and escape text, link destinations, and code fences for CommonMark.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
 
 ### Scoring System
