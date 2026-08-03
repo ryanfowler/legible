@@ -107,16 +107,20 @@ impl TreeSink for DomSink {
         flags: ElementFlags,
     ) -> NodeId {
         let mut dom = self.dom.borrow_mut();
+        let tag = Tag::from_qual_name(&name);
         let id = dom
             .create(NodeData::Element(ElementData {
-                name: name.clone(),
-                tag: Tag::from_qual_name(&name),
+                name,
+                tag,
                 attrs: attrs
                     .into_iter()
-                    .map(|a| super::Attribute {
-                        name: a.name.clone(),
-                        known: AttrName::from_local(a.name.local.as_ref()),
-                        value: a.value,
+                    .map(|a| {
+                        let known = AttrName::from_local(a.name.local.as_ref());
+                        super::Attribute {
+                            name: a.name,
+                            known,
+                            value: a.value,
+                        }
                     })
                     .collect(),
                 template_contents: NodeLink::NONE,
@@ -227,9 +231,10 @@ impl TreeSink for DomSink {
         if let NodeData::Element(e) = &mut d.node_mut(*target).data {
             for a in attrs {
                 if !e.attrs.iter().any(|x| x.name == a.name) {
+                    let known = AttrName::from_local(a.name.local.as_ref());
                     e.attrs.push(super::Attribute {
-                        name: a.name.clone(),
-                        known: AttrName::from_local(a.name.local.as_ref()),
+                        name: a.name,
+                        known,
                         value: a.value,
                     })
                 }

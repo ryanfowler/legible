@@ -45,7 +45,7 @@ The extraction pipeline flows through these stages:
 
 - Use `Dom`'s direct `NodeId` traversal and typed query helpers. Do not add a general CSS matcher.
 - Keep post-parse DOM access free of `RefCell`; parser-only interior mutability belongs in `dom/parse.rs`.
-- Use borrowed attribute values for hot reads and `Tag`/`AttrName` for common predicates.
+- Use borrowed attribute values for hot reads and `Tag`/`AttrName` for common predicates. Keep parser tag and attribute classification allocation-free for html5ever's normalized lowercase names.
 - Collect attached preorder snapshots before mutation when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots with depth when a pass processes only elements and can skip removed subtrees.
 - Use `SmallVec` for hot, short-lived traversal stacks, scoring candidates, metadata tables, and small child snapshots. Keep full-document snapshots in `Vec`.
 - Keep structural mutation in `dom/mutation.rs` and validate links in debug builds.

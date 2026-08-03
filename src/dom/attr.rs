@@ -45,7 +45,17 @@ pub(crate) enum AttrName {
 }
 impl AttrName {
     pub(crate) fn from_local(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
+        // html5ever normalizes HTML attribute names to lowercase. Avoid an
+        // allocation for that hot path, but keep case-insensitive behavior for
+        // qualified names supplied by callers.
+        let lowercase;
+        let s = if s.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            lowercase = s.to_ascii_lowercase();
+            lowercase.as_str()
+        } else {
+            s
+        };
+        match s {
             "align" => Self::Align,
             "aria-hidden" => Self::AriaHidden,
             "aria-modal" => Self::AriaModal,
