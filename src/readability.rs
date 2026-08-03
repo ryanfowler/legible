@@ -193,6 +193,9 @@ impl<'a> Readability<'a> {
                 }
             }
             let mut remove = SmallVec::<[NodeId; 64]>::new();
+            // Allocate dense state once. Scoring IDs follow document order and
+            // would otherwise grow this vector several times during the pass.
+            self.node_data.sync_len(self.dom.len());
             // Tree repair can make arena order differ from document order. Record
             // only attached elements in preorder before this pass starts mutating.
             // Snapshot depths identify removed subtrees without ancestor walks.

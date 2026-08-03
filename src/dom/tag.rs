@@ -119,7 +119,16 @@ impl Tag {
         }
     }
     pub(crate) fn from_local(name: &str) -> Self {
-        match name.to_ascii_lowercase().as_str() {
+        // Tokenized HTML names are already lowercase. Keep the uncommon
+        // caller-provided mixed-case path without allocating in the parser.
+        let lowercase;
+        let name = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            lowercase = name.to_ascii_lowercase();
+            lowercase.as_str()
+        } else {
+            name
+        };
+        match name {
             "a" => Self::A,
             "abbr" => Self::Abbr,
             "address" => Self::Address,
