@@ -82,18 +82,19 @@ if doc.is_probably_readerable(None) {
 
 The `Article` struct contains:
 
-| Field            | Type             | Description                       |
-| ---------------- | ---------------- | --------------------------------- |
-| `title`          | `String`         | The article title                 |
-| `content`        | `String`         | The article content as HTML       |
-| `text_content`   | `String`         | The article content as plain text |
-| `byline`         | `Option<String>` | The author byline                 |
-| `excerpt`        | `Option<String>` | A short excerpt from the article  |
-| `site_name`      | `Option<String>` | The site name                     |
-| `published_time` | `Option<String>` | The published time                |
-| `dir`            | `Option<String>` | Text direction (ltr or rtl)       |
-| `lang`           | `Option<String>` | Document language                 |
-| `length`         | `usize`          | Length of the text content        |
+| Field              | Type             | Description                       |
+| ------------------ | ---------------- | --------------------------------- |
+| `title`            | `String`         | The article title                 |
+| `content`          | `String`         | The article content as HTML       |
+| `markdown_content` | `String`         | Sanitized CommonMark content      |
+| `text_content`     | `String`         | The article content as plain text |
+| `byline`           | `Option<String>` | The author byline                 |
+| `excerpt`          | `Option<String>` | A short excerpt from the article  |
+| `site_name`        | `Option<String>` | The site name                     |
+| `published_time`   | `Option<String>` | The published time                |
+| `dir`              | `Option<String>` | Text direction (ltr or rtl)       |
+| `lang`             | `Option<String>` | Document language                 |
+| `length`           | `usize`          | Length of the text content        |
 
 ## Configuration
 
@@ -136,6 +137,10 @@ let article = parse(html, Some(url), None)?;
 // Sanitize before rendering
 let safe_html = ammonia::clean(&article.content);
 ```
+
+`markdown_content` does not emit active raw HTML. It escapes source text and rejects
+links and images with unsafe URI schemes. HTTP, HTTPS, email, telephone, fragment, and
+relative links are allowed. Images allow only HTTP, HTTPS, and relative URLs.
 
 ## How It Works
 

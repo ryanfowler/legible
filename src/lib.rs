@@ -34,6 +34,7 @@
 //!         println!("Title: {}", article.title);
 //!         println!("Byline: {:?}", article.byline);
 //!         println!("Content: {}", article.content);
+//!         println!("Markdown: {}", article.markdown_content);
 //!         println!("Text: {}", article.text_content);
 //!     }
 //!     Err(e) => eprintln!("Error: {}", e),
@@ -130,6 +131,9 @@
 //! let safe_html = ammonia::clean(&article.content);
 //! ```
 //!
+//! `Article::markdown_content` is safe CommonMark output. It does not emit active raw
+//! HTML, and it omits links and images that use unsafe URI schemes.
+//!
 //! ## How It Works
 //!
 //! Legible implements the same algorithm as Readability.js:
@@ -147,6 +151,7 @@ mod document;
 mod dom;
 mod error;
 mod logging;
+mod markdown;
 mod metadata;
 mod options;
 mod readability;
