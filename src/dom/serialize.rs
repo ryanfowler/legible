@@ -60,6 +60,7 @@ impl Serialize for Serializable<'_> {
     }
 }
 impl Dom {
+    #[cfg(test)]
     pub(crate) fn serialize_node(&self, node: NodeId, out: &mut String) -> Result<(), DomError> {
         let mut bytes = Vec::new();
         serialize::serialize(
@@ -92,11 +93,13 @@ impl Dom {
         *out = String::from_utf8(bytes).map_err(|e| DomError(e.to_string()))?;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn html(&self, node: NodeId) -> Result<String, DomError> {
         let mut s = String::new();
         self.serialize_node(node, &mut s)?;
         Ok(s)
     }
+    #[cfg(test)]
     pub(crate) fn inner_html(&self, node: NodeId) -> Result<String, DomError> {
         let mut s = String::new();
         self.serialize_children(node, &mut s)?;

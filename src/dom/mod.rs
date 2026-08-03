@@ -195,6 +195,21 @@ mod tests {
     }
 
     #[test]
+    fn capped_normalized_count_is_exact_only_below_threshold() {
+        let dom = Dom::parse_document("<p>  one </p><p> two  three </p>").unwrap();
+        let body = dom.body().unwrap();
+
+        assert_eq!(dom.normalized_char_count(body), 13);
+        assert_eq!(dom.normalized_char_count_below(body, 14), Some(13));
+        assert_eq!(dom.normalized_char_count_below(body, 13), None);
+        assert_eq!(dom.normalized_char_count_below(body, 1), None);
+        assert_eq!(dom.normalized_char_count_below(body, 0), None);
+        let (text, length) = dom.normalized_text(body, 4);
+        assert_eq!(text, "one two three");
+        assert_eq!(length, 13);
+    }
+
+    #[test]
     fn deeply_nested_input_is_stack_safe() {
         const DEPTH: usize = 1_000;
         let mut html = "<div>".repeat(DEPTH);

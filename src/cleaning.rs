@@ -10,7 +10,6 @@ use crate::scoring::{
     has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
 use regex::Regex;
-use std::borrow::Cow;
 
 pub fn prep_document(dom: &mut Dom) {
     let mut ids = Vec::new();
@@ -104,6 +103,25 @@ pub fn remove_scripts(dom: &mut Dom) {
         }
     }
 }
+fn has_allowed_media(dom: &Dom, id: NodeId, allowed: &Regex) -> bool {
+    if dom
+        .attrs(id)
+        .iter()
+        .any(|attr| allowed.is_match(attr.value.as_ref()))
+    {
+        return true;
+    }
+    dom.tag(id) == Some(Tag::Object)
+        && dom.descendants(id).any(|node| {
+            dom.attrs(node)
+                .iter()
+                .any(|attr| allowed.is_match(attr.value.as_ref()))
+                || dom
+                    .text_node(node)
+                    .is_some_and(|text| allowed.is_match(text))
+        })
+}
+
 pub fn clean_tags(dom: &mut Dom, root: NodeId, tags: &[Tag], allowed: &Regex) {
     let ids: Vec<_> = dom
         .descendants(root)
@@ -115,13 +133,7 @@ pub fn clean_tags(dom: &mut Dom, root: NodeId, tags: &[Tag], allowed: &Regex) {
         }
         let tag = dom.tag(id).unwrap();
         if matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe) {
-            let keep = dom
-                .attrs(id)
-                .iter()
-                .any(|a| allowed.is_match(a.value.as_ref()))
-                || (tag == Tag::Object
-                    && allowed.is_match(&dom.inner_html(id).unwrap_or_default()));
-            if keep {
+            if has_allowed_media(dom, id, allowed) {
                 continue;
             }
         }
@@ -256,13 +268,7 @@ fn should_remove(
                 Tag::Span | Tag::Td | Tag::Blockquote | Tag::Dl | Tag::Div | Tag::Pre | Tag::Table,
             ) => textish += get_or_compute_stats(dom, x, store).text_length,
             Some(Tag::Object | Tag::Embed | Tag::Iframe) => {
-                if dom
-                    .attrs(x)
-                    .iter()
-                    .any(|a| allowed.is_match(a.value.as_ref()))
-                    || dom.tag(x) == Some(Tag::Object)
-                        && allowed.is_match(&dom.inner_html(x).unwrap_or_default())
-                {
+                if has_allowed_media(dom, x, allowed) {
                     return false;
                 }
                 embeds += 1;
@@ -440,39 +446,29 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId) {
         match dom.tag(id) {
             Some(Tag::Img | Tag::Picture) => dom.set_attr(id, attr, &value),
             Some(Tag::Figure) if !dom.any_descendant_by_tags(id, &[Tag::Img, Tag::Picture]) => {
-                let _ = dom.set_inner_html(
-                    id,
-                    &format!("<img {}=\"{}\">", attr.as_str(), escape_attr(&value)),
-                );
+                if let Ok(image) = dom.create_html_element(Tag::Img) {
+                    dom.set_attr(image, attr, &value);
+                    dom.detach_children(id);
+                    dom.append_child(id, image);
+                }
             }
             _ => {}
         }
     }
 }
-fn escape_attr(s: &str) -> Cow<'_, str> {
-    if !s.contains(['&', '"', '<', '>']) {
-        Cow::Borrowed(s)
-    } else {
-        let mut o = String::new();
-        for c in s.chars() {
-            match c {
-                '&' => o.push_str("&amp;"),
-                '"' => o.push_str("&quot;"),
-                '<' => o.push_str("&lt;"),
-                '>' => o.push_str("&gt;"),
-                _ => o.push(c),
-            }
+fn single_image_fragment(dom: &Dom) -> Option<NodeId> {
+    let mut image = None;
+    for node in dom.children(dom.root()) {
+        if dom.tag(node) == Some(Tag::Img) && image.is_none() {
+            image = Some(node);
+        } else if !dom
+            .text_node(node)
+            .is_some_and(|text| text.trim().is_empty())
+        {
+            return None;
         }
-        Cow::Owned(o)
     }
-}
-fn is_single_image_markup(html: &str) -> bool {
-    let trimmed = html.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("<img")
-        && lower.matches("<img").count() == 1
-        && lower.matches('<').count() == 1
-        && trimmed.ends_with('>')
+    image
 }
 
 fn useful_image(dom: &Dom, id: NodeId) -> bool {
@@ -551,10 +547,7 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
             .descendants(id)
             .filter(|&node| dom.tag(node) == Some(Tag::Img))
             .collect();
-        if dom.has_non_whitespace_text(id) {
-            continue;
-        }
-        if image_ids.len() == 1 {
+        if image_ids.len() == 1 && !dom.has_non_whitespace_text(id) {
             let image = image_ids[0];
             if let Some(previous) = previous_element(dom, id)
                 && let Some(previous_image) = single_image_element(dom, previous)
@@ -567,22 +560,28 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
             }
             continue;
         }
-        let Some(html) = dom.inner_html(id).ok() else {
-            continue;
-        };
-        if !is_single_image_markup(&html) {
+        if !image_ids.is_empty() {
             continue;
         }
-        let Ok(inserted) = dom.insert_html_after(id, &html) else {
+        let mut text_nodes = dom.children(id).filter(|&node| {
+            dom.is_text(node) && dom.text_node(node).is_some_and(|t| !t.trim().is_empty())
+        });
+        let Some(text_node) = text_nodes.next() else {
             continue;
         };
-        let Some(new_image) = inserted.iter().copied().find_map(|node| {
-            if dom.tag(node) == Some(Tag::Img) {
-                Some(node)
-            } else {
-                dom.first_descendant_by_tag(node, Tag::Img)
-            }
-        }) else {
+        if text_nodes.next().is_some() {
+            continue;
+        }
+        let Some(markup) = dom.text_node(text_node) else {
+            continue;
+        };
+        let Ok(fragment) = Dom::parse_fragment(markup, Tag::Div) else {
+            continue;
+        };
+        let Some(source_image) = single_image_fragment(&fragment) else {
+            continue;
+        };
+        let Ok(new_image) = dom.import_subtree(&fragment, source_image) else {
             continue;
         };
         if let Some(previous) = previous_element(dom, id)
@@ -696,6 +695,82 @@ mod tests {
             .collect();
         assert_eq!(images.len(), 1);
         assert_eq!(dom.attr(images[0], AttrName::Src), Some("real.jpg"));
+    }
+
+    #[test]
+    fn parses_escaped_noscript_image_text_without_serializing() {
+        let mut dom = Dom::parse_document(
+            r#"<img src="placeholder.jpg"><noscript>&lt;img src="real.jpg" data-id="1"&gt;</noscript>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let images: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&id| dom.tag(id) == Some(Tag::Img))
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(dom.attr(images[0], AttrName::Src), Some("real.jpg"));
+        assert_eq!(dom.attr_by_local_name(images[0], "data-id"), Some("1"));
+    }
+
+    #[test]
+    fn creates_lazy_figure_image_directly() {
+        let mut dom = Dom::parse_document(
+            r#"<figure data-src="image.jpg?x=1&amp;y=2"><figcaption>old</figcaption></figure>"#,
+        )
+        .unwrap();
+        let root = dom.root();
+        let figure = dom.first_descendant_by_tag(root, Tag::Figure).unwrap();
+
+        fix_lazy_images(&mut dom, root);
+
+        let image = dom.first_descendant_by_tag(figure, Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("image.jpg?x=1&y=2"));
+        assert_eq!(dom.element_children(figure).count(), 1);
+    }
+
+    #[test]
+    fn detects_allowed_media_in_object_descendant_attributes_and_text() {
+        let allowed = Regex::new("video\\.example").unwrap();
+        let mut dom = Dom::parse_document(
+            r#"<div><object id="attr"><param value="//video.example/id"></object><object id="text">//video.example/other</object><object id="remove"><param value="//ads.example/id"></object></div>"#,
+        )
+        .unwrap();
+        let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
+
+        clean_tags(&mut dom, root, &[Tag::Object], &allowed);
+
+        assert!(
+            dom.descendants(root)
+                .any(|id| dom.attr(id, AttrName::Id) == Some("attr"))
+        );
+        assert!(
+            dom.descendants(root)
+                .any(|id| dom.attr(id, AttrName::Id) == Some("text"))
+        );
+        assert!(
+            !dom.descendants(root)
+                .any(|id| dom.attr(id, AttrName::Id) == Some("remove"))
+        );
+    }
+
+    #[test]
+    fn does_not_allow_iframe_from_matching_fallback_text() {
+        let allowed = Regex::new("video\\.example").unwrap();
+        let mut dom = Dom::parse_document(
+            r#"<div><iframe src="//ads.example">//video.example/id</iframe></div>"#,
+        )
+        .unwrap();
+        let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
+
+        clean_tags(&mut dom, root, &[Tag::Iframe], &allowed);
+
+        assert!(
+            !dom.descendants(root)
+                .any(|id| dom.tag(id) == Some(Tag::Iframe))
+        );
     }
 
     #[test]

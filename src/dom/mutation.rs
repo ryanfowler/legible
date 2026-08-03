@@ -2,6 +2,7 @@
 
 use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
+#[cfg(test)]
 use smallvec::SmallVec;
 use tendril::StrTendril;
 impl Dom {
@@ -103,29 +104,6 @@ impl Dom {
             self.node_mut(parent).first_child = NodeLink::from_option(Some(node))
         }
     }
-    pub(crate) fn insert_after(&mut self, reference: NodeId, node: NodeId) {
-        let parent = self.parent(reference).expect("reference is detached");
-        self.ensure_no_cycle(parent, node);
-        if node == reference {
-            return;
-        }
-        if self.parent(node).is_some() {
-            self.detach(node)
-        }
-        let next = self.next_sibling(reference);
-        {
-            let n = self.node_mut(node);
-            n.parent = NodeLink::from_option(Some(parent));
-            n.prev_sibling = NodeLink::from_option(Some(reference));
-            n.next_sibling = NodeLink::from_option(next)
-        }
-        self.node_mut(reference).next_sibling = NodeLink::from_option(Some(node));
-        if let Some(next) = next {
-            self.node_mut(next).prev_sibling = NodeLink::from_option(Some(node))
-        } else {
-            self.node_mut(parent).last_child = NodeLink::from_option(Some(node))
-        }
-    }
     pub(crate) fn replace_with(&mut self, target: NodeId, replacement: NodeId) {
         if target == replacement {
             return;
@@ -203,6 +181,7 @@ impl Dom {
             })
         }
     }
+    #[cfg(test)]
     pub(crate) fn set_inner_html(&mut self, node: NodeId, html: &str) -> Result<(), DomError> {
         let source = Dom::parse_fragment(html, self.tag(node).unwrap_or(Tag::Div))?;
         self.detach_children(node);
@@ -213,26 +192,11 @@ impl Dom {
         }
         Ok(())
     }
-    pub(crate) fn insert_html_after(
-        &mut self,
-        node: NodeId,
-        html: &str,
-    ) -> Result<SmallVec<[NodeId; 4]>, DomError> {
-        let source = Dom::parse_fragment(
-            html,
-            self.tag(self.parent(node).unwrap_or(self.root))
-                .unwrap_or(Tag::Div),
-        )?;
-        let roots: SmallVec<[NodeId; 4]> = source.children(source.root()).collect();
-        let mut out = SmallVec::<[NodeId; 4]>::new();
-        let mut at = node;
-        for id in roots {
-            let x = self.import_subtree(&source, id)?;
-            self.insert_after(at, x);
-            at = x;
-            out.push(x)
-        }
-        Ok(out)
+    pub(crate) fn copy_subtree_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
+        let mut fragment = Dom::new(NodeData::Fragment);
+        let copied = fragment.import_subtree(self, source_root)?;
+        fragment.append_child(fragment.root(), copied);
+        Ok(fragment)
     }
     pub(crate) fn import_subtree(
         &mut self,
