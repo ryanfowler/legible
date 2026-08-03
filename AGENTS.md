@@ -51,6 +51,8 @@ The extraction pipeline flows through these stages:
 - Keep structural mutation in `dom/mutation.rs` and validate links in debug builds.
 - Preserve the O(1) leaf fast path in DOM cycle checks. The parser appends new leaf nodes, so do not add another depth-dependent scan to this path.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
+- Use the `dom_parse` Criterion group to isolate custom DOM construction from readability extraction.
+- Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.

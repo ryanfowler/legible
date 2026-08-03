@@ -11,6 +11,19 @@ fn load_test_page(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e))
 }
 
+/// Benchmark construction of the custom DOM without extraction work.
+fn bench_dom_parse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dom_parse");
+    for name in ["medium-2", "wikipedia-2", "guardian-1"] {
+        let html = load_test_page(name);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &html, |b, html| {
+            b.iter(|| Document::new(black_box(html)))
+        });
+    }
+    group.finish();
+}
+
 /// Benchmark parsing articles of different sizes
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
@@ -149,6 +162,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_dom_parse,
     bench_parse,
     bench_parse_retries,
     bench_readerable,
