@@ -14,33 +14,55 @@ fn stats_for_text(text: &str) -> NodeStats {
     };
     let mut prev = true;
     let mut dot = false;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            s.has_sentence_break |= dot;
-            dot = false;
-            if !prev {
+
+    // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
+    // Unicode whitespace tables in the hot loop.
+    if text.is_ascii() {
+        for &byte in text.as_bytes() {
+            if byte.is_ascii_whitespace() {
+                s.has_sentence_break |= dot;
+                dot = false;
+                if !prev {
+                    s.text_length += 1;
+                    prev = true
+                }
+            } else {
+                s.has_non_whitespace = true;
+                dot = byte == b'.';
+                s.comma_count += usize::from(byte == b',');
                 s.text_length += 1;
-                prev = true
+                prev = false
             }
-        } else {
-            s.has_non_whitespace = true;
-            dot = c == '.';
-            s.comma_count += usize::from(
-                c == ','
-                    || matches!(
-                        c,
-                        '\u{060C}'
-                            | '\u{FE50}'
-                            | '\u{FE10}'
-                            | '\u{FE11}'
-                            | '\u{2E41}'
-                            | '\u{2E34}'
-                            | '\u{2E32}'
-                            | '\u{FF0C}'
-                    ),
-            );
-            s.text_length += 1;
-            prev = false
+        }
+    } else {
+        for c in text.chars() {
+            if c.is_whitespace() {
+                s.has_sentence_break |= dot;
+                dot = false;
+                if !prev {
+                    s.text_length += 1;
+                    prev = true
+                }
+            } else {
+                s.has_non_whitespace = true;
+                dot = c == '.';
+                s.comma_count += usize::from(
+                    c == ','
+                        || matches!(
+                            c,
+                            '\u{060C}'
+                                | '\u{FE50}'
+                                | '\u{FE10}'
+                                | '\u{FE11}'
+                                | '\u{2E41}'
+                                | '\u{2E34}'
+                                | '\u{2E32}'
+                                | '\u{FF0C}'
+                        ),
+                );
+                s.text_length += 1;
+                prev = false
+            }
         }
     }
     if prev && s.text_length > 0 {
@@ -368,4 +390,27 @@ fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value:
     }
     let value_end = cursor + value.len();
     value_end <= style.len() && style[cursor..value_end].eq_ignore_ascii_case(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stats_for_text;
+
+    #[test]
+    fn text_stats_match_for_ascii_and_unicode_paths() {
+        let ascii = stats_for_text(" a,\t b. c ");
+        assert_eq!(ascii.text_length, 7);
+        assert_eq!(ascii.comma_count, 1);
+        assert!(ascii.starts_with_whitespace);
+        assert!(ascii.ends_with_whitespace);
+        assert!(ascii.has_sentence_break);
+        assert!(ascii.has_sentence_end);
+
+        let unicode = stats_for_text("\u{3000}甲， 乙.\u{a0}");
+        assert_eq!(unicode.text_length, 5);
+        assert_eq!(unicode.comma_count, 1);
+        assert!(unicode.starts_with_whitespace);
+        assert!(unicode.ends_with_whitespace);
+        assert!(unicode.has_sentence_end);
+    }
 }
