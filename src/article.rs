@@ -134,13 +134,13 @@ impl Article {
         self.text_char_count
     }
     pub fn to_html(&self) -> String {
-        self.tree.to_html()
+        self.tree.to_html(self.text_char_count)
     }
     pub fn to_markdown(&self) -> String {
         self.tree.to_markdown(self.text_char_count)
     }
     pub fn to_text(&self) -> String {
-        self.tree.to_text()
+        self.tree.to_text(self.text_char_count)
     }
     pub fn to_markdown_with(&self, options: &MarkdownOptions) -> String {
         let markdown = self.tree.to_markdown_filtered(
@@ -154,6 +154,7 @@ impl Article {
         if options.preserve_line_breaks || matches!(options.block_separator, TextSeparator::Newline)
         {
             self.tree.to_block_text(
+                self.text_char_count,
                 matches!(options.block_separator, TextSeparator::Newline),
                 options.preserve_line_breaks,
             )
@@ -371,11 +372,15 @@ impl ArticleMetadata {
         for id in dom.descendants(dom.root()) {
             match dom.tag(id) {
                 Some(Tag::Meta) => {
-                    let key = dom
+                    let raw_key = dom
                         .attr(id, AttrName::Property)
                         .or_else(|| dom.attr(id, AttrName::Name))
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
+                        .unwrap_or("");
+                    let key = if raw_key.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                        std::borrow::Cow::Owned(raw_key.to_ascii_lowercase())
+                    } else {
+                        std::borrow::Cow::Borrowed(raw_key)
+                    };
                     if !metadata_source_enabled(&key, sources) {
                         continue;
                     }
@@ -386,7 +391,7 @@ impl ArticleMetadata {
                     else {
                         continue;
                     };
-                    match key.as_str() {
+                    match key.as_ref() {
                         "og:url" => out.canonical_url = resolve(value),
                         "og:image" | "twitter:image" => {
                             if out.lead_image.is_none() {

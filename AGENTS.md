@@ -33,7 +33,7 @@ The extraction pipeline flows through these stages:
 
 - **`document.rs`** - Public fallible `Document<'a>` parser for checking readability before extraction
 - **`extractor.rs`** - Reusable extraction configuration and the primary extraction entry points
-- **`article.rs` / `article_tree.rs`** - Private-field public result API and compact immutable `Send + Sync` output tree
+- **`article.rs` / `article_tree.rs`** - Private-field public result API and compact immutable `Send + Sync` output tree with direct HTML, text, and Markdown rendering
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
@@ -60,7 +60,7 @@ The extraction pipeline flows through these stages:
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.
 - Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Serialize only the final selected article for `Article::content`.
-- Generate `Article::markdown_content` directly from the final cleaned DOM. Keep Markdown traversal iterative and escape text, link destinations, and code fences for CommonMark.
+- Generate legacy Markdown directly from the final cleaned DOM. Render the immutable `Article` directly from `ArticleTree` through the shared read-only Markdown traversal interface. Do not rebuild a temporary DOM. Keep Markdown traversal iterative and escape text, link destinations, and code fences for CommonMark.
 - Preserve Markdown's byte-wise ASCII text path, compact task fields, and output capacity hint from normalized article text. These avoid per-character work, excess task-stack traffic, and repeated output growth.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
 

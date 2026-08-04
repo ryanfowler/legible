@@ -117,6 +117,41 @@ fn bench_output_formats(c: &mut Criterion) {
     });
 }
 
+/// Benchmark repeated rendering without parse, extraction, or tree-freezing work.
+fn bench_render_only(c: &mut Criterion) {
+    let extractor = Extractor::default();
+    let fixtures = [
+        ("basic-tags-cleaning", load_test_page("basic-tags-cleaning")),
+        ("medium-2", load_test_page("medium-2")),
+        ("wikipedia-2", load_test_page("wikipedia-2")),
+        ("guardian-1", load_test_page("guardian-1")),
+        (
+            "noisy-small-article",
+            format!(
+                "<body>{}<article><p>{}</p></article></body>",
+                "<aside>navigation and advertising</aside>".repeat(2_000),
+                "retained article text ".repeat(100)
+            ),
+        ),
+        (
+            "large-retained-article",
+            format!(
+                "<article>{}</article>",
+                "<p>retained article text</p>".repeat(2_000)
+            ),
+        ),
+    ];
+
+    let mut render = c.benchmark_group("render_only");
+    for (name, html) in fixtures {
+        let article = extractor.extract(&html).unwrap();
+        render.bench_function(BenchmarkId::new("all_formats", name), |b| {
+            b.iter(|| (article.to_html(), article.to_markdown(), article.to_text()))
+        });
+    }
+    render.finish();
+}
+
 /// Benchmark is_probably_readable check
 fn bench_readerable(c: &mut Criterion) {
     let mut group = c.benchmark_group("is_probably_readerable");
@@ -190,6 +225,7 @@ criterion_group!(
     bench_parse,
     bench_parse_retries,
     bench_output_formats,
+    bench_render_only,
     bench_readerable,
     bench_complex_pages,
     bench_deeply_nested

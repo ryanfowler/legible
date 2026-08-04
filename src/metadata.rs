@@ -434,10 +434,14 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str, sources: u8
     m
 }
 fn metadata_source_enabled(name: &str, sources: u8) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    if name.starts_with("og:") || name.starts_with("article:") {
+    let name = name.trim();
+    let has_prefix = |prefix: &str| {
+        name.get(..prefix.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+    };
+    if has_prefix("og:") || has_prefix("article:") {
         sources & 0b0010 != 0
-    } else if name.starts_with("twitter:") {
+    } else if has_prefix("twitter:") {
         sources & 0b0100 != 0
     } else {
         sources & 0b1000 != 0

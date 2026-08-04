@@ -1,16 +1,87 @@
-//! Markdown serialization for cleaned article DOM subtrees.
+//! Markdown serialization for cleaned article trees.
 //!
-//! The serializer walks the DOM directly. It does not serialize and parse the
-//! extracted HTML again. Its explicit work stack also keeps deeply nested input
+//! The serializer walks a read-only tree directly. It supports the extraction DOM
+//! and the compact article tree. Its explicit work stack keeps deeply nested input
 //! from using the Rust call stack.
 
 use smallvec::SmallVec;
 
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{Dom, NodeId, Tag};
+
+pub(crate) trait MarkdownTree {
+    type Node: Copy + Eq;
+
+    fn first_child(&self, node: Self::Node) -> Option<Self::Node>;
+    fn next_sibling(&self, node: Self::Node) -> Option<Self::Node>;
+    fn tag(&self, node: Self::Node) -> Option<Tag>;
+    fn text_node(&self, node: Self::Node) -> Option<&str>;
+    fn is_comment(&self, node: Self::Node) -> bool;
+    fn attr_by_local_name(&self, node: Self::Node, name: &str) -> Option<&str>;
+
+    fn append_text(&self, root: Self::Node, out: &mut String) {
+        let mut nodes = SmallVec::<[(Self::Node, bool); 16]>::new();
+        nodes.push((root, false));
+        while let Some((node, include_siblings)) = nodes.pop() {
+            if include_siblings && let Some(sibling) = self.next_sibling(node) {
+                nodes.push((sibling, true));
+            }
+            if let Some(text) = self.text_node(node) {
+                out.push_str(text);
+                continue;
+            }
+            if self.tag(node) == Some(Tag::Template) {
+                continue;
+            }
+            if let Some(child) = self.first_child(node) {
+                nodes.push((child, true));
+            }
+        }
+    }
+
+    fn text(&self, root: Self::Node) -> String {
+        let mut text = String::new();
+        self.append_text(root, &mut text);
+        text
+    }
+}
+
+impl MarkdownTree for Dom {
+    type Node = NodeId;
+
+    fn first_child(&self, node: NodeId) -> Option<NodeId> {
+        self.first_child(node)
+    }
+    fn next_sibling(&self, node: NodeId) -> Option<NodeId> {
+        self.next_sibling(node)
+    }
+    fn tag(&self, node: NodeId) -> Option<Tag> {
+        self.tag(node)
+    }
+    fn text_node(&self, node: NodeId) -> Option<&str> {
+        self.text_node(node)
+    }
+    fn is_comment(&self, node: NodeId) -> bool {
+        self.is_comment(node)
+    }
+    fn attr_by_local_name(&self, node: NodeId, name: &str) -> Option<&str> {
+        self.attr_by_local_name(node, name)
+    }
+}
 
 /// Serializes the children of `root` as CommonMark.
+#[cfg(test)]
 pub(crate) fn dom_to_markdown(dom: &Dom, root: NodeId, capacity: usize) -> String {
-    MarkdownSerializer::new(dom, capacity).serialize(root)
+    tree_to_markdown_filtered(dom, root, capacity, true, true)
+}
+
+pub(crate) fn tree_to_markdown_filtered<T: MarkdownTree>(
+    tree: &T,
+    root: T::Node,
+    capacity: usize,
+    include_links: bool,
+    include_images: bool,
+) -> String {
+    MarkdownSerializer::new(tree, capacity, include_links, include_images).serialize(root)
 }
 
 #[derive(Clone, Copy)]
@@ -20,14 +91,14 @@ enum Mode {
 }
 
 #[derive(Clone, Copy)]
-enum Task {
-    Node(NodeId, Mode),
-    Siblings(NodeId, Mode),
-    InlineRun(NodeId, RunKind),
-    Close(Close),
-    ListItems(NodeId, i32, u32),
-    ListItem(NodeId, ListMarker),
-    ItemParagraph(NodeId),
+enum Task<N> {
+    Node(N, Mode),
+    Siblings(N, Mode),
+    InlineRun(N, RunKind),
+    Close(Close<N>),
+    ListItems(N, i32, u32),
+    ListItem(N, ListMarker),
+    ItemParagraph(N),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -55,34 +126,38 @@ enum ListMarker {
 }
 
 #[derive(Clone, Copy)]
-enum Close {
+enum Close<N> {
     Block,
     Marker(RunKind),
     TableCellSeparator,
-    Link(NodeId),
+    Link(N),
     Quote,
     List,
     ListItem,
 }
 
-struct MarkdownSerializer<'a> {
-    dom: &'a Dom,
+struct MarkdownSerializer<'a, T: MarkdownTree> {
+    dom: &'a T,
     out: Output,
-    tasks: Vec<Task>,
+    tasks: Vec<Task<T::Node>>,
     list_depth: usize,
+    include_links: bool,
+    include_images: bool,
 }
 
-impl<'a> MarkdownSerializer<'a> {
-    fn new(dom: &'a Dom, capacity: usize) -> Self {
+impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
+    fn new(dom: &'a T, capacity: usize, include_links: bool, include_images: bool) -> Self {
         Self {
             dom,
             out: Output::new(capacity),
             tasks: Vec::new(),
             list_depth: 0,
+            include_links,
+            include_images,
         }
     }
 
-    fn serialize(mut self, root: NodeId) -> String {
+    fn serialize(mut self, root: T::Node) -> String {
         self.push_children(root, Mode::Block);
         while let Some(task) = self.tasks.pop() {
             match task {
@@ -114,13 +189,13 @@ impl<'a> MarkdownSerializer<'a> {
         self.out.finish()
     }
 
-    fn push_children(&mut self, id: NodeId, mode: Mode) {
+    fn push_children(&mut self, id: T::Node, mode: Mode) {
         if let Some(child) = self.dom.first_child(id) {
             self.tasks.push(Task::Siblings(child, mode));
         }
     }
 
-    fn node(&mut self, id: NodeId, mode: Mode) {
+    fn node(&mut self, id: T::Node, mode: Mode) {
         if let Some(text) = self.dom.text_node(id) {
             self.out.text(text);
             return;
@@ -189,18 +264,20 @@ impl<'a> MarkdownSerializer<'a> {
             Tag::Ul | Tag::Ol => self.list(id, tag == Tag::Ol),
             Tag::Pre => self.code_block(id),
             Tag::A => {
-                if self
-                    .dom
-                    .attr(id, AttrName::Href)
-                    .and_then(|href| safe_destination(href, DestinationKind::Link))
-                    .is_some()
+                if self.include_links
+                    && self
+                        .dom
+                        .attr_by_local_name(id, "href")
+                        .and_then(|href| safe_destination(href, DestinationKind::Link))
+                        .is_some()
                 {
                     self.out.open_marker("[");
                     self.tasks.push(Task::Close(Close::Link(id)));
                 }
                 self.push_children(id, Mode::Inline);
             }
-            Tag::Img => self.image(id),
+            Tag::Img if self.include_images => self.image(id),
+            Tag::Img => {}
             Tag::Strong | Tag::B => self.format(id, RunKind::Strong),
             Tag::Em | Tag::I => self.format(id, RunKind::Emphasis),
             Tag::Code => self.code_span(id),
@@ -215,14 +292,14 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn format(&mut self, id: NodeId, kind: RunKind) {
+    fn format(&mut self, id: T::Node, kind: RunKind) {
         let marker = kind.marker().expect("formatting element has a marker");
         self.out.open_marker(marker);
         self.tasks.push(Task::Close(Close::Marker(kind)));
         self.push_children(id, Mode::Inline);
     }
 
-    fn run_kind(&self, id: NodeId) -> Option<RunKind> {
+    fn run_kind(&self, id: T::Node) -> Option<RunKind> {
         match self.dom.tag(id)? {
             Tag::Strong | Tag::B => Some(RunKind::Strong),
             Tag::Em | Tag::I => Some(RunKind::Emphasis),
@@ -231,7 +308,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn inline_run(&mut self, first: NodeId, kind: RunKind) {
+    fn inline_run(&mut self, first: T::Node, kind: RunKind) {
         if kind == RunKind::Code {
             let mut text = String::new();
             let mut current = Some(first);
@@ -246,7 +323,7 @@ impl<'a> MarkdownSerializer<'a> {
         let marker = kind.marker().expect("formatting run has a marker");
         self.out.open_marker(marker);
         self.tasks.push(Task::Close(Close::Marker(kind)));
-        let mut nodes = SmallVec::<[NodeId; 4]>::new();
+        let mut nodes = SmallVec::<[T::Node; 4]>::new();
         let mut current = Some(first);
         while let Some(id) = current.filter(|&id| self.run_kind(id) == Some(kind)) {
             nodes.push(id);
@@ -257,7 +334,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn list(&mut self, id: NodeId, ordered: bool) {
+    fn list(&mut self, id: T::Node, ordered: bool) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
@@ -282,7 +359,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn list_items(&mut self, id: NodeId, start: i32, index: u32) {
+    fn list_items(&mut self, id: T::Node, start: i32, index: u32) {
         let is_item = self.dom.tag(id) == Some(Tag::Li);
         if let Some(sibling) = self.dom.next_sibling(id) {
             self.tasks
@@ -303,7 +380,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn list_item(&mut self, id: NodeId, marker: ListMarker) {
+    fn list_item(&mut self, id: T::Node, marker: ListMarker) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
@@ -329,7 +406,13 @@ impl<'a> MarkdownSerializer<'a> {
         });
         self.tasks.push(Task::Close(Close::ListItem));
 
-        for child in self.dom.children_rev(id) {
+        let mut children = SmallVec::<[T::Node; 8]>::new();
+        let mut child = self.dom.first_child(id);
+        while let Some(node) = child {
+            children.push(node);
+            child = self.dom.next_sibling(node);
+        }
+        for child in children.into_iter().rev() {
             if self.dom.tag(child) == Some(Tag::P) {
                 self.tasks.push(Task::ItemParagraph(child));
             } else {
@@ -338,7 +421,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn item_paragraph(&mut self, id: NodeId) {
+    fn item_paragraph(&mut self, id: T::Node) {
         if !self.out.in_empty_list_item() {
             if self.out.has_current_line_content() {
                 self.out.newline();
@@ -349,15 +432,18 @@ impl<'a> MarkdownSerializer<'a> {
         self.push_children(id, Mode::Inline);
     }
 
-    fn table_row(&mut self, id: NodeId) {
+    fn table_row(&mut self, id: T::Node) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
-        let cells: SmallVec<[NodeId; 16]> = self
-            .dom
-            .element_children(id)
-            .filter(|&child| matches!(self.dom.tag(child), Some(Tag::Td | Tag::Th)))
-            .collect();
+        let mut cells = SmallVec::<[T::Node; 16]>::new();
+        let mut child = self.dom.first_child(id);
+        while let Some(node) = child {
+            if matches!(self.dom.tag(node), Some(Tag::Td | Tag::Th)) {
+                cells.push(node);
+            }
+            child = self.dom.next_sibling(node);
+        }
         if cells.is_empty() {
             self.push_children(id, Mode::Inline);
             self.tasks.push(Task::Close(Close::Block));
@@ -372,7 +458,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn code_span(&mut self, id: NodeId) {
+    fn code_span(&mut self, id: T::Node) {
         let text = self.dom.text(id);
         self.emit_code_span(&text);
     }
@@ -394,7 +480,7 @@ impl<'a> MarkdownSerializer<'a> {
         self.out.markup(&fence);
     }
 
-    fn code_block(&mut self, id: NodeId) {
+    fn code_block(&mut self, id: T::Node) {
         self.out.ensure_blank_line();
         self.out.mark_list_item_content();
         let text = self.dom.text(id);
@@ -407,11 +493,11 @@ impl<'a> MarkdownSerializer<'a> {
         self.out.newline();
     }
 
-    fn image(&mut self, id: NodeId) {
+    fn image(&mut self, id: T::Node) {
         let alt = self.dom.attr_by_local_name(id, "alt").unwrap_or("");
         let Some(src) = self
             .dom
-            .attr(id, AttrName::Src)
+            .attr_by_local_name(id, "src")
             .and_then(|src| safe_destination(src, DestinationKind::Image))
         else {
             self.out.text(alt);
@@ -430,7 +516,7 @@ impl<'a> MarkdownSerializer<'a> {
         self.out.markup(")");
     }
 
-    fn close(&mut self, close: Close) {
+    fn close(&mut self, close: Close<T::Node>) {
         match close {
             Close::Block => self.out.newline(),
             Close::Marker(kind) => {
@@ -445,7 +531,7 @@ impl<'a> MarkdownSerializer<'a> {
                     let trailing_space = std::mem::take(&mut self.out.pending_space);
                     let href = self
                         .dom
-                        .attr(id, AttrName::Href)
+                        .attr_by_local_name(id, "href")
                         .and_then(|href| safe_destination(href, DestinationKind::Link))
                         .expect("validated link destination changed during serialization");
                     self.out.destination(href);

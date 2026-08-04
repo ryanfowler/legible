@@ -2,7 +2,6 @@
 
 use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
-#[cfg(test)]
 use smallvec::SmallVec;
 use tendril::StrTendril;
 impl Dom {
@@ -218,7 +217,8 @@ impl Dom {
         }
 
         let root = self.create(copy_data(source, source_root))?;
-        let mut work = vec![(source_root, root)];
+        let mut work = SmallVec::<[(NodeId, NodeId); 16]>::new();
+        work.push((source_root, root));
         while let Some((source_id, dest_id)) = work.pop() {
             if let NodeData::Element(element) = &source.node(source_id).data
                 && let Some(template) = element.template_contents.get()

@@ -1,8 +1,7 @@
-use crate::dom::{AttrName, Attribute as DomAttribute, Dom, NodeData, NodeId};
+use crate::dom::{Dom, NodeData, NodeId, Tag};
 use html5ever::QualName;
 use html5ever::serialize::{self, Serialize, Serializer, TraversalScope};
 use std::io;
-use tendril::StrTendril;
 
 #[derive(Debug)]
 pub(crate) struct ArticleTree {
@@ -33,15 +32,12 @@ impl ArticleTree {
             first_child: None,
             next_sibling: None,
         }];
-        let mut stack: Vec<(NodeId, usize)> = dom.children(root).map(|id| (id, 0)).collect();
-        stack.reverse();
+        let mut stack = dom.children_rev(root).map(|id| (id, 0)).collect::<Vec<_>>();
         let mut last_child: Vec<Option<usize>> = vec![None];
         while let Some((id, parent)) = stack.pop() {
             let kind = match &dom.node(id).data {
                 NodeData::Document | NodeData::Fragment => {
-                    let mut children: Vec<_> = dom.children(id).collect();
-                    children.reverse();
-                    for child in children {
+                    for child in dom.children_rev(id) {
                         stack.push((child, parent));
                     }
                     continue;
@@ -78,19 +74,11 @@ impl ArticleTree {
                 nodes[parent].first_child = Some(index)
             }
             last_child[parent] = Some(index);
-            let mut children: Vec<_> = match &dom.node(id).data {
-                NodeData::Element(element) if element.template_contents.get().is_some() => dom
-                    .children(
-                        element
-                            .template_contents
-                            .get()
-                            .expect("checked template root"),
-                    )
-                    .collect(),
-                _ => dom.children(id).collect(),
+            let child_root = match &dom.node(id).data {
+                NodeData::Element(element) => element.template_contents.get().unwrap_or(id),
+                _ => id,
             };
-            children.reverse();
-            for child in children {
+            for child in dom.children_rev(child_root) {
                 stack.push((child, index));
             }
         }
@@ -99,11 +87,16 @@ impl ArticleTree {
             root: 0,
         }
     }
-    pub(crate) fn to_html(&self) -> String {
-        self.to_html_filtered(true, true)
+    pub(crate) fn to_html(&self, capacity: usize) -> String {
+        self.to_html_filtered(capacity, true, true)
     }
-    fn to_html_filtered(&self, include_links: bool, include_images: bool) -> String {
-        let mut bytes = Vec::new();
+    fn to_html_filtered(
+        &self,
+        capacity: usize,
+        include_links: bool,
+        include_images: bool,
+    ) -> String {
+        let mut bytes = Vec::with_capacity(capacity);
         serialize::serialize(
             &mut bytes,
             &TreeSerializable {
@@ -119,23 +112,46 @@ impl ArticleTree {
         .expect("writing to Vec cannot fail");
         String::from_utf8(bytes).expect("HTML serialization is UTF-8")
     }
-    pub(crate) fn to_text(&self) -> String {
-        let mut output = NormalizedOutput::default();
-        let mut tasks = Vec::new();
-        push_tree_children(&mut tasks, self, self.root);
-        while let Some(index) = tasks.pop() {
+    pub(crate) fn to_text(&self, capacity: usize) -> String {
+        enum Task {
+            Siblings(usize),
+        }
+        let mut output = NormalizedOutput::with_capacity(capacity);
+        let mut tasks = smallvec::SmallVec::<[Task; 32]>::new();
+        if let Some(child) = self.nodes[self.root].first_child {
+            tasks.push(Task::Siblings(child));
+        }
+        while let Some(task) = tasks.pop() {
+            let index = match task {
+                Task::Siblings(index) => {
+                    if let Some(next) = self.nodes[index].next_sibling {
+                        tasks.push(Task::Siblings(next));
+                    }
+                    index
+                }
+            };
             match &self.nodes[index].kind {
                 Kind::Text(text) => output.text(text),
                 Kind::Element { name, .. } if name.local.as_ref() == "template" => {}
-                Kind::Element { .. } | Kind::Root => push_tree_children(&mut tasks, self, index),
+                Kind::Element { .. } | Kind::Root => {
+                    if let Some(child) = self.nodes[index].first_child {
+                        tasks.push(Task::Siblings(child));
+                    }
+                }
                 _ => {}
             }
         }
         output.finish()
     }
-    pub(crate) fn to_block_text(&self, block_newlines: bool, preserve_breaks: bool) -> String {
+    pub(crate) fn to_block_text(
+        &self,
+        capacity: usize,
+        block_newlines: bool,
+        preserve_breaks: bool,
+    ) -> String {
         enum Task {
             Node(usize),
+            Siblings(usize),
             BlockEnd,
         }
         let separator = if block_newlines {
@@ -143,20 +159,20 @@ impl ArticleTree {
         } else {
             Separator::Space
         };
-        let mut output = NormalizedOutput::default();
-        let mut tasks = Vec::new();
-        let mut roots = Vec::new();
-        let mut node = self.nodes[self.root].first_child;
-        while let Some(index) = node {
-            roots.push(index);
-            node = self.nodes[index].next_sibling
-        }
-        for index in roots.into_iter().rev() {
-            tasks.push(Task::Node(index))
+        let mut output = NormalizedOutput::with_capacity(capacity);
+        let mut tasks = smallvec::SmallVec::<[Task; 32]>::new();
+        if let Some(child) = self.nodes[self.root].first_child {
+            tasks.push(Task::Siblings(child));
         }
         while let Some(task) = tasks.pop() {
             match task {
                 Task::BlockEnd => output.separator(separator),
+                Task::Siblings(index) => {
+                    if let Some(next) = self.nodes[index].next_sibling {
+                        tasks.push(Task::Siblings(next));
+                    }
+                    tasks.push(Task::Node(index));
+                }
                 Task::Node(index) => match &self.nodes[index].kind {
                     Kind::Text(text) => output.text(text),
                     Kind::Element { name, .. } if name.local.as_ref() == "template" => {}
@@ -171,14 +187,8 @@ impl ArticleTree {
                             output.separator(separator);
                             tasks.push(Task::BlockEnd)
                         }
-                        let mut children = Vec::new();
-                        let mut child = self.nodes[index].first_child;
-                        while let Some(child_index) = child {
-                            children.push(child_index);
-                            child = self.nodes[child_index].next_sibling
-                        }
-                        for child in children.into_iter().rev() {
-                            tasks.push(Task::Node(child))
+                        if let Some(child) = self.nodes[index].first_child {
+                            tasks.push(Task::Siblings(child));
                         }
                     }
                     _ => {}
@@ -196,59 +206,13 @@ impl ArticleTree {
         include_links: bool,
         include_images: bool,
     ) -> String {
-        let Some(dom) = self.to_dom_filtered(include_links, include_images) else {
-            return String::new();
-        };
-        crate::markdown::dom_to_markdown(&dom, dom.root(), capacity)
-    }
-    fn to_dom_filtered(&self, include_links: bool, include_images: bool) -> Option<Dom> {
-        let mut dom = Dom::new(NodeData::Fragment);
-        let root = dom.root();
-        let mut tasks = Vec::new();
-        let mut roots = Vec::new();
-        let mut node = self.nodes[self.root].first_child;
-        while let Some(index) = node {
-            roots.push(index);
-            node = self.nodes[index].next_sibling
-        }
-        for index in roots.into_iter().rev() {
-            tasks.push((index, root))
-        }
-        while let Some((index, parent)) = tasks.pop() {
-            let created = match &self.nodes[index].kind {
-                Kind::Root => continue,
-                Kind::Text(text) => dom
-                    .create(NodeData::Text(StrTendril::from(text.as_str())))
-                    .ok()?,
-                Kind::Comment(text) => dom
-                    .create(NodeData::Comment(StrTendril::from(text.as_str())))
-                    .ok()?,
-                Kind::Element { name, .. } if name.local.as_ref() == "img" && !include_images => {
-                    continue;
-                }
-                Kind::Element { name, .. } if name.local.as_ref() == "a" && !include_links => {
-                    push_dom_children(&mut tasks, self, index, parent);
-                    continue;
-                }
-                Kind::Element { name, attrs } => {
-                    let id = dom.create_element(name.clone()).ok()?;
-                    if let NodeData::Element(element) = &mut dom.node_mut(id).data {
-                        element.attrs = attrs
-                            .iter()
-                            .map(|attr| DomAttribute {
-                                name: attr.name.clone(),
-                                known: AttrName::from_local(attr.name.local.as_ref()),
-                                value: StrTendril::from(attr.value.as_str()),
-                            })
-                            .collect()
-                    }
-                    id
-                }
-            };
-            dom.append_child(parent, created);
-            push_dom_children(&mut tasks, self, index, created);
-        }
-        Some(dom)
+        crate::markdown::tree_to_markdown_filtered(
+            self,
+            self.root,
+            capacity,
+            include_links,
+            include_images,
+        )
     }
     #[cfg(test)]
     pub(crate) fn node_count(&self) -> usize {
@@ -256,14 +220,44 @@ impl ArticleTree {
     }
 }
 
-fn push_tree_children(tasks: &mut Vec<usize>, tree: &ArticleTree, parent: usize) {
-    let mut children = Vec::new();
-    let mut child = tree.nodes[parent].first_child;
-    while let Some(index) = child {
-        children.push(index);
-        child = tree.nodes[index].next_sibling
+impl crate::markdown::MarkdownTree for ArticleTree {
+    type Node = usize;
+
+    fn first_child(&self, node: usize) -> Option<usize> {
+        self.nodes[node].first_child
     }
-    tasks.extend(children.into_iter().rev());
+
+    fn next_sibling(&self, node: usize) -> Option<usize> {
+        self.nodes[node].next_sibling
+    }
+
+    fn tag(&self, node: usize) -> Option<Tag> {
+        match &self.nodes[node].kind {
+            Kind::Element { name, .. } => Some(Tag::from_qual_name(name)),
+            _ => None,
+        }
+    }
+
+    fn text_node(&self, node: usize) -> Option<&str> {
+        match &self.nodes[node].kind {
+            Kind::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn is_comment(&self, node: usize) -> bool {
+        matches!(self.nodes[node].kind, Kind::Comment(_))
+    }
+
+    fn attr_by_local_name(&self, node: usize, name: &str) -> Option<&str> {
+        match &self.nodes[node].kind {
+            Kind::Element { attrs, .. } => attrs
+                .iter()
+                .find(|attr| attr.name.local.as_ref().eq_ignore_ascii_case(name))
+                .map(|attr| attr.value.as_str()),
+            _ => None,
+        }
+    }
 }
 
 fn is_text_block(name: &str) -> bool {
@@ -296,6 +290,13 @@ struct NormalizedOutput {
     pending: Separator,
 }
 impl NormalizedOutput {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            output: String::with_capacity(capacity),
+            pending: Separator::None,
+        }
+    }
+
     fn text(&mut self, text: &str) {
         for character in text.chars() {
             if character.is_whitespace() {
@@ -340,50 +341,27 @@ struct TreeSerializable<'a> {
 }
 enum Op {
     Open(usize),
+    Siblings(usize),
     Close(QualName),
 }
-fn push_dom_children(
-    tasks: &mut Vec<(usize, NodeId)>,
-    tree: &ArticleTree,
-    parent: usize,
-    dom_parent: NodeId,
-) {
-    let mut children = Vec::new();
-    let mut node = tree.nodes[parent].first_child;
-    while let Some(index) = node {
-        children.push(index);
-        node = tree.nodes[index].next_sibling
-    }
-    for index in children.into_iter().rev() {
-        tasks.push((index, dom_parent))
-    }
-}
-fn push_children(ops: &mut Vec<Op>, tree: &ArticleTree, parent: usize) {
-    let mut children = Vec::new();
-    let mut node = tree.nodes[parent].first_child;
-    while let Some(index) = node {
-        children.push(index);
-        node = tree.nodes[index].next_sibling;
-    }
-    for index in children.into_iter().rev() {
-        ops.push(Op::Open(index))
+fn push_children(ops: &mut smallvec::SmallVec<[Op; 32]>, tree: &ArticleTree, parent: usize) {
+    if let Some(child) = tree.nodes[parent].first_child {
+        ops.push(Op::Siblings(child));
     }
 }
 impl Serialize for TreeSerializable<'_> {
     fn serialize<S: Serializer>(&self, ser: &mut S, _: TraversalScope) -> io::Result<()> {
-        let mut ops = Vec::new();
-        let mut roots = Vec::new();
-        let mut n = self.tree.nodes[self.tree.root].first_child;
-        while let Some(i) = n {
-            roots.push(i);
-            n = self.tree.nodes[i].next_sibling
-        }
-        for i in roots.into_iter().rev() {
-            ops.push(Op::Open(i))
-        }
+        let mut ops = smallvec::SmallVec::<[Op; 32]>::new();
+        push_children(&mut ops, self.tree, self.tree.root);
         while let Some(op) = ops.pop() {
             match op {
                 Op::Close(name) => ser.end_elem(name)?,
+                Op::Siblings(i) => {
+                    if let Some(next) = self.tree.nodes[i].next_sibling {
+                        ops.push(Op::Siblings(next));
+                    }
+                    ops.push(Op::Open(i));
+                }
                 Op::Open(i) => match &self.tree.nodes[i].kind {
                     Kind::Root => {}
                     Kind::Text(s) => ser.write_text(s)?,
@@ -423,11 +401,32 @@ mod tests {
         let expected_count = dom.normalized_char_count(body);
         let tree = ArticleTree::freeze(&dom, body);
         assert_eq!(
-            tree.to_html(),
+            tree.to_html(expected_count),
             "<div>visible<template><em>saved</em></template></div>"
         );
-        assert_eq!(tree.to_text(), "visible");
-        assert_eq!(tree.to_text().chars().count(), expected_count);
+        assert_eq!(tree.to_text(expected_count), "visible");
+        assert_eq!(tree.to_text(expected_count).chars().count(), expected_count);
         assert!(!tree.to_markdown(expected_count).contains("saved"));
+    }
+
+    #[test]
+    fn direct_renderers_match_the_cleaned_dom() {
+        let depth = 1_000;
+        let html = format!(
+            "<body>{}<p>A <a href='https://example.test/a(b)'>link [x]</a><img src='image.jpg' alt='photo'></p>{}</body>",
+            "<section>".repeat(depth),
+            "</section>".repeat(depth)
+        );
+        let dom = Dom::parse_document(&html).unwrap();
+        let body = dom.body().unwrap();
+        let count = dom.normalized_char_count(body);
+        let tree = ArticleTree::freeze(&dom, body);
+
+        assert_eq!(tree.to_html(count), dom.inner_html(body).unwrap());
+        assert_eq!(tree.to_text(count), dom.normalized_text(body, count).0);
+        assert_eq!(
+            tree.to_markdown(count),
+            crate::markdown::dom_to_markdown(&dom, body, count)
+        );
     }
 }
