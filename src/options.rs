@@ -1,10 +1,10 @@
-//! Configuration options for Readability parsing.
+//! Options for article extraction and the quick readability check.
 
 use regex::Regex;
 
-/// Configuration options for the [`parse()`](crate::parse) function.
+/// Options for [`parse()`](crate::parse) and [`Document::parse`](crate::Document::parse).
 ///
-/// Use the builder methods to customize parsing behavior:
+/// Use the builder methods, or change the public fields directly.
 ///
 /// ```rust
 /// use legible::Options;
@@ -15,72 +15,64 @@ use regex::Regex;
 ///     .disable_json_ld(true);
 /// ```
 ///
-/// # Available Options
-///
-/// | Option | Default | Description |
-/// |--------|---------|-------------|
-/// | `max_elems_to_parse` | `0` | Maximum elements to parse (0 = unlimited) |
-/// | `nb_top_candidates` | `5` | Number of top candidates to consider |
-/// | `char_threshold` | `500` | Minimum article character length |
-/// | `keep_classes` | `false` | Preserve CSS classes in output |
-/// | `classes_to_preserve` | `["page"]` | Specific classes to keep |
-/// | `disable_json_ld` | `false` | Skip JSON-LD metadata extraction |
-/// | `allowed_video_regex` | - | Custom regex for allowed video embeds |
-/// | `link_density_modifier` | `0.0` | Adjust link density threshold |
-/// | `debug` | `false` | Enable debug logging |
+/// `Options::new()` and `Options::default()` return the same values.
 #[derive(Clone)]
 pub struct Options {
-    /// Maximum number of elements to parse. Set to `0` for no limit.
+    /// Maximum number of HTML elements that the document can contain.
     ///
-    /// Use this to prevent excessive processing time on very large documents.
-    /// Returns [`Error::TooManyElements`](crate::Error::TooManyElements)
-    /// if the limit is exceeded.
+    /// The default is `0`, which sets no limit. Legible checks the limit after HTML
+    /// parsing and before extraction. It returns
+    /// [`Error::TooManyElements`](crate::Error::TooManyElements) if the document
+    /// exceeds the limit.
     pub max_elems_to_parse: usize,
 
-    /// The number of top candidates to consider when analyzing competition.
+    /// Number of high-score content candidates to compare.
     ///
-    /// Higher values may improve accuracy on complex pages but increase processing time.
+    /// The default is `5`. A larger value can improve selection on a complex page, but
+    /// it can increase processing time.
     pub nb_top_candidates: usize,
 
-    /// The minimum number of characters an article must have to return a result.
+    /// Target minimum number of characters in the extracted article.
     ///
-    /// If the extracted content is shorter than this threshold, the algorithm
-    /// will retry with less aggressive filtering.
+    /// The default is `500`. Legible retries with less filtering if the content is
+    /// shorter. This value is not a strict minimum. After all retries, Legible can
+    /// return shorter nonempty content.
     pub char_threshold: usize,
 
-    /// CSS classes to preserve on elements in the output.
+    /// CSS classes to keep in the output HTML.
     ///
-    /// By default, most classes are stripped from the output HTML. Add class names
-    /// here to preserve them (e.g., for styling purposes).
+    /// The default list contains `"page"`. This list applies only when
+    /// [`keep_classes`](Options::keep_classes) is `false`.
     pub classes_to_preserve: Vec<String>,
 
-    /// Whether to keep all CSS classes on elements.
+    /// Controls whether Legible keeps all CSS classes in the output HTML.
     ///
-    /// If `true`, all classes are preserved. If `false`, only classes in
-    /// `classes_to_preserve` are kept.
+    /// The default is `false`. If this value is `false`, Legible keeps only the classes
+    /// in [`classes_to_preserve`](Options::classes_to_preserve).
     pub keep_classes: bool,
 
-    /// Whether to disable JSON-LD metadata extraction.
+    /// Controls JSON-LD metadata extraction.
     ///
-    /// JSON-LD is commonly used for structured article metadata. Disable this
-    /// if you're experiencing issues with JSON-LD parsing.
+    /// The default is `false`. Set this value to `true` to ignore JSON-LD metadata.
     pub disable_json_ld: bool,
 
-    /// Custom regex for allowed video embed URLs.
+    /// Regular expression for permitted video embed URLs.
     ///
-    /// By default, common video platforms (YouTube, Vimeo, etc.) are allowed.
-    /// Set this to customize which video embeds are preserved.
+    /// `None` uses the built-in list of common video services. `Some(regex)` replaces
+    /// the built-in list. Legible removes video embeds that do not match the regular
+    /// expression.
     pub allowed_video_regex: Option<Regex>,
 
-    /// Modifier for link density threshold.
+    /// Value that Legible adds to its link-density limits.
     ///
-    /// Added to the base threshold when determining if an element has too many links.
-    /// Positive values make the algorithm more permissive of link-heavy content.
+    /// The default is `0.0`. A positive value keeps more link-heavy content. A negative
+    /// value removes more link-heavy content.
     pub link_density_modifier: f64,
 
-    /// Enable debug logging to stderr.
+    /// Controls debug output.
     ///
-    /// When enabled, the algorithm logs its decision-making process.
+    /// The default is `false`. If this value is `true`, Legible writes extraction
+    /// decisions to standard error.
     pub debug: bool,
 }
 
@@ -101,93 +93,93 @@ impl Default for Options {
 }
 
 impl Options {
-    /// Create a new Options with default values.
+    /// Creates extraction options with default values.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set the maximum number of elements to parse.
+    /// Sets the maximum number of HTML elements. Use `0` for no limit.
     pub fn max_elems_to_parse(mut self, max: usize) -> Self {
         self.max_elems_to_parse = max;
         self
     }
 
-    /// Set the number of top candidates to consider.
+    /// Sets the number of high-score content candidates to compare.
     pub fn nb_top_candidates(mut self, n: usize) -> Self {
         self.nb_top_candidates = n;
         self
     }
 
-    /// Set the character threshold for article content.
+    /// Sets the target minimum article length.
     pub fn char_threshold(mut self, threshold: usize) -> Self {
         self.char_threshold = threshold;
         self
     }
 
-    /// Add classes to preserve in the output.
+    /// Adds CSS classes to the list of classes to keep.
+    ///
+    /// This method extends the current list. The default list contains `"page"`.
     pub fn classes_to_preserve(mut self, classes: Vec<String>) -> Self {
         self.classes_to_preserve.extend(classes);
         self
     }
 
-    /// Set whether to keep all classes.
+    /// Sets whether Legible keeps all CSS classes.
     pub fn keep_classes(mut self, keep: bool) -> Self {
         self.keep_classes = keep;
         self
     }
 
-    /// Set whether to disable JSON-LD metadata extraction.
+    /// Sets whether Legible disables JSON-LD metadata extraction.
     pub fn disable_json_ld(mut self, disable: bool) -> Self {
         self.disable_json_ld = disable;
         self
     }
 
-    /// Set a custom regex for allowed video URLs.
+    /// Replaces the built-in regular expression for permitted video URLs.
     pub fn allowed_video_regex(mut self, regex: Regex) -> Self {
         self.allowed_video_regex = Some(regex);
         self
     }
 
-    /// Set the link density modifier.
+    /// Sets the value that Legible adds to its link-density limits.
     pub fn link_density_modifier(mut self, modifier: f64) -> Self {
         self.link_density_modifier = modifier;
         self
     }
 
-    /// Enable or disable debug mode.
+    /// Sets whether Legible writes debug output to standard error.
     pub fn debug(mut self, debug: bool) -> Self {
         self.debug = debug;
         self
     }
 }
 
-/// Options for the [`is_probably_readerable`](crate::is_probably_readerable) function.
-///
-/// Use these options to tune the quick readability check:
+/// Options for [`is_probably_readerable`](crate::is_probably_readerable) and
+/// [`Document::is_probably_readerable`](crate::Document::is_probably_readerable).
 ///
 /// ```rust
-/// use legible::{is_probably_readerable, ReaderableOptions};
+/// use legible::{ReaderableOptions, is_probably_readerable};
 ///
 /// let options = ReaderableOptions::new()
 ///     .min_score(30.0)
 ///     .min_content_length(100);
 ///
-/// let html = "<html><body><article>Content...</article></body></html>";
-/// if is_probably_readerable(html, Some(options)) {
-///     println!("Document appears to be readerable");
-/// }
+/// let text = "Article text. ".repeat(30);
+/// let html = format!("<article><p>{text}</p></article>");
+/// let likely_article = is_probably_readerable(&html, Some(options));
 /// ```
 #[derive(Clone)]
 pub struct ReaderableOptions {
-    /// Minimum cumulated score to consider the document readerable.
+    /// Minimum total score for a positive result.
     ///
-    /// The score is calculated based on the length of text content in paragraph-like elements.
-    /// Higher values require more substantial content. Default is `20.0`.
+    /// The default is `20.0`. The check scores text in paragraph-like elements. A
+    /// larger value requires more content.
     pub min_score: f64,
 
-    /// Minimum node content length to consider for scoring.
+    /// Minimum text length of an element that can contribute to the score.
     ///
-    /// Nodes with fewer characters than this threshold are ignored. Default is `140`.
+    /// The default is `140` characters. The check ignores shorter elements.
     pub min_content_length: usize,
 }
 
@@ -201,18 +193,18 @@ impl Default for ReaderableOptions {
 }
 
 impl ReaderableOptions {
-    /// Create new ReaderableOptions with default values.
+    /// Creates readability-check options with default values.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set the minimum score.
+    /// Sets the minimum total score for a positive result.
     pub fn min_score(mut self, score: f64) -> Self {
         self.min_score = score;
         self
     }
 
-    /// Set the minimum content length.
+    /// Sets the minimum text length of a scored element.
     pub fn min_content_length(mut self, length: usize) -> Self {
         self.min_content_length = length;
         self

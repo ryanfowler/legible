@@ -1,53 +1,51 @@
-//! Error types for the legible crate.
+//! Errors from article extraction.
 
 use thiserror::Error;
 
-/// Errors that can occur during article parsing.
+/// Errors from article extraction.
 ///
-/// These errors are returned by [`parse()`](crate::parse) when content extraction fails.
+/// [`parse()`](crate::parse) and [`Document::parse`](crate::Document::parse) return these
+/// errors.
 ///
 /// # Example
 ///
 /// ```rust
-/// use legible::{parse, Error};
+/// use legible::{Error, parse};
 ///
-/// let html = "<html><body></body></html>";
-///
-/// match parse(html, None, None) {
-///     Ok(article) => println!("Success: {}", article.title),
-///     Err(Error::NoContent) => println!("No article content found"),
-///     Err(Error::NoBody) => println!("Document has no body"),
-///     Err(e) => println!("Other error: {}", e),
+/// match parse("<html><body></body></html>", None, None) {
+///     Ok(article) => println!("Title: {}", article.title),
+///     Err(Error::NoContent) => println!("The document has no article content."),
+///     Err(Error::NoBody) => println!("The document has no body."),
+///     Err(error) => println!("Extraction error: {error}"),
 /// }
 /// ```
 #[derive(Error, Debug)]
 pub enum Error {
-    /// The document contains too many elements to parse safely.
+    /// The document exceeds the configured element limit.
     ///
-    /// This error is returned when the document exceeds the `max_elems_to_parse` limit
-    /// set in [`Options`](crate::Options). The first value is the actual count, the second
-    /// is the configured maximum.
+    /// The first value is the number of HTML elements in the document. The second value
+    /// is [`Options::max_elems_to_parse`](crate::Options::max_elems_to_parse).
     #[error("Aborting parsing document; {0} elements found (max: {1})")]
     TooManyElements(usize, usize),
 
-    /// No article content could be extracted from the document.
+    /// Legible cannot extract nonempty article content.
     ///
-    /// This typically means the document doesn't contain enough readable content,
-    /// or the content structure doesn't match expected article patterns.
+    /// The document can have too little readable text, or its structure can have no
+    /// identifiable article.
     #[error("Failed to extract article content from the document")]
     NoContent,
 
-    /// The document has no `<body>` element.
+    /// The parsed document has no `<body>` element.
     #[error("No body found in document")]
     NoBody,
 
-    /// URL parsing error.
+    /// The specified base URL is invalid.
     ///
-    /// This error is returned when the URL provided to [`parse()`](crate::parse)
-    /// is invalid and cannot be parsed.
+    /// The `url` parameter of [`parse()`](crate::parse) or
+    /// [`Document::parse`](crate::Document::parse) caused this error.
     #[error("Invalid URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
 }
 
-/// Result type alias for readability operations.
+/// A result from article extraction.
 pub type Result<T> = std::result::Result<T, Error>;

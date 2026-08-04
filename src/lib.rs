@@ -1,13 +1,12 @@
 //! # Legible
 //!
-//! A Rust port of Mozilla's [Readability.js](https://github.com/mozilla/readability)
-//! for extracting readable content from web pages.
+//! Legible extracts the main article from an HTML document. It removes navigation,
+//! advertisements, sidebars, and other unrelated content. Legible is a Rust port of
+//! Mozilla's [Readability.js](https://github.com/mozilla/readability).
 //!
-//! This library provides functionality to extract the main content from HTML documents,
-//! stripping away navigation, ads, and other non-content elements to produce clean,
-//! readable article content.
+//! ## Extract an article
 //!
-//! ## Quick Start
+//! Use [`parse`] for most applications:
 //!
 //! ```rust
 //! use legible::parse;
@@ -19,131 +18,86 @@
 //!         <nav>Navigation</nav>
 //!         <article>
 //!             <h1>Article Title</h1>
-//!             <p>This is the main content of the article. It contains several
-//!             paragraphs of text that make up the body of the article.</p>
-//!             <p>More content here to ensure we have enough text for the
-//!             readability algorithm to work with properly.</p>
+//!             <p>This is the main content of the article.</p>
+//!             <p>This second paragraph contains more article text.</p>
 //!         </article>
 //!         <footer>Footer</footer>
 //!     </body>
 //!     </html>
 //! "#;
 //!
-//! match parse(html, Some("https://example.com"), None) {
+//! match parse(html, Some("https://example.com/articles/1"), None) {
 //!     Ok(article) => {
 //!         println!("Title: {}", article.title);
-//!         println!("Byline: {:?}", article.byline);
-//!         println!("Content: {}", article.content);
+//!         println!("HTML: {}", article.content);
 //!         println!("Markdown: {}", article.markdown_content);
 //!         println!("Text: {}", article.text_content);
 //!     }
-//!     Err(e) => eprintln!("Error: {}", e),
+//!     Err(error) => eprintln!("Error: {error}"),
 //! }
 //! ```
 //!
-//! The returned [`Article`] contains:
-//! - `title` - The article title
-//! - `content` - The article content as HTML
-//! - `text_content` - The article content as plain text
-//! - `byline` - The author byline
-//! - `excerpt` - A short excerpt from the article
-//! - `site_name` - The site name
-//! - `published_time` - The published time
-//! - `dir` - Text direction (ltr or rtl)
-//! - `lang` - Document language
-//! - `length` - Length of the text content
+//! The optional URL must be absolute. Legible uses it as the base URL for relative
+//! links and media URLs. Relative URLs stay relative if you pass `None`.
 //!
-//! ## Checking Readability
+//! [`Article`] provides HTML, CommonMark, normalized plain text, and article metadata.
 //!
-//! You can quickly check if a document is likely to be parseable without running
-//! the full algorithm:
+//! ## Check a document before extraction
 //!
-//! ```rust
-//! use legible::is_probably_readerable;
+//! [`is_probably_readerable`] performs a quick content check. This check is a
+//! heuristic. A `true` result does not guarantee successful extraction. A `false`
+//! result does not prove that the document has no article.
 //!
-//! let html = "<html><body><article>Long article content...</article></body></html>";
-//! if is_probably_readerable(html, None) {
-//!     println!("Document appears to be readerable");
-//! }
-//! ```
-//!
-//! ## Pre-parsed Document
-//!
-//! If you want to check readability before parsing, use [`Document`] to avoid
-//! parsing the HTML twice:
+//! Use [`Document`] if you want to run the check and then extract the article.
+//! `Document` prevents a second HTML parse.
 //!
 //! ```rust
 //! use legible::Document;
 //!
-//! let html = r#"
-//!     <html>
-//!     <head><title>My Article</title></head>
-//!     <body>
-//!         <article>
-//!             <h1>Article Title</h1>
-//!             <p>This is the main content of the article. It contains several
-//!             paragraphs of text that make up the body of the article.</p>
-//!             <p>More content here to ensure we have enough text for the
-//!             readability algorithm to work with properly.</p>
-//!         </article>
-//!     </body>
-//!     </html>
-//! "#;
+//! let text = "Article text. ".repeat(30);
+//! let html = format!("<article><p>{text}</p></article>");
+//! let document = Document::new(&html);
 //!
-//! let doc = Document::new(html);
-//!
-//! if doc.is_probably_readerable(None) {
-//!     match doc.parse(Some("https://example.com"), None) {
-//!         Ok(article) => println!("Title: {}", article.title),
-//!         Err(e) => eprintln!("Error: {}", e),
-//!     }
+//! if document.is_probably_readerable(None) {
+//!     let result = document.parse(Some("https://example.com/articles/1"), None);
+//!     // Use the extraction result.
 //! }
 //! ```
 //!
-//! ## Configuration
+//! The check borrows the document. Extraction consumes it because extraction changes
+//! the internal document tree.
 //!
-//! Use the [`Options`] builder to customize parsing behavior:
+//! ## Configure extraction
+//!
+//! Use [`Options`] to configure extraction. Use [`ReaderableOptions`] to configure the
+//! quick content check.
 //!
 //! ```rust
-//! use legible::{parse, Options};
-//!
-//! let html = "<html><body><article>Content...</article></body></html>";
+//! use legible::{Options, parse};
 //!
 //! let options = Options::new()
-//!     .char_threshold(250)        // Minimum article length (default: 500)
-//!     .keep_classes(true)         // Preserve CSS classes in output
-//!     .disable_json_ld(true);     // Skip JSON-LD metadata extraction
+//!     .char_threshold(250)
+//!     .keep_classes(true)
+//!     .disable_json_ld(true);
 //!
-//! let article = parse(html, Some("https://example.com"), Some(options));
+//! let result = parse(
+//!     "<html><body><article><p>Article text</p></article></body></html>",
+//!     Some("https://example.com/articles/1"),
+//!     Some(options),
+//! );
 //! ```
-//!
-//! See [`Options`] for all available configuration options.
 //!
 //! ## Security
 //!
-//! The extracted HTML content is **unsanitized** and may contain malicious scripts or
-//! other dangerous content from the source document. Before rendering this HTML in a
-//! browser or other context where scripts could execute, you should sanitize it using
-//! a library like [`ammonia`](https://docs.rs/ammonia):
+//! **Do not render [`Article::content`] without sanitizing it.**
 //!
-//! ```rust,ignore
-//! let article = parse(html, Some(url), None)?;
-//! let safe_html = ammonia::clean(&article.content);
-//! ```
+//! Legible cleans article content, but it is not an HTML security sanitizer. The HTML
+//! can contain unsafe attributes, URLs, or other source markup. Apply a sanitizer that
+//! matches your security policy before you render the HTML.
 //!
-//! `Article::markdown_content` is safe CommonMark output. It does not emit active raw
-//! HTML, and it omits links and images that use unsafe URI schemes.
-//!
-//! ## How It Works
-//!
-//! Legible implements the same algorithm as Readability.js:
-//!
-//! 1. **Document Preparation** - Removes scripts, normalizes markup, fixes lazy-loaded images
-//! 2. **Metadata Extraction** - Extracts title, byline, and other metadata from JSON-LD,
-//!    OpenGraph tags, and meta elements
-//! 3. **Content Scoring** - Scores DOM nodes based on tag type, text density, and class/id patterns
-//! 4. **Candidate Selection** - Identifies the highest-scoring content container
-//! 5. **Content Cleaning** - Removes low-scoring elements, empty containers, and non-content markup
+//! [`Article::markdown_content`] does not contain raw HTML. It removes links and images
+//! that have unsupported URI schemes. If you convert the Markdown to HTML, sanitize
+//! that HTML according to your application's security policy.
 
 mod cleaning;
 mod constants;
@@ -164,43 +118,40 @@ pub use options::{Options, ReaderableOptions};
 pub use readability::Article;
 pub use readerable::is_probably_readerable;
 
-/// Parse an HTML document and extract the article content.
+/// Extract article content and metadata from an HTML document.
 ///
-/// This is the main entry point for content extraction. It parses the HTML, identifies
-/// the main article content, and returns an [`Article`] with the extracted content
-/// and metadata.
+/// Use this function for a single extraction. Use [`Document`] if you first call
+/// [`is_probably_readerable`]. A `Document` prevents a second HTML parse.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * `html` - The HTML content to parse
-/// * `url` - Optional base URL for resolving relative links. If provided, relative URLs
-///   in the extracted content will be converted to absolute URLs.
-/// * `options` - Optional [`Options`] to customize parsing behavior
+/// * `html` is the source HTML.
+/// * `url` is an optional absolute base URL. Legible resolves relative link and media
+///   URLs against this value. Relative URLs stay relative if this value is `None`.
+/// * `options` configures extraction. Default options apply if this value is `None`.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The provided URL is invalid ([`Error::InvalidUrl`])
-/// - The document has no `<body>` element ([`Error::NoBody`])
-/// - No article content could be extracted ([`Error::NoContent`])
-/// - The document exceeds `max_elems_to_parse` ([`Error::TooManyElements`])
+/// This function returns:
+///
+/// * [`Error::InvalidUrl`] if `url` is not a valid absolute URL.
+/// * [`Error::NoBody`] if the parsed document has no `<body>` element.
+/// * [`Error::NoContent`] if Legible cannot extract nonempty article content.
+/// * [`Error::TooManyElements`] if the document exceeds
+///   [`Options::max_elems_to_parse`].
 ///
 /// # Example
 ///
 /// ```rust
-/// use legible::{parse, Options};
+/// use legible::{Options, parse};
 ///
-/// let html = "<html><body><article>Content...</article></body></html>";
-///
-/// // Basic usage
-/// let article = parse(html, None, None);
-///
-/// // With URL for resolving relative links
-/// let article = parse(html, Some("https://example.com/article"), None);
-///
-/// // With custom options
+/// let html = "<html><body><article><p>Article content.</p></article></body></html>";
 /// let options = Options::new().char_threshold(250);
-/// let article = parse(html, Some("https://example.com"), Some(options));
+/// let result = parse(
+///     html,
+///     Some("https://example.com/articles/1"),
+///     Some(options),
+/// );
 /// ```
 pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<Article> {
     Document::new(html).parse(url, options)
