@@ -1,4 +1,4 @@
-//! Main Readability extraction algorithm.
+//! Article extraction and its result type.
 #![allow(clippy::collapsible_if)]
 use crate::cleaning::*;
 use crate::constants::{
@@ -14,75 +14,83 @@ use regex::Regex;
 use smallvec::SmallVec;
 use url::Url;
 
-/// The extracted article content and metadata.
+/// Extracted article content and metadata.
+///
+/// Legible returns content in HTML, CommonMark, and normalized plain-text formats.
+/// Metadata fields are `None` when Legible cannot find the applicable value.
 ///
 /// # Example
 ///
 /// ```rust
 /// use legible::parse;
 ///
-/// let html = "<html><body><article><h1>Title</h1><p>Content...</p></article></body></html>";
+/// let html = "<html><body><article><h1>Title</h1><p>Article content.</p></article></body></html>";
 ///
 /// if let Ok(article) = parse(html, None, None) {
 ///     println!("Title: {}", article.title);
 ///     println!("Author: {:?}", article.byline);
 ///     println!("HTML length: {} bytes", article.content.len());
-///     println!("Text length: {} chars", article.length);
+///     println!("Text length: {} characters", article.length);
 /// }
 /// ```
 ///
 /// # Security
 ///
-/// The [`content`](Article::content) field contains unsanitized HTML. Sanitize it before
-/// you render it in a context where scripts or other unsafe content can execute.
-/// [`markdown_content`](Article::markdown_content) does not contain active raw HTML and
-/// omits destinations that use unsafe URI schemes.
+/// **Do not render [`content`](Article::content) without sanitizing it.** Legible cleans
+/// article content, but it is not an HTML security sanitizer.
+///
+/// [`markdown_content`](Article::markdown_content) does not contain raw HTML. It removes
+/// destinations that have unsupported URI schemes. If you convert the Markdown to HTML,
+/// sanitize that HTML according to your application's security policy.
 ///
 /// ```rust,ignore
 /// let safe_html = ammonia::clean(&article.content);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Article {
-    /// The article title.
+    /// Article title.
     ///
-    /// This value can come from the `<title>` tag, a heading, or document metadata.
+    /// This value can come from the `<title>` element, a heading, or page metadata.
     pub title: String,
 
-    /// The author byline.
+    /// Author byline, if found.
     pub byline: Option<String>,
 
-    /// The text direction, such as `"ltr"` or `"rtl"`.
+    /// Text direction from the source, such as `"ltr"` or `"rtl"`.
     pub dir: Option<String>,
 
-    /// The document language, such as `"en"` or `"fr"`.
+    /// Document language from the source, such as `"en"` or `"fr"`.
     pub lang: Option<String>,
 
-    /// The cleaned article content as HTML.
+    /// Extracted article content as an HTML fragment.
     ///
-    /// This HTML is unsanitized. Sanitize it before you render it.
+    /// This HTML is not sanitized. It can contain unsafe attributes, URLs, or other
+    /// source markup. Apply an HTML sanitizer before you render it.
     pub content: String,
 
-    /// The article content as plain text.
+    /// Extracted article content as normalized plain text.
     pub text_content: String,
 
-    /// The article content as Markdown.
+    /// Extracted article content as CommonMark.
     ///
-    /// This field is generated directly from the same cleaned DOM subtree as
-    /// [`content`](Article::content). Text cannot become raw HTML or Markdown syntax.
-    /// Links allow HTTP, HTTPS, email, telephone, fragment, and relative destinations.
-    /// Images allow only HTTP, HTTPS, and relative destinations.
+    /// Legible creates this value from the same document tree as
+    /// [`content`](Article::content). It escapes source text and does not include raw
+    /// HTML. Links can use HTTP, HTTPS, email, telephone, fragment, and relative
+    /// destinations. Images can use HTTP, HTTPS, and relative destinations.
     pub markdown_content: String,
 
-    /// The length of [`text_content`](Article::text_content) in characters.
+    /// Number of characters in [`text_content`](Article::text_content).
     pub length: usize,
 
-    /// A short article excerpt.
+    /// Short article excerpt, if found.
     pub excerpt: Option<String>,
 
-    /// The site name.
+    /// Site name, if found.
     pub site_name: Option<String>,
 
-    /// The publication time as an ISO 8601 string.
+    /// Publication time from page metadata, if found.
+    ///
+    /// Legible does not validate or change the source format.
     pub published_time: Option<String>,
 }
 pub(crate) struct Readability<'a> {

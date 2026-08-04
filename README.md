@@ -3,22 +3,26 @@
 [![Crates.io](https://img.shields.io/crates/v/legible.svg)](https://crates.io/crates/legible)
 [![Documentation](https://docs.rs/legible/badge.svg)](https://docs.rs/legible)
 
-A Rust port of Mozilla's [Readability.js](https://github.com/mozilla/readability) for extracting readable content from web pages.
-
-Legible analyzes HTML documents and extracts the main article content, stripping away navigation, ads, sidebars, and other non-content elements to produce clean, readable output.
+Legible extracts the main article from an HTML document. It removes navigation, advertisements, sidebars, and other unrelated content. Legible is a Rust port of Mozilla's [Readability.js](https://github.com/mozilla/readability).
 
 ## Installation
 
-Add to your `Cargo.toml`:
+Run this command:
+
+```bash
+cargo add legible
+```
+
+Or add the dependency to `Cargo.toml`:
 
 ```toml
 [dependencies]
 legible = "0.4"
 ```
 
-## Usage
+## Extract an article
 
-### Basic Extraction
+Use `parse` for most applications:
 
 ```rust
 use legible::parse;
@@ -30,129 +34,154 @@ let html = r#"
         <nav>Navigation</nav>
         <article>
             <h1>Article Title</h1>
-            <p>This is the main content of the article...</p>
+            <p>This is the main content of the article.</p>
+            <p>This second paragraph contains more article text.</p>
         </article>
         <footer>Footer</footer>
     </body>
     </html>
 "#;
 
-match parse(html, Some("https://example.com"), None) {
+match parse(html, Some("https://example.com/articles/1"), None) {
     Ok(article) => {
         println!("Title: {}", article.title);
-        println!("Content: {}", article.content);
+        println!("HTML: {}", article.content);
+        println!("Markdown: {}", article.markdown_content);
         println!("Text: {}", article.text_content);
     }
-    Err(e) => eprintln!("Error: {}", e),
+    Err(error) => eprintln!("Error: {error}"),
 }
 ```
 
-### Quick Readability Check
+The optional URL must be an absolute URL. Legible uses it as the base URL for relative links and media URLs. Relative URLs stay relative if you pass `None`.
 
-Before running the full extraction, you can check if a document is likely to contain readable content:
+## Check a document before extraction
+
+`is_probably_readerable` performs a quick content check. The check is a heuristic. A `true` result does not guarantee successful extraction. A `false` result does not prove that the document has no article.
 
 ```rust
 use legible::is_probably_readerable;
 
-if is_probably_readerable(html, None) {
-    // Document appears to have extractable content
+let text = "Article text. ".repeat(30);
+let html = format!("<article><p>{text}</p></article>");
+
+if is_probably_readerable(&html, None) {
+    // The document probably contains an article.
 }
 ```
 
-### Pre-parsed Document
-
-If you want to check readability before parsing, use `Document` to parse the HTML once and reuse it for both operations:
+This function parses the HTML. If you also want to extract the article, use `Document` to avoid a second HTML parse:
 
 ```rust
 use legible::Document;
 
-let doc = Document::new(html);
+let text = "Article text. ".repeat(30);
+let html = format!("<article><p>{text}</p></article>");
+let document = Document::new(&html);
 
-if doc.is_probably_readerable(None) {
-    match doc.parse(Some("https://example.com"), None) {
+if document.is_probably_readerable(None) {
+    match document.parse(Some("https://example.com/articles/1"), None) {
         Ok(article) => println!("Title: {}", article.title),
-        Err(e) => eprintln!("Error: {}", e),
+        Err(error) => eprintln!("Error: {error}"),
     }
 }
 ```
 
-`is_probably_readerable` borrows the document (read-only check), while `parse` consumes it (the extraction algorithm mutates the DOM).
+The readability check borrows the `Document`. Article extraction consumes it because extraction changes the internal document tree.
 
-### Extracted Article Fields
+## Article fields
 
-The `Article` struct contains:
+`parse` and `Document::parse` return an `Article` with these fields:
 
-| Field              | Type             | Description                       |
-| ------------------ | ---------------- | --------------------------------- |
-| `title`            | `String`         | The article title                 |
-| `content`          | `String`         | The article content as HTML       |
-| `markdown_content` | `String`         | Sanitized CommonMark content      |
-| `text_content`     | `String`         | The article content as plain text |
-| `byline`           | `Option<String>` | The author byline                 |
-| `excerpt`          | `Option<String>` | A short excerpt from the article  |
-| `site_name`        | `Option<String>` | The site name                     |
-| `published_time`   | `Option<String>` | The published time                |
-| `dir`              | `Option<String>` | Text direction (ltr or rtl)       |
-| `lang`             | `Option<String>` | Document language                 |
-| `length`           | `usize`          | Length of the text content        |
+| Field              | Type             | Description                                      |
+| ------------------ | ---------------- | ------------------------------------------------ |
+| `title`            | `String`         | Article title                                    |
+| `content`          | `String`         | Extracted HTML; not sanitized                    |
+| `markdown_content` | `String`         | CommonMark without raw HTML or unsupported URI schemes |
+| `text_content`     | `String`         | Normalized plain text                            |
+| `byline`           | `Option<String>` | Author byline                                    |
+| `excerpt`          | `Option<String>` | Short article excerpt                            |
+| `site_name`        | `Option<String>` | Site name                                        |
+| `published_time`   | `Option<String>` | Publication time from the source metadata        |
+| `dir`              | `Option<String>` | Text direction, such as `ltr` or `rtl`            |
+| `lang`             | `Option<String>` | Document language, such as `en` or `fr`           |
+| `length`           | `usize`          | Number of characters in `text_content`            |
 
-## Configuration
+## Configure extraction
 
-Use the `Options` builder to customize parsing behavior:
+Use the `Options` builder and pass the result to `parse`:
 
 ```rust
-use legible::{parse, Options};
+use legible::{Options, parse};
 
 let options = Options::new()
-    .char_threshold(250)        // Minimum article length (default: 500)
-    .keep_classes(true)         // Preserve CSS classes in output
-    .disable_json_ld(true);     // Skip JSON-LD metadata extraction
+    .char_threshold(250)
+    .keep_classes(true)
+    .disable_json_ld(true);
 
-let article = parse(html, Some(url), Some(options));
+let result = parse(
+    "<html><body><article><p>Article text</p></article></body></html>",
+    Some("https://example.com/articles/1"),
+    Some(options),
+);
 ```
 
-### Available Options
+Extraction options have these defaults:
 
-| Option                  | Default    | Description                               |
-| ----------------------- | ---------- | ----------------------------------------- |
-| `max_elems_to_parse`    | `0`        | Maximum elements to parse (0 = unlimited) |
-| `nb_top_candidates`     | `5`        | Number of top candidates to consider      |
-| `char_threshold`        | `500`      | Minimum article character length          |
-| `keep_classes`          | `false`    | Preserve CSS classes in output            |
-| `classes_to_preserve`   | `["page"]` | Specific classes to keep                  |
-| `disable_json_ld`       | `false`    | Skip JSON-LD metadata extraction          |
-| `allowed_video_regex`   | -          | Custom regex for allowed video embeds     |
-| `link_density_modifier` | `0.0`      | Adjust link density threshold             |
-| `debug`                 | `false`    | Enable debug logging                      |
+| Option                  | Default    | Effect |
+| ----------------------- | ---------- | ------ |
+| `max_elems_to_parse`    | `0`        | Sets the maximum number of HTML elements to analyze. `0` sets no limit. |
+| `nb_top_candidates`     | `5`        | Sets the number of high-score content candidates to compare. |
+| `char_threshold`        | `500`      | Sets the target minimum article length. Legible retries with less filtering below this value. |
+| `keep_classes`          | `false`    | Keeps all CSS classes when set to `true`. |
+| `classes_to_preserve`   | `["page"]` | Lists CSS classes to keep when `keep_classes` is `false`. The builder method extends this list. |
+| `disable_json_ld`       | `false`    | Disables JSON-LD metadata extraction when set to `true`. |
+| `allowed_video_regex`   | `None`     | Uses a built-in list. A custom regular expression replaces that list. |
+| `link_density_modifier` | `0.0`      | Changes link-density limits. A positive value keeps more link-heavy content. |
+| `debug`                 | `false`    | Writes extraction decisions to standard error when set to `true`. |
+
+`char_threshold` is a retry threshold, not a strict minimum. After all retries, Legible can return shorter nonempty content.
+
+You can also configure the quick readability check:
+
+```rust
+use legible::{ReaderableOptions, is_probably_readerable};
+
+let options = ReaderableOptions::new()
+    .min_score(30.0)
+    .min_content_length(100);
+
+let text = "Article text. ".repeat(30);
+let html = format!("<article><p>{text}</p></article>");
+let likely_article = is_probably_readerable(&html, Some(options));
+```
+
+`min_score` defaults to `20.0`. `min_content_length` defaults to `140` characters.
 
 ## Security
 
-The extracted HTML content is **unsanitized** and may contain malicious scripts or other dangerous content from the source document. Before rendering this HTML in a browser or other context where scripts could execute, you should sanitize it using a library like [ammonia](https://docs.rs/ammonia):
+**Do not render `Article::content` without sanitizing it.**
+
+Legible cleans article content, but it is not an HTML security sanitizer. The HTML can contain unsafe attributes, URLs, or other source markup. Apply a sanitizer that matches your security policy before you render the HTML. For example, you can use [ammonia](https://docs.rs/ammonia):
 
 ```rust
-use legible::parse;
-
-let article = parse(html, Some(url), None)?;
-
-// Sanitize before rendering
+let article = legible::parse(html, Some(url), None)?;
 let safe_html = ammonia::clean(&article.content);
 ```
 
-`markdown_content` does not emit active raw HTML. It escapes source text and rejects
-links and images with unsafe URI schemes. HTTP, HTTPS, email, telephone, fragment, and
-relative links are allowed. Images allow only HTTP, HTTPS, and relative URLs.
+`markdown_content` does not contain raw HTML. It removes links and images that have unsupported URI schemes. Links can use HTTP, HTTPS, email, telephone, fragment, and relative destinations. Images can use HTTP, HTTPS, and relative destinations. If you convert the Markdown to HTML, sanitize that HTML according to your application's security policy.
 
-## How It Works
+## How Legible works
 
-Legible implements the same algorithm as Readability.js:
+Legible uses the Readability.js extraction process:
 
-1. **Document Preparation** - Removes scripts, normalizes markup, fixes lazy-loaded images
-2. **Metadata Extraction** - Extracts title, byline, and other metadata from JSON-LD, OpenGraph tags, and meta elements
-3. **Content Scoring** - Scores DOM nodes based on tag type, text density, and class/id patterns
-4. **Candidate Selection** - Identifies the highest-scoring content container
-5. **Content Cleaning** - Removes low-scoring elements, empty containers, and non-content markup
+1. It parses the HTML and prepares the document tree.
+2. It reads metadata from JSON-LD, OpenGraph properties, and meta elements.
+3. It scores content from its element type, text density, links, classes, and identifiers.
+4. It selects the content container with the highest score.
+5. It removes low-score elements, empty containers, and unrelated markup.
 
-The library is tested against Mozilla's official [Readability.js test suite](https://github.com/mozilla/readability/tree/main/test/test-pages).
+The test suite includes Mozilla's official [Readability.js test pages](https://github.com/mozilla/readability/tree/main/test/test-pages).
 
 ## License
 

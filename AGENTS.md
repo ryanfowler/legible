@@ -74,6 +74,14 @@ Initial scores by tag: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, ADDRESS/OL/UL/
 
 The algorithm retries with progressively fewer flags if initial extraction fails.
 
+## Documentation
+
+- Keep `README.md` and the public Rust API docs consistent.
+- Write user documentation in ASD-STE100 Simplified Technical English. Use short sentences, active voice, and consistent terms.
+- State that `Article::content` is not sanitized. Do not describe cleaned HTML as safe HTML.
+- State that `char_threshold` causes less-filtered retries and is not a strict output minimum.
+- State that the quick readability check is a heuristic and can return false positives or false negatives.
+
 ## Testing
 
 The custom DOM uses safe Rust only. Run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings` after DOM changes.

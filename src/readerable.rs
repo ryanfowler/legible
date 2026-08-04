@@ -1,4 +1,4 @@
-//! Functions to determine if a document is probably readerable.
+//! The quick check for readable article content.
 #![allow(clippy::collapsible_if)]
 use crate::constants::regexps;
 use crate::document::Document;
@@ -7,27 +7,32 @@ use crate::options::ReaderableOptions;
 use crate::scoring::is_probably_visible;
 use smallvec::SmallVec;
 
-/// Check if an HTML document probably contains readable article content.
+/// Checks if an HTML document probably contains readable article content.
 ///
-/// This quick heuristic scores visible paragraph-like elements by text length. It ignores
-/// elements that look like navigation, sidebars, or other non-content sections.
+/// This function parses the HTML and runs a quick heuristic. The heuristic scores
+/// visible paragraph-like elements by text length. It ignores elements that look like
+/// navigation, sidebars, or other unrelated sections.
 ///
-/// Use [`Document`](crate::Document) if you plan to extract the article after this check.
-/// It avoids parsing the HTML twice.
+/// A `true` result does not guarantee successful extraction. A `false` result does not
+/// prove that the document has no article.
 ///
-/// # Arguments
+/// Use [`Document`](crate::Document) if you want to extract the article after this
+/// check. A `Document` prevents a second HTML parse.
 ///
-/// * `html` - The HTML content to check.
-/// * `options` - Optional settings for the heuristic.
+/// # Parameters
+///
+/// * `html` is the source HTML.
+/// * `options` configures the heuristic. Default options apply if this value is `None`.
 ///
 /// # Example
 ///
 /// ```rust
 /// use legible::is_probably_readerable;
 ///
-/// let html = "<article><p>This is a substantial article with enough content for the check.</p></article>";
-/// if is_probably_readerable(html, None) {
-///     println!("Document is likely readerable");
+/// let text = "Article text. ".repeat(30);
+/// let html = format!("<article><p>{text}</p></article>");
+/// if is_probably_readerable(&html, None) {
+///     println!("The document probably contains an article.");
 /// }
 /// ```
 pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) -> bool {
