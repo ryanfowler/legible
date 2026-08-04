@@ -177,13 +177,18 @@ impl<'a> Readability<'a> {
         }
         let content = self.grab_article()?;
         let excerpt = self.metadata.excerpt.take().or(content.excerpt);
+        let markdown_content = crate::markdown::dom_to_markdown(
+            &self.dom,
+            content.article_root,
+            content.text_content.len(),
+        );
         Ok(Article {
             title: std::mem::take(&mut self.article_title),
             byline: self.metadata.byline.take().or(self.article_byline.take()),
             dir: self.article_dir.take(),
             lang: self.article_lang.take(),
             content: content.content_html,
-            markdown_content: crate::markdown::dom_to_markdown(&self.dom, content.article_root),
+            markdown_content,
             text_content: content.text_content,
             length: content.text_length,
             excerpt,

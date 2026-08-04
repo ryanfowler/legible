@@ -9,8 +9,8 @@ use smallvec::SmallVec;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 /// Serializes the children of `root` as CommonMark.
-pub(crate) fn dom_to_markdown(dom: &Dom, root: NodeId) -> String {
-    MarkdownSerializer::new(dom).serialize(root)
+pub(crate) fn dom_to_markdown(dom: &Dom, root: NodeId, capacity: usize) -> String {
+    MarkdownSerializer::new(dom, capacity).serialize(root)
 }
 
 #[derive(Clone, Copy)]
@@ -22,11 +22,10 @@ enum Mode {
 #[derive(Clone, Copy)]
 enum Task {
     Node(NodeId, Mode),
-    Children(NodeId, Mode),
     Siblings(NodeId, Mode),
     InlineRun(NodeId, RunKind),
     Close(Close),
-    ListItems(NodeId, i64, usize),
+    ListItems(NodeId, i32, u32),
     ListItem(NodeId, ListMarker),
     ItemParagraph(NodeId),
 }
@@ -52,14 +51,14 @@ impl RunKind {
 enum ListMarker {
     Bullet,
     Ordered,
-    OrderedStart(i64),
+    OrderedStart(i32),
 }
 
 #[derive(Clone, Copy)]
 enum Close {
     Block,
-    Marker(&'static str),
-    Literal(&'static str),
+    Marker(RunKind),
+    TableCellSeparator,
     Link(NodeId),
     Quote,
     List,
@@ -74,10 +73,10 @@ struct MarkdownSerializer<'a> {
 }
 
 impl<'a> MarkdownSerializer<'a> {
-    fn new(dom: &'a Dom) -> Self {
+    fn new(dom: &'a Dom, capacity: usize) -> Self {
         Self {
             dom,
-            out: Output::new(),
+            out: Output::new(capacity),
             tasks: Vec::new(),
             list_depth: 0,
         }
@@ -88,11 +87,6 @@ impl<'a> MarkdownSerializer<'a> {
         while let Some(task) = self.tasks.pop() {
             match task {
                 Task::Node(id, mode) => self.node(id, mode),
-                Task::Children(id, mode) => {
-                    if let Some(child) = self.dom.first_child(id) {
-                        self.tasks.push(Task::Siblings(child, mode));
-                    }
-                }
                 Task::Siblings(id, mode) => {
                     if let Some(kind) = self.run_kind(id) {
                         let mut after = self.dom.next_sibling(id);
@@ -121,7 +115,9 @@ impl<'a> MarkdownSerializer<'a> {
     }
 
     fn push_children(&mut self, id: NodeId, mode: Mode) {
-        self.tasks.push(Task::Children(id, mode));
+        if let Some(child) = self.dom.first_child(id) {
+            self.tasks.push(Task::Siblings(child, mode));
+        }
     }
 
     fn node(&mut self, id: NodeId, mode: Mode) {
@@ -205,8 +201,8 @@ impl<'a> MarkdownSerializer<'a> {
                 self.push_children(id, Mode::Inline);
             }
             Tag::Img => self.image(id),
-            Tag::Strong | Tag::B => self.format(id, "**"),
-            Tag::Em | Tag::I => self.format(id, "*"),
+            Tag::Strong | Tag::B => self.format(id, RunKind::Strong),
+            Tag::Em | Tag::I => self.format(id, RunKind::Emphasis),
             Tag::Code => self.code_span(id),
             Tag::Table => {
                 self.out.ensure_blank_line();
@@ -219,9 +215,10 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn format(&mut self, id: NodeId, marker: &'static str) {
+    fn format(&mut self, id: NodeId, kind: RunKind) {
+        let marker = kind.marker().expect("formatting element has a marker");
         self.out.open_marker(marker);
-        self.tasks.push(Task::Close(Close::Marker(marker)));
+        self.tasks.push(Task::Close(Close::Marker(kind)));
         self.push_children(id, Mode::Inline);
     }
 
@@ -248,7 +245,7 @@ impl<'a> MarkdownSerializer<'a> {
 
         let marker = kind.marker().expect("formatting run has a marker");
         self.out.open_marker(marker);
-        self.tasks.push(Task::Close(Close::Marker(marker)));
+        self.tasks.push(Task::Close(Close::Marker(kind)));
         let mut nodes = SmallVec::<[NodeId; 4]>::new();
         let mut current = Some(first);
         while let Some(id) = current.filter(|&id| self.run_kind(id) == Some(kind)) {
@@ -273,29 +270,26 @@ impl<'a> MarkdownSerializer<'a> {
         let start = self
             .dom
             .attr_by_local_name(id, "start")
-            .and_then(|value| value.parse::<i64>().ok())
+            .and_then(|value| value.parse::<i32>().ok())
             .filter(|value| (1..=999_999_999).contains(value))
             .unwrap_or(1);
         if let Some(child) = self.dom.first_child(id) {
             self.tasks.push(Task::ListItems(
                 child,
-                if ordered { start } else { i64::MIN },
+                if ordered { start } else { i32::MIN },
                 0,
             ));
         }
     }
 
-    fn list_items(&mut self, id: NodeId, start: i64, index: usize) {
+    fn list_items(&mut self, id: NodeId, start: i32, index: u32) {
         let is_item = self.dom.tag(id) == Some(Tag::Li);
         if let Some(sibling) = self.dom.next_sibling(id) {
-            self.tasks.push(Task::ListItems(
-                sibling,
-                start,
-                index + usize::from(is_item),
-            ));
+            self.tasks
+                .push(Task::ListItems(sibling, start, index + u32::from(is_item)));
         }
         if is_item {
-            let marker = if start == i64::MIN {
+            let marker = if start == i32::MIN {
                 ListMarker::Bullet
             } else if index == 0 && start != 1 {
                 ListMarker::OrderedStart(start)
@@ -373,7 +367,7 @@ impl<'a> MarkdownSerializer<'a> {
         for (index, cell) in cells.into_iter().enumerate().rev() {
             self.tasks.push(Task::Node(cell, Mode::Inline));
             if index != 0 {
-                self.tasks.push(Task::Close(Close::Literal(" | ")));
+                self.tasks.push(Task::Close(Close::TableCellSeparator));
             }
         }
     }
@@ -439,10 +433,11 @@ impl<'a> MarkdownSerializer<'a> {
     fn close(&mut self, close: Close) {
         match close {
             Close::Block => self.out.newline(),
-            Close::Marker(marker) => {
+            Close::Marker(kind) => {
+                let marker = kind.marker().expect("formatting close has a marker");
                 self.out.close_marker(marker, marker);
             }
-            Close::Literal(value) => self.out.markup(value),
+            Close::TableCellSeparator => self.out.markup(" | "),
             Close::Link(id) => {
                 if self.out.close_marker("[", "](") {
                     // HTML whitespace at the end of the label belongs after
@@ -519,9 +514,9 @@ struct Marker {
 }
 
 impl Output {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            value: String::with_capacity(512),
+            value: String::with_capacity(capacity.max(512)),
             pending_space: false,
             line_start: true,
             trailing_newlines: 0,
@@ -568,15 +563,23 @@ impl Output {
     }
 
     fn text(&mut self, text: &str) {
+        if text.is_ascii() {
+            self.ascii_text(text);
+            return;
+        }
+
+        let mut prepared = false;
         for ch in text.chars() {
             if ch.is_whitespace() {
                 self.pending_space |= !self.line_start;
                 continue;
             }
-            self.prefix();
-            self.flush_space();
-            self.open_pending_markers();
-            self.mark_list_item_content();
+            if prepared {
+                self.flush_space();
+            } else {
+                self.prepare_text();
+                prepared = true;
+            }
 
             let escape_line_marker = match self.line_text_state {
                 LineTextState::Start if ch.is_ascii_digit() => {
@@ -594,16 +597,93 @@ impl Output {
                 }
                 LineTextState::Other => false,
             };
-            if escape_line_marker
-                || matches!(
-                    ch,
-                    '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#' | '!'
-                )
-            {
+            if escape_line_marker || markdown_escape(ch) {
                 self.value.push('\\');
             }
             self.value.push(ch);
         }
+    }
+
+    fn ascii_text(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        let mut prepared = false;
+        while index < bytes.len() {
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                self.pending_space |= !self.line_start;
+                index += 1;
+            }
+            if index == bytes.len() {
+                break;
+            }
+
+            if prepared {
+                self.flush_space();
+            } else {
+                self.prepare_text();
+                prepared = true;
+            }
+            let start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            self.ascii_text_run(&text[start..index]);
+        }
+    }
+
+    fn ascii_text_run(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+
+        if matches!(
+            self.line_text_state,
+            LineTextState::Start | LineTextState::Digits
+        ) {
+            if matches!(self.line_text_state, LineTextState::Start) && !bytes[0].is_ascii_digit() {
+                self.line_text_state = LineTextState::Other;
+                self.push_ascii_text_byte(bytes[0], matches!(bytes[0], b'-' | b'+' | b'=' | b'~'));
+                index = 1;
+            } else {
+                let digits_start = index;
+                while index < bytes.len() && bytes[index].is_ascii_digit() {
+                    index += 1;
+                }
+                self.value.push_str(&text[digits_start..index]);
+                self.line_text_state = LineTextState::Digits;
+                if index == bytes.len() {
+                    return;
+                }
+                self.line_text_state = LineTextState::Other;
+                self.push_ascii_text_byte(bytes[index], matches!(bytes[index], b'.' | b')'));
+                index += 1;
+            }
+        }
+
+        let mut copy_start = index;
+        while index < bytes.len() {
+            if markdown_escape_byte(bytes[index]) {
+                self.value.push_str(&text[copy_start..index]);
+                self.value.push('\\');
+                self.value.push(bytes[index] as char);
+                copy_start = index + 1;
+            }
+            index += 1;
+        }
+        self.value.push_str(&text[copy_start..]);
+    }
+
+    fn prepare_text(&mut self) {
+        self.prefix();
+        self.flush_space();
+        self.open_pending_markers();
+        self.mark_list_item_content();
+    }
+
+    fn push_ascii_text_byte(&mut self, byte: u8, escape_line_marker: bool) {
+        if escape_line_marker || markdown_escape_byte(byte) {
+            self.value.push('\\');
+        }
+        self.value.push(byte as char);
     }
 
     fn label(&mut self, text: &str) {
@@ -804,6 +884,20 @@ fn matches_ignore_ascii_case(value: &str, allowed: &[&str]) -> bool {
     allowed.iter().any(|item| value.eq_ignore_ascii_case(item))
 }
 
+fn markdown_escape(ch: char) -> bool {
+    matches!(
+        ch,
+        '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#' | '!'
+    )
+}
+
+fn markdown_escape_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'\\' | b'`' | b'*' | b'_' | b'[' | b']' | b'<' | b'>' | b'|' | b'#' | b'!'
+    )
+}
+
 fn longest_run(bytes: &[u8], needle: u8) -> usize {
     let mut longest = 0;
     let mut current = 0;
@@ -844,7 +938,7 @@ mod tests {
 
     fn markdown(html: &str) -> String {
         let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
-        dom_to_markdown(&dom, dom.root())
+        dom_to_markdown(&dom, dom.root(), 0)
     }
 
     #[test]
