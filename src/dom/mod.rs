@@ -6,6 +6,7 @@ mod mutation;
 mod node;
 mod parse;
 mod query;
+#[cfg(test)]
 mod serialize;
 mod state;
 mod tag;

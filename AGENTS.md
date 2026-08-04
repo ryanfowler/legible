@@ -31,7 +31,9 @@ The extraction pipeline flows through these stages:
 
 ### Key Modules
 
-- **`document.rs`** - Public `Document<'a>` struct for pre-parsing HTML once; delegates to `readerable` and `readability` internally
+- **`document.rs`** - Public fallible `Document<'a>` parser for checking readability before extraction
+- **`extractor.rs`** - Reusable extraction configuration and the primary extraction entry points
+- **`article.rs` / `article_tree.rs`** - Private-field public result API and compact immutable `Send + Sync` output tree
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
@@ -93,17 +95,15 @@ Extraction with default options must return `Error::NoContent` when the best ret
 ## Public API
 
 ```rust
-use legible::{parse, Options, is_probably_readerable, Document};
+use legible::{extract, Document, Extractor};
 
-// Full extraction
-let article = parse(html, Some("https://example.com"), None)?;  // Returns Article with title, content, text_content, byline, excerpt, etc.
+let article = extract(html)?;
+let markdown = article.to_markdown();
 
-// Quick check without full parsing
-if is_probably_readerable(html, None) { /* ... */ }
-
-// Pre-parsed document (avoids parsing HTML twice when checking readability before extracting)
-let doc = Document::new(html);
-if doc.is_probably_readerable(None) {          // borrows — read-only check
-    let article = doc.parse(Some(url), None)?; // consumes — extraction mutates the DOM
+let document = Document::parse(html)?;
+if document.is_probably_readable() {
+    let article = Extractor::default().extract_document(document)?;
 }
 ```
+
+The deprecated `parse` adapter returns `legacy::Article` with the 0.4 public string fields.

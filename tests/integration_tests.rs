@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Integration tests against Mozilla's readability test suite.
 
 use legible::parse;

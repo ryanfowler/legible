@@ -16,7 +16,7 @@ use regex::Regex;
 /// ```
 ///
 /// `Options::new()` and `Options::default()` return the same values.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Maximum number of HTML elements that the document can contain.
     ///
@@ -69,11 +69,14 @@ pub struct Options {
     /// value removes more link-heavy content.
     pub link_density_modifier: f64,
 
-    /// Controls debug output.
+    /// Controls extraction debug events.
     ///
-    /// The default is `false`. If this value is `true`, Legible writes extraction
-    /// decisions to standard error.
+    /// The default is `false`. With the `tracing` feature, `true` emits events to the
+    /// configured tracing subscriber. Without that feature, this value has no effect.
     pub debug: bool,
+
+    /// Enabled metadata source groups. Internal 0.5 extractor configuration.
+    pub(crate) metadata_sources: u8,
 }
 
 impl Default for Options {
@@ -88,6 +91,7 @@ impl Default for Options {
             allowed_video_regex: None,
             link_density_modifier: 0.0,
             debug: false,
+            metadata_sources: 0b1111,
         }
     }
 }
@@ -148,7 +152,7 @@ impl Options {
         self
     }
 
-    /// Sets whether Legible writes debug output to standard error.
+    /// Sets whether Legible emits extraction debug events.
     pub fn debug(mut self, debug: bool) -> Self {
         self.debug = debug;
         self
@@ -182,6 +186,9 @@ pub struct ReaderableOptions {
     /// The default is `140` characters. The check ignores shorter elements.
     pub min_content_length: usize,
 }
+
+/// Options for the quick readability heuristic.
+pub type ReadabilityOptions = ReaderableOptions;
 
 impl Default for ReaderableOptions {
     fn default() -> Self {

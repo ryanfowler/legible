@@ -3,6 +3,7 @@ use html5ever::QualName;
 use tendril::StrTendril;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) enum NodeData {
     Document,
     Fragment,

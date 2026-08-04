@@ -2,6 +2,20 @@
 
 use thiserror::Error;
 
+/// An HTML parser failure.
+#[derive(Error, Debug)]
+#[error("{message}")]
+pub struct ParseError {
+    pub(crate) message: String,
+}
+impl ParseError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// Errors from article extraction.
 ///
 /// [`parse()`](crate::parse) and [`Document::parse`](crate::Document::parse) return these
@@ -21,22 +35,32 @@ use thiserror::Error;
 /// ```
 #[derive(Error, Debug)]
 pub enum Error {
+    /// Extraction configuration is invalid.
+    #[error("invalid extraction configuration: {message}")]
+    InvalidConfiguration { message: String },
+
+    /// HTML parsing could not create a document tree.
+    #[error("HTML parsing failed: {0}")]
+    Parse(#[from] ParseError),
+
+    /// The input exceeds the configured byte limit.
+    #[error("document input is {actual} bytes; limit is {limit}")]
+    InputTooLarge { actual: usize, limit: usize },
+
     /// The document exceeds the configured element limit.
     ///
-    /// The first value is the number of HTML elements in the document. The second value
-    /// is [`Options::max_elems_to_parse`](crate::Options::max_elems_to_parse).
-    #[error("Aborting parsing document; {0} elements found (max: {1})")]
-    TooManyElements(usize, usize),
+    #[error("document contains more than {limit} elements")]
+    TooManyElements { limit: usize },
 
     /// Legible cannot extract nonempty article content.
     ///
     /// The document can have too little readable text, or its structure can have no
     /// identifiable article.
-    #[error("Failed to extract article content from the document")]
+    #[error("no readable article content was found")]
     NoContent,
 
     /// The parsed document has no `<body>` element.
-    #[error("No body found in document")]
+    #[error("the document has no body")]
     NoBody,
 
     /// The specified base URL is invalid.

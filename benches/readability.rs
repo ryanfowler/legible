@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::{Document, Options, is_probably_readerable, parse};
+use legible::{Document, Extractor, extract, is_probably_readable};
 use std::fs;
 use std::hint::black_box;
 
@@ -18,7 +18,7 @@ fn bench_dom_parse(c: &mut Criterion) {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &html, |b, html| {
-            b.iter(|| Document::new(black_box(html)))
+            b.iter(|| Document::parse(black_box(html)))
         });
     }
     group.finish();
@@ -49,29 +49,29 @@ fn bench_parse(c: &mut Criterion) {
     ];
 
     // Benchmark small articles
-    for (name, url) in small_articles {
+    for (name, _url) in small_articles {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("small", name), &html, |b, html| {
-            b.iter(|| parse(black_box(html), Some(url), None))
+            b.iter(|| extract(black_box(html)))
         });
     }
 
     // Benchmark medium articles
-    for (name, url) in medium_articles {
+    for (name, _url) in medium_articles {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("medium", name), &html, |b, html| {
-            b.iter(|| parse(black_box(html), Some(url), None))
+            b.iter(|| extract(black_box(html)))
         });
     }
 
     // Benchmark large articles
-    for (name, url) in large_articles {
+    for (name, _url) in large_articles {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("large", name), &html, |b, html| {
-            b.iter(|| parse(black_box(html), Some(url), None))
+            b.iter(|| extract(black_box(html)))
         });
     }
 
@@ -81,19 +81,43 @@ fn bench_parse(c: &mut Criterion) {
 /// Benchmark the full four-pass fallback path.
 fn bench_parse_retries(c: &mut Criterion) {
     let html = load_test_page("medium-2");
-    let options = Options::new().char_threshold(usize::MAX);
+    let extractor = Extractor::builder()
+        .retry_length_threshold(usize::MAX)
+        .build()
+        .unwrap();
     c.bench_function("parse_retries/medium-2", |b| {
+        b.iter(|| extractor.extract(black_box(&html)))
+    });
+}
+
+/// Benchmark extraction separately from each on-demand renderer.
+fn bench_output_formats(c: &mut Criterion) {
+    let html = load_test_page("medium-2");
+    let extractor = Extractor::default();
+    c.bench_function("extract_only/medium-2", |b| {
+        b.iter(|| extractor.extract(black_box(&html)))
+    });
+    for (name, render) in [
+        (
+            "extract_and_html",
+            legible::Article::to_html as fn(&legible::Article) -> String,
+        ),
+        ("extract_and_markdown", legible::Article::to_markdown),
+        ("extract_and_text", legible::Article::to_text),
+    ] {
+        c.bench_function(&format!("{name}/medium-2"), |b| {
+            b.iter(|| render(&extractor.extract(black_box(&html)).unwrap()))
+        });
+    }
+    c.bench_function("extract_and_all_formats/medium-2", |b| {
         b.iter(|| {
-            parse(
-                black_box(&html),
-                Some("https://medium.com"),
-                Some(options.clone()),
-            )
+            let article = extractor.extract(black_box(&html)).unwrap();
+            (article.to_html(), article.to_markdown(), article.to_text())
         })
     });
 }
 
-/// Benchmark is_probably_readerable check
+/// Benchmark is_probably_readable check
 fn bench_readerable(c: &mut Criterion) {
     let mut group = c.benchmark_group("is_probably_readerable");
 
@@ -107,7 +131,7 @@ fn bench_readerable(c: &mut Criterion) {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
-            b.iter(|| is_probably_readerable(black_box(html), None))
+            b.iter(|| is_probably_readable(black_box(html), None))
         });
     }
 
@@ -125,11 +149,11 @@ fn bench_complex_pages(c: &mut Criterion) {
         ("guardian-1", "https://theguardian.com"), // ~1.16MB, news with heavy layout
     ];
 
-    for (name, url) in complex_pages {
+    for (name, _url) in complex_pages {
         let html = load_test_page(name);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new("page", name), &html, |b, html| {
-            b.iter(|| parse(black_box(html), Some(url), None))
+            b.iter(|| extract(black_box(html)))
         });
     }
 
@@ -153,7 +177,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(depth as u64));
         group.bench_with_input(BenchmarkId::from_parameter(depth), &html, |b, html| {
-            b.iter(|| Document::new(black_box(html)))
+            b.iter(|| Document::parse(black_box(html)))
         });
     }
 
@@ -165,6 +189,7 @@ criterion_group!(
     bench_dom_parse,
     bench_parse,
     bench_parse_retries,
+    bench_output_formats,
     bench_readerable,
     bench_complex_pages,
     bench_deeply_nested

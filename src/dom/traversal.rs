@@ -267,6 +267,7 @@ impl Dom {
         }
         Some(count)
     }
+    #[cfg(test)]
     pub(crate) fn normalized_text(&self, root: NodeId, initial_capacity: usize) -> (String, usize) {
         let mut out = String::with_capacity(initial_capacity);
         let mut char_count = 0;

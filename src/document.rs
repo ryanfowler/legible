@@ -1,8 +1,8 @@
 //! A parsed HTML document for a readability check followed by extraction.
 use crate::dom::Dom;
 use crate::error::Result;
-use crate::options::{Options, ReaderableOptions};
-use crate::readability::{Article, Readability};
+use crate::options::ReaderableOptions;
+
 use crate::readerable::is_probably_readerable_doc;
 
 /// A parsed HTML document.
@@ -17,12 +17,13 @@ use crate::readerable::is_probably_readerable_doc;
 ///
 /// let text = "Article text. ".repeat(30);
 /// let html = format!("<article><h1>Title</h1><p>{text}</p></article>");
-/// let document = Document::new(&html);
+/// let document = Document::parse(&html)?;
 ///
-/// if document.is_probably_readerable(None) {
-///     let result = document.parse(Some("https://example.com/articles/1"), None);
+/// if document.is_probably_readable() {
+///     let result = legible::Extractor::default().extract_document(document);
 ///     // Use the extraction result.
 /// }
+/// # Ok::<(), legible::Error>(())
 /// ```
 ///
 /// # Ownership
@@ -32,38 +33,43 @@ use crate::readerable::is_probably_readerable_doc;
 /// extraction changes the internal document tree.
 pub struct Document<'a> {
     pub(crate) doc: Dom,
-    html: &'a str,
+    pub(crate) html: &'a str,
 }
 impl<'a> Document<'a> {
     /// Parses an HTML string and stores the document tree.
     ///
     /// The document borrows `html`. The source string must exist for as long as the
     /// document.
+    #[deprecated(since = "0.5.0", note = "use Document::parse")]
     pub fn new(html: &'a str) -> Self {
-        Self {
-            doc: Dom::parse_document(html).expect("HTML DOM node limit exceeded"),
-            html,
-        }
+        Self::parse(html).expect("HTML parsing failed")
+    }
+
+    /// Parses HTML into a reusable document.
+    pub fn parse(html: &'a str) -> Result<Self> {
+        let doc = Dom::parse_document(html)
+            .map_err(|error| crate::error::ParseError::new(error.to_string()))?;
+        Ok(Self { doc, html })
     }
     /// Checks if this document probably contains readable article content.
     ///
     /// This quick check is a heuristic. A `true` result does not guarantee successful
     /// extraction. A `false` result does not prove that the document has no article.
-    /// This method borrows the document, so you can call [`Document::parse`] after it.
+    /// This method borrows the document. You can later pass the document to
+    /// [`Extractor::extract_document`](crate::Extractor::extract_document).
     /// Default options apply if `options` is `None`.
     pub fn is_probably_readerable(&self, options: Option<ReaderableOptions>) -> bool {
         is_probably_readerable_doc(&self.doc, options)
     }
 
-    /// Extracts article content and metadata from this document.
-    ///
-    /// This method consumes the document because extraction changes the internal
-    /// document tree. `url` must be an absolute base URL if it is present. Default
-    /// extraction options apply if `options` is `None`.
-    ///
-    /// See [`parse`](crate::parse) for all parameters and errors.
-    pub fn parse(self, url: Option<&str>, options: Option<Options>) -> Result<Article> {
-        Readability::from_document(self.doc, self.html, url, options).parse()
+    /// Uses default options for the quick readability heuristic.
+    pub fn is_probably_readable(&self) -> bool {
+        is_probably_readerable_doc(&self.doc, None)
+    }
+
+    /// Uses explicit options for the quick readability heuristic.
+    pub fn is_probably_readable_with(&self, options: &ReaderableOptions) -> bool {
+        is_probably_readerable_doc(&self.doc, Some(options.clone()))
     }
 }
 #[cfg(test)]
@@ -72,11 +78,19 @@ mod tests {
     #[test]
     fn test_readerable_check() {
         let s = "a ".repeat(300);
-        assert!(Document::new(&format!("<p>{s}</p>")).is_probably_readerable(None));
+        assert!(
+            Document::parse(&format!("<p>{s}</p>"))
+                .unwrap()
+                .is_probably_readable()
+        );
     }
     #[test]
     fn test_not_readerable() {
-        assert!(!Document::new("<p>Short</p>").is_probably_readerable(None));
+        assert!(
+            !Document::parse("<p>Short</p>")
+                .unwrap()
+                .is_probably_readable()
+        );
     }
 
     #[test]
@@ -87,7 +101,7 @@ mod tests {
             "<html><body><img src=\"article.jpg\" alt=\"Article image\"></body></html>",
         ] {
             assert!(matches!(
-                Document::new(html).parse(None, None),
+                crate::Extractor::default().extract_document(Document::parse(html).unwrap()),
                 Err(crate::Error::NoContent)
             ));
         }

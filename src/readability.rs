@@ -36,10 +36,10 @@ use url::Url;
 ///
 /// # Security
 ///
-/// **Do not render [`content`](Article::content) without sanitizing it.** Legible cleans
-/// article content, but it is not an HTML security sanitizer.
+/// **Do not render [`content`](LegacyArticle::content) without sanitizing it.** Legible
+/// cleans article content, but it is not an HTML security sanitizer.
 ///
-/// [`markdown_content`](Article::markdown_content) does not contain raw HTML. It removes
+/// [`markdown_content`](LegacyArticle::markdown_content) does not contain raw HTML. It removes
 /// destinations that have unsupported URI schemes. If you convert the Markdown to HTML,
 /// sanitize that HTML according to your application's security policy.
 ///
@@ -47,7 +47,7 @@ use url::Url;
 /// let safe_html = ammonia::clean(&article.content);
 /// ```
 #[derive(Debug, Clone)]
-pub struct Article {
+pub struct LegacyArticle {
     /// Article title.
     ///
     /// This value can come from the `<title>` element, a heading, or page metadata.
@@ -74,12 +74,12 @@ pub struct Article {
     /// Extracted article content as CommonMark.
     ///
     /// Legible creates this value from the same document tree as
-    /// [`content`](Article::content). It escapes source text and does not include raw
+    /// [`content`](LegacyArticle::content). It escapes source text and does not include raw
     /// HTML. Links can use HTTP, HTTPS, email, telephone, fragment, and relative
     /// destinations. Images can use HTTP, HTTPS, and relative destinations.
     pub markdown_content: String,
 
-    /// Number of characters in [`text_content`](Article::text_content).
+    /// Number of characters in [`text_content`](LegacyArticle::text_content).
     pub length: usize,
 
     /// Short article excerpt, if found.
@@ -117,12 +117,9 @@ struct FrozenContent {
     dom: Dom,
 }
 struct ArticleContent {
-    content_html: String,
-    text_content: String,
     text_length: usize,
     excerpt: Option<String>,
-    /// The node whose children produce the serialized content.
-    /// Valid in `self.dom` after `grab_article` returns.
+    /// The node whose children form the output fragment.
     article_root: NodeId,
 }
 impl<'a> Readability<'a> {
@@ -155,7 +152,32 @@ impl<'a> Readability<'a> {
             best_attempt: None,
         }
     }
-    pub(crate) fn parse(mut self) -> Result<Article> {
+    pub(crate) fn parse(self) -> Result<LegacyArticle> {
+        let article = self.extract()?;
+        let metadata = article.metadata();
+        Ok(LegacyArticle {
+            title: article.title().unwrap_or_default().to_owned(),
+            byline: article.byline().map(str::to_owned),
+            dir: article.direction().map(|d| {
+                match d {
+                    crate::TextDirection::LeftToRight => "ltr",
+                    crate::TextDirection::RightToLeft => "rtl",
+                    crate::TextDirection::Auto => "auto",
+                }
+                .to_owned()
+            }),
+            lang: article.language().map(str::to_owned),
+            content: article.to_html(),
+            text_content: article.to_text(),
+            markdown_content: article.to_markdown(),
+            length: article.text_char_count(),
+            excerpt: article.excerpt().map(str::to_owned),
+            site_name: metadata.site_name().map(str::to_owned),
+            published_time: metadata.published_time().map(str::to_owned),
+        })
+    }
+
+    pub(crate) fn extract(mut self) -> Result<crate::Article> {
         if let Some(e) = self.url_error {
             return Err(Error::InvalidUrl(e));
         }
@@ -166,9 +188,16 @@ impl<'a> Readability<'a> {
                 .filter(|&x| self.dom.is_element(x))
                 .count();
             if n > self.options.max_elems_to_parse {
-                return Err(Error::TooManyElements(n, self.options.max_elems_to_parse));
+                return Err(Error::TooManyElements {
+                    limit: self.options.max_elems_to_parse,
+                });
             }
         }
+        let extended_metadata = crate::ArticleMetadata::from_dom(
+            &self.dom,
+            self.base_uri.as_ref(),
+            self.options.metadata_sources,
+        );
         unwrap_noscript_images(&mut self.dom);
         let title = metadata::get_article_title(&self.dom);
         let json = if self.options.disable_json_ld {
@@ -176,33 +205,43 @@ impl<'a> Readability<'a> {
         } else {
             metadata::get_json_ld(&self.dom, &title)
         };
+        let json_extended = crate::ArticleMetadata::from_json(&json, self.base_uri.as_ref());
         remove_scripts(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_title = title;
-        self.metadata = metadata::get_article_metadata(&self.dom, &json, &self.article_title);
+        self.metadata = metadata::get_article_metadata(
+            &self.dom,
+            &json,
+            &self.article_title,
+            self.options.metadata_sources,
+        );
         if let Some(t) = self.metadata.title.take() {
             self.article_title = t
         }
         let content = self.grab_article()?;
         let excerpt = self.metadata.excerpt.take().or(content.excerpt);
-        let markdown_content = crate::markdown::dom_to_markdown(
-            &self.dom,
-            content.article_root,
-            content.text_content.len(),
-        );
-        Ok(Article {
+        let mut legacy_metadata = LegacyArticle {
             title: std::mem::take(&mut self.article_title),
             byline: self.metadata.byline.take().or(self.article_byline.take()),
             dir: self.article_dir.take(),
             lang: self.article_lang.take(),
-            content: content.content_html,
-            markdown_content,
-            text_content: content.text_content,
+            content: String::new(),
+            text_content: String::new(),
+            markdown_content: String::new(),
             length: content.text_length,
             excerpt,
             site_name: self.metadata.site_name.take(),
             published_time: self.metadata.published_time.take(),
-        })
+        };
+        let mut metadata = crate::ArticleMetadata::from_legacy(&mut legacy_metadata);
+        metadata.merge_json(json_extended);
+        metadata.merge_missing(extended_metadata);
+        let tree = crate::article_tree::ArticleTree::freeze(&self.dom, content.article_root);
+        Ok(crate::Article::from_parts(
+            tree,
+            metadata,
+            content.text_length,
+        ))
     }
     fn grab_article(&mut self) -> Result<ArticleContent> {
         if self.dom.body().is_none() {
@@ -563,14 +602,7 @@ impl<'a> Readability<'a> {
                 }
                 self.dom = best.content.dom;
                 let root = self.dom.root();
-                let (text, _) = self.dom.normalized_text(root, best.text_len_chars);
-                let mut html = String::new();
-                self.dom
-                    .serialize_children(root, &mut html)
-                    .map_err(|_| Error::NoContent)?;
                 return Ok(ArticleContent {
-                    content_html: html,
-                    text_content: text,
                     text_length: best.text_len_chars,
                     excerpt: best.excerpt,
                     article_root: root,
@@ -586,16 +618,8 @@ impl<'a> Readability<'a> {
             }
             let excerpt = self.article_excerpt(article_id);
             self.post_process(article_id);
-            let (text, len) = self
-                .dom
-                .normalized_text(article_id, self.options.char_threshold);
-            let mut html = String::new();
-            self.dom
-                .serialize_children(article_id, &mut html)
-                .map_err(|_| Error::NoContent)?;
+            let len = self.dom.normalized_char_count(article_id);
             return Ok(ArticleContent {
-                content_html: html,
-                text_content: text,
                 text_length: len,
                 excerpt,
                 article_root: article_id,
