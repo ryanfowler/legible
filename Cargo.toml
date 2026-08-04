@@ -16,14 +16,14 @@ bench = false
 
 [dependencies]
 html5ever = "0.39"
-tendril = "0.5"
 once_cell = "1.21"
-regex = "1.12"
+regex = "1.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = "1.15"
-url = "2.5"
+tendril = "0.5"
 thiserror = "2.0"
+url = "2.5"
 
 [dev-dependencies]
 criterion = "0.8"
