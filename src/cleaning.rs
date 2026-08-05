@@ -2,7 +2,7 @@
 #![allow(clippy::collapsible_if)]
 use crate::constants::{
     PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension, has_image_src, has_image_srcset,
-    is_deprecated_size_attribute_elem, regexps,
+    is_deprecated_size_attribute_elem, parse_b64_data_url, regexps,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::{
@@ -433,8 +433,8 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
             match AttrName::from_local(a.name.local.as_ref()) {
                 AttrName::Src => {
                     src = !v.is_empty();
-                    if let Some(c) = regexps::B64_DATA_URL.captures(v)
-                        && c.get(1).map(|m| m.as_str()) != Some("image/svg+xml")
+                    if let Some((_, media_type)) = parse_b64_data_url(v)
+                        && media_type != "image/svg+xml"
                     {
                         b64 = true;
                     }
@@ -456,10 +456,8 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         if b64
             && other
             && let Some(v) = dom.attr(id, AttrName::Src)
-            && let Some(c) = regexps::B64_DATA_URL.captures(v)
-            && v.len()
-                .saturating_sub(c.get(0).map(|m| m.end()).unwrap_or(0))
-                < 133
+            && let Some((end, _)) = parse_b64_data_url(v)
+            && v.len().saturating_sub(end) < 133
         {
             dom.remove_attr(id, AttrName::Src);
             src = false;

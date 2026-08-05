@@ -1,5 +1,5 @@
 //! Content scoring and DOM text helpers.
-use crate::constants::{flags::*, is_div_to_p_elem, is_phrasing_elem, regexps};
+use crate::constants::{flags::*, has_byline, is_div_to_p_elem, is_phrasing_elem, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use smallvec::SmallVec;
 fn is_hash_url(s: &str) -> bool {
@@ -366,7 +366,7 @@ pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str, text_buffer: &mut String
         || dom
             .attr(id, AttrName::ItemProp)
             .is_some_and(|x| x.contains("author"))
-        || regexps::BYLINE.is_match(ms);
+        || has_byline(ms);
     if !ok {
         return false;
     }
