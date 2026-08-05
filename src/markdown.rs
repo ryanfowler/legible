@@ -18,7 +18,7 @@ trait MarkdownTree {
     fn attr(&self, node: Self::Node, name: AttrName) -> Option<&str>;
     fn attr_by_local_name(&self, node: Self::Node, name: &str) -> Option<&str>;
 
-    fn append_text(&self, root: Self::Node, out: &mut String) {
+    fn for_each_text(&self, root: Self::Node, mut visit: impl FnMut(&str)) {
         let mut nodes = SmallVec::<[(Self::Node, bool); 16]>::new();
         nodes.push((root, false));
         while let Some((node, include_siblings)) = nodes.pop() {
@@ -26,7 +26,7 @@ trait MarkdownTree {
                 nodes.push((sibling, true));
             }
             if let Some(text) = self.text_node(node) {
-                out.push_str(text);
+                visit(text);
                 continue;
             }
             if self.tag(node) == Some(Tag::Template) {
@@ -36,12 +36,6 @@ trait MarkdownTree {
                 nodes.push((child, true));
             }
         }
-    }
-
-    fn text(&self, root: Self::Node) -> String {
-        let mut text = String::new();
-        self.append_text(root, &mut text);
-        text
     }
 }
 
@@ -163,7 +157,9 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         Self {
             dom,
             out: Output::new(capacity),
-            tasks: Vec::new(),
+            // Most documents stay below this depth. Keep the stack on the heap so
+            // adversarial nesting cannot exhaust the call stack.
+            tasks: Vec::with_capacity(32),
             list_depth: 0,
             include_links,
             include_images,
@@ -331,13 +327,13 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
 
     fn inline_run(&mut self, first: T::Node, kind: RunKind) {
         if kind == RunKind::Code {
-            let mut text = String::new();
+            let mut nodes = SmallVec::<[T::Node; 4]>::new();
             let mut current = Some(first);
             while let Some(id) = current.filter(|&id| self.run_kind(id) == Some(kind)) {
-                self.dom.append_text(id, &mut text);
+                nodes.push(id);
                 current = self.dom.next_sibling(id);
             }
-            self.emit_code_span(&text);
+            self.emit_code_span(&nodes);
             return;
         }
 
@@ -415,10 +411,10 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 3
             }
             ListMarker::OrderedStart(start) => {
-                let start = start.to_string();
-                self.out.markup(&start);
+                let width = decimal_len(start) + 2;
+                self.out.markup_number(start);
                 self.out.markup(". ");
-                start.len() + 2
+                width
             }
         };
         self.out.prefixes.push(Prefix::ListItem {
@@ -480,37 +476,66 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
     }
 
     fn code_span(&mut self, id: T::Node) {
-        let text = self.dom.text(id);
-        self.emit_code_span(&text);
+        self.emit_code_span(&[id]);
     }
 
-    fn emit_code_span(&mut self, text: &str) {
+    fn emit_code_span(&mut self, nodes: &[T::Node]) {
+        let mut scan = CollapsedText::default();
+        for &id in nodes {
+            self.dom.for_each_text(id, |text| scan.scan(text));
+        }
+
         self.out.mark_list_item_content();
-        let normalized = collapse_whitespace(text);
-        let fence_len = longest_run(normalized.as_bytes(), b'`') + 1;
-        let fence = "`".repeat(fence_len);
-        let pad = normalized.starts_with('`') || normalized.ends_with('`');
-        self.out.markup(&fence);
+        let fence_len = scan.longest_backtick_run + 1;
+        let pad = scan.starts_with_backtick || scan.ends_with_backtick;
+        self.out.markup_repeat('`', fence_len);
         if pad {
             self.out.verbatim(" ");
         }
-        self.out.verbatim(&normalized);
+        let mut writer = CollapsedTextWriter::default();
+        self.out.begin_verbatim();
+        for &id in nodes {
+            self.dom
+                .for_each_text(id, |text| writer.write(&mut self.out.value, text));
+        }
+        if writer.empty && writer.pending_whitespace {
+            self.out.value.push(' ');
+        }
         if pad {
             self.out.verbatim(" ");
         }
-        self.out.markup(&fence);
+        self.out.markup_repeat('`', fence_len);
     }
 
     fn code_block(&mut self, id: T::Node) {
         self.out.ensure_blank_line();
         self.out.mark_list_item_content();
-        let text = self.dom.text(id);
-        let fence = "`".repeat(3.max(longest_run(text.as_bytes(), b'`') + 1));
-        self.out.markup(&fence);
+        let mut longest = 0;
+        let mut current = 0;
+        let mut remaining = 0;
+        let mut ends_with_newline = false;
+        self.dom.for_each_text(id, |text| {
+            remaining += text.len();
+            if !text.is_empty() {
+                ends_with_newline = text.ends_with('\n');
+            }
+            scan_longest_run(text.as_bytes(), b'`', &mut longest, &mut current);
+        });
+        let fence_len = 3.max(longest + 1);
+        self.out.markup_repeat('`', fence_len);
         self.out.newline();
-        self.out.verbatim(text.strip_suffix('\n').unwrap_or(&text));
+        self.dom.for_each_text(id, |text| {
+            let omit_last = !text.is_empty() && remaining == text.len() && ends_with_newline;
+            let text = if omit_last {
+                &text[..text.len() - 1]
+            } else {
+                text
+            };
+            self.out.verbatim(text);
+            remaining -= text.len() + usize::from(omit_last);
+        });
         self.out.newline();
-        self.out.markup(&fence);
+        self.out.markup_repeat('`', fence_len);
         self.out.newline();
     }
 
@@ -845,10 +870,26 @@ impl Output {
     }
 
     fn markup(&mut self, value: &str) {
+        self.prepare_markup();
+        self.value.push_str(value);
+    }
+
+    fn markup_repeat(&mut self, value: char, count: usize) {
+        self.prepare_markup();
+        self.value.extend(std::iter::repeat_n(value, count));
+    }
+
+    fn markup_number(&mut self, value: i32) {
+        use std::fmt::Write;
+
+        self.prepare_markup();
+        write!(self.value, "{value}").expect("writing to a String cannot fail");
+    }
+
+    fn prepare_markup(&mut self) {
         self.flush_space();
         self.prefix();
         self.open_pending_markers();
-        self.value.push_str(value);
         self.line_text_state = LineTextState::Other;
     }
 
@@ -875,6 +916,11 @@ impl Output {
             self.value.push_str(closing);
         }
         marker.opened
+    }
+
+    fn begin_verbatim(&mut self) {
+        self.flush_space();
+        self.prefix();
     }
 
     fn verbatim(&mut self, value: &str) {
@@ -1005,38 +1051,86 @@ fn markdown_escape_byte(byte: u8) -> bool {
     )
 }
 
-fn longest_run(bytes: &[u8], needle: u8) -> usize {
-    let mut longest = 0;
-    let mut current = 0;
+fn scan_longest_run(bytes: &[u8], needle: u8, longest: &mut usize, current: &mut usize) {
     for &byte in bytes {
         if byte == needle {
-            current += 1;
-            longest = longest.max(current);
+            *current += 1;
+            *longest = (*longest).max(*current);
         } else {
-            current = 0;
+            *current = 0;
         }
     }
-    longest
 }
 
-fn collapse_whitespace(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut pending = false;
-    for ch in value.chars() {
-        if ch.is_whitespace() {
-            pending = true;
-        } else {
-            if pending {
-                out.push(' ');
-                pending = false;
+#[derive(Clone, Copy, Default)]
+struct CollapsedText {
+    longest_backtick_run: usize,
+    current_backtick_run: usize,
+    starts_with_backtick: bool,
+    ends_with_backtick: bool,
+    has_content: bool,
+    pending_whitespace: bool,
+}
+
+impl CollapsedText {
+    fn scan(&mut self, value: &str) {
+        for ch in value.chars() {
+            if ch.is_whitespace() {
+                self.pending_whitespace = true;
+                self.current_backtick_run = 0;
+                continue;
             }
-            out.push(ch);
+            if !self.has_content {
+                self.starts_with_backtick = !self.pending_whitespace && ch == '`';
+                self.has_content = true;
+            }
+            self.ends_with_backtick = ch == '`';
+            if ch == '`' {
+                self.current_backtick_run += 1;
+                self.longest_backtick_run =
+                    self.longest_backtick_run.max(self.current_backtick_run);
+            } else {
+                self.current_backtick_run = 0;
+            }
+            self.pending_whitespace = false;
         }
     }
-    if pending && out.is_empty() {
-        out.push(' ');
+}
+
+struct CollapsedTextWriter {
+    empty: bool,
+    pending_whitespace: bool,
+}
+
+impl Default for CollapsedTextWriter {
+    fn default() -> Self {
+        Self {
+            empty: true,
+            pending_whitespace: false,
+        }
     }
-    out
+}
+
+impl CollapsedTextWriter {
+    fn write(&mut self, out: &mut String, value: &str) {
+        for ch in value.chars() {
+            if ch.is_whitespace() {
+                self.pending_whitespace = true;
+                continue;
+            }
+            if self.pending_whitespace {
+                out.push(' ');
+            }
+            out.push(ch);
+            self.empty = false;
+            self.pending_whitespace = false;
+        }
+    }
+}
+
+fn decimal_len(value: i32) -> usize {
+    debug_assert!(value > 0);
+    value.ilog10() as usize + 1
 }
 
 #[cfg(test)]
@@ -1189,6 +1283,16 @@ mod tests {
         );
         assert_eq!(markdown("<p><code>`x`</code></p>"), "`` `x` ``\n");
         assert_eq!(markdown("<p><code>   </code></p>"), "` `\n");
+        assert_eq!(markdown("<p><code> x</code></p>"), "` x`\n");
+        assert_eq!(markdown("<p><code> `x</code></p>"), "`` `x``\n");
+        assert_eq!(
+            markdown("<p><code>`<span>`</span> x</code><code> y`</code></p>"),
+            "``` `` x y` ```\n"
+        );
+        assert_eq!(
+            markdown("<pre>a<span>``</span>`\n</pre>"),
+            "````\na```\n````\n"
+        );
         assert_eq!(
             markdown("<blockquote><blockquote><p>Nested</p></blockquote></blockquote>"),
             "> > Nested\n"
@@ -1347,6 +1451,19 @@ mod tests {
         assert!(article.markdown_content.contains("Unsafe link"));
         assert!(!article.markdown_content.contains("javascript:"));
         assert!(!article.markdown_content.contains('<'));
+    }
+
+    #[test]
+    fn code_block_ignores_empty_text_after_its_final_newline() {
+        let mut dom = Dom::parse_fragment("<pre>code\n</pre>", Tag::Div).unwrap();
+        let pre = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Pre))
+            .unwrap();
+        let empty = dom.create_text("").unwrap();
+        dom.append_child(pre, empty);
+        let root = dom.root();
+        assert_eq!(dom_to_markdown(&dom, root, 0), "```\ncode\n```\n");
     }
 
     #[test]

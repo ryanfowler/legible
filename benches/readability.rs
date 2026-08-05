@@ -1,5 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::{Document, Extractor, extract_html, is_probably_readable};
+use legible::{
+    BulletMarker, Document, Extractor, HeadingStyle, MarkdownOptions, extract_html,
+    is_probably_readable,
+};
 use std::fs;
 use std::hint::black_box;
 
@@ -116,6 +119,17 @@ fn bench_output_formats(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("extract_markdown", name), |b| {
             b.iter(|| {
                 let article = extractor.extract_markdown(black_box(&html)).unwrap();
+                black_box(article.content());
+            })
+        });
+        let markdown_options = MarkdownOptions::default()
+            .heading_style(HeadingStyle::Setext)
+            .bullet_marker(BulletMarker::Asterisk);
+        group.bench_function(BenchmarkId::new("extract_markdown_custom", name), |b| {
+            b.iter(|| {
+                let article = extractor
+                    .extract_markdown_with(black_box(&html), &markdown_options)
+                    .unwrap();
                 black_box(article.content());
             })
         });

@@ -187,34 +187,40 @@ impl MarkdownOptions {
         self.include_images
     }
     pub(crate) fn apply(&self, mut text: String) -> String {
-        if matches!(self.heading_style, HeadingStyle::Setext) {
-            text = map_markdown_outside_fences(&text, |line| {
-                if let Some(title) = line.strip_prefix("# ") {
-                    format!("{title}\n{}", "=".repeat(title.chars().count().max(1)))
-                } else if let Some(title) = line.strip_prefix("## ") {
-                    format!("{title}\n{}", "-".repeat(title.chars().count().max(1)))
-                } else {
-                    line.into()
-                }
-            });
-        }
         let marker = match self.bullet_marker {
-            BulletMarker::Dash => '-',
-            BulletMarker::Asterisk => '*',
-            BulletMarker::Plus => '+',
+            BulletMarker::Dash => b'-',
+            BulletMarker::Asterisk => b'*',
+            BulletMarker::Plus => b'+',
         };
-        if marker != '-' {
-            text = map_markdown_outside_fences(&text, |line| {
-                let content = line.trim_start();
-                let indent = &line[..line.len() - content.len()];
-                if let Some(rest) = content.strip_prefix("- ") {
-                    format!("{indent}{marker} {rest}")
-                } else {
-                    line.into()
-                }
-            });
+        if matches!(self.heading_style, HeadingStyle::Atx) {
+            if marker != b'-' {
+                replace_bullet_markers(&mut text, marker);
+            }
+            return text;
         }
-        text
+
+        let mut output = String::with_capacity(text.len());
+        let mut fence: Option<(u8, usize)> = None;
+        for (index, line) in text.lines().enumerate() {
+            if index != 0 {
+                output.push('\n');
+            }
+            let trimmed = line.trim_start();
+            if update_fence(trimmed.as_bytes(), &mut fence) || fence.is_some() {
+                output.push_str(line);
+            } else if let Some(title) = line.strip_prefix("# ") {
+                output.push_str(title);
+                output.push('\n');
+                output.extend(std::iter::repeat_n('=', title.chars().count().max(1)));
+            } else if let Some(title) = line.strip_prefix("## ") {
+                output.push_str(title);
+                output.push('\n');
+                output.extend(std::iter::repeat_n('-', title.chars().count().max(1)));
+            } else {
+                push_line_with_bullet(line, marker, &mut output);
+            }
+        }
+        output
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -262,29 +268,57 @@ impl TextOptions {
         self.preserve_line_breaks
     }
 }
-fn map_markdown_outside_fences(text: &str, mut map: impl FnMut(&str) -> String) -> String {
-    let mut fence: Option<(char, usize)> = None;
-    text.lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if let Some((marker, length)) = fence {
-                if trimmed.chars().take_while(|&c| c == marker).count() >= length {
-                    fence = None;
-                }
-                line.into()
-            } else {
-                let marker = trimmed.chars().next();
-                let length = marker.map_or(0, |m| trimmed.chars().take_while(|&c| c == m).count());
-                if length >= 3 && matches!(marker, Some('`' | '~')) {
-                    fence = Some((marker.unwrap(), length));
-                    line.into()
-                } else {
-                    map(line)
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn replace_bullet_markers(text: &mut str, marker: u8) {
+    let mut fence = None;
+    // The replacement is one ASCII byte, so it cannot change UTF-8 boundaries.
+    let bytes = unsafe { text.as_bytes_mut() };
+    for line in bytes.split_mut(|&byte| byte == b'\n') {
+        let content_start = line
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(line.len());
+        let content = &mut line[content_start..];
+        if update_fence(content, &mut fence) || fence.is_some() {
+            continue;
+        }
+        if content.starts_with(b"- ") {
+            content[0] = marker;
+        }
+    }
+}
+
+fn push_line_with_bullet(line: &str, marker: u8, output: &mut String) {
+    let content = line.trim_start();
+    if marker != b'-' && content.starts_with("- ") {
+        let indent_len = line.len() - content.len();
+        output.push_str(&line[..indent_len]);
+        output.push(marker as char);
+        output.push_str(&content[1..]);
+    } else {
+        output.push_str(line);
+    }
+}
+
+/// Updates fenced-code state and returns true for an opening or closing fence.
+fn update_fence(line: &[u8], fence: &mut Option<(u8, usize)>) -> bool {
+    if let Some((marker, length)) = *fence {
+        if line.iter().take_while(|&&byte| byte == marker).count() >= length {
+            *fence = None;
+            return true;
+        }
+        return false;
+    }
+
+    let Some(&marker @ (b'`' | b'~')) = line.first() else {
+        return false;
+    };
+    let length = line.iter().take_while(|&&byte| byte == marker).count();
+    if length >= 3 {
+        *fence = Some((marker, length));
+        true
+    } else {
+        false
+    }
 }
 
 fn push_unique(values: &mut Vec<String>, value: &str) {
@@ -540,6 +574,32 @@ fn metadata_source_enabled(name: &str, sources: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{BulletMarker, HeadingStyle, MarkdownOptions};
+
+    #[test]
+    fn markdown_options_transform_in_one_pass_without_changing_fences() {
+        let input = "# Heading\n\n- item\n\n```\n# code\n- code item\n```\n".to_owned();
+        let output = MarkdownOptions::default()
+            .heading_style(HeadingStyle::Setext)
+            .bullet_marker(BulletMarker::Plus)
+            .apply(input);
+        assert_eq!(
+            output,
+            "Heading\n=======\n\n+ item\n\n```\n# code\n- code item\n```"
+        );
+    }
+
+    #[test]
+    fn bullet_marker_replacement_reuses_the_default_markdown_buffer() {
+        let input = "- first\n  - nested\n~~~\n- code\n~~~\n".to_owned();
+        let pointer = input.as_ptr();
+        let output = MarkdownOptions::default()
+            .bullet_marker(BulletMarker::Asterisk)
+            .apply(input);
+        assert_eq!(output, "* first\n  * nested\n~~~\n- code\n~~~\n");
+        assert_eq!(output.as_ptr(), pointer);
+    }
+
     #[test]
     fn result_types_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
