@@ -488,14 +488,21 @@ impl ArticleMetadata {
             ..Default::default()
         }
     }
-    pub(crate) fn from_legacy(a: &mut crate::readability::LegacyArticle) -> Self {
-        let direction = match a.dir.as_deref() {
+    pub(crate) fn from_parts(
+        title: String,
+        byline: Option<String>,
+        direction: Option<String>,
+        language: Option<String>,
+        excerpt: Option<String>,
+        site_name: Option<String>,
+        published_time: Option<String>,
+    ) -> Self {
+        let direction = match direction.as_deref() {
             Some("rtl") => Some(TextDirection::RightToLeft),
             Some("ltr") => Some(TextDirection::LeftToRight),
             Some("auto") => Some(TextDirection::Auto),
             _ => None,
         };
-        let byline = a.byline.take();
         let authors = byline
             .as_deref()
             .map(str::trim)
@@ -508,13 +515,13 @@ impl ArticleMetadata {
             })
             .unwrap_or_default();
         Self {
-            title: (!a.title.is_empty()).then(|| std::mem::take(&mut a.title)),
+            title: (!title.is_empty()).then_some(title),
             byline,
             authors,
-            excerpt: a.excerpt.take(),
-            site_name: a.site_name.take(),
-            published_time: a.published_time.take(),
-            language: a.lang.take(),
+            excerpt,
+            site_name,
+            published_time,
+            language,
             direction,
             ..Default::default()
         }

@@ -237,20 +237,15 @@ impl<'a> Readability<'a> {
         }
         let content = self.grab_article()?;
         let excerpt = self.metadata.excerpt.take().or(content.excerpt);
-        let mut legacy_metadata = LegacyArticle {
-            title: std::mem::take(&mut self.article_title),
-            byline: self.metadata.byline.take().or(self.article_byline.take()),
-            dir: self.article_dir.take(),
-            lang: self.article_lang.take(),
-            content: String::new(),
-            text_content: String::new(),
-            markdown_content: String::new(),
-            length: content.text_length,
+        let mut metadata = crate::ArticleMetadata::from_parts(
+            std::mem::take(&mut self.article_title),
+            self.metadata.byline.take().or(self.article_byline.take()),
+            self.article_dir.take(),
+            self.article_lang.take(),
             excerpt,
-            site_name: self.metadata.site_name.take(),
-            published_time: self.metadata.published_time.take(),
-        };
-        let mut metadata = crate::ArticleMetadata::from_legacy(&mut legacy_metadata);
+            self.metadata.site_name.take(),
+            self.metadata.published_time.take(),
+        );
         metadata.merge_json(json_extended);
         metadata.merge_missing(extended_metadata);
         Ok(ExtractedArticle {

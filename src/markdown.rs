@@ -5,7 +5,7 @@
 
 use smallvec::SmallVec;
 
-use crate::dom::{Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 trait MarkdownTree {
     type Node: Copy + Eq;
@@ -15,6 +15,7 @@ trait MarkdownTree {
     fn tag(&self, node: Self::Node) -> Option<Tag>;
     fn text_node(&self, node: Self::Node) -> Option<&str>;
     fn is_comment(&self, node: Self::Node) -> bool;
+    fn attr(&self, node: Self::Node, name: AttrName) -> Option<&str>;
     fn attr_by_local_name(&self, node: Self::Node, name: &str) -> Option<&str>;
 
     fn append_text(&self, root: Self::Node, out: &mut String) {
@@ -61,6 +62,9 @@ impl MarkdownTree for Dom {
     }
     fn is_comment(&self, node: NodeId) -> bool {
         self.is_comment(node)
+    }
+    fn attr(&self, node: NodeId, name: AttrName) -> Option<&str> {
+        self.attr(node, name)
     }
     fn attr_by_local_name(&self, node: NodeId, name: &str) -> Option<&str> {
         self.attr_by_local_name(node, name)
@@ -284,7 +288,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 if self.include_links
                     && self
                         .dom
-                        .attr_by_local_name(id, "href")
+                        .attr(id, AttrName::Href)
                         .and_then(|href| safe_destination(href, DestinationKind::Link))
                         .is_some()
                 {
@@ -514,7 +518,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         let alt = self.dom.attr_by_local_name(id, "alt").unwrap_or("");
         let Some(src) = self
             .dom
-            .attr_by_local_name(id, "src")
+            .attr(id, AttrName::Src)
             .and_then(|src| safe_destination(src, DestinationKind::Image))
         else {
             self.out.text(alt);
@@ -548,7 +552,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                     let trailing_space = std::mem::take(&mut self.out.pending_space);
                     let href = self
                         .dom
-                        .attr_by_local_name(id, "href")
+                        .attr(id, AttrName::Href)
                         .and_then(|href| safe_destination(href, DestinationKind::Link))
                         .expect("validated link destination changed during serialization");
                     self.out.destination(href);
