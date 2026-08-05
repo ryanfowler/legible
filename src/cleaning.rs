@@ -122,12 +122,19 @@ fn has_allowed_media(dom: &Dom, id: NodeId, allowed: &Regex) -> bool {
         })
 }
 
-pub fn clean_tags(dom: &mut Dom, root: NodeId, tags: &[Tag], allowed: &Regex) {
-    let ids: Vec<_> = dom
-        .descendants(root)
-        .filter(|&id| dom.tag(id).is_some_and(|t| tags.contains(&t)))
-        .collect();
-    for id in ids {
+pub fn clean_tags(
+    dom: &mut Dom,
+    root: NodeId,
+    tags: &[Tag],
+    allowed: &Regex,
+    nodes: &mut Vec<NodeId>,
+) {
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&id| dom.tag(id).is_some_and(|t| tags.contains(&t))),
+    );
+    for &id in nodes.iter() {
         if dom.parent(id).is_none() {
             continue;
         }
@@ -140,9 +147,10 @@ pub fn clean_tags(dom: &mut Dom, root: NodeId, tags: &[Tag], allowed: &Regex) {
         dom.detach(id);
     }
 }
-pub fn clean_styles(dom: &mut Dom, root: NodeId) {
-    let ids: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    for id in ids {
+pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    nodes.clear();
+    nodes.extend(std::iter::once(root).chain(dom.descendants(root)));
+    for &id in nodes.iter() {
         if !dom.is_element(id) || dom.tag(id) == Some(Tag::Svg) {
             continue;
         }
@@ -153,12 +161,13 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId) {
         }
     }
 }
-pub fn clean_headers(dom: &mut Dom, root: NodeId, flags: u32) {
-    let ids: Vec<_> = dom
-        .descendants(root)
-        .filter(|&id| matches!(dom.tag(id), Some(Tag::H1 | Tag::H2)))
-        .collect();
-    for id in ids {
+pub fn clean_headers(dom: &mut Dom, root: NodeId, flags: u32, nodes: &mut Vec<NodeId>) {
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&id| matches!(dom.tag(id), Some(Tag::H1 | Tag::H2))),
+    );
+    for &id in nodes.iter() {
         if get_class_weight(dom, id, flags) < 0 {
             dom.detach(id);
         }
@@ -173,24 +182,37 @@ pub fn clean_conditionally(
     flags: u32,
     allowed: &Regex,
     store: &mut crate::dom::NodeStateStore,
+    text_buffer: &mut String,
+    nodes: &mut Vec<NodeId>,
     modifier: f64,
 ) {
     if flags & FLAG_CLEAN_CONDITIONALLY == 0 {
         return;
     }
-    let ids: Vec<_> = dom
-        .descendants(root)
-        .filter(|&id| dom.tag(id).is_some_and(|t| tags.contains(&t)))
-        .collect();
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&id| dom.tag(id).is_some_and(|t| tags.contains(&t))),
+    );
     store.clear_stats();
-    for id in ids.into_iter().rev() {
+    for &id in nodes.iter().rev() {
         if dom.parent(id).is_some()
-            && should_remove(dom, id, semantic, flags, allowed, store, modifier)
+            && should_remove(
+                dom,
+                id,
+                semantic,
+                flags,
+                allowed,
+                store,
+                text_buffer,
+                modifier,
+            )
         {
             dom.detach(id);
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn should_remove(
     dom: &Dom,
     id: NodeId,
@@ -198,6 +220,7 @@ fn should_remove(
     flags: u32,
     allowed: &Regex,
     store: &mut crate::dom::NodeStateStore,
+    text_buffer: &mut String,
     modifier: f64,
 ) -> bool {
     if semantic == Tag::Table && store.is_data_table(id) == Some(true) {
@@ -280,7 +303,8 @@ fn should_remove(
     let is_list = semantic == Tag::Ul
         || semantic == Tag::Ol
         || stats.text_length > 0 && list as f64 / stats.text_length as f64 > 0.9;
-    if stats.text_length <= 32 && regexps::AD_LOADING_SET.is_match(&get_inner_text(dom, id, false))
+    if stats.text_length <= 32
+        && regexps::AD_LOADING_SET.is_match(get_inner_text(dom, id, text_buffer))
     {
         return true;
     }
@@ -326,12 +350,18 @@ fn should_remove(
     }
     remove
 }
-pub fn mark_data_tables(dom: &Dom, root: NodeId, store: &mut crate::dom::NodeStateStore) {
-    let ids: Vec<_> = dom
-        .descendants(root)
-        .filter(|&x| dom.tag(x) == Some(Tag::Table))
-        .collect();
-    for id in ids {
+pub fn mark_data_tables(
+    dom: &Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    nodes: &mut Vec<NodeId>,
+) {
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&x| dom.tag(x) == Some(Tag::Table)),
+    );
+    for &id in nodes.iter() {
         if dom.attr(id, AttrName::Role) == Some("presentation")
             || dom.attr(id, AttrName::DataTable) == Some("0")
         {
@@ -384,12 +414,13 @@ pub fn mark_data_tables(dom: &Dom, root: NodeId, store: &mut crate::dom::NodeSta
         );
     }
 }
-pub fn fix_lazy_images(dom: &mut Dom, root: NodeId) {
-    let ids: Vec<_> = dom
-        .descendants(root)
-        .filter(|&x| matches!(dom.tag(x), Some(Tag::Img | Tag::Picture | Tag::Figure)))
-        .collect();
-    for id in ids {
+pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&x| matches!(dom.tag(x), Some(Tag::Img | Tag::Picture | Tag::Figure))),
+    );
+    for &id in nodes.iter() {
         let mut src = false;
         let mut srcset = false;
         let mut lazy = false;
@@ -399,7 +430,7 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId) {
         let mut lazy_srcset = None;
         for a in dom.attrs(id) {
             let v = a.value.as_ref();
-            match a.known {
+            match AttrName::from_local(a.name.local.as_ref()) {
                 AttrName::Src => {
                     src = !v.is_empty();
                     if let Some(c) = regexps::B64_DATA_URL.captures(v)
@@ -484,8 +515,10 @@ fn copy_image_attributes(dom: &mut Dom, from: NodeId, to: NodeId) {
         .attrs(from)
         .iter()
         .filter(|a| {
-            matches!(a.known, AttrName::Src | AttrName::Srcset)
-                || has_image_extension(a.value.as_ref())
+            matches!(
+                AttrName::from_local(a.name.local.as_ref()),
+                AttrName::Src | AttrName::Srcset
+            ) || has_image_extension(a.value.as_ref())
         })
         .map(|a| (a.name.clone(), a.value.clone()))
         .collect();
@@ -594,9 +627,10 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
         }
     }
 }
-pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId) {
-    let ids: Vec<_> = dom.descendants(root).collect();
-    for id in ids.into_iter().rev() {
+pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    nodes.clear();
+    nodes.extend(dom.descendants(root));
+    for &id in nodes.iter().rev() {
         if !matches!(dom.tag(id), Some(Tag::Div | Tag::Section)) {
             continue;
         }
@@ -629,15 +663,20 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId) {
         }
     }
 }
-pub fn clean_matched_nodes<F>(dom: &mut Dom, root: NodeId, filter: F)
-where
-    F: Fn(&Dom, NodeId, &str) -> bool,
+pub fn clean_matched_nodes<F>(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    match_buffer: &mut String,
+    mut filter: F,
+) where
+    F: FnMut(&Dom, NodeId, &str) -> bool,
 {
-    let ids: Vec<_> = dom.descendants(root).collect();
-    let mut match_string = String::new();
-    for id in ids.into_iter().rev() {
-        crate::dom::build_match_string(dom, id, &mut match_string);
-        if dom.parent(id).is_some() && filter(dom, id, &match_string) {
+    nodes.clear();
+    nodes.extend(dom.descendants(root));
+    for &id in nodes.iter().rev() {
+        crate::dom::build_match_string(dom, id, match_buffer);
+        if dom.parent(id).is_some() && filter(dom, id, match_buffer) {
             dom.detach(id)
         }
     }
@@ -656,7 +695,7 @@ mod tests {
         .unwrap();
         let root = dom.root();
         let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        fix_lazy_images(&mut dom, root);
+        fix_lazy_images(&mut dom, root, &mut Vec::new());
         assert_eq!(
             dom.attr(image, AttrName::Src),
             Some("https://example.com/image.jpg")
@@ -669,6 +708,8 @@ mod tests {
         let root = dom.root();
         let div = dom.first_descendant_by_tag(root, Tag::Div).unwrap();
         let mut store = NodeStateStore::new();
+        let mut text_buffer = String::new();
+        let mut nodes = Vec::new();
         clean_conditionally(
             &mut dom,
             root,
@@ -677,6 +718,8 @@ mod tests {
             FLAG_CLEAN_CONDITIONALLY,
             &Regex::new("$").unwrap(),
             &mut store,
+            &mut text_buffer,
+            &mut nodes,
             0.0,
         );
         assert!(dom.parent(div).is_none());
@@ -724,7 +767,7 @@ mod tests {
         let root = dom.root();
         let figure = dom.first_descendant_by_tag(root, Tag::Figure).unwrap();
 
-        fix_lazy_images(&mut dom, root);
+        fix_lazy_images(&mut dom, root, &mut Vec::new());
 
         let image = dom.first_descendant_by_tag(figure, Tag::Img).unwrap();
         assert_eq!(dom.attr(image, AttrName::Src), Some("image.jpg?x=1&y=2"));
@@ -740,7 +783,7 @@ mod tests {
         .unwrap();
         let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
 
-        clean_tags(&mut dom, root, &[Tag::Object], &allowed);
+        clean_tags(&mut dom, root, &[Tag::Object], &allowed, &mut Vec::new());
 
         assert!(
             dom.descendants(root)
@@ -765,7 +808,7 @@ mod tests {
         .unwrap();
         let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
 
-        clean_tags(&mut dom, root, &[Tag::Iframe], &allowed);
+        clean_tags(&mut dom, root, &[Tag::Iframe], &allowed, &mut Vec::new());
 
         assert!(
             !dom.descendants(root)
@@ -782,7 +825,7 @@ mod tests {
         let root = dom.root();
         let svg = dom.first_descendant_by_tag(root, Tag::Svg).unwrap();
         let path = dom.first_descendant_by_tag(svg, Tag::Svg).unwrap();
-        clean_styles(&mut dom, root);
+        clean_styles(&mut dom, root, &mut Vec::new());
         assert_eq!(dom.attr_by_local_name(svg, "width"), Some("10"));
         assert_eq!(dom.attr_by_local_name(path, "fill"), Some("red"));
     }

@@ -2,7 +2,7 @@
 #![allow(clippy::collapsible_if, clippy::field_reassign_with_default)]
 use crate::constants::regexps;
 use crate::dom::{AttrName, Dom, Tag};
-use crate::scoring::get_inner_text;
+use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_text};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
@@ -147,32 +147,18 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
             (_, Some(h)) => Some(h.trim().into()),
             _ => None,
         };
-        if let Some(a) = o.get("author") {
-            if let Some(n) = a.get("name").and_then(Value::as_str) {
-                if !n.trim().is_empty() {
-                    out.byline = Some(n.trim().into())
-                }
-            } else if let Some(arr) = a.as_array() {
-                let names: Vec<_> = arr
-                    .iter()
-                    .filter_map(|v| v.get("name").and_then(Value::as_str))
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !names.is_empty() {
-                    out.byline = Some(names.join(", "))
-                }
+        if let Some(author) = o.get("author") {
+            let mut authors = Vec::new();
+            collect_json_authors(author, &mut authors);
+            if !authors.is_empty() {
+                out.byline = Some(authors.join(", "));
             }
         }
         out.excerpt = o
             .get("description")
             .and_then(Value::as_str)
             .map(|s| s.trim().into());
-        out.site_name = o
-            .get("publisher")
-            .and_then(|v| v.get("name"))
-            .and_then(Value::as_str)
-            .map(|s| s.trim().into());
+        out.site_name = o.get("publisher").and_then(json_name).map(str::to_owned);
         out.published_time = o
             .get("datePublished")
             .and_then(Value::as_str)
@@ -181,12 +167,34 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
     }
     out
 }
+fn json_name(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+fn collect_json_authors(value: &Value, out: &mut Vec<String>) {
+    if let Some(values) = value.as_array() {
+        for value in values {
+            collect_json_authors(value, out)
+        }
+        return;
+    }
+    let Some(name) = json_name(value) else { return };
+    if !out
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(name))
+    {
+        out.push(name.into())
+    }
+}
 static SCHEMA: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
 pub fn get_article_title(dom: &Dom) -> String {
     let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
     };
-    let orig = get_inner_text(dom, id, false);
+    let orig = get_inner_text_owned(dom, id);
     if orig.is_empty() {
         return orig;
     }
@@ -204,10 +212,11 @@ pub fn get_article_title(dom: &Dom) -> String {
             cur = regexps::TITLE_FIRST_PART.replace(&orig, "")
         }
     } else if orig.contains(": ") {
+        let mut text_buffer = String::new();
         let has = dom
             .descendants(dom.root())
             .filter(|&x| matches!(dom.tag(x), Some(Tag::H1 | Tag::H2)))
-            .any(|x| get_inner_text(dom, x, false).trim() == orig.trim());
+            .any(|x| get_inner_text(dom, x, &mut text_buffer) == orig.trim());
         if !has {
             if let Some(p) = orig.rfind(": ") {
                 cur = Cow::Borrowed(&orig[p + 2..]);
@@ -228,7 +237,9 @@ pub fn get_article_title(dom: &Dom) -> String {
             .filter(|&x| dom.tag(x) == Some(Tag::H1))
             .collect();
         if hs.len() == 1 {
-            cur = Cow::Owned(get_inner_text(dom, hs[0], true))
+            let mut normalized = String::new();
+            get_normalized_inner_text(dom, hs[0], &mut normalized);
+            cur = Cow::Owned(normalized)
         }
     }
     let mut cur = regexps::NORMALIZE.replace_all(cur.trim(), " ").into_owned();
@@ -240,7 +251,7 @@ pub fn get_article_title(dom: &Dom) -> String {
     }
     cur
 }
-pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata {
+pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str, sources: u8) -> Metadata {
     static PP: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)\s*(article|dc|dcterm|og|twitter)\s*:\s*(author|creator|description|published_time|title|site_name)\s*").unwrap()
     });
@@ -259,6 +270,7 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
         };
         if let Some(p) = dom
             .attr(id, AttrName::Property)
+            .filter(|name| metadata_source_enabled(name, sources))
             .and_then(|p| PP.captures(p))
         {
             let n = p
@@ -270,7 +282,11 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
                 .flat_map(char::to_lowercase)
                 .collect::<String>();
             insert_metadata_value(&mut vals, n, c.trim().into());
-        } else if let Some(n) = dom.attr(id, AttrName::Name).filter(|n| NP.is_match(n)) {
+        } else if let Some(n) = dom
+            .attr(id, AttrName::Name)
+            .filter(|name| metadata_source_enabled(name, sources))
+            .filter(|n| NP.is_match(n))
+        {
             let n = n
                 .chars()
                 .filter(|c| !c.is_whitespace())
@@ -338,6 +354,21 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str) -> Metadata
     m.published_time = m.published_time.map(unescape_owned);
     m
 }
+fn metadata_source_enabled(name: &str, sources: u8) -> bool {
+    let name = name.trim();
+    let has_prefix = |prefix: &str| {
+        name.get(..prefix.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+    };
+    if has_prefix("og:") || has_prefix("article:") {
+        sources & 0b0010 != 0
+    } else if has_prefix("twitter:") {
+        sources & 0b0100 != 0
+    } else {
+        sources & 0b1000 != 0
+    }
+}
+
 fn unescape_owned(s: String) -> String {
     match unescape_html_entities(&s) {
         Cow::Borrowed(_) => s,

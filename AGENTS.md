@@ -31,13 +31,13 @@ The extraction pipeline flows through these stages:
 
 ### Key Modules
 
-- **`document.rs`** - Public `Document<'a>` struct for pre-parsing HTML once; delegates to `readerable` and `readability` internally
+- **`document.rs`** - Public `Document<'a>` wrapper for checking readability before extraction
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
-- **`markdown.rs`** - Iterative, direct DOM-to-CommonMark serialization of cleaned article content
+- **`markdown.rs` / `text.rs`** - Iterative direct rendering of cleaned article content
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
 - **`src/dom/`** - Compact arena storage, typed tags and attributes, iterative traversal, centralized mutation, fragment parsing, and `html5ever` serialization
 - **`dom/state.rs`** - Dense Readability state indexed by stable `NodeId` values
@@ -46,21 +46,29 @@ The extraction pipeline flows through these stages:
 
 - Use `Dom`'s direct `NodeId` traversal and typed query helpers. Do not add a general CSS matcher.
 - Keep post-parse DOM access free of `RefCell`; parser-only interior mutability belongs in `dom/parse.rs`.
+- Retain html5ever's attribute vectors when the parser creates elements. Do not rebuild them only to cache attribute classifications.
 - Use borrowed attribute values for hot reads and `Tag`/`AttrName` for common predicates. Keep parser tag and attribute classification allocation-free for html5ever's normalized lowercase names.
 - Collect attached preorder snapshots before mutation when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots with depth when a pass processes only elements and can skip removed subtrees.
+- Reuse the cleaning node snapshot and text buffers across extraction retries and sequential mutation passes. Keep URI repair, class cleanup, and comment removal in one post-processing snapshot.
 - Use `SmallVec` for hot, short-lived traversal stacks, scoring candidates, metadata tables, and small child snapshots. Keep full-document snapshots in `Vec`.
 - Keep structural mutation in `dom/mutation.rs` and validate links in debug builds.
 - Preserve the O(1) leaf fast path in DOM cycle checks. The parser appends new leaf nodes, so do not add another depth-dependent scan to this path.
+- Keep the bounded, markup-density-aware node capacity hint. Count markup with `memchr` so preallocation does not add a full scalar scan or overallocate for dense adversarial input.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
-- Use the `dom_parse` Criterion group to isolate custom DOM construction from readability extraction.
+- Use the `dom_parse` Criterion group to isolate custom DOM construction.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
+- Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.
-- Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Serialize only the final selected article for `Article::content`.
-- Generate `Article::markdown_content` directly from the final cleaned DOM. Keep Markdown traversal iterative and escape text, link destinations, and code fences for CommonMark.
-- Preserve Markdown's byte-wise ASCII text path, compact task fields, and output capacity hint from normalized article text. These avoid per-character work, excess task-stack traffic, and repeated output growth.
+- Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Render only the requested final format from the cleaned DOM.
+- Render HTML, Markdown, and text directly from the final cleaned DOM. Do not freeze an intermediate output tree or rebuild a temporary DOM. Drop the DOM before returning the public result.
+- Keep final HTML rendering on the direct iterative serializer. Escape text and attributes in byte runs. Do not route final output through html5ever's character-at-a-time serializer.
+- The public `parse` function must render all formats from one cleaned DOM. Keep final rendering iterative. Match html5ever's HTML escaping and namespace rules. Escape Markdown text, link destinations, and code fences for CommonMark.
+- Preserve the byte-wise ASCII paths in Markdown and normalized article text, compact task fields, the preallocated heap-backed Markdown task stack, and output capacity hints from normalized article text. Keep code span and code block rendering free of temporary text and fence allocations. These avoid per-character work, excess task-stack traffic, stack-resident task buffers on complex articles, and repeated output growth.
+- Use typed `AttrName` lookups for hot Markdown link and image attributes. Keep local-name lookups only for attributes without a known enum variant.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
+- Borrow `Options` during extraction. Keep the owned options alive at the public API boundary.
 
 ### Scoring System
 
@@ -93,17 +101,14 @@ Extraction with default options must return `Error::NoContent` when the best ret
 ## Public API
 
 ```rust
-use legible::{parse, Options, is_probably_readerable, Document};
+use legible::{Document, parse};
 
-// Full extraction
-let article = parse(html, Some("https://example.com"), None)?;  // Returns Article with title, content, text_content, byline, excerpt, etc.
+let article = parse(html, None, None)?;
 
-// Quick check without full parsing
-if is_probably_readerable(html, None) { /* ... */ }
-
-// Pre-parsed document (avoids parsing HTML twice when checking readability before extracting)
-let doc = Document::new(html);
-if doc.is_probably_readerable(None) {          // borrows — read-only check
-    let article = doc.parse(Some(url), None)?; // consumes — extraction mutates the DOM
+let document = Document::new(html);
+if document.is_probably_readerable(None) {
+    let article = document.parse(None, None)?;
 }
 ```
+
+`Article` contains public HTML, Markdown, text, and metadata fields.

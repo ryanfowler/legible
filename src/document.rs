@@ -63,7 +63,8 @@ impl<'a> Document<'a> {
     ///
     /// See [`parse`](crate::parse) for all parameters and errors.
     pub fn parse(self, url: Option<&str>, options: Option<Options>) -> Result<Article> {
-        Readability::from_document(self.doc, self.html, url, options).parse()
+        let options = options.unwrap_or_default();
+        Readability::from_document(self.doc, self.html, url, &options).parse()
     }
 }
 #[cfg(test)]

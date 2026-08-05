@@ -2,7 +2,6 @@
 
 use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
-#[cfg(test)]
 use smallvec::SmallVec;
 use tendril::StrTendril;
 impl Dom {
@@ -61,26 +60,6 @@ impl Dom {
         }
         self.node_mut(parent).last_child = NodeLink::from_option(Some(child));
     }
-    #[allow(dead_code)]
-    pub(crate) fn prepend_child(&mut self, parent: NodeId, child: NodeId) {
-        self.ensure_no_cycle(parent, child);
-        if self.parent(child).is_some() {
-            self.detach(child)
-        }
-        let first = self.first_child(parent);
-        {
-            let n = self.node_mut(child);
-            n.parent = NodeLink::from_option(Some(parent));
-            n.prev_sibling = NodeLink::NONE;
-            n.next_sibling = NodeLink::from_option(first)
-        }
-        if let Some(first) = first {
-            self.node_mut(first).prev_sibling = NodeLink::from_option(Some(child))
-        } else {
-            self.node_mut(parent).last_child = NodeLink::from_option(Some(child))
-        }
-        self.node_mut(parent).first_child = NodeLink::from_option(Some(child));
-    }
     pub(crate) fn insert_before(&mut self, reference: NodeId, node: NodeId) {
         let parent = self.parent(reference).expect("reference is detached");
         self.ensure_no_cycle(parent, node);
@@ -137,12 +116,15 @@ impl Dom {
     }
     pub(crate) fn set_attr(&mut self, node: NodeId, name: AttrName, value: &str) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            if let Some(a) = e.attrs.iter_mut().find(|a| a.known == name) {
+            if let Some(a) = e
+                .attrs
+                .iter_mut()
+                .find(|attribute| name.matches_local(attribute.name.local.as_ref()))
+            {
                 a.value = StrTendril::from(value)
             } else {
                 e.attrs.push(super::Attribute {
                     name: QualName::new(None, ns!(), LocalName::from(name.as_str())),
-                    known: name,
                     value: StrTendril::from(value),
                 })
             }
@@ -153,31 +135,20 @@ impl Dom {
             if let Some(a) = e.attrs.iter_mut().find(|a| a.name == name) {
                 a.value = value
             } else {
-                e.attrs.push(super::Attribute {
-                    known: AttrName::from_local(name.local.as_ref()),
-                    name,
-                    value,
-                })
+                e.attrs.push(super::Attribute { name, value })
             }
         }
     }
     pub(crate) fn remove_attr(&mut self, node: NodeId, name: AttrName) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|a| a.known != name)
+            e.attrs
+                .retain(|attribute| !name.matches_local(attribute.name.local.as_ref()))
         }
     }
     pub(crate) fn remove_attrs(&mut self, node: NodeId, names: &[AttrName]) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|a| !names.contains(&a.known))
-        }
-    }
-    #[allow(dead_code)]
-    pub(crate) fn retain_attrs_by_local_name(&mut self, node: NodeId, names: &[&str]) {
-        if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|a| {
-                names
-                    .iter()
-                    .any(|n| a.name.local.as_ref().eq_ignore_ascii_case(n))
+            e.attrs.retain(|attribute| {
+                !names.contains(&AttrName::from_local(attribute.name.local.as_ref()))
             })
         }
     }
@@ -218,7 +189,8 @@ impl Dom {
         }
 
         let root = self.create(copy_data(source, source_root))?;
-        let mut work = vec![(source_root, root)];
+        let mut work = SmallVec::<[(NodeId, NodeId); 16]>::new();
+        work.push((source_root, root));
         while let Some((source_id, dest_id)) = work.pop() {
             if let NodeData::Element(element) = &source.node(source_id).data
                 && let Some(template) = element.template_contents.get()

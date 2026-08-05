@@ -206,6 +206,25 @@ impl Dom {
         self.append_text(root, &mut s);
         s
     }
+    pub(crate) fn append_normalized_text(&self, root: NodeId, out: &mut String) {
+        let mut pending_whitespace = false;
+        for id in std::iter::once(root).chain(self.descendants(root)) {
+            let Some(text) = self.text_node(id) else {
+                continue;
+            };
+            for c in text.chars() {
+                if c.is_whitespace() {
+                    pending_whitespace |= !out.is_empty();
+                } else {
+                    if pending_whitespace {
+                        out.push(' ');
+                        pending_whitespace = false;
+                    }
+                    out.push(c);
+                }
+            }
+        }
+    }
     pub(crate) fn normalized_char_count(&self, root: NodeId) -> usize {
         let mut count = 0;
         let mut has_text = false;
@@ -267,28 +286,11 @@ impl Dom {
         }
         Some(count)
     }
+    #[cfg(test)]
     pub(crate) fn normalized_text(&self, root: NodeId, initial_capacity: usize) -> (String, usize) {
         let mut out = String::with_capacity(initial_capacity);
-        let mut char_count = 0;
-        let mut pending_whitespace = false;
-        for id in std::iter::once(root).chain(self.descendants(root)) {
-            let Some(text) = self.text_node(id) else {
-                continue;
-            };
-            for c in text.chars() {
-                if c.is_whitespace() {
-                    pending_whitespace |= !out.is_empty();
-                } else {
-                    if pending_whitespace {
-                        out.push(' ');
-                        char_count += 1;
-                        pending_whitespace = false;
-                    }
-                    out.push(c);
-                    char_count += 1;
-                }
-            }
-        }
+        self.append_normalized_text(root, &mut out);
+        let char_count = out.chars().count();
         (out, char_count)
     }
     pub(crate) fn has_non_whitespace_text(&self, root: NodeId) -> bool {

@@ -52,8 +52,8 @@ impl ElementData {
     pub(crate) fn attr(&self, name: AttrName) -> Option<&str> {
         self.attrs
             .iter()
-            .find(|a| a.known == name)
-            .map(|a| a.value.as_ref())
+            .find(|attribute| name.matches_local(attribute.name.local.as_ref()))
+            .map(|attribute| attribute.value.as_ref())
     }
     pub(crate) fn attr_local(&self, name: &str) -> Option<&str> {
         self.attrs

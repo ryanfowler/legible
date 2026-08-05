@@ -16,7 +16,7 @@ use regex::Regex;
 /// ```
 ///
 /// `Options::new()` and `Options::default()` return the same values.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Maximum number of HTML elements that the document can contain.
     ///
@@ -69,10 +69,10 @@ pub struct Options {
     /// value removes more link-heavy content.
     pub link_density_modifier: f64,
 
-    /// Controls debug output.
+    /// Controls extraction debug events.
     ///
-    /// The default is `false`. If this value is `true`, Legible writes extraction
-    /// decisions to standard error.
+    /// The default is `false`. With the `tracing` feature, `true` emits events to the
+    /// configured tracing subscriber. Without that feature, this value has no effect.
     pub debug: bool,
 }
 
@@ -148,7 +148,7 @@ impl Options {
         self
     }
 
-    /// Sets whether Legible writes debug output to standard error.
+    /// Sets whether Legible emits extraction debug events.
     pub fn debug(mut self, debug: bool) -> Self {
         self.debug = debug;
         self

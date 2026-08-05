@@ -1,16 +1,94 @@
-//! Markdown serialization for cleaned article DOM subtrees.
+//! Markdown serialization for the cleaned extraction DOM.
 //!
-//! The serializer walks the DOM directly. It does not serialize and parse the
-//! extracted HTML again. Its explicit work stack also keeps deeply nested input
-//! from using the Rust call stack.
+//! The serializer uses an explicit work stack. Deeply nested input does not use the
+//! Rust call stack.
 
 use smallvec::SmallVec;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
+trait MarkdownTree {
+    type Node: Copy + Eq;
+
+    fn first_child(&self, node: Self::Node) -> Option<Self::Node>;
+    fn next_sibling(&self, node: Self::Node) -> Option<Self::Node>;
+    fn tag(&self, node: Self::Node) -> Option<Tag>;
+    fn text_node(&self, node: Self::Node) -> Option<&str>;
+    fn is_comment(&self, node: Self::Node) -> bool;
+    fn attr(&self, node: Self::Node, name: AttrName) -> Option<&str>;
+    fn attr_by_local_name(&self, node: Self::Node, name: &str) -> Option<&str>;
+
+    fn for_each_text(&self, root: Self::Node, mut visit: impl FnMut(&str)) {
+        let mut nodes = SmallVec::<[(Self::Node, bool); 16]>::new();
+        nodes.push((root, false));
+        while let Some((node, include_siblings)) = nodes.pop() {
+            if include_siblings && let Some(sibling) = self.next_sibling(node) {
+                nodes.push((sibling, true));
+            }
+            if let Some(text) = self.text_node(node) {
+                visit(text);
+                continue;
+            }
+            if self.tag(node) == Some(Tag::Template) {
+                continue;
+            }
+            if let Some(child) = self.first_child(node) {
+                nodes.push((child, true));
+            }
+        }
+    }
+}
+
+impl MarkdownTree for Dom {
+    type Node = NodeId;
+
+    fn first_child(&self, node: NodeId) -> Option<NodeId> {
+        self.first_child(node)
+    }
+    fn next_sibling(&self, node: NodeId) -> Option<NodeId> {
+        self.next_sibling(node)
+    }
+    fn tag(&self, node: NodeId) -> Option<Tag> {
+        self.tag(node)
+    }
+    fn text_node(&self, node: NodeId) -> Option<&str> {
+        self.text_node(node)
+    }
+    fn is_comment(&self, node: NodeId) -> bool {
+        self.is_comment(node)
+    }
+    fn attr(&self, node: NodeId, name: AttrName) -> Option<&str> {
+        self.attr(node, name)
+    }
+    fn attr_by_local_name(&self, node: NodeId, name: &str) -> Option<&str> {
+        self.attr_by_local_name(node, name)
+    }
+}
+
 /// Serializes the children of `root` as CommonMark.
+#[cfg(test)]
 pub(crate) fn dom_to_markdown(dom: &Dom, root: NodeId, capacity: usize) -> String {
-    MarkdownSerializer::new(dom, capacity).serialize(root)
+    render_markdown(dom, root, capacity, true, true)
+}
+
+pub(crate) fn render_markdown(
+    dom: &Dom,
+    root: NodeId,
+    capacity: usize,
+    include_links: bool,
+    include_images: bool,
+) -> String {
+    serialize_markdown(dom, root, capacity, include_links, include_images)
+}
+
+fn serialize_markdown<T: MarkdownTree>(
+    tree: &T,
+    root: T::Node,
+    capacity: usize,
+    include_links: bool,
+    include_images: bool,
+) -> String {
+    MarkdownSerializer::new(tree, capacity, include_links, include_images).serialize(root)
 }
 
 #[derive(Clone, Copy)]
@@ -20,14 +98,14 @@ enum Mode {
 }
 
 #[derive(Clone, Copy)]
-enum Task {
-    Node(NodeId, Mode),
-    Siblings(NodeId, Mode),
-    InlineRun(NodeId, RunKind),
-    Close(Close),
-    ListItems(NodeId, i32, u32),
-    ListItem(NodeId, ListMarker),
-    ItemParagraph(NodeId),
+enum Task<N> {
+    Node(N, Mode),
+    Siblings(N, Mode),
+    InlineRun(N, RunKind),
+    Close(Close<N>),
+    ListItems(N, i32, u32),
+    ListItem(N, ListMarker),
+    ItemParagraph(N),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -55,34 +133,40 @@ enum ListMarker {
 }
 
 #[derive(Clone, Copy)]
-enum Close {
+enum Close<N> {
     Block,
     Marker(RunKind),
     TableCellSeparator,
-    Link(NodeId),
+    Link(N),
     Quote,
     List,
     ListItem,
 }
 
-struct MarkdownSerializer<'a> {
-    dom: &'a Dom,
+struct MarkdownSerializer<'a, T: MarkdownTree> {
+    dom: &'a T,
     out: Output,
-    tasks: Vec<Task>,
+    tasks: Vec<Task<T::Node>>,
     list_depth: usize,
+    include_links: bool,
+    include_images: bool,
 }
 
-impl<'a> MarkdownSerializer<'a> {
-    fn new(dom: &'a Dom, capacity: usize) -> Self {
+impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
+    fn new(dom: &'a T, capacity: usize, include_links: bool, include_images: bool) -> Self {
         Self {
             dom,
             out: Output::new(capacity),
-            tasks: Vec::new(),
+            // Most documents stay below this depth. Keep the stack on the heap so
+            // adversarial nesting cannot exhaust the call stack.
+            tasks: Vec::with_capacity(32),
             list_depth: 0,
+            include_links,
+            include_images,
         }
     }
 
-    fn serialize(mut self, root: NodeId) -> String {
+    fn serialize(mut self, root: T::Node) -> String {
         self.push_children(root, Mode::Block);
         while let Some(task) = self.tasks.pop() {
             match task {
@@ -114,13 +198,13 @@ impl<'a> MarkdownSerializer<'a> {
         self.out.finish()
     }
 
-    fn push_children(&mut self, id: NodeId, mode: Mode) {
+    fn push_children(&mut self, id: T::Node, mode: Mode) {
         if let Some(child) = self.dom.first_child(id) {
             self.tasks.push(Task::Siblings(child, mode));
         }
     }
 
-    fn node(&mut self, id: NodeId, mode: Mode) {
+    fn node(&mut self, id: T::Node, mode: Mode) {
         if let Some(text) = self.dom.text_node(id) {
             self.out.text(text);
             return;
@@ -135,8 +219,16 @@ impl<'a> MarkdownSerializer<'a> {
         match tag {
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
                 self.out.ensure_blank_line();
-                let level = tag as usize - Tag::H1 as usize + 1;
-                self.out.markup(&"#".repeat(level));
+                let marker = match tag {
+                    Tag::H1 => "#",
+                    Tag::H2 => "##",
+                    Tag::H3 => "###",
+                    Tag::H4 => "####",
+                    Tag::H5 => "#####",
+                    Tag::H6 => "######",
+                    _ => unreachable!("heading match contains only headings"),
+                };
+                self.out.markup(marker);
                 self.out.markup(" ");
                 self.tasks.push(Task::Close(Close::Block));
                 self.push_children(id, Mode::Inline);
@@ -189,18 +281,20 @@ impl<'a> MarkdownSerializer<'a> {
             Tag::Ul | Tag::Ol => self.list(id, tag == Tag::Ol),
             Tag::Pre => self.code_block(id),
             Tag::A => {
-                if self
-                    .dom
-                    .attr(id, AttrName::Href)
-                    .and_then(|href| safe_destination(href, DestinationKind::Link))
-                    .is_some()
+                if self.include_links
+                    && self
+                        .dom
+                        .attr(id, AttrName::Href)
+                        .and_then(|href| safe_destination(href, DestinationKind::Link))
+                        .is_some()
                 {
                     self.out.open_marker("[");
                     self.tasks.push(Task::Close(Close::Link(id)));
                 }
                 self.push_children(id, Mode::Inline);
             }
-            Tag::Img => self.image(id),
+            Tag::Img if self.include_images => self.image(id),
+            Tag::Img => {}
             Tag::Strong | Tag::B => self.format(id, RunKind::Strong),
             Tag::Em | Tag::I => self.format(id, RunKind::Emphasis),
             Tag::Code => self.code_span(id),
@@ -215,14 +309,14 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn format(&mut self, id: NodeId, kind: RunKind) {
+    fn format(&mut self, id: T::Node, kind: RunKind) {
         let marker = kind.marker().expect("formatting element has a marker");
         self.out.open_marker(marker);
         self.tasks.push(Task::Close(Close::Marker(kind)));
         self.push_children(id, Mode::Inline);
     }
 
-    fn run_kind(&self, id: NodeId) -> Option<RunKind> {
+    fn run_kind(&self, id: T::Node) -> Option<RunKind> {
         match self.dom.tag(id)? {
             Tag::Strong | Tag::B => Some(RunKind::Strong),
             Tag::Em | Tag::I => Some(RunKind::Emphasis),
@@ -231,22 +325,22 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn inline_run(&mut self, first: NodeId, kind: RunKind) {
+    fn inline_run(&mut self, first: T::Node, kind: RunKind) {
         if kind == RunKind::Code {
-            let mut text = String::new();
+            let mut nodes = SmallVec::<[T::Node; 4]>::new();
             let mut current = Some(first);
             while let Some(id) = current.filter(|&id| self.run_kind(id) == Some(kind)) {
-                self.dom.append_text(id, &mut text);
+                nodes.push(id);
                 current = self.dom.next_sibling(id);
             }
-            self.emit_code_span(&text);
+            self.emit_code_span(&nodes);
             return;
         }
 
         let marker = kind.marker().expect("formatting run has a marker");
         self.out.open_marker(marker);
         self.tasks.push(Task::Close(Close::Marker(kind)));
-        let mut nodes = SmallVec::<[NodeId; 4]>::new();
+        let mut nodes = SmallVec::<[T::Node; 4]>::new();
         let mut current = Some(first);
         while let Some(id) = current.filter(|&id| self.run_kind(id) == Some(kind)) {
             nodes.push(id);
@@ -257,7 +351,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn list(&mut self, id: NodeId, ordered: bool) {
+    fn list(&mut self, id: T::Node, ordered: bool) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
@@ -282,7 +376,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn list_items(&mut self, id: NodeId, start: i32, index: u32) {
+    fn list_items(&mut self, id: T::Node, start: i32, index: u32) {
         let is_item = self.dom.tag(id) == Some(Tag::Li);
         if let Some(sibling) = self.dom.next_sibling(id) {
             self.tasks
@@ -303,7 +397,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn list_item(&mut self, id: NodeId, marker: ListMarker) {
+    fn list_item(&mut self, id: T::Node, marker: ListMarker) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
@@ -317,10 +411,10 @@ impl<'a> MarkdownSerializer<'a> {
                 3
             }
             ListMarker::OrderedStart(start) => {
-                let start = start.to_string();
-                self.out.markup(&start);
+                let width = decimal_len(start) + 2;
+                self.out.markup_number(start);
                 self.out.markup(". ");
-                start.len() + 2
+                width
             }
         };
         self.out.prefixes.push(Prefix::ListItem {
@@ -329,7 +423,13 @@ impl<'a> MarkdownSerializer<'a> {
         });
         self.tasks.push(Task::Close(Close::ListItem));
 
-        for child in self.dom.children_rev(id) {
+        let mut children = SmallVec::<[T::Node; 8]>::new();
+        let mut child = self.dom.first_child(id);
+        while let Some(node) = child {
+            children.push(node);
+            child = self.dom.next_sibling(node);
+        }
+        for child in children.into_iter().rev() {
             if self.dom.tag(child) == Some(Tag::P) {
                 self.tasks.push(Task::ItemParagraph(child));
             } else {
@@ -338,7 +438,7 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn item_paragraph(&mut self, id: NodeId) {
+    fn item_paragraph(&mut self, id: T::Node) {
         if !self.out.in_empty_list_item() {
             if self.out.has_current_line_content() {
                 self.out.newline();
@@ -349,15 +449,18 @@ impl<'a> MarkdownSerializer<'a> {
         self.push_children(id, Mode::Inline);
     }
 
-    fn table_row(&mut self, id: NodeId) {
+    fn table_row(&mut self, id: T::Node) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
-        let cells: SmallVec<[NodeId; 16]> = self
-            .dom
-            .element_children(id)
-            .filter(|&child| matches!(self.dom.tag(child), Some(Tag::Td | Tag::Th)))
-            .collect();
+        let mut cells = SmallVec::<[T::Node; 16]>::new();
+        let mut child = self.dom.first_child(id);
+        while let Some(node) = child {
+            if matches!(self.dom.tag(node), Some(Tag::Td | Tag::Th)) {
+                cells.push(node);
+            }
+            child = self.dom.next_sibling(node);
+        }
         if cells.is_empty() {
             self.push_children(id, Mode::Inline);
             self.tasks.push(Task::Close(Close::Block));
@@ -372,42 +475,71 @@ impl<'a> MarkdownSerializer<'a> {
         }
     }
 
-    fn code_span(&mut self, id: NodeId) {
-        let text = self.dom.text(id);
-        self.emit_code_span(&text);
+    fn code_span(&mut self, id: T::Node) {
+        self.emit_code_span(&[id]);
     }
 
-    fn emit_code_span(&mut self, text: &str) {
+    fn emit_code_span(&mut self, nodes: &[T::Node]) {
+        let mut scan = CollapsedText::default();
+        for &id in nodes {
+            self.dom.for_each_text(id, |text| scan.scan(text));
+        }
+
         self.out.mark_list_item_content();
-        let normalized = collapse_whitespace(text);
-        let fence_len = longest_run(normalized.as_bytes(), b'`') + 1;
-        let fence = "`".repeat(fence_len);
-        let pad = normalized.starts_with('`') || normalized.ends_with('`');
-        self.out.markup(&fence);
+        let fence_len = scan.longest_backtick_run + 1;
+        let pad = scan.starts_with_backtick || scan.ends_with_backtick;
+        self.out.markup_repeat('`', fence_len);
         if pad {
             self.out.verbatim(" ");
         }
-        self.out.verbatim(&normalized);
+        let mut writer = CollapsedTextWriter::default();
+        self.out.begin_verbatim();
+        for &id in nodes {
+            self.dom
+                .for_each_text(id, |text| writer.write(&mut self.out.value, text));
+        }
+        if writer.empty && writer.pending_whitespace {
+            self.out.value.push(' ');
+        }
         if pad {
             self.out.verbatim(" ");
         }
-        self.out.markup(&fence);
+        self.out.markup_repeat('`', fence_len);
     }
 
-    fn code_block(&mut self, id: NodeId) {
+    fn code_block(&mut self, id: T::Node) {
         self.out.ensure_blank_line();
         self.out.mark_list_item_content();
-        let text = self.dom.text(id);
-        let fence = "`".repeat(3.max(longest_run(text.as_bytes(), b'`') + 1));
-        self.out.markup(&fence);
+        let mut longest = 0;
+        let mut current = 0;
+        let mut remaining = 0;
+        let mut ends_with_newline = false;
+        self.dom.for_each_text(id, |text| {
+            remaining += text.len();
+            if !text.is_empty() {
+                ends_with_newline = text.ends_with('\n');
+            }
+            scan_longest_run(text.as_bytes(), b'`', &mut longest, &mut current);
+        });
+        let fence_len = 3.max(longest + 1);
+        self.out.markup_repeat('`', fence_len);
         self.out.newline();
-        self.out.verbatim(text.strip_suffix('\n').unwrap_or(&text));
+        self.dom.for_each_text(id, |text| {
+            let omit_last = !text.is_empty() && remaining == text.len() && ends_with_newline;
+            let text = if omit_last {
+                &text[..text.len() - 1]
+            } else {
+                text
+            };
+            self.out.verbatim(text);
+            remaining -= text.len() + usize::from(omit_last);
+        });
         self.out.newline();
-        self.out.markup(&fence);
+        self.out.markup_repeat('`', fence_len);
         self.out.newline();
     }
 
-    fn image(&mut self, id: NodeId) {
+    fn image(&mut self, id: T::Node) {
         let alt = self.dom.attr_by_local_name(id, "alt").unwrap_or("");
         let Some(src) = self
             .dom
@@ -430,7 +562,7 @@ impl<'a> MarkdownSerializer<'a> {
         self.out.markup(")");
     }
 
-    fn close(&mut self, close: Close) {
+    fn close(&mut self, close: Close<T::Node>) {
         match close {
             Close::Block => self.out.newline(),
             Close::Marker(kind) => {
@@ -623,53 +755,53 @@ impl Output {
                 self.prepare_text();
                 prepared = true;
             }
-            let start = index;
-            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
-                index += 1;
-            }
-            self.ascii_text_run(&text[start..index]);
+            self.ascii_text_run(text, &mut index);
         }
     }
 
-    fn ascii_text_run(&mut self, text: &str) {
+    /// Writes one non-whitespace run and leaves `index` at its end.
+    fn ascii_text_run(&mut self, text: &str, index: &mut usize) {
         let bytes = text.as_bytes();
-        let mut index = 0;
 
         if matches!(
             self.line_text_state,
             LineTextState::Start | LineTextState::Digits
         ) {
-            if matches!(self.line_text_state, LineTextState::Start) && !bytes[0].is_ascii_digit() {
+            if matches!(self.line_text_state, LineTextState::Start)
+                && !bytes[*index].is_ascii_digit()
+            {
                 self.line_text_state = LineTextState::Other;
-                self.push_ascii_text_byte(bytes[0], matches!(bytes[0], b'-' | b'+' | b'=' | b'~'));
-                index = 1;
+                let byte = bytes[*index];
+                self.push_ascii_text_byte(byte, matches!(byte, b'-' | b'+' | b'=' | b'~'));
+                *index += 1;
             } else {
-                let digits_start = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
+                let digits_start = *index;
+                while *index < bytes.len() && bytes[*index].is_ascii_digit() {
+                    *index += 1;
                 }
-                self.value.push_str(&text[digits_start..index]);
+                self.value.push_str(&text[digits_start..*index]);
                 self.line_text_state = LineTextState::Digits;
-                if index == bytes.len() {
+                if *index == bytes.len() || bytes[*index].is_ascii_whitespace() {
                     return;
                 }
                 self.line_text_state = LineTextState::Other;
-                self.push_ascii_text_byte(bytes[index], matches!(bytes[index], b'.' | b')'));
-                index += 1;
+                let byte = bytes[*index];
+                self.push_ascii_text_byte(byte, matches!(byte, b'.' | b')'));
+                *index += 1;
             }
         }
 
-        let mut copy_start = index;
-        while index < bytes.len() {
-            if markdown_escape_byte(bytes[index]) {
-                self.value.push_str(&text[copy_start..index]);
+        let mut copy_start = *index;
+        while *index < bytes.len() && !bytes[*index].is_ascii_whitespace() {
+            if markdown_escape_byte(bytes[*index]) {
+                self.value.push_str(&text[copy_start..*index]);
                 self.value.push('\\');
-                self.value.push(bytes[index] as char);
-                copy_start = index + 1;
+                self.value.push(bytes[*index] as char);
+                copy_start = *index + 1;
             }
-            index += 1;
+            *index += 1;
         }
-        self.value.push_str(&text[copy_start..]);
+        self.value.push_str(&text[copy_start..*index]);
     }
 
     fn prepare_text(&mut self) {
@@ -738,10 +870,26 @@ impl Output {
     }
 
     fn markup(&mut self, value: &str) {
+        self.prepare_markup();
+        self.value.push_str(value);
+    }
+
+    fn markup_repeat(&mut self, value: char, count: usize) {
+        self.prepare_markup();
+        self.value.extend(std::iter::repeat_n(value, count));
+    }
+
+    fn markup_number(&mut self, value: i32) {
+        use std::fmt::Write;
+
+        self.prepare_markup();
+        write!(self.value, "{value}").expect("writing to a String cannot fail");
+    }
+
+    fn prepare_markup(&mut self) {
         self.flush_space();
         self.prefix();
         self.open_pending_markers();
-        self.value.push_str(value);
         self.line_text_state = LineTextState::Other;
     }
 
@@ -768,6 +916,11 @@ impl Output {
             self.value.push_str(closing);
         }
         marker.opened
+    }
+
+    fn begin_verbatim(&mut self) {
+        self.flush_space();
+        self.prefix();
     }
 
     fn verbatim(&mut self, value: &str) {
@@ -898,38 +1051,86 @@ fn markdown_escape_byte(byte: u8) -> bool {
     )
 }
 
-fn longest_run(bytes: &[u8], needle: u8) -> usize {
-    let mut longest = 0;
-    let mut current = 0;
+fn scan_longest_run(bytes: &[u8], needle: u8, longest: &mut usize, current: &mut usize) {
     for &byte in bytes {
         if byte == needle {
-            current += 1;
-            longest = longest.max(current);
+            *current += 1;
+            *longest = (*longest).max(*current);
         } else {
-            current = 0;
+            *current = 0;
         }
     }
-    longest
 }
 
-fn collapse_whitespace(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut pending = false;
-    for ch in value.chars() {
-        if ch.is_whitespace() {
-            pending = true;
-        } else {
-            if pending {
-                out.push(' ');
-                pending = false;
+#[derive(Clone, Copy, Default)]
+struct CollapsedText {
+    longest_backtick_run: usize,
+    current_backtick_run: usize,
+    starts_with_backtick: bool,
+    ends_with_backtick: bool,
+    has_content: bool,
+    pending_whitespace: bool,
+}
+
+impl CollapsedText {
+    fn scan(&mut self, value: &str) {
+        for ch in value.chars() {
+            if ch.is_whitespace() {
+                self.pending_whitespace = true;
+                self.current_backtick_run = 0;
+                continue;
             }
-            out.push(ch);
+            if !self.has_content {
+                self.starts_with_backtick = !self.pending_whitespace && ch == '`';
+                self.has_content = true;
+            }
+            self.ends_with_backtick = ch == '`';
+            if ch == '`' {
+                self.current_backtick_run += 1;
+                self.longest_backtick_run =
+                    self.longest_backtick_run.max(self.current_backtick_run);
+            } else {
+                self.current_backtick_run = 0;
+            }
+            self.pending_whitespace = false;
         }
     }
-    if pending && out.is_empty() {
-        out.push(' ');
+}
+
+struct CollapsedTextWriter {
+    empty: bool,
+    pending_whitespace: bool,
+}
+
+impl Default for CollapsedTextWriter {
+    fn default() -> Self {
+        Self {
+            empty: true,
+            pending_whitespace: false,
+        }
     }
-    out
+}
+
+impl CollapsedTextWriter {
+    fn write(&mut self, out: &mut String, value: &str) {
+        for ch in value.chars() {
+            if ch.is_whitespace() {
+                self.pending_whitespace = true;
+                continue;
+            }
+            if self.pending_whitespace {
+                out.push(' ');
+            }
+            out.push(ch);
+            self.empty = false;
+            self.pending_whitespace = false;
+        }
+    }
+}
+
+fn decimal_len(value: i32) -> usize {
+    debug_assert!(value > 0);
+    value.ilog10() as usize + 1
 }
 
 #[cfg(test)]
@@ -1082,6 +1283,16 @@ mod tests {
         );
         assert_eq!(markdown("<p><code>`x`</code></p>"), "`` `x` ``\n");
         assert_eq!(markdown("<p><code>   </code></p>"), "` `\n");
+        assert_eq!(markdown("<p><code> x</code></p>"), "` x`\n");
+        assert_eq!(markdown("<p><code> `x</code></p>"), "`` `x``\n");
+        assert_eq!(
+            markdown("<p><code>`<span>`</span> x</code><code> y`</code></p>"),
+            "``` `` x y` ```\n"
+        );
+        assert_eq!(
+            markdown("<pre>a<span>``</span>`\n</pre>"),
+            "````\na```\n````\n"
+        );
         assert_eq!(
             markdown("<blockquote><blockquote><p>Nested</p></blockquote></blockquote>"),
             "> > Nested\n"
@@ -1240,6 +1451,19 @@ mod tests {
         assert!(article.markdown_content.contains("Unsafe link"));
         assert!(!article.markdown_content.contains("javascript:"));
         assert!(!article.markdown_content.contains('<'));
+    }
+
+    #[test]
+    fn code_block_ignores_empty_text_after_its_final_newline() {
+        let mut dom = Dom::parse_fragment("<pre>code\n</pre>", Tag::Div).unwrap();
+        let pre = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Pre))
+            .unwrap();
+        let empty = dom.create_text("").unwrap();
+        dom.append_child(pre, empty);
+        let root = dom.root();
+        assert_eq!(dom_to_markdown(&dom, root, 0), "```\ncode\n```\n");
     }
 
     #[test]
