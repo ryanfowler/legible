@@ -1,6 +1,10 @@
 //! Metadata extraction from HTML documents.
 #![allow(clippy::collapsible_if, clippy::field_reassign_with_default)]
-use crate::constants::regexps;
+use crate::constants::{
+    find_last_title_separator_start, has_hierarchical_title_separator, has_title_separator,
+    is_json_ld_article_type, is_schema_org_url, normalize_whitespace, remove_title_first_part,
+    remove_title_separators, split_word_tokens,
+};
 use crate::dom::{AttrName, Dom, Tag};
 use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_text};
 use regex::Regex;
@@ -91,7 +95,7 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
             parsed = match a.into_iter().find(|v| {
                 v.get("@type")
                     .and_then(Value::as_str)
-                    .is_some_and(|t| regexps::JSON_LD_ARTICLE_TYPES.is_match(t))
+                    .is_some_and(is_json_ld_article_type)
             }) {
                 Some(v) => v,
                 None => continue,
@@ -101,11 +105,11 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
             continue;
         };
         let schema = match obj.get("@context") {
-            Some(Value::String(s)) => SCHEMA.is_match(s),
+            Some(Value::String(s)) => is_schema_org_url(s),
             Some(Value::Object(o)) => o
                 .get("@vocab")
                 .and_then(Value::as_str)
-                .is_some_and(|s| SCHEMA.is_match(s)),
+                .is_some_and(is_schema_org_url),
             _ => false,
         };
         if !schema {
@@ -117,7 +121,7 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
                 if let Some(v) = g.iter().find(|v| {
                     v.get("@type")
                         .and_then(Value::as_str)
-                        .is_some_and(|t| regexps::JSON_LD_ARTICLE_TYPES.is_match(t))
+                        .is_some_and(is_json_ld_article_type)
                 }) {
                     value = v.clone()
                 } else {
@@ -129,7 +133,7 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
         if !o
             .get("@type")
             .and_then(Value::as_str)
-            .is_some_and(|t| regexps::JSON_LD_ARTICLE_TYPES.is_match(t))
+            .is_some_and(is_json_ld_article_type)
         {
             continue;
         }
@@ -189,7 +193,6 @@ fn collect_json_authors(value: &Value, out: &mut Vec<String>) {
         out.push(name.into())
     }
 }
-static SCHEMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
 pub fn get_article_title(dom: &Dom) -> String {
     let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
@@ -203,13 +206,13 @@ pub fn get_article_title(dom: &Dom) -> String {
     fn wc(s: &str) -> usize {
         s.split_whitespace().count()
     }
-    if regexps::TITLE_SEPARATOR.is_match(&orig) {
-        hierarchical = regexps::TITLE_HIERARCHICAL.is_match(&orig);
-        if let Some(m) = regexps::TITLE_SEPARATOR.find_iter(&orig).last() {
-            cur = Cow::Borrowed(&orig[..m.start()])
+    if has_title_separator(&orig) {
+        hierarchical = has_hierarchical_title_separator(&orig);
+        if let Some(start) = find_last_title_separator_start(&orig) {
+            cur = Cow::Borrowed(&orig[..start])
         }
         if wc(&cur) < 3 {
-            cur = regexps::TITLE_FIRST_PART.replace(&orig, "")
+            cur = Cow::Owned(remove_title_first_part(&orig))
         }
     } else if orig.contains(": ") {
         let mut text_buffer = String::new();
@@ -242,9 +245,9 @@ pub fn get_article_title(dom: &Dom) -> String {
             cur = Cow::Owned(normalized)
         }
     }
-    let mut cur = regexps::NORMALIZE.replace_all(cur.trim(), " ").into_owned();
+    let mut cur = normalize_whitespace(cur.trim());
     if wc(&cur) <= 4 {
-        let without = regexps::TITLE_SEPARATOR.replace_all(&orig, "");
+        let without = remove_title_separators(&orig);
         if !hierarchical || wc(&cur) != wc(&without).saturating_sub(1) {
             cur = orig
         }
@@ -390,14 +393,8 @@ fn insert_metadata_value(
 pub fn text_similarity(a: &str, b: &str) -> f64 {
     let aa = a.to_lowercase();
     let bb = b.to_lowercase();
-    let set: SmallVec<[&str; 16]> = regexps::TOKENIZE
-        .split(&aa)
-        .filter(|s| !s.is_empty())
-        .collect();
-    let tokens: SmallVec<[&str; 16]> = regexps::TOKENIZE
-        .split(&bb)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let set: SmallVec<[&str; 16]> = split_word_tokens(&aa).collect();
+    let tokens: SmallVec<[&str; 16]> = split_word_tokens(&bb).collect();
     if set.is_empty() || tokens.is_empty() {
         return 0.;
     }

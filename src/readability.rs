@@ -2,7 +2,8 @@
 #![allow(clippy::collapsible_if)]
 use crate::cleaning::*;
 use crate::constants::{
-    flags::*, is_alter_to_div_exception, is_default_tag_to_score, is_unlikely_role, regexps,
+    flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score,
+    is_unlikely_role, regexps,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
@@ -740,11 +741,7 @@ impl<'a> Readability<'a> {
         let children: SmallVec<[NodeId; 16]> = self.dom.element_children(root).collect();
         for c in children {
             clean_matched_nodes(&mut self.dom, c, nodes, match_buffer, |d, id, m| {
-                m.as_bytes()
-                    .windows(5)
-                    .any(|w| w.eq_ignore_ascii_case(b"share"))
-                    && regexps::SHARE_ELEMENTS.is_match(m)
-                    && get_inner_text(d, id, text_buffer).len() < threshold
+                has_share_element(m) && get_inner_text(d, id, text_buffer).len() < threshold
             })
         }
         clean_tags(

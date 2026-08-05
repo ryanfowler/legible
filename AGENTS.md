@@ -38,7 +38,7 @@ The extraction pipeline flows through these stages:
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
 - **`markdown.rs` / `text.rs`** - Iterative direct rendering of cleaned article content
-- **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
+- **`constants.rs`** - Static regex patterns, specialized matching helpers, and configuration flags
 - **`src/dom/`** - Compact arena storage, typed tags and attributes, iterative traversal, centralized mutation, fragment parsing, and `html5ever` serialization
 - **`dom/state.rs`** - Dense Readability state indexed by stable `NodeId` values
 
