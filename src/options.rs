@@ -187,9 +187,6 @@ pub struct ReaderableOptions {
     pub min_content_length: usize,
 }
 
-/// Options for the quick readability heuristic.
-pub type ReadabilityOptions = ReaderableOptions;
-
 impl Default for ReaderableOptions {
     fn default() -> Self {
         Self {

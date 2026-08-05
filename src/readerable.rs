@@ -36,7 +36,7 @@ use smallvec::SmallVec;
 /// }
 /// ```
 pub fn is_probably_readerable(html: &str, options: Option<ReaderableOptions>) -> bool {
-    Document::parse(html).is_ok_and(|document| document.is_probably_readerable(options))
+    Document::new(html).is_probably_readerable(options)
 }
 pub(crate) fn is_probably_readerable_doc(dom: &Dom, options: Option<ReaderableOptions>) -> bool {
     let options = options.unwrap_or_default();

@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use legible::{Options, parse};
 
 #[test]

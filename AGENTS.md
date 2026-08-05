@@ -31,9 +31,8 @@ The extraction pipeline flows through these stages:
 
 ### Key Modules
 
-- **`document.rs`** - Public fallible `Document<'a>` parser for checking readability before extraction
-- **`extractor.rs`** - Reusable extraction configuration and the primary extraction entry points
-- **`article.rs`** - Private-field public HTML, Markdown, and text result types and format options
+- **`document.rs`** - Public `Document<'a>` wrapper for checking readability before extraction
+- **`article.rs`** - Internal extended metadata and rendering support
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
@@ -57,7 +56,7 @@ The extraction pipeline flows through these stages:
 - Preserve the O(1) leaf fast path in DOM cycle checks. The parser appends new leaf nodes, so do not add another depth-dependent scan to this path.
 - Keep the bounded, markup-density-aware node capacity hint. Count markup with `memchr` so preallocation does not add a full scalar scan or overallocate for dense adversarial input.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
-- Use the `dom_parse` Criterion group to isolate custom DOM construction. Use `document_extraction` to benchmark extraction from an already parsed `Document`.
+- Use the `dom_parse` Criterion group to isolate custom DOM construction.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
 - Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
@@ -65,11 +64,11 @@ The extraction pipeline flows through these stages:
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.
 - Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Render only the requested final format from the cleaned DOM.
 - Render HTML, Markdown, and text directly from the final cleaned DOM. Do not freeze an intermediate output tree or rebuild a temporary DOM. Drop the DOM before returning the public result.
-- The deprecated `parse` adapter must render all formats from one cleaned DOM. Keep final rendering iterative. Escape HTML through `html5ever`. Escape Markdown text, link destinations, and code fences for CommonMark.
+- The public `parse` function must render all formats from one cleaned DOM. Keep final rendering iterative. Escape HTML through `html5ever`. Escape Markdown text, link destinations, and code fences for CommonMark.
 - Preserve the byte-wise ASCII paths in Markdown and normalized article text, compact task fields, the preallocated heap-backed Markdown task stack, and output capacity hints from normalized article text. Keep code span and code block rendering free of temporary text and fence allocations. Apply non-default bullet markers in place, and transform Setext headings in one output pass. These avoid per-character work, excess task-stack traffic, stack-resident task buffers on complex articles, and repeated output growth.
 - Use typed `AttrName` lookups for hot Markdown link and image attributes. Keep local-name lookups only for attributes without a known enum variant.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
-- Borrow reusable `Extractor` configuration during extraction. Keep owned legacy `Options` alive at the compatibility API boundary.
+- Borrow `Options` during extraction. Keep the owned options alive at the public API boundary.
 
 ### Scoring System
 
@@ -87,7 +86,7 @@ The algorithm retries with progressively fewer flags if initial extraction fails
 
 - Keep `README.md` and the public Rust API docs consistent.
 - Write user documentation in ASD-STE100 Simplified Technical English. Use short sentences, active voice, and consistent terms.
-- State that `HtmlArticle::content` is not sanitized. Do not describe cleaned HTML as safe HTML.
+- State that `Article::content` is not sanitized. Do not describe cleaned HTML as safe HTML.
 - State that `char_threshold` causes less-filtered retries and is not a strict output minimum.
 - State that the quick readability check is a heuristic and can return false positives or false negatives.
 
@@ -102,15 +101,14 @@ Extraction with default options must return `Error::NoContent` when the best ret
 ## Public API
 
 ```rust
-use legible::{extract_html, Document, Extractor};
+use legible::{Document, parse};
 
-let article = extract_html(html)?;
-let markdown = Extractor::default().extract_markdown(html)?;
+let article = parse(html, None, None)?;
 
-let document = Document::parse(html)?;
-if document.is_probably_readable() {
-    let article = Extractor::default().extract_document_html(document)?;
+let document = Document::new(html);
+if document.is_probably_readerable(None) {
+    let article = document.parse(None, None)?;
 }
 ```
 
-The deprecated `parse` adapter returns `legacy::Article` with the 0.4 public string fields.
+`Article` contains public HTML, Markdown, text, and metadata fields.

@@ -197,7 +197,7 @@ mod tests {
                 &dom,
                 body,
                 0,
-                &TextOptions::default().block_separator(crate::TextSeparator::Newline),
+                &TextOptions::default().block_separator(crate::article::TextSeparator::Newline),
             ),
             "A\nHello world!\nCD"
         );
@@ -207,7 +207,7 @@ mod tests {
                 body,
                 0,
                 &TextOptions::default()
-                    .block_separator(crate::TextSeparator::Newline)
+                    .block_separator(crate::article::TextSeparator::Newline)
                     .preserve_line_breaks(true),
             ),
             "A\nHello world!\nC\nD"

@@ -1,21 +1,103 @@
-//! Legible extracts readable article content from HTML.
+//! # Legible
 //!
-//! Use [`extract_html`] for one HTML extraction. Use [`Extractor`] for reusable
-//! configuration and for Markdown or text extraction. Each method creates only the
-//! requested format.
+//! Legible extracts the main article from an HTML document. It removes navigation,
+//! advertisements, sidebars, and other unrelated content. Legible is a Rust port of
+//! Mozilla's [Readability.js](https://github.com/mozilla/readability).
+//!
+//! ## Extract an article
+//!
+//! Use [`parse`] for most applications:
 //!
 //! ```rust
-//! let article = legible::extract_html("<article><h1>Title</h1><p>Article text.</p></article>")?;
-//! println!("{}", article.metadata().title().unwrap_or("Untitled"));
-//! println!("{}", article.content());
-//! # Ok::<(), legible::Error>(())
+//! use legible::parse;
+//!
+//! let html = r#"
+//!     <html>
+//!     <head><title>My Article</title></head>
+//!     <body>
+//!         <nav>Navigation</nav>
+//!         <article>
+//!             <h1>Article Title</h1>
+//!             <p>This is the main content of the article.</p>
+//!             <p>This second paragraph contains more article text.</p>
+//!         </article>
+//!         <footer>Footer</footer>
+//!     </body>
+//!     </html>
+//! "#;
+//!
+//! match parse(html, Some("https://example.com/articles/1"), None) {
+//!     Ok(article) => {
+//!         println!("Title: {}", article.title);
+//!         println!("HTML: {}", article.content);
+//!         println!("Markdown: {}", article.markdown_content);
+//!         println!("Text: {}", article.text_content);
+//!     }
+//!     Err(error) => eprintln!("Error: {error}"),
+//! }
 //! ```
 //!
-//! [`HtmlArticle::content`] does not return sanitized HTML. Apply a sanitizer before you
-//! render the result. The quick [`is_probably_readable`] check is a heuristic and can
-//! return false positives or false negatives.
-
-#![allow(deprecated)]
+//! The optional URL must be absolute. Legible uses it as the base URL for relative
+//! links and media URLs. Relative URLs stay relative if you pass `None`.
+//!
+//! [`Article`] provides HTML, CommonMark, normalized plain text, and article metadata.
+//!
+//! ## Check a document before extraction
+//!
+//! [`is_probably_readerable`] performs a quick content check. This check is a
+//! heuristic. A `true` result does not guarantee successful extraction. A `false`
+//! result does not prove that the document has no article.
+//!
+//! Use [`Document`] if you want to run the check and then extract the article.
+//! `Document` prevents a second HTML parse.
+//!
+//! ```rust
+//! use legible::Document;
+//!
+//! let text = "Article text. ".repeat(30);
+//! let html = format!("<article><p>{text}</p></article>");
+//! let document = Document::new(&html);
+//!
+//! if document.is_probably_readerable(None) {
+//!     let result = document.parse(Some("https://example.com/articles/1"), None);
+//!     // Use the extraction result.
+//! }
+//! ```
+//!
+//! The check borrows the document. Extraction consumes it because extraction changes
+//! the internal document tree.
+//!
+//! ## Configure extraction
+//!
+//! Use [`Options`] to configure extraction. Use [`ReaderableOptions`] to configure the
+//! quick content check.
+//!
+//! ```rust
+//! use legible::{Options, parse};
+//!
+//! let options = Options::new()
+//!     .char_threshold(250)
+//!     .keep_classes(true)
+//!     .disable_json_ld(true);
+//!
+//! let result = parse(
+//!     "<html><body><article><p>Article text</p></article></body></html>",
+//!     Some("https://example.com/articles/1"),
+//!     Some(options),
+//! );
+//! ```
+//!
+//! ## Security
+//!
+//! **Do not render [`Article::content`] without sanitizing it.**
+//!
+//! Legible cleans article content, but it is not an HTML security sanitizer. The HTML
+//! can contain unsafe attributes, URLs, or other source markup. Apply a sanitizer that
+//! matches your security policy before you render the HTML.
+//!
+//! [`Article::markdown_content`] does not contain raw HTML. It removes links and images
+//! that have unsupported URI schemes. If you convert the Markdown to HTML, sanitize
+//! that HTML according to your application's security policy.
 
 mod article;
 mod cleaning;
@@ -23,7 +105,6 @@ mod constants;
 mod document;
 mod dom;
 mod error;
-mod extractor;
 mod logging;
 mod markdown;
 mod metadata;
@@ -33,24 +114,11 @@ mod readerable;
 mod scoring;
 mod text;
 
-pub use article::{
-    ArticleMetadata, Author, BulletMarker, HeadingStyle, HtmlArticle, ImageMetadata,
-    MarkdownArticle, MarkdownOptions, TextArticle, TextDirection, TextOptions, TextSeparator,
-};
 pub use document::Document;
-pub use error::{Error, ParseError, Result};
-pub use extractor::{
-    ClassPolicy, EmbedPolicy, Extractor, ExtractorBuilder, Heuristics, MetadataSources,
-    extract_html, extract_html_with_url,
-};
-pub use options::{Options, ReadabilityOptions, ReaderableOptions};
-pub use readability::LegacyArticle;
+pub use error::{Error, Result};
+pub use options::{Options, ReaderableOptions};
+pub use readability::Article;
 pub use readerable::is_probably_readerable;
-
-/// Performs the quick readability heuristic with the corrected API spelling.
-pub fn is_probably_readable(html: &str, options: Option<ReadabilityOptions>) -> bool {
-    is_probably_readerable(html, options)
-}
 
 /// Extract article content and metadata from an HTML document.
 ///
@@ -87,18 +155,6 @@ pub fn is_probably_readable(html: &str, options: Option<ReadabilityOptions>) -> 
 ///     Some(options),
 /// );
 /// ```
-#[deprecated(
-    since = "0.5.0",
-    note = "use extract_html() or an explicit Extractor format method"
-)]
-pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<legacy::Article> {
-    let document = Document::parse(html)?;
-    let options = options.unwrap_or_default();
-    readability::Readability::from_document(document.doc, document.html, url, &options).parse()
-}
-
-/// Compatibility API for applications that still use the 0.4 result fields.
-pub mod legacy {
-    pub use crate::options::Options;
-    pub use crate::readability::LegacyArticle as Article;
+pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<Article> {
+    Document::new(html).parse(url, options)
 }

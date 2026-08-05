@@ -1,4 +1,6 @@
-//! Explicit article result types and rendering options.
+//! Internal article metadata and rendering options.
+#![allow(dead_code)]
+
 use url::Url;
 
 #[derive(Clone, Debug, Default, PartialEq)]

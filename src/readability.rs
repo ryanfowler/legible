@@ -36,10 +36,10 @@ use url::Url;
 ///
 /// # Security
 ///
-/// **Do not render [`content`](LegacyArticle::content) without sanitizing it.** Legible
+/// **Do not render [`content`](Article::content) without sanitizing it.** Legible
 /// cleans article content, but it is not an HTML security sanitizer.
 ///
-/// [`markdown_content`](LegacyArticle::markdown_content) does not contain raw HTML. It removes
+/// [`markdown_content`](Article::markdown_content) does not contain raw HTML. It removes
 /// destinations that have unsupported URI schemes. If you convert the Markdown to HTML,
 /// sanitize that HTML according to your application's security policy.
 ///
@@ -47,7 +47,7 @@ use url::Url;
 /// let safe_html = ammonia::clean(&article.content);
 /// ```
 #[derive(Debug, Clone)]
-pub struct LegacyArticle {
+pub struct Article {
     /// Article title.
     ///
     /// This value can come from the `<title>` element, a heading, or page metadata.
@@ -74,12 +74,12 @@ pub struct LegacyArticle {
     /// Extracted article content as CommonMark.
     ///
     /// Legible creates this value from the same document tree as
-    /// [`content`](LegacyArticle::content). It escapes source text and does not include raw
+    /// [`content`](Article::content). It escapes source text and does not include raw
     /// HTML. Links can use HTTP, HTTPS, email, telephone, fragment, and relative
     /// destinations. Images can use HTTP, HTTPS, and relative destinations.
     pub markdown_content: String,
 
-    /// Number of characters in [`text_content`](LegacyArticle::text_content).
+    /// Number of characters in [`text_content`](Article::text_content).
     pub length: usize,
 
     /// Short article excerpt, if found.
@@ -126,12 +126,12 @@ struct ArticleContent {
 pub(crate) struct ExtractedArticle {
     dom: Dom,
     root: NodeId,
-    metadata: crate::ArticleMetadata,
+    metadata: crate::article::ArticleMetadata,
     text_char_count: usize,
 }
 
 impl ExtractedArticle {
-    pub(crate) fn into_parts(self) -> (Dom, NodeId, crate::ArticleMetadata, usize) {
+    pub(crate) fn into_parts(self) -> (Dom, NodeId, crate::article::ArticleMetadata, usize) {
         (self.dom, self.root, self.metadata, self.text_char_count)
     }
 }
@@ -165,21 +165,25 @@ impl<'a> Readability<'a> {
             best_attempt: None,
         }
     }
-    pub(crate) fn parse(self) -> Result<LegacyArticle> {
+    pub(crate) fn parse(self) -> Result<Article> {
         let (dom, root, metadata, text_char_count) = self.extract_source()?.into_parts();
         let content = crate::dom::render_html(&dom, root, text_char_count);
         let markdown_content =
             crate::markdown::render_markdown(&dom, root, text_char_count, true, true);
-        let text_content =
-            crate::text::render_text(&dom, root, text_char_count, &crate::TextOptions::default());
-        Ok(LegacyArticle {
+        let text_content = crate::text::render_text(
+            &dom,
+            root,
+            text_char_count,
+            &crate::article::TextOptions::default(),
+        );
+        Ok(Article {
             title: metadata.title().unwrap_or_default().to_owned(),
             byline: metadata.byline().map(str::to_owned),
             dir: metadata.direction().map(|direction| {
                 match direction {
-                    crate::TextDirection::LeftToRight => "ltr",
-                    crate::TextDirection::RightToLeft => "rtl",
-                    crate::TextDirection::Auto => "auto",
+                    crate::article::TextDirection::LeftToRight => "ltr",
+                    crate::article::TextDirection::RightToLeft => "rtl",
+                    crate::article::TextDirection::Auto => "auto",
                 }
                 .to_owned()
             }),
@@ -205,12 +209,10 @@ impl<'a> Readability<'a> {
                 .filter(|&x| self.dom.is_element(x))
                 .count();
             if n > self.options.max_elems_to_parse {
-                return Err(Error::TooManyElements {
-                    limit: self.options.max_elems_to_parse,
-                });
+                return Err(Error::TooManyElements(n, self.options.max_elems_to_parse));
             }
         }
-        let extended_metadata = crate::ArticleMetadata::from_dom(
+        let extended_metadata = crate::article::ArticleMetadata::from_dom(
             &self.dom,
             self.base_uri.as_ref(),
             self.options.metadata_sources,
@@ -222,7 +224,8 @@ impl<'a> Readability<'a> {
         } else {
             metadata::get_json_ld(&self.dom, &title)
         };
-        let json_extended = crate::ArticleMetadata::from_json(&json, self.base_uri.as_ref());
+        let json_extended =
+            crate::article::ArticleMetadata::from_json(&json, self.base_uri.as_ref());
         remove_scripts(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_title = title;
@@ -237,7 +240,7 @@ impl<'a> Readability<'a> {
         }
         let content = self.grab_article()?;
         let excerpt = self.metadata.excerpt.take().or(content.excerpt);
-        let mut metadata = crate::ArticleMetadata::from_parts(
+        let mut metadata = crate::article::ArticleMetadata::from_parts(
             std::mem::take(&mut self.article_title),
             self.metadata.byline.take().or(self.article_byline.take()),
             self.article_dir.take(),
