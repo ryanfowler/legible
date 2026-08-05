@@ -145,6 +145,12 @@ fn bench_render_only(c: &mut Criterion) {
     let mut render = c.benchmark_group("render_only");
     for (name, html) in fixtures {
         let article = extractor.extract(&html).unwrap();
+        render.bench_function(BenchmarkId::new("markdown", name), |b| {
+            b.iter(|| article.to_markdown())
+        });
+        render.bench_function(BenchmarkId::new("text", name), |b| {
+            b.iter(|| article.to_text())
+        });
         render.bench_function(BenchmarkId::new("all_formats", name), |b| {
             b.iter(|| (article.to_html(), article.to_markdown(), article.to_text()))
         });

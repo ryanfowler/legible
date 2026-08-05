@@ -96,7 +96,7 @@ pub struct LegacyArticle {
 pub(crate) struct Readability<'a> {
     dom: Dom,
     original_html: &'a str,
-    options: Options,
+    options: &'a Options,
     flags: u32,
     node_data: NodeStateStore,
     article_title: String,
@@ -127,7 +127,7 @@ impl<'a> Readability<'a> {
         dom: Dom,
         original_html: &'a str,
         url: Option<&str>,
-        options: Option<Options>,
+        options: &'a Options,
     ) -> Self {
         let (base_uri, url_error) = match url {
             Some(x) => match Url::parse(x) {
@@ -139,7 +139,7 @@ impl<'a> Readability<'a> {
         Self {
             dom,
             original_html,
-            options: options.unwrap_or_default(),
+            options,
             flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeStateStore::new(),
             article_title: String::new(),

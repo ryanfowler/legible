@@ -6,13 +6,24 @@ use std::io;
 #[derive(Debug)]
 pub(crate) struct ArticleTree {
     nodes: Box<[ArticleNode]>,
-    root: usize,
+    root: u32,
 }
 #[derive(Debug)]
 struct ArticleNode {
     kind: Kind,
-    first_child: Option<usize>,
-    next_sibling: Option<usize>,
+    first_child: u32,
+    next_sibling: u32,
+    tag: Tag,
+}
+
+const NO_NODE: u32 = u32::MAX;
+
+fn node_index(index: u32) -> usize {
+    index as usize
+}
+
+fn linked(index: u32) -> Option<u32> {
+    (index != NO_NODE).then_some(index)
 }
 #[derive(Debug)]
 enum Kind {
@@ -29,11 +40,12 @@ impl ArticleTree {
     pub(crate) fn freeze(dom: &Dom, root: NodeId) -> Self {
         let mut nodes = vec![ArticleNode {
             kind: Kind::Root,
-            first_child: None,
-            next_sibling: None,
+            first_child: NO_NODE,
+            next_sibling: NO_NODE,
+            tag: Tag::Other,
         }];
         let mut stack = dom.children_rev(root).map(|id| (id, 0)).collect::<Vec<_>>();
-        let mut last_child: Vec<Option<usize>> = vec![None];
+        let mut last_child = vec![NO_NODE];
         while let Some((id, parent)) = stack.pop() {
             let kind = match &dom.node(id).data {
                 NodeData::Document | NodeData::Fragment => {
@@ -61,19 +73,22 @@ impl ArticleTree {
                 NodeData::Comment(s) => Kind::Comment(s.to_string()),
                 _ => continue,
             };
-            let index = nodes.len();
+            let index = u32::try_from(nodes.len()).expect("article tree exceeds u32 capacity");
+            let tag = dom.tag(id).unwrap_or(Tag::Other);
             nodes.push(ArticleNode {
                 kind,
-                first_child: None,
-                next_sibling: None,
+                first_child: NO_NODE,
+                next_sibling: NO_NODE,
+                tag,
             });
-            last_child.push(None);
-            if let Some(previous) = last_child[parent] {
-                nodes[previous].next_sibling = Some(index)
+            last_child.push(NO_NODE);
+            if last_child[node_index(parent)] != NO_NODE {
+                let previous = last_child[node_index(parent)];
+                nodes[node_index(previous)].next_sibling = index
             } else {
-                nodes[parent].first_child = Some(index)
+                nodes[node_index(parent)].first_child = index
             }
-            last_child[parent] = Some(index);
+            last_child[node_index(parent)] = index;
             let child_root = match &dom.node(id).data {
                 NodeData::Element(element) => element.template_contents.get().unwrap_or(id),
                 _ => id,
@@ -114,27 +129,27 @@ impl ArticleTree {
     }
     pub(crate) fn to_text(&self, capacity: usize) -> String {
         enum Task {
-            Siblings(usize),
+            Siblings(u32),
         }
         let mut output = NormalizedOutput::with_capacity(capacity);
         let mut tasks = smallvec::SmallVec::<[Task; 32]>::new();
-        if let Some(child) = self.nodes[self.root].first_child {
+        if let Some(child) = linked(self.nodes[node_index(self.root)].first_child) {
             tasks.push(Task::Siblings(child));
         }
         while let Some(task) = tasks.pop() {
             let index = match task {
                 Task::Siblings(index) => {
-                    if let Some(next) = self.nodes[index].next_sibling {
+                    if let Some(next) = linked(self.nodes[node_index(index)].next_sibling) {
                         tasks.push(Task::Siblings(next));
                     }
                     index
                 }
             };
-            match &self.nodes[index].kind {
+            match &self.nodes[node_index(index)].kind {
                 Kind::Text(text) => output.text(text),
-                Kind::Element { name, .. } if name.local.as_ref() == "template" => {}
+                Kind::Element { .. } if self.nodes[node_index(index)].tag == Tag::Template => {}
                 Kind::Element { .. } | Kind::Root => {
-                    if let Some(child) = self.nodes[index].first_child {
+                    if let Some(child) = linked(self.nodes[node_index(index)].first_child) {
                         tasks.push(Task::Siblings(child));
                     }
                 }
@@ -150,8 +165,8 @@ impl ArticleTree {
         preserve_breaks: bool,
     ) -> String {
         enum Task {
-            Node(usize),
-            Siblings(usize),
+            Node(u32),
+            Siblings(u32),
             BlockEnd,
         }
         let separator = if block_newlines {
@@ -161,33 +176,33 @@ impl ArticleTree {
         };
         let mut output = NormalizedOutput::with_capacity(capacity);
         let mut tasks = smallvec::SmallVec::<[Task; 32]>::new();
-        if let Some(child) = self.nodes[self.root].first_child {
+        if let Some(child) = linked(self.nodes[node_index(self.root)].first_child) {
             tasks.push(Task::Siblings(child));
         }
         while let Some(task) = tasks.pop() {
             match task {
                 Task::BlockEnd => output.separator(separator),
                 Task::Siblings(index) => {
-                    if let Some(next) = self.nodes[index].next_sibling {
+                    if let Some(next) = linked(self.nodes[node_index(index)].next_sibling) {
                         tasks.push(Task::Siblings(next));
                     }
                     tasks.push(Task::Node(index));
                 }
-                Task::Node(index) => match &self.nodes[index].kind {
+                Task::Node(index) => match &self.nodes[node_index(index)].kind {
                     Kind::Text(text) => output.text(text),
-                    Kind::Element { name, .. } if name.local.as_ref() == "template" => {}
-                    Kind::Element { name, .. }
-                        if name.local.as_ref() == "br" && preserve_breaks =>
+                    Kind::Element { .. } if self.nodes[node_index(index)].tag == Tag::Template => {}
+                    Kind::Element { .. }
+                        if self.nodes[node_index(index)].tag == Tag::Br && preserve_breaks =>
                     {
                         output.separator(Separator::Newline)
                     }
-                    Kind::Element { name, .. } => {
-                        let block = is_text_block(name.local.as_ref());
+                    Kind::Element { .. } => {
+                        let block = is_text_block(self.nodes[node_index(index)].tag);
                         if block {
                             output.separator(separator);
                             tasks.push(Task::BlockEnd)
                         }
-                        if let Some(child) = self.nodes[index].first_child {
+                        if let Some(child) = linked(self.nodes[node_index(index)].first_child) {
                             tasks.push(Task::Siblings(child));
                         }
                     }
@@ -221,36 +236,34 @@ impl ArticleTree {
 }
 
 impl crate::markdown::MarkdownTree for ArticleTree {
-    type Node = usize;
+    type Node = u32;
 
-    fn first_child(&self, node: usize) -> Option<usize> {
-        self.nodes[node].first_child
+    fn first_child(&self, node: u32) -> Option<u32> {
+        linked(self.nodes[node_index(node)].first_child)
     }
 
-    fn next_sibling(&self, node: usize) -> Option<usize> {
-        self.nodes[node].next_sibling
+    fn next_sibling(&self, node: u32) -> Option<u32> {
+        linked(self.nodes[node_index(node)].next_sibling)
     }
 
-    fn tag(&self, node: usize) -> Option<Tag> {
-        match &self.nodes[node].kind {
-            Kind::Element { name, .. } => Some(Tag::from_qual_name(name)),
-            _ => None,
-        }
+    fn tag(&self, node: u32) -> Option<Tag> {
+        let node = &self.nodes[node_index(node)];
+        matches!(node.kind, Kind::Element { .. }).then_some(node.tag)
     }
 
-    fn text_node(&self, node: usize) -> Option<&str> {
-        match &self.nodes[node].kind {
+    fn text_node(&self, node: u32) -> Option<&str> {
+        match &self.nodes[node_index(node)].kind {
             Kind::Text(text) => Some(text),
             _ => None,
         }
     }
 
-    fn is_comment(&self, node: usize) -> bool {
-        matches!(self.nodes[node].kind, Kind::Comment(_))
+    fn is_comment(&self, node: u32) -> bool {
+        matches!(self.nodes[node_index(node)].kind, Kind::Comment(_))
     }
 
-    fn attr_by_local_name(&self, node: usize, name: &str) -> Option<&str> {
-        match &self.nodes[node].kind {
+    fn attr_by_local_name(&self, node: u32, name: &str) -> Option<&str> {
+        match &self.nodes[node_index(node)].kind {
             Kind::Element { attrs, .. } => attrs
                 .iter()
                 .find(|attr| attr.name.local.as_ref().eq_ignore_ascii_case(name))
@@ -260,20 +273,21 @@ impl crate::markdown::MarkdownTree for ArticleTree {
     }
 }
 
-fn is_text_block(name: &str) -> bool {
+fn is_text_block(tag: Tag) -> bool {
     matches!(
-        name,
-        "p" | "div"
-            | "article"
-            | "section"
-            | "li"
-            | "blockquote"
-            | "h1"
-            | "h2"
-            | "h3"
-            | "h4"
-            | "h5"
-            | "h6"
+        tag,
+        Tag::P
+            | Tag::Div
+            | Tag::Article
+            | Tag::Section
+            | Tag::Li
+            | Tag::Blockquote
+            | Tag::H1
+            | Tag::H2
+            | Tag::H3
+            | Tag::H4
+            | Tag::H5
+            | Tag::H6
     )
 }
 
@@ -298,6 +312,27 @@ impl NormalizedOutput {
     }
 
     fn text(&mut self, text: &str) {
+        if text.is_ascii() {
+            let bytes = text.as_bytes();
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index].is_ascii_whitespace() {
+                    if !self.output.is_empty() && self.pending == Separator::None {
+                        self.pending = Separator::Space
+                    }
+                    index += 1;
+                    continue;
+                }
+                self.flush();
+                let start = index;
+                while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                self.output.push_str(&text[start..index]);
+            }
+            return;
+        }
+
         for character in text.chars() {
             if character.is_whitespace() {
                 if !self.output.is_empty() && self.pending == Separator::None {
@@ -340,12 +375,12 @@ struct TreeSerializable<'a> {
     include_images: bool,
 }
 enum Op {
-    Open(usize),
-    Siblings(usize),
+    Open(u32),
+    Siblings(u32),
     Close(QualName),
 }
-fn push_children(ops: &mut smallvec::SmallVec<[Op; 32]>, tree: &ArticleTree, parent: usize) {
-    if let Some(child) = tree.nodes[parent].first_child {
+fn push_children(ops: &mut smallvec::SmallVec<[Op; 32]>, tree: &ArticleTree, parent: u32) {
+    if let Some(child) = linked(tree.nodes[node_index(parent)].first_child) {
         ops.push(Op::Siblings(child));
     }
 }
@@ -357,19 +392,20 @@ impl Serialize for TreeSerializable<'_> {
             match op {
                 Op::Close(name) => ser.end_elem(name)?,
                 Op::Siblings(i) => {
-                    if let Some(next) = self.tree.nodes[i].next_sibling {
+                    if let Some(next) = linked(self.tree.nodes[node_index(i)].next_sibling) {
                         ops.push(Op::Siblings(next));
                     }
                     ops.push(Op::Open(i));
                 }
-                Op::Open(i) => match &self.tree.nodes[i].kind {
+                Op::Open(i) => match &self.tree.nodes[node_index(i)].kind {
                     Kind::Root => {}
                     Kind::Text(s) => ser.write_text(s)?,
                     Kind::Comment(s) => ser.write_comment(s)?,
-                    Kind::Element { name, .. }
-                        if name.local.as_ref() == "img" && !self.include_images => {}
-                    Kind::Element { name, .. }
-                        if name.local.as_ref() == "a" && !self.include_links =>
+                    Kind::Element { .. }
+                        if self.tree.nodes[node_index(i)].tag == Tag::Img
+                            && !self.include_images => {}
+                    Kind::Element { .. }
+                        if self.tree.nodes[node_index(i)].tag == Tag::A && !self.include_links =>
                     {
                         push_children(&mut ops, self.tree, i);
                     }

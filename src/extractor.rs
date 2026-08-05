@@ -49,7 +49,7 @@ impl Extractor {
             document.doc,
             document.html,
             url.map(Url::as_str),
-            Some(self.config.clone()),
+            &self.config,
         )
         .extract()
     }

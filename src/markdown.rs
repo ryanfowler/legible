@@ -210,8 +210,16 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         match tag {
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
                 self.out.ensure_blank_line();
-                let level = tag as usize - Tag::H1 as usize + 1;
-                self.out.markup(&"#".repeat(level));
+                let marker = match tag {
+                    Tag::H1 => "#",
+                    Tag::H2 => "##",
+                    Tag::H3 => "###",
+                    Tag::H4 => "####",
+                    Tag::H5 => "#####",
+                    Tag::H6 => "######",
+                    _ => unreachable!("heading match contains only headings"),
+                };
+                self.out.markup(marker);
                 self.out.markup(" ");
                 self.tasks.push(Task::Close(Close::Block));
                 self.push_children(id, Mode::Inline);

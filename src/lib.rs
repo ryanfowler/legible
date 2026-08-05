@@ -93,7 +93,8 @@ pub fn is_probably_readable(html: &str, options: Option<ReadabilityOptions>) -> 
 )]
 pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<legacy::Article> {
     let document = Document::parse(html)?;
-    readability::Readability::from_document(document.doc, document.html, url, options).parse()
+    let options = options.unwrap_or_default();
+    readability::Readability::from_document(document.doc, document.html, url, &options).parse()
 }
 
 /// Compatibility API for applications that still use the 0.4 result fields.
