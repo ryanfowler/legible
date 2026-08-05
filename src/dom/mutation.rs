@@ -60,26 +60,6 @@ impl Dom {
         }
         self.node_mut(parent).last_child = NodeLink::from_option(Some(child));
     }
-    #[allow(dead_code)]
-    pub(crate) fn prepend_child(&mut self, parent: NodeId, child: NodeId) {
-        self.ensure_no_cycle(parent, child);
-        if self.parent(child).is_some() {
-            self.detach(child)
-        }
-        let first = self.first_child(parent);
-        {
-            let n = self.node_mut(child);
-            n.parent = NodeLink::from_option(Some(parent));
-            n.prev_sibling = NodeLink::NONE;
-            n.next_sibling = NodeLink::from_option(first)
-        }
-        if let Some(first) = first {
-            self.node_mut(first).prev_sibling = NodeLink::from_option(Some(child))
-        } else {
-            self.node_mut(parent).last_child = NodeLink::from_option(Some(child))
-        }
-        self.node_mut(parent).first_child = NodeLink::from_option(Some(child));
-    }
     pub(crate) fn insert_before(&mut self, reference: NodeId, node: NodeId) {
         let parent = self.parent(reference).expect("reference is detached");
         self.ensure_no_cycle(parent, node);
@@ -169,16 +149,6 @@ impl Dom {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.attrs.retain(|attribute| {
                 !names.contains(&AttrName::from_local(attribute.name.local.as_ref()))
-            })
-        }
-    }
-    #[allow(dead_code)]
-    pub(crate) fn retain_attrs_by_local_name(&mut self, node: NodeId, names: &[&str]) {
-        if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|a| {
-                names
-                    .iter()
-                    .any(|n| a.name.local.as_ref().eq_ignore_ascii_case(n))
             })
         }
     }

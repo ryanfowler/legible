@@ -99,7 +99,6 @@
 //! that have unsupported URI schemes. If you convert the Markdown to HTML, sanitize
 //! that HTML according to your application's security policy.
 
-mod article;
 mod cleaning;
 mod constants;
 mod document;

@@ -32,7 +32,6 @@ The extraction pipeline flows through these stages:
 ### Key Modules
 
 - **`document.rs`** - Public `Document<'a>` wrapper for checking readability before extraction
-- **`article.rs`** - Internal extended metadata and rendering support
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
@@ -65,7 +64,7 @@ The extraction pipeline flows through these stages:
 - Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Render only the requested final format from the cleaned DOM.
 - Render HTML, Markdown, and text directly from the final cleaned DOM. Do not freeze an intermediate output tree or rebuild a temporary DOM. Drop the DOM before returning the public result.
 - The public `parse` function must render all formats from one cleaned DOM. Keep final rendering iterative. Escape HTML through `html5ever`. Escape Markdown text, link destinations, and code fences for CommonMark.
-- Preserve the byte-wise ASCII paths in Markdown and normalized article text, compact task fields, the preallocated heap-backed Markdown task stack, and output capacity hints from normalized article text. Keep code span and code block rendering free of temporary text and fence allocations. Apply non-default bullet markers in place, and transform Setext headings in one output pass. These avoid per-character work, excess task-stack traffic, stack-resident task buffers on complex articles, and repeated output growth.
+- Preserve the byte-wise ASCII paths in Markdown and normalized article text, compact task fields, the preallocated heap-backed Markdown task stack, and output capacity hints from normalized article text. Keep code span and code block rendering free of temporary text and fence allocations. These avoid per-character work, excess task-stack traffic, stack-resident task buffers on complex articles, and repeated output growth.
 - Use typed `AttrName` lookups for hot Markdown link and image attributes. Keep local-name lookups only for attributes without a known enum variant.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
 - Borrow `Options` during extraction. Keep the owned options alive at the public API boundary.

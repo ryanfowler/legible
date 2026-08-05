@@ -123,17 +123,17 @@ struct ArticleContent {
     article_root: NodeId,
 }
 
-pub(crate) struct ExtractedArticle {
+struct ExtractedArticle {
     dom: Dom,
     root: NodeId,
-    metadata: crate::article::ArticleMetadata,
+    title: String,
+    byline: Option<String>,
+    direction: Option<String>,
+    language: Option<String>,
+    excerpt: Option<String>,
+    site_name: Option<String>,
+    published_time: Option<String>,
     text_char_count: usize,
-}
-
-impl ExtractedArticle {
-    pub(crate) fn into_parts(self) -> (Dom, NodeId, crate::article::ArticleMetadata, usize) {
-        (self.dom, self.root, self.metadata, self.text_char_count)
-    }
 }
 impl<'a> Readability<'a> {
     pub(crate) fn from_document(
@@ -166,39 +166,38 @@ impl<'a> Readability<'a> {
         }
     }
     pub(crate) fn parse(self) -> Result<Article> {
-        let (dom, root, metadata, text_char_count) = self.extract_source()?.into_parts();
-        let content = crate::dom::render_html(&dom, root, text_char_count);
-        let markdown_content =
-            crate::markdown::render_markdown(&dom, root, text_char_count, true, true);
+        let extracted = self.extract_source()?;
+        let content =
+            crate::dom::render_html(&extracted.dom, extracted.root, extracted.text_char_count);
+        let markdown_content = crate::markdown::render_markdown(
+            &extracted.dom,
+            extracted.root,
+            extracted.text_char_count,
+            true,
+            true,
+        );
         let text_content = crate::text::render_text(
-            &dom,
-            root,
-            text_char_count,
-            &crate::article::TextOptions::default(),
+            &extracted.dom,
+            extracted.root,
+            extracted.text_char_count,
+            &crate::text::TextOptions::default(),
         );
         Ok(Article {
-            title: metadata.title().unwrap_or_default().to_owned(),
-            byline: metadata.byline().map(str::to_owned),
-            dir: metadata.direction().map(|direction| {
-                match direction {
-                    crate::article::TextDirection::LeftToRight => "ltr",
-                    crate::article::TextDirection::RightToLeft => "rtl",
-                    crate::article::TextDirection::Auto => "auto",
-                }
-                .to_owned()
-            }),
-            lang: metadata.language().map(str::to_owned),
+            title: extracted.title,
+            byline: extracted.byline,
+            dir: extracted.direction,
+            lang: extracted.language,
             content,
             text_content,
             markdown_content,
-            length: text_char_count,
-            excerpt: metadata.excerpt().map(str::to_owned),
-            site_name: metadata.site_name().map(str::to_owned),
-            published_time: metadata.published_time().map(str::to_owned),
+            length: extracted.text_char_count,
+            excerpt: extracted.excerpt,
+            site_name: extracted.site_name,
+            published_time: extracted.published_time,
         })
     }
 
-    pub(crate) fn extract_source(mut self) -> Result<ExtractedArticle> {
+    fn extract_source(mut self) -> Result<ExtractedArticle> {
         if let Some(e) = self.url_error {
             return Err(Error::InvalidUrl(e));
         }
@@ -212,11 +211,6 @@ impl<'a> Readability<'a> {
                 return Err(Error::TooManyElements(n, self.options.max_elems_to_parse));
             }
         }
-        let extended_metadata = crate::article::ArticleMetadata::from_dom(
-            &self.dom,
-            self.base_uri.as_ref(),
-            self.options.metadata_sources,
-        );
         unwrap_noscript_images(&mut self.dom);
         let title = metadata::get_article_title(&self.dom);
         let json = if self.options.disable_json_ld {
@@ -224,37 +218,25 @@ impl<'a> Readability<'a> {
         } else {
             metadata::get_json_ld(&self.dom, &title)
         };
-        let json_extended =
-            crate::article::ArticleMetadata::from_json(&json, self.base_uri.as_ref());
         remove_scripts(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_title = title;
-        self.metadata = metadata::get_article_metadata(
-            &self.dom,
-            &json,
-            &self.article_title,
-            self.options.metadata_sources,
-        );
+        self.metadata =
+            metadata::get_article_metadata(&self.dom, &json, &self.article_title, 0b1111);
         if let Some(t) = self.metadata.title.take() {
             self.article_title = t
         }
         let content = self.grab_article()?;
-        let excerpt = self.metadata.excerpt.take().or(content.excerpt);
-        let mut metadata = crate::article::ArticleMetadata::from_parts(
-            std::mem::take(&mut self.article_title),
-            self.metadata.byline.take().or(self.article_byline.take()),
-            self.article_dir.take(),
-            self.article_lang.take(),
-            excerpt,
-            self.metadata.site_name.take(),
-            self.metadata.published_time.take(),
-        );
-        metadata.merge_json(json_extended);
-        metadata.merge_missing(extended_metadata);
         Ok(ExtractedArticle {
             dom: self.dom,
             root: content.article_root,
-            metadata,
+            title: self.article_title,
+            byline: self.metadata.byline.or(self.article_byline),
+            direction: self.article_dir,
+            language: self.article_lang,
+            excerpt: self.metadata.excerpt.or(content.excerpt),
+            site_name: self.metadata.site_name,
+            published_time: self.metadata.published_time,
             text_char_count: content.text_length,
         })
     }

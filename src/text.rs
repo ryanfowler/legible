@@ -1,8 +1,41 @@
 //! Normalized text rendering from the cleaned extraction DOM.
 
-use crate::article::TextOptions;
 use crate::dom::{Dom, NodeId, Tag};
 use smallvec::SmallVec;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TextOptions {
+    block_newlines: bool,
+    preserve_line_breaks: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum TextSeparator {
+    Newline,
+}
+
+impl TextOptions {
+    #[cfg(test)]
+    fn block_separator(mut self, value: TextSeparator) -> Self {
+        self.block_newlines = matches!(value, TextSeparator::Newline);
+        self
+    }
+
+    #[cfg(test)]
+    fn preserve_line_breaks(mut self, value: bool) -> Self {
+        self.preserve_line_breaks = value;
+        self
+    }
+
+    fn block_newlines(&self) -> bool {
+        self.block_newlines
+    }
+
+    fn preserves_line_breaks(&self) -> bool {
+        self.preserve_line_breaks
+    }
+}
 
 pub(crate) fn render_text(
     dom: &Dom,
@@ -197,7 +230,7 @@ mod tests {
                 &dom,
                 body,
                 0,
-                &TextOptions::default().block_separator(crate::article::TextSeparator::Newline),
+                &TextOptions::default().block_separator(TextSeparator::Newline),
             ),
             "A\nHello world!\nCD"
         );
@@ -207,7 +240,7 @@ mod tests {
                 body,
                 0,
                 &TextOptions::default()
-                    .block_separator(crate::article::TextSeparator::Newline)
+                    .block_separator(TextSeparator::Newline)
                     .preserve_line_breaks(true),
             ),
             "A\nHello world!\nC\nD"

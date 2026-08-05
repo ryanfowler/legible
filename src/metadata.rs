@@ -15,20 +15,6 @@ pub struct Metadata {
     pub excerpt: Option<String>,
     pub site_name: Option<String>,
     pub published_time: Option<String>,
-    pub authors: Vec<(String, Option<String>)>,
-    pub publisher: Option<String>,
-    pub canonical_url: Option<String>,
-    pub image: Option<JsonImage>,
-    pub modified_time: Option<String>,
-    pub section: Option<String>,
-    pub tags: Vec<String>,
-}
-#[derive(Debug, Clone, Default)]
-pub struct JsonImage {
-    pub url: String,
-    pub alt: Option<String>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
 }
 pub fn unescape_html_entities<'a>(s: &'a str) -> Cow<'a, str> {
     if s.is_empty() || !s.contains('&') {
@@ -162,44 +148,21 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
             _ => None,
         };
         if let Some(author) = o.get("author") {
-            collect_json_authors(author, &mut out.authors);
-            if !out.authors.is_empty() {
-                out.byline = Some(
-                    out.authors
-                        .iter()
-                        .map(|(name, _)| name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
+            let mut authors = Vec::new();
+            collect_json_authors(author, &mut authors);
+            if !authors.is_empty() {
+                out.byline = Some(authors.join(", "));
             }
         }
         out.excerpt = o
             .get("description")
             .and_then(Value::as_str)
             .map(|s| s.trim().into());
-        out.publisher = o.get("publisher").and_then(json_name).map(str::to_owned);
-        out.site_name = out.publisher.clone();
+        out.site_name = o.get("publisher").and_then(json_name).map(str::to_owned);
         out.published_time = o
             .get("datePublished")
             .and_then(Value::as_str)
             .map(|s| s.trim().into());
-        out.modified_time = o
-            .get("dateModified")
-            .and_then(Value::as_str)
-            .map(|s| s.trim().into());
-        out.section = o
-            .get("articleSection")
-            .and_then(Value::as_str)
-            .map(|s| s.trim().into());
-        out.canonical_url = o
-            .get("mainEntityOfPage")
-            .and_then(json_url)
-            .map(str::to_owned)
-            .or_else(|| o.get("url").and_then(Value::as_str).map(str::to_owned));
-        out.image = o.get("image").and_then(json_image);
-        if let Some(keywords) = o.get("keywords") {
-            collect_json_tags(keywords, &mut out.tags);
-        }
         break;
     }
     out
@@ -211,15 +174,7 @@ fn json_name(value: &Value) -> Option<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
 }
-fn json_url(value: &Value) -> Option<&str> {
-    value
-        .as_str()
-        .or_else(|| value.get("url").and_then(Value::as_str))
-        .or_else(|| value.get("@id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-}
-fn collect_json_authors(value: &Value, out: &mut Vec<(String, Option<String>)>) {
+fn collect_json_authors(value: &Value, out: &mut Vec<String>) {
     if let Some(values) = value.as_array() {
         for value in values {
             collect_json_authors(value, out)
@@ -227,49 +182,12 @@ fn collect_json_authors(value: &Value, out: &mut Vec<(String, Option<String>)>) 
         return;
     }
     let Some(name) = json_name(value) else { return };
-    let url = json_url(value)
-        .filter(|url| *url != name)
-        .map(str::to_owned);
     if !out
         .iter()
-        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+        .any(|existing| existing.eq_ignore_ascii_case(name))
     {
-        out.push((name.into(), url))
+        out.push(name.into())
     }
-}
-fn collect_json_tags(value: &Value, out: &mut Vec<String>) {
-    if let Some(values) = value.as_array() {
-        for value in values {
-            collect_json_tags(value, out)
-        }
-    } else if let Some(value) = value.as_str() {
-        for tag in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            if !out.iter().any(|v| v.eq_ignore_ascii_case(tag)) {
-                out.push(tag.into())
-            }
-        }
-    }
-}
-fn json_image(value: &Value) -> Option<JsonImage> {
-    if let Some(first) = value.as_array().and_then(|values| values.first()) {
-        return json_image(first);
-    }
-    let url = json_url(value)?.to_owned();
-    Some(JsonImage {
-        url,
-        alt: value
-            .get("caption")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        width: value
-            .get("width")
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok()),
-        height: value
-            .get("height")
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok()),
-    })
 }
 static SCHEMA: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
 pub fn get_article_title(dom: &Dom) -> String {

@@ -74,9 +74,6 @@ pub struct Options {
     /// The default is `false`. With the `tracing` feature, `true` emits events to the
     /// configured tracing subscriber. Without that feature, this value has no effect.
     pub debug: bool,
-
-    /// Enabled metadata source groups. Internal 0.5 extractor configuration.
-    pub(crate) metadata_sources: u8,
 }
 
 impl Default for Options {
@@ -91,7 +88,6 @@ impl Default for Options {
             allowed_video_regex: None,
             link_density_modifier: 0.0,
             debug: false,
-            metadata_sources: 0b1111,
         }
     }
 }
