@@ -3,11 +3,11 @@
 use crate::constants::regexps;
 use crate::dom::{AttrName, Dom, Tag};
 use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_text};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::sync::LazyLock;
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub title: Option<String>,
@@ -189,7 +189,7 @@ fn collect_json_authors(value: &Value, out: &mut Vec<String>) {
         out.push(name.into())
     }
 }
-static SCHEMA: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
+static SCHEMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^https?://schema\.org/?$").unwrap());
 pub fn get_article_title(dom: &Dom) -> String {
     let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
@@ -252,10 +252,10 @@ pub fn get_article_title(dom: &Dom) -> String {
     cur
 }
 pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str, sources: u8) -> Metadata {
-    static PP: Lazy<Regex> = Lazy::new(|| {
+    static PP: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\s*(article|dc|dcterm|og|twitter)\s*:\s*(author|creator|description|published_time|title|site_name)\s*").unwrap()
     });
-    static NP: Lazy<Regex> = Lazy::new(|| {
+    static NP: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)^\s*(?:(dc|dcterm|og|twitter|parsely|weibo:(article|webpage))\s*[-\.:]?\s*)?(author|creator|pub-date|description|title|site_name)\s*$").unwrap()
     });
     // Metadata uses a small, fixed set of keys. A short linear table avoids a

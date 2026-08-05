@@ -7,11 +7,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use ipnet::{Ipv4Net, Ipv6Net};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// IPv4 networks that are blocked (private, loopback, link-local, etc.)
-static BLOCKED_IPV4_NETS: Lazy<Vec<Ipv4Net>> = Lazy::new(|| {
+static BLOCKED_IPV4_NETS: LazyLock<Vec<Ipv4Net>> = LazyLock::new(|| {
     vec![
         // Loopback (127.0.0.0/8)
         "127.0.0.0/8".parse().unwrap(),
@@ -43,7 +43,7 @@ static BLOCKED_IPV4_NETS: Lazy<Vec<Ipv4Net>> = Lazy::new(|| {
 });
 
 /// IPv6 networks that are blocked (private, loopback, link-local, etc.)
-static BLOCKED_IPV6_NETS: Lazy<Vec<Ipv6Net>> = Lazy::new(|| {
+static BLOCKED_IPV6_NETS: LazyLock<Vec<Ipv6Net>> = LazyLock::new(|| {
     vec![
         // Loopback (::1)
         "::1/128".parse().unwrap(),
