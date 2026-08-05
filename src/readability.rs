@@ -296,6 +296,9 @@ impl<'a> Readability<'a> {
                     .dom
                     .tag(id)
                     .expect("element snapshot must contain only elements");
+                if tag == Tag::A {
+                    self.node_data.enable_link_lengths();
+                }
                 if !is_probably_visible(&self.dom, id) {
                     remove.push(id);
                     removed_depth = Some(depth);

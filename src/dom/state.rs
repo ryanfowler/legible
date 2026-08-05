@@ -30,6 +30,7 @@ pub(crate) struct NodeState {
 pub(crate) struct NodeStateStore {
     entries: Vec<NodeState>,
     stats_epoch: u32,
+    link_lengths: Option<Vec<f64>>,
 }
 impl NodeStateStore {
     pub(crate) fn new() -> Self {
@@ -48,9 +49,13 @@ impl NodeStateStore {
             .iter_mut()
             .for_each(|e| *e = NodeState::default());
         self.stats_epoch = 1;
+        self.link_lengths = None;
     }
     pub(crate) fn clear_stats(&mut self) {
         self.stats_epoch = self.stats_epoch.wrapping_add(1);
+        if let Some(lengths) = &mut self.link_lengths {
+            lengths.fill(0.0);
+        }
         if self.stats_epoch == 0 {
             self.stats_epoch = 1;
             for e in &mut self.entries {
@@ -78,6 +83,29 @@ impl NodeStateStore {
         self.sync_len(id.index() + 1);
         self.entries[id.index()].stats = s;
         self.entries[id.index()].stats_epoch = self.stats_epoch
+    }
+    pub(crate) fn enable_link_lengths(&mut self) {
+        self.link_lengths
+            .get_or_insert_with(|| vec![0.0; self.entries.len()]);
+    }
+    pub(crate) fn link_lengths_enabled(&self) -> bool {
+        self.link_lengths.is_some()
+    }
+    pub(crate) fn link_length(&self, id: super::NodeId) -> f64 {
+        self.link_lengths
+            .as_ref()
+            .and_then(|lengths| lengths.get(id.index()))
+            .copied()
+            .unwrap_or(0.0)
+    }
+    pub(crate) fn set_link_length(&mut self, id: super::NodeId, length: f64) {
+        let Some(lengths) = &mut self.link_lengths else {
+            return;
+        };
+        if id.index() >= lengths.len() {
+            lengths.resize(id.index() + 1, 0.0);
+        }
+        lengths[id.index()] = length;
     }
     pub(crate) fn get(&self, id: super::NodeId) -> Option<&NodeState> {
         self.entries.get(id.index()).filter(|e| e.score_initialized)

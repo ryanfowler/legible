@@ -59,6 +59,7 @@ The extraction pipeline flows through these stages:
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
 - Use the `dom_parse` Criterion group to isolate custom DOM construction. Use `document_extraction` to benchmark extraction from an already parsed `Document`.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
+- Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.

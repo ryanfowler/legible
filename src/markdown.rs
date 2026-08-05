@@ -755,53 +755,53 @@ impl Output {
                 self.prepare_text();
                 prepared = true;
             }
-            let start = index;
-            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
-                index += 1;
-            }
-            self.ascii_text_run(&text[start..index]);
+            self.ascii_text_run(text, &mut index);
         }
     }
 
-    fn ascii_text_run(&mut self, text: &str) {
+    /// Writes one non-whitespace run and leaves `index` at its end.
+    fn ascii_text_run(&mut self, text: &str, index: &mut usize) {
         let bytes = text.as_bytes();
-        let mut index = 0;
 
         if matches!(
             self.line_text_state,
             LineTextState::Start | LineTextState::Digits
         ) {
-            if matches!(self.line_text_state, LineTextState::Start) && !bytes[0].is_ascii_digit() {
+            if matches!(self.line_text_state, LineTextState::Start)
+                && !bytes[*index].is_ascii_digit()
+            {
                 self.line_text_state = LineTextState::Other;
-                self.push_ascii_text_byte(bytes[0], matches!(bytes[0], b'-' | b'+' | b'=' | b'~'));
-                index = 1;
+                let byte = bytes[*index];
+                self.push_ascii_text_byte(byte, matches!(byte, b'-' | b'+' | b'=' | b'~'));
+                *index += 1;
             } else {
-                let digits_start = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
+                let digits_start = *index;
+                while *index < bytes.len() && bytes[*index].is_ascii_digit() {
+                    *index += 1;
                 }
-                self.value.push_str(&text[digits_start..index]);
+                self.value.push_str(&text[digits_start..*index]);
                 self.line_text_state = LineTextState::Digits;
-                if index == bytes.len() {
+                if *index == bytes.len() || bytes[*index].is_ascii_whitespace() {
                     return;
                 }
                 self.line_text_state = LineTextState::Other;
-                self.push_ascii_text_byte(bytes[index], matches!(bytes[index], b'.' | b')'));
-                index += 1;
+                let byte = bytes[*index];
+                self.push_ascii_text_byte(byte, matches!(byte, b'.' | b')'));
+                *index += 1;
             }
         }
 
-        let mut copy_start = index;
-        while index < bytes.len() {
-            if markdown_escape_byte(bytes[index]) {
-                self.value.push_str(&text[copy_start..index]);
+        let mut copy_start = *index;
+        while *index < bytes.len() && !bytes[*index].is_ascii_whitespace() {
+            if markdown_escape_byte(bytes[*index]) {
+                self.value.push_str(&text[copy_start..*index]);
                 self.value.push('\\');
-                self.value.push(bytes[index] as char);
-                copy_start = index + 1;
+                self.value.push(bytes[*index] as char);
+                copy_start = *index + 1;
             }
-            index += 1;
+            *index += 1;
         }
-        self.value.push_str(&text[copy_start..]);
+        self.value.push_str(&text[copy_start..*index]);
     }
 
     fn prepare_text(&mut self) {

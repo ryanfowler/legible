@@ -117,10 +117,26 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
             Some(t) => stats_for_text(t),
             None => NodeStats::default(),
         };
+        let cache_links = store.link_lengths_enabled();
+        let mut link_length = 0.0;
         for c in dom.children(n) {
             if let Some(cs) = store.get_stats(c) {
                 append_stats(&mut s, cs)
             }
+            if cache_links {
+                link_length += store.link_length(c);
+            }
+        }
+        if cache_links {
+            if dom.tag(n) == Some(Tag::A) {
+                link_length = s.text_length as f64
+                    * if dom.attr(n, AttrName::Href).is_some_and(is_hash_url) {
+                        0.3
+                    } else {
+                        1.0
+                    };
+            }
+            store.set_link_length(n, link_length);
         }
         s.has_sentence_end = s.has_sentence_break || s.ends_with_dot;
         store.set_stats(n, s)
@@ -230,19 +246,18 @@ pub fn get_link_density_cached(
     if len == 0 {
         return 0.;
     }
-    let mut links = 0.;
-    for x in dom.descendants(id) {
-        if dom.tag(x) == Some(Tag::A) {
-            let n = get_or_compute_stats(dom, x, store).text_length;
-            links += n as f64
-                * if dom.attr(x, AttrName::Href).is_some_and(is_hash_url) {
-                    0.3
-                } else {
-                    1.
-                }
-        }
+    get_or_compute_stats(dom, id, store);
+    if dom.tag(id) == Some(Tag::A) {
+        // Link density excludes the root itself. This case is not part of the
+        // normal candidate path, but preserve the helper's original behavior.
+        let links = dom
+            .children(id)
+            .map(|child| store.link_length(child))
+            .sum::<f64>();
+        links / len as f64
+    } else {
+        store.link_length(id) / len as f64
     }
-    links / len as f64
 }
 pub fn is_whitespace(dom: &Dom, id: NodeId) -> bool {
     dom.text_node(id).is_some_and(|t| t.trim().is_empty()) || dom.tag(id) == Some(Tag::Br)
@@ -388,7 +403,8 @@ fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value:
 
 #[cfg(test)]
 mod tests {
-    use super::stats_for_text;
+    use super::{get_link_density, get_link_density_cached, stats_for_text};
+    use crate::dom::{Dom, NodeStateStore, Tag};
 
     #[test]
     fn text_stats_match_for_ascii_and_unicode_paths() {
@@ -406,5 +422,22 @@ mod tests {
         assert!(unicode.starts_with_whitespace);
         assert!(unicode.ends_with_whitespace);
         assert!(unicode.has_sentence_end);
+    }
+
+    #[test]
+    fn cached_link_density_matches_structural_scan() {
+        let dom = Dom::parse_fragment(
+            r##"plain <a href="/full">full</a> <a href="#hash">hash</a>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let mut store = NodeStateStore::new();
+        store.enable_link_lengths();
+        let len = dom.normalized_char_count(root);
+
+        let expected = get_link_density(&dom, root);
+        let actual = get_link_density_cached(&dom, root, len, &mut store);
+        assert!((actual - expected).abs() < f64::EPSILON);
     }
 }
