@@ -1,8 +1,8 @@
 //! Constants and regex patterns used by Readability.
 
 use crate::dom::{AttrName, Tag};
-use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
+use std::sync::LazyLock;
 
 /// Parsing flags that control the behavior of the algorithm.
 pub mod flags {
@@ -38,60 +38,60 @@ pub mod regexps {
     use super::*;
 
     /// Matches unlikely candidates for main content.
-    pub static UNLIKELY_CANDIDATES: Lazy<Regex> = Lazy::new(|| {
+    pub static UNLIKELY_CANDIDATES: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)-ad-|ai2html|banner|breadcrumbs|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager|popup|yom-remote").unwrap()
     });
 
     /// Matches elements that might be candidates even if they look unlikely.
-    pub static OK_MAYBE_ITS_A_CANDIDATE: Lazy<Regex> = Lazy::new(|| {
+    pub static OK_MAYBE_ITS_A_CANDIDATE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)and|article|body|column|content|main|mathjax|shadow").unwrap()
     });
 
     /// Matches positive indicators for content.
-    pub static POSITIVE: Lazy<Regex> = Lazy::new(|| {
+    pub static POSITIVE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)article|body|content|entry|hentry|h-entry|main|page|pagination|post|text|blog|story").unwrap()
     });
 
     /// Matches negative indicators for content.
-    pub static NEGATIVE: Lazy<Regex> = Lazy::new(|| {
+    pub static NEGATIVE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)-ad-|hidden|^hid$| hid$| hid |^hid |banner|combx|comment|com-|contact|footer|gdpr|masthead|media|meta|outbrain|promo|related|scroll|share|shoutbox|sidebar|skyscraper|sponsor|shopping|tags|widget").unwrap()
     });
 
     /// Matches byline patterns.
-    pub static BYLINE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)byline|author|dateline|writtenby|p-author").unwrap());
+    pub static BYLINE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)byline|author|dateline|writtenby|p-author").unwrap());
 
     /// Matches multiple whitespace characters.
-    pub static NORMALIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s{2,}").unwrap());
+    pub static NORMALIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").unwrap());
 
     /// Matches video hosting URLs.
-    pub static VIDEOS: Lazy<Regex> = Lazy::new(|| {
+    pub static VIDEOS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)//(www\.)?((dailymotion|youtube|youtube-nocookie|player\.vimeo|v\.qq|bilibili|live.bilibili)\.com|(archive|upload\.wikimedia)\.org|player\.twitch\.tv)").unwrap()
     });
 
     /// Matches share-related elements.
-    pub static SHARE_ELEMENTS: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)(\b|_)(share|sharedaddy)(\b|_)").unwrap());
+    pub static SHARE_ELEMENTS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)(\b|_)(share|sharedaddy)(\b|_)").unwrap());
 
     /// Tokenizes text on word boundaries.
-    pub static TOKENIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\W+").unwrap());
+    pub static TOKENIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\W+").unwrap());
 
     /// Matches srcset URL patterns.
-    pub static SRCSET_URL: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap());
+    pub static SRCSET_URL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap());
 
     /// Matches base64 data URLs.
-    pub static B64_DATA_URL: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)^data:\s*([^\s;,]+)\s*;\s*base64\s*,").unwrap());
+    pub static B64_DATA_URL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)^data:\s*([^\s;,]+)\s*;\s*base64\s*,").unwrap());
 
     /// Matches JSON-LD article types.
     /// See: https://schema.org/Article
-    pub static JSON_LD_ARTICLE_TYPES: Lazy<Regex> = Lazy::new(|| {
+    pub static JSON_LD_ARTICLE_TYPES: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^Article|AdvertiserContentArticle|NewsArticle|AnalysisNewsArticle|AskPublicNewsArticle|BackgroundNewsArticle|OpinionNewsArticle|ReportageNewsArticle|ReviewNewsArticle|Report|SatiricalArticle|ScholarlyArticle|MedicalScholarlyArticle|SocialMediaPosting|BlogPosting|LiveBlogPosting|DiscussionForumPosting|TechArticle|APIReference$").unwrap()
     });
 
     /// Matches ad-related words.
-    pub static AD_WORDS: Lazy<Regex> = Lazy::new(|| {
+    pub static AD_WORDS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"(?iu)^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|广告|Реклама|Anuncio)$",
         )
@@ -99,25 +99,25 @@ pub mod regexps {
     });
 
     /// Matches loading indicator words.
-    pub static LOADING_WORDS: Lazy<Regex> = Lazy::new(|| {
+    pub static LOADING_WORDS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?iu)^((loading|正在加载|Загрузка|chargement|cargando)(…|\.\.\.)?)$").unwrap()
     });
 
     /// Matches title separators surrounded by whitespace.
-    pub static TITLE_SEPARATOR: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\s[\|\-–—\\\/>»]\s").unwrap());
+    pub static TITLE_SEPARATOR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\s[\|\-–—\\\/>»]\s").unwrap());
 
     /// Matches hierarchical title separators (/, >, »).
-    pub static TITLE_HIERARCHICAL: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\s[\\/>\u{00BB}]\s").unwrap());
+    pub static TITLE_HIERARCHICAL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\s[\\/>\u{00BB}]\s").unwrap());
 
     /// Matches the first part of a title up to and including a separator.
-    pub static TITLE_FIRST_PART: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^[^\|\-–—\\\/>»]*[\|\-–—\\\/>»]").unwrap());
+    pub static TITLE_FIRST_PART: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^[^\|\-–—\\\/>»]*[\|\-–—\\\/>»]").unwrap());
 
     /// RegexSet for class weight scoring - combines NEGATIVE (index 0) and POSITIVE (index 1).
     /// Allows single-pass matching instead of 4 separate regex calls.
-    pub static CLASS_WEIGHT_SET: Lazy<RegexSet> = Lazy::new(|| {
+    pub static CLASS_WEIGHT_SET: LazyLock<RegexSet> = LazyLock::new(|| {
         RegexSet::new([
             NEGATIVE.as_str(), // Index 0 - negative patterns
             POSITIVE.as_str(), // Index 1 - positive patterns
@@ -127,7 +127,7 @@ pub mod regexps {
 
     /// RegexSet for candidate filtering - combines UNLIKELY_CANDIDATES (index 0)
     /// and OK_MAYBE_ITS_A_CANDIDATE (index 1).
-    pub static CANDIDATE_FILTER_SET: Lazy<RegexSet> = Lazy::new(|| {
+    pub static CANDIDATE_FILTER_SET: LazyLock<RegexSet> = LazyLock::new(|| {
         RegexSet::new([
             UNLIKELY_CANDIDATES.as_str(),      // Index 0 - unlikely patterns
             OK_MAYBE_ITS_A_CANDIDATE.as_str(), // Index 1 - maybe ok patterns
@@ -137,7 +137,7 @@ pub mod regexps {
 
     /// RegexSet for ad/loading word detection - combines AD_WORDS (index 0)
     /// and LOADING_WORDS (index 1) for single-pass matching.
-    pub static AD_LOADING_SET: Lazy<RegexSet> = Lazy::new(|| {
+    pub static AD_LOADING_SET: LazyLock<RegexSet> = LazyLock::new(|| {
         RegexSet::new([
             AD_WORDS.as_str(),      // Index 0 - ad-related words
             LOADING_WORDS.as_str(), // Index 1 - loading indicator words
