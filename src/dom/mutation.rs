@@ -136,12 +136,15 @@ impl Dom {
     }
     pub(crate) fn set_attr(&mut self, node: NodeId, name: AttrName, value: &str) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            if let Some(a) = e.attrs.iter_mut().find(|a| a.known == name) {
+            if let Some(a) = e
+                .attrs
+                .iter_mut()
+                .find(|attribute| name.matches_local(attribute.name.local.as_ref()))
+            {
                 a.value = StrTendril::from(value)
             } else {
                 e.attrs.push(super::Attribute {
                     name: QualName::new(None, ns!(), LocalName::from(name.as_str())),
-                    known: name,
                     value: StrTendril::from(value),
                 })
             }
@@ -152,22 +155,21 @@ impl Dom {
             if let Some(a) = e.attrs.iter_mut().find(|a| a.name == name) {
                 a.value = value
             } else {
-                e.attrs.push(super::Attribute {
-                    known: AttrName::from_local(name.local.as_ref()),
-                    name,
-                    value,
-                })
+                e.attrs.push(super::Attribute { name, value })
             }
         }
     }
     pub(crate) fn remove_attr(&mut self, node: NodeId, name: AttrName) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|a| a.known != name)
+            e.attrs
+                .retain(|attribute| !name.matches_local(attribute.name.local.as_ref()))
         }
     }
     pub(crate) fn remove_attrs(&mut self, node: NodeId, names: &[AttrName]) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|a| !names.contains(&a.known))
+            e.attrs.retain(|attribute| {
+                !names.contains(&AttrName::from_local(attribute.name.local.as_ref()))
+            })
         }
     }
     #[allow(dead_code)]

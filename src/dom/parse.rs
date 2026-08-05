@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
-use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
+use super::{Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::tokenizer::TokenizerOpts;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{Attribute as HtmlAttribute, ParseOpts, QualName, parse_document, parse_fragment};
@@ -23,16 +23,29 @@ struct DomSink {
     quirks: Cell<QuirksMode>,
 }
 impl DomSink {
-    fn new(fragment: bool) -> Self {
+    fn new(fragment: bool, capacity: usize) -> Self {
         Self {
-            dom: RefCell::new(Dom::new(if fragment {
-                NodeData::Fragment
-            } else {
-                NodeData::Document
-            })),
+            dom: RefCell::new(Dom::with_capacity(
+                if fragment {
+                    NodeData::Fragment
+                } else {
+                    NodeData::Document
+                },
+                capacity,
+            )),
             quirks: Cell::new(html5ever::tree_builder::NoQuirks),
         }
     }
+}
+fn node_capacity_hint(html: &str) -> usize {
+    let markup = memchr::memchr_iter(b'<', html.as_bytes()).count();
+    if markup == 0 || markup > html.len() / 10 {
+        return 1;
+    }
+    markup
+        .saturating_add(markup / 3)
+        .saturating_add(64)
+        .min(32_768)
 }
 fn opts(drop_doctype: bool) -> ParseOpts {
     ParseOpts {
@@ -46,10 +59,10 @@ fn opts(drop_doctype: bool) -> ParseOpts {
 }
 impl Dom {
     pub(crate) fn parse_document(html: &str) -> Result<Self, DomError> {
-        Ok(parse_document(DomSink::new(false), opts(false)).one(html))
+        Ok(parse_document(DomSink::new(false, node_capacity_hint(html)), opts(false)).one(html))
     }
     pub(crate) fn parse_fragment(html: &str, context: Tag) -> Result<Self, DomError> {
-        let sink = DomSink::new(true);
+        let sink = DomSink::new(true, node_capacity_hint(html));
         let context = QualName::new(
             None,
             html5ever::ns!(html),
@@ -112,17 +125,7 @@ impl TreeSink for DomSink {
             .create(NodeData::Element(ElementData {
                 name,
                 tag,
-                attrs: attrs
-                    .into_iter()
-                    .map(|a| {
-                        let known = AttrName::from_local(a.name.local.as_ref());
-                        super::Attribute {
-                            name: a.name,
-                            known,
-                            value: a.value,
-                        }
-                    })
-                    .collect(),
+                attrs,
                 template_contents: NodeLink::NONE,
                 mathml_annotation_xml_integration_point: flags
                     .mathml_annotation_xml_integration_point,
@@ -231,12 +234,7 @@ impl TreeSink for DomSink {
         if let NodeData::Element(e) = &mut d.node_mut(*target).data {
             for a in attrs {
                 if !e.attrs.iter().any(|x| x.name == a.name) {
-                    let known = AttrName::from_local(a.name.local.as_ref());
-                    e.attrs.push(super::Attribute {
-                        name: a.name,
-                        known,
-                        value: a.value,
-                    })
+                    e.attrs.push(a)
                 }
             }
         }
@@ -264,5 +262,21 @@ impl ElementTemplate for NodeData {
             NodeData::Element(e) => e.template_contents.get(),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::node_capacity_hint;
+
+    #[test]
+    fn node_capacity_hint_avoids_sparse_and_markup_dense_overallocation() {
+        assert_eq!(node_capacity_hint("plain text"), 1);
+        assert_eq!(node_capacity_hint("<<<<<<<<<<<<<<<<<<<<"), 1);
+        assert!(
+            node_capacity_hint(
+                "<article><p>This document has enough text to make its markup sparse.</p></article>"
+            ) > 1
+        );
     }
 }

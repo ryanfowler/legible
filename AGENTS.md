@@ -48,13 +48,16 @@ The extraction pipeline flows through these stages:
 
 - Use `Dom`'s direct `NodeId` traversal and typed query helpers. Do not add a general CSS matcher.
 - Keep post-parse DOM access free of `RefCell`; parser-only interior mutability belongs in `dom/parse.rs`.
+- Retain html5ever's attribute vectors when the parser creates elements. Do not rebuild them only to cache attribute classifications.
 - Use borrowed attribute values for hot reads and `Tag`/`AttrName` for common predicates. Keep parser tag and attribute classification allocation-free for html5ever's normalized lowercase names.
 - Collect attached preorder snapshots before mutation when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots with depth when a pass processes only elements and can skip removed subtrees.
+- Reuse the cleaning node snapshot and text buffers across extraction retries and sequential mutation passes. Keep URI repair, class cleanup, and comment removal in one post-processing snapshot.
 - Use `SmallVec` for hot, short-lived traversal stacks, scoring candidates, metadata tables, and small child snapshots. Keep full-document snapshots in `Vec`.
 - Keep structural mutation in `dom/mutation.rs` and validate links in debug builds.
 - Preserve the O(1) leaf fast path in DOM cycle checks. The parser appends new leaf nodes, so do not add another depth-dependent scan to this path.
+- Keep the bounded, markup-density-aware node capacity hint. Count markup with `memchr` so preallocation does not add a full scalar scan or overallocate for dense adversarial input.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
-- Use the `dom_parse` Criterion group to isolate custom DOM construction from readability extraction.
+- Use the `dom_parse` Criterion group to isolate custom DOM construction. Use `document_extraction` to benchmark extraction from an already parsed `Document`.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.

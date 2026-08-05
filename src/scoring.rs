@@ -148,7 +148,7 @@ pub fn get_class_weight(dom: &Dom, id: NodeId, flags: u32) -> i32 {
     }
     let mut w = 0;
     for a in dom.attrs(id) {
-        if !matches!(a.known, AttrName::Class | AttrName::Id) || a.value.is_empty() {
+        if !matches!(a.name.local.as_ref(), "class" | "id") || a.value.is_empty() {
             continue;
         }
         let m = regexps::CLASS_WEIGHT_SET.matches(a.value.as_ref());
@@ -164,33 +164,27 @@ pub fn get_class_weight(dom: &Dom, id: NodeId, flags: u32) -> i32 {
 pub fn has_non_empty_inner_text(dom: &Dom, id: NodeId) -> bool {
     dom.has_non_whitespace_text(id)
 }
-pub fn get_inner_text(dom: &Dom, id: NodeId, normalize: bool) -> String {
-    let mut raw = String::new();
-    dom.append_text(id, &mut raw);
-    let t = raw.trim();
-    if t.is_empty() {
-        return String::new();
-    }
-    if !normalize {
-        // Most text nodes already have clean boundaries. Return the buffer
-        // instead of allocating a second String for the trimmed view.
-        return if t.len() == raw.len() {
-            raw
-        } else {
-            t.to_owned()
-        };
-    }
-    let mut out = String::with_capacity(t.len());
-    let mut ws = false;
-    for c in t.chars() {
-        if c.is_whitespace() {
-            if !ws {
-                out.push(' ')
-            }
-            ws = true
-        } else {
-            out.push(c);
-            ws = false
+pub fn get_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String) -> &'a str {
+    out.clear();
+    dom.append_text(id, out);
+    out.trim()
+}
+pub fn get_normalized_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String) -> &'a str {
+    out.clear();
+    dom.append_normalized_text(id, out);
+    out
+}
+pub fn get_inner_text_owned(dom: &Dom, id: NodeId) -> String {
+    let mut out = String::new();
+    dom.append_text(id, &mut out);
+    let start = out.len() - out.trim_start().len();
+    let end = out.trim_end().len();
+    if end == 0 {
+        out.clear();
+    } else {
+        out.truncate(end);
+        if start != 0 {
+            out.drain(..start);
         }
     }
     out
@@ -352,7 +346,7 @@ pub fn is_probably_visible(dom: &Dom, id: NodeId) -> bool {
     }
     true
 }
-pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str) -> bool {
+pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str, text_buffer: &mut String) -> bool {
     let ok = dom.attr(id, AttrName::Rel) == Some("author")
         || dom
             .attr(id, AttrName::ItemProp)
@@ -361,7 +355,7 @@ pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str) -> bool {
     if !ok {
         return false;
     }
-    let t = get_inner_text(dom, id, false);
+    let t = get_inner_text(dom, id, text_buffer);
     !t.is_empty() && t.len() < 400 && t.chars().count() < 100
 }
 fn has_hidden_style(style: &str) -> bool {

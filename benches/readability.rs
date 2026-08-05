@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use legible::{
     BulletMarker, Document, Extractor, HeadingStyle, MarkdownOptions, extract_html,
     is_probably_readable,
@@ -22,6 +22,24 @@ fn bench_dom_parse(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &html, |b, html| {
             b.iter(|| Document::parse(black_box(html)))
+        });
+    }
+    group.finish();
+}
+
+/// Benchmark extraction from an already parsed document.
+fn bench_document_extraction(c: &mut Criterion) {
+    let extractor = Extractor::default();
+    let mut group = c.benchmark_group("document_extraction");
+    for name in ["medium-2", "wikipedia-2", "guardian-1"] {
+        let html = load_test_page(name);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &html, |b, html| {
+            b.iter_batched(
+                || Document::parse(black_box(html)).unwrap(),
+                |document| extractor.extract_document_html(black_box(document)),
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -238,6 +256,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_dom_parse,
+    bench_document_extraction,
     bench_parse,
     bench_parse_retries,
     bench_output_formats,

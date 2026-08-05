@@ -259,6 +259,9 @@ impl<'a> Readability<'a> {
         if self.dom.body().is_none() {
             return Err(Error::NoBody);
         }
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+        let mut cleaning_nodes = Vec::new();
         loop {
             let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
             let mut to_score = SmallVec::<[NodeId; 256]>::new();
@@ -280,7 +283,6 @@ impl<'a> Readability<'a> {
             let initial_nodes = self
                 .dom
                 .element_descendants_snapshot_with_depth(self.dom.root());
-            let mut buf = String::new();
             let mut removed_depth = None;
             let mut remove_title = true;
             for (id, depth) in initial_nodes {
@@ -307,14 +309,14 @@ impl<'a> Readability<'a> {
                     continue;
                 }
                 if self.article_byline.is_none() && self.metadata.byline.is_none() {
-                    build_match_string(&self.dom, id, &mut buf);
-                    if is_valid_byline(&self.dom, id, &buf) {
+                    build_match_string(&self.dom, id, &mut match_buffer);
+                    if is_valid_byline(&self.dom, id, &match_buffer, &mut text_buffer) {
                         let mut names = Vec::new();
                         self.dom
                             .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
                         let n = names.first().copied().unwrap_or(id);
                         self.article_byline =
-                            Some(get_inner_text(&self.dom, n, false).trim().into());
+                            Some(get_inner_text(&self.dom, n, &mut text_buffer).to_owned());
                         remove.push(id);
                         removed_depth = Some(depth);
                         continue;
@@ -324,7 +326,7 @@ impl<'a> Readability<'a> {
                     && matches!(tag, Tag::H1 | Tag::H2)
                     && metadata::text_similarity(
                         &self.article_title,
-                        &get_inner_text(&self.dom, id, false),
+                        get_inner_text(&self.dom, id, &mut text_buffer),
                     ) > 0.75
                 {
                     remove_title = false;
@@ -333,8 +335,8 @@ impl<'a> Readability<'a> {
                     continue;
                 }
                 if strip && tag != Tag::Body && tag != Tag::A {
-                    build_match_string(&self.dom, id, &mut buf);
-                    let m = regexps::CANDIDATE_FILTER_SET.matches(&buf);
+                    build_match_string(&self.dom, id, &mut match_buffer);
+                    let m = regexps::CANDIDATE_FILTER_SET.matches(&match_buffer);
                     if m.matched(0)
                         && !m.matched(1)
                         && !has_ancestor_tags_any(&self.dom, id, &[Tag::Table, Tag::Code], 3)
@@ -553,7 +555,13 @@ impl<'a> Readability<'a> {
                 .allowed_video_regex
                 .clone()
                 .unwrap_or_else(|| regexps::VIDEOS.clone());
-            self.prep_article(article_id, &video);
+            self.prep_article(
+                article_id,
+                &video,
+                &mut match_buffer,
+                &mut text_buffer,
+                &mut cleaning_nodes,
+            );
             if synthetic {
                 self.dom
                     .set_attr(article_id, AttrName::Id, "readability-page-1");
@@ -581,7 +589,7 @@ impl<'a> Readability<'a> {
                     .is_none_or(|best| len > best.text_len_chars)
                 {
                     let excerpt = self.article_excerpt(article_id);
-                    self.post_process(article_id);
+                    self.post_process(article_id, &mut cleaning_nodes);
                     let dom = self
                         .dom
                         .copy_subtree_as_fragment(article_id)
@@ -629,7 +637,7 @@ impl<'a> Readability<'a> {
                 p = self.dom.parent(x)
             }
             let excerpt = self.article_excerpt(article_id);
-            self.post_process(article_id);
+            self.post_process(article_id, &mut cleaning_nodes);
             let len = self.dom.normalized_char_count(article_id);
             return Ok(ArticleContent {
                 text_length: len,
@@ -698,10 +706,17 @@ impl<'a> Readability<'a> {
         }
         Some(c)
     }
-    fn prep_article(&mut self, root: NodeId, video: &Regex) {
-        clean_styles(&mut self.dom, root);
-        mark_data_tables(&self.dom, root, &mut self.node_data);
-        fix_lazy_images(&mut self.dom, root);
+    fn prep_article(
+        &mut self,
+        root: NodeId,
+        video: &Regex,
+        match_buffer: &mut String,
+        text_buffer: &mut String,
+        nodes: &mut Vec<NodeId>,
+    ) {
+        clean_styles(&mut self.dom, root, nodes);
+        mark_data_tables(&self.dom, root, &mut self.node_data, nodes);
+        fix_lazy_images(&mut self.dom, root, nodes);
         clean_conditionally(
             &mut self.dom,
             root,
@@ -710,6 +725,8 @@ impl<'a> Readability<'a> {
             self.flags,
             video,
             &mut self.node_data,
+            text_buffer,
+            nodes,
             self.options.link_density_modifier,
         );
         clean_conditionally(
@@ -720,6 +737,8 @@ impl<'a> Readability<'a> {
             self.flags,
             video,
             &mut self.node_data,
+            text_buffer,
+            nodes,
             self.options.link_density_modifier,
         );
         clean_tags(
@@ -727,16 +746,17 @@ impl<'a> Readability<'a> {
             root,
             &[Tag::Object, Tag::Embed, Tag::Footer, Tag::Link, Tag::Aside],
             video,
+            nodes,
         );
         let threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
         let children: SmallVec<[NodeId; 16]> = self.dom.element_children(root).collect();
         for c in children {
-            clean_matched_nodes(&mut self.dom, c, |d, id, m| {
+            clean_matched_nodes(&mut self.dom, c, nodes, match_buffer, |d, id, m| {
                 m.as_bytes()
                     .windows(5)
                     .any(|w| w.eq_ignore_ascii_case(b"share"))
                     && regexps::SHARE_ELEMENTS.is_match(m)
-                    && get_inner_text(d, id, false).len() < threshold
+                    && get_inner_text(d, id, text_buffer).len() < threshold
             })
         }
         clean_tags(
@@ -750,8 +770,9 @@ impl<'a> Readability<'a> {
                 Tag::Button,
             ],
             video,
+            nodes,
         );
-        clean_headers(&mut self.dom, root, self.flags);
+        clean_headers(&mut self.dom, root, self.flags, nodes);
         clean_conditionally(
             &mut self.dom,
             root,
@@ -760,6 +781,8 @@ impl<'a> Readability<'a> {
             self.flags,
             video,
             &mut self.node_data,
+            text_buffer,
+            nodes,
             self.options.link_density_modifier,
         );
         clean_conditionally(
@@ -770,6 +793,8 @@ impl<'a> Readability<'a> {
             self.flags,
             video,
             &mut self.node_data,
+            text_buffer,
+            nodes,
             self.options.link_density_modifier,
         );
         clean_conditionally(
@@ -780,6 +805,8 @@ impl<'a> Readability<'a> {
             self.flags,
             video,
             &mut self.node_data,
+            text_buffer,
+            nodes,
             self.options.link_density_modifier,
         );
         let hs: SmallVec<[NodeId; 4]> = self
@@ -853,105 +880,100 @@ impl<'a> Readability<'a> {
     fn article_excerpt(&self, root: NodeId) -> Option<String> {
         self.dom
             .first_descendant_by_tag(root, Tag::P)
-            .map(|id| get_inner_text(&self.dom, id, false))
+            .map(|id| get_inner_text_owned(&self.dom, id))
             .filter(|text| !text.is_empty())
     }
-    fn post_process(&mut self, root: NodeId) {
-        self.fix_relative_uris(root);
-        simplify_nested_elements(&mut self.dom, root);
-        let ids: Vec<_> = self.dom.descendants(root).collect();
-        let mut comments = SmallVec::<[NodeId; 32]>::new();
-        for id in ids {
-            if self.dom.is_element(id) {
-                if !self.options.keep_classes {
-                    if let Some(c) = self.dom.attr(id, AttrName::Class) {
-                        let keep = c
-                            .split_whitespace()
-                            .filter(|x| self.options.classes_to_preserve.iter().any(|p| p == x))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        if keep.is_empty() {
-                            self.dom.remove_attr(id, AttrName::Class)
-                        } else {
-                            self.dom.set_attr(id, AttrName::Class, &keep)
+    fn post_process(&mut self, root: NodeId, nodes: &mut Vec<NodeId>) {
+        // URI repair, class cleanup, and comment removal share one stable
+        // preorder snapshot. The snapshot also permits structural link changes.
+        nodes.clear();
+        nodes.extend(self.dom.descendants(root));
+        let mut class_buffer = String::new();
+        for &id in nodes.iter() {
+            if self.dom.parent(id).is_none() {
+                continue;
+            }
+            if self.dom.is_comment(id) {
+                self.dom.detach(id);
+                continue;
+            }
+            let Some(tag) = self.dom.tag(id) else {
+                continue;
+            };
+
+            if let Some(base) = self.base_uri.as_ref() {
+                if tag == Tag::A {
+                    if let Some(href) = self.dom.attr(id, AttrName::Href) {
+                        if href.starts_with('#') {
+                            // Fragment links do not need URI resolution.
+                        } else if href.starts_with("javascript:") {
+                            let text = self.dom.text(id);
+                            self.dom.detach_children(id);
+                            if let Ok(text_node) = self.dom.create_text(&text) {
+                                self.dom.append_child(id, text_node)
+                            }
+                            self.dom.rename_html(id, Tag::Span)
+                        } else if let Ok(url) = base.join(href) {
+                            self.dom.set_attr(id, AttrName::Href, url.as_str())
+                        }
+                    }
+                } else if matches!(
+                    tag,
+                    Tag::Img | Tag::Picture | Tag::Figure | Tag::Video | Tag::Audio | Tag::Source
+                ) {
+                    for attr in [AttrName::Src, AttrName::Poster] {
+                        if let Some(value) = self.dom.attr(id, attr)
+                            && let Ok(url) = base.join(value)
+                        {
+                            self.dom.set_attr(id, attr, url.as_str())
+                        }
+                    }
+                    if let Some(value) = self.dom.attr(id, AttrName::Srcset) {
+                        let replacement =
+                            regexps::SRCSET_URL.replace_all(value, |captures: &regex::Captures| {
+                                let url = base
+                                    .join(&captures[1])
+                                    .map(|url| url.to_string())
+                                    .unwrap_or_else(|_| captures[1].into());
+                                format!(
+                                    "{}{}{}",
+                                    url,
+                                    captures.get(2).map_or("", |value| value.as_str()),
+                                    captures.get(3).map_or("", |value| value.as_str())
+                                )
+                            });
+                        if let std::borrow::Cow::Owned(replacement) = replacement {
+                            self.dom
+                                .set_attr(id, AttrName::Srcset, replacement.as_str())
                         }
                     }
                 }
-            } else if self.dom.is_comment(id) {
-                comments.push(id)
             }
-        }
-        for x in comments {
-            self.dom.detach(x)
-        }
-    }
-    fn fix_relative_uris(&mut self, root: NodeId) {
-        let Some(base) = self.base_uri.clone() else {
-            return;
-        };
-        let links: Vec<_> = self
-            .dom
-            .descendants(root)
-            .filter(|&x| self.dom.tag(x) == Some(Tag::A))
-            .collect();
-        for x in links {
-            if let Some(h) = self.dom.attr(x, AttrName::Href).map(str::to_string) {
-                if h.starts_with('#') {
-                    continue;
-                }
-                if h.starts_with("javascript:") {
-                    let text = self.dom.text(x);
-                    self.dom.detach_children(x);
-                    if let Ok(text_node) = self.dom.create_text(&text) {
-                        self.dom.append_child(x, text_node)
+
+            if !self.options.keep_classes
+                && let Some(classes) = self.dom.attr(id, AttrName::Class)
+            {
+                class_buffer.clear();
+                for class in classes.split_whitespace().filter(|class| {
+                    self.options
+                        .classes_to_preserve
+                        .iter()
+                        .any(|preserved| preserved == class)
+                }) {
+                    if !class_buffer.is_empty() {
+                        class_buffer.push(' ')
                     }
-                    self.dom.rename_html(x, Tag::Span)
-                } else if let Ok(u) = base.join(&h) {
-                    self.dom.set_attr(x, AttrName::Href, u.as_str())
+                    class_buffer.push_str(class)
+                }
+                if class_buffer.is_empty() {
+                    self.dom.remove_attr(id, AttrName::Class)
+                } else if class_buffer != classes {
+                    self.dom
+                        .set_attr(id, AttrName::Class, class_buffer.as_str())
                 }
             }
         }
-        let media: Vec<_> = self
-            .dom
-            .descendants(root)
-            .filter(|&x| {
-                matches!(
-                    self.dom.tag(x),
-                    Some(
-                        Tag::Img
-                            | Tag::Picture
-                            | Tag::Figure
-                            | Tag::Video
-                            | Tag::Audio
-                            | Tag::Source
-                    )
-                )
-            })
-            .collect();
-        for x in media {
-            for a in [AttrName::Src, AttrName::Poster] {
-                if let Some(v) = self.dom.attr(x, a).map(str::to_string) {
-                    if let Ok(u) = base.join(&v) {
-                        self.dom.set_attr(x, a, u.as_str())
-                    }
-                }
-            }
-            if let Some(v) = self.dom.attr(x, AttrName::Srcset).map(str::to_string) {
-                let n = regexps::SRCSET_URL.replace_all(&v, |c: &regex::Captures| {
-                    let u = base
-                        .join(&c[1])
-                        .map(|x| x.to_string())
-                        .unwrap_or_else(|_| c[1].into());
-                    format!(
-                        "{}{}{}",
-                        u,
-                        c.get(2).map_or("", |x| x.as_str()),
-                        c.get(3).map_or("", |x| x.as_str())
-                    )
-                });
-                self.dom.set_attr(x, AttrName::Srcset, &n)
-            }
-        }
+        simplify_nested_elements(&mut self.dom, root, nodes);
     }
     fn reparse_prepare(&mut self) -> Result<()> {
         self.dom = Dom::parse_document(self.original_html).map_err(|_| Error::NoContent)?;

@@ -2,7 +2,7 @@
 #![allow(clippy::collapsible_if, clippy::field_reassign_with_default)]
 use crate::constants::regexps;
 use crate::dom::{AttrName, Dom, Tag};
-use crate::scoring::get_inner_text;
+use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_text};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
@@ -276,7 +276,7 @@ pub fn get_article_title(dom: &Dom) -> String {
     let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
     };
-    let orig = get_inner_text(dom, id, false);
+    let orig = get_inner_text_owned(dom, id);
     if orig.is_empty() {
         return orig;
     }
@@ -294,10 +294,11 @@ pub fn get_article_title(dom: &Dom) -> String {
             cur = regexps::TITLE_FIRST_PART.replace(&orig, "")
         }
     } else if orig.contains(": ") {
+        let mut text_buffer = String::new();
         let has = dom
             .descendants(dom.root())
             .filter(|&x| matches!(dom.tag(x), Some(Tag::H1 | Tag::H2)))
-            .any(|x| get_inner_text(dom, x, false).trim() == orig.trim());
+            .any(|x| get_inner_text(dom, x, &mut text_buffer) == orig.trim());
         if !has {
             if let Some(p) = orig.rfind(": ") {
                 cur = Cow::Borrowed(&orig[p + 2..]);
@@ -318,7 +319,9 @@ pub fn get_article_title(dom: &Dom) -> String {
             .filter(|&x| dom.tag(x) == Some(Tag::H1))
             .collect();
         if hs.len() == 1 {
-            cur = Cow::Owned(get_inner_text(dom, hs[0], true))
+            let mut normalized = String::new();
+            get_normalized_inner_text(dom, hs[0], &mut normalized);
+            cur = Cow::Owned(normalized)
         }
     }
     let mut cur = regexps::NORMALIZE.replace_all(cur.trim(), " ").into_owned();

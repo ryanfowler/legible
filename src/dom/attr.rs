@@ -1,6 +1,3 @@
-use html5ever::QualName;
-use tendril::StrTendril;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum AttrName {
     Align,
@@ -97,6 +94,13 @@ impl AttrName {
             _ => Self::Other,
         }
     }
+    pub(crate) fn matches_local(self, local: &str) -> bool {
+        if self == Self::Other {
+            Self::from_local(local) == Self::Other
+        } else {
+            local.eq_ignore_ascii_case(self.as_str())
+        }
+    }
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Align => "align",
@@ -142,9 +146,4 @@ impl AttrName {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Attribute {
-    pub(crate) name: QualName,
-    pub(crate) known: AttrName,
-    pub(crate) value: StrTendril,
-}
+pub(crate) type Attribute = html5ever::Attribute;
