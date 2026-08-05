@@ -122,6 +122,19 @@ struct ArticleContent {
     /// The node whose children form the output fragment.
     article_root: NodeId,
 }
+
+pub(crate) struct ExtractedArticle {
+    dom: Dom,
+    root: NodeId,
+    metadata: crate::ArticleMetadata,
+    text_char_count: usize,
+}
+
+impl ExtractedArticle {
+    pub(crate) fn into_parts(self) -> (Dom, NodeId, crate::ArticleMetadata, usize) {
+        (self.dom, self.root, self.metadata, self.text_char_count)
+    }
+}
 impl<'a> Readability<'a> {
     pub(crate) fn from_document(
         dom: Dom,
@@ -153,31 +166,35 @@ impl<'a> Readability<'a> {
         }
     }
     pub(crate) fn parse(self) -> Result<LegacyArticle> {
-        let article = self.extract()?;
-        let metadata = article.metadata();
+        let (dom, root, metadata, text_char_count) = self.extract_source()?.into_parts();
+        let content = crate::dom::render_html(&dom, root, text_char_count);
+        let markdown_content =
+            crate::markdown::render_markdown(&dom, root, text_char_count, true, true);
+        let text_content =
+            crate::text::render_text(&dom, root, text_char_count, &crate::TextOptions::default());
         Ok(LegacyArticle {
-            title: article.title().unwrap_or_default().to_owned(),
-            byline: article.byline().map(str::to_owned),
-            dir: article.direction().map(|d| {
-                match d {
+            title: metadata.title().unwrap_or_default().to_owned(),
+            byline: metadata.byline().map(str::to_owned),
+            dir: metadata.direction().map(|direction| {
+                match direction {
                     crate::TextDirection::LeftToRight => "ltr",
                     crate::TextDirection::RightToLeft => "rtl",
                     crate::TextDirection::Auto => "auto",
                 }
                 .to_owned()
             }),
-            lang: article.language().map(str::to_owned),
-            content: article.to_html(),
-            text_content: article.to_text(),
-            markdown_content: article.to_markdown(),
-            length: article.text_char_count(),
-            excerpt: article.excerpt().map(str::to_owned),
+            lang: metadata.language().map(str::to_owned),
+            content,
+            text_content,
+            markdown_content,
+            length: text_char_count,
+            excerpt: metadata.excerpt().map(str::to_owned),
             site_name: metadata.site_name().map(str::to_owned),
             published_time: metadata.published_time().map(str::to_owned),
         })
     }
 
-    pub(crate) fn extract(mut self) -> Result<crate::Article> {
+    pub(crate) fn extract_source(mut self) -> Result<ExtractedArticle> {
         if let Some(e) = self.url_error {
             return Err(Error::InvalidUrl(e));
         }
@@ -236,12 +253,12 @@ impl<'a> Readability<'a> {
         let mut metadata = crate::ArticleMetadata::from_legacy(&mut legacy_metadata);
         metadata.merge_json(json_extended);
         metadata.merge_missing(extended_metadata);
-        let tree = crate::article_tree::ArticleTree::freeze(&self.dom, content.article_root);
-        Ok(crate::Article::from_parts(
-            tree,
+        Ok(ExtractedArticle {
+            dom: self.dom,
+            root: content.article_root,
             metadata,
-            content.text_length,
-        ))
+            text_char_count: content.text_length,
+        })
     }
     fn grab_article(&mut self) -> Result<ArticleContent> {
         if self.dom.body().is_none() {

@@ -1,11 +1,16 @@
 use crate::{
-    article::Article,
+    article::{HtmlArticle, MarkdownArticle, MarkdownOptions, TextArticle, TextOptions},
     document::Document,
     error::{Error, Result},
     options::Options,
+    readability::ExtractedArticle,
 };
 use url::Url;
 
+/// Reusable extraction configuration.
+///
+/// Each extraction method renders one requested format from the cleaned DOM. Requesting
+/// multiple public formats requires separate extraction calls.
 #[derive(Clone, Debug, Default)]
 pub struct Extractor {
     config: Options,
@@ -18,19 +23,154 @@ impl Extractor {
             embed_policy: None,
         }
     }
-    pub fn extract(&self, html: &str) -> Result<Article> {
+
+    /// Extracts an HTML fragment. The returned HTML is not sanitized.
+    pub fn extract_html(&self, html: &str) -> Result<HtmlArticle> {
+        render_html_article(self.extract_source_from_html(html, None)?)
+    }
+    pub fn extract_html_with_url(&self, html: &str, url: &Url) -> Result<HtmlArticle> {
+        render_html_article(self.extract_source_from_html(html, Some(url))?)
+    }
+    pub fn extract_document_html(&self, document: Document<'_>) -> Result<HtmlArticle> {
+        render_html_article(self.extract_source_from_document(document, None)?)
+    }
+    pub fn extract_document_html_with_url(
+        &self,
+        document: Document<'_>,
+        url: &Url,
+    ) -> Result<HtmlArticle> {
+        render_html_article(self.extract_source_from_document(document, Some(url))?)
+    }
+
+    /// Extracts CommonMark Markdown with default format options.
+    pub fn extract_markdown(&self, html: &str) -> Result<MarkdownArticle> {
+        self.extract_markdown_with(html, &MarkdownOptions::default())
+    }
+    /// Extracts CommonMark Markdown with explicit format options.
+    pub fn extract_markdown_with(
+        &self,
+        html: &str,
+        options: &MarkdownOptions,
+    ) -> Result<MarkdownArticle> {
+        render_markdown_article(self.extract_source_from_html(html, None)?, options)
+    }
+    pub fn extract_markdown_with_url(&self, html: &str, url: &Url) -> Result<MarkdownArticle> {
+        self.extract_markdown_with_url_and_options(html, url, &MarkdownOptions::default())
+    }
+    pub fn extract_markdown_with_url_and_options(
+        &self,
+        html: &str,
+        url: &Url,
+        options: &MarkdownOptions,
+    ) -> Result<MarkdownArticle> {
+        render_markdown_article(self.extract_source_from_html(html, Some(url))?, options)
+    }
+    pub fn extract_document_markdown(&self, document: Document<'_>) -> Result<MarkdownArticle> {
+        self.extract_document_markdown_with(document, &MarkdownOptions::default())
+    }
+    pub fn extract_document_markdown_with(
+        &self,
+        document: Document<'_>,
+        options: &MarkdownOptions,
+    ) -> Result<MarkdownArticle> {
+        render_markdown_article(self.extract_source_from_document(document, None)?, options)
+    }
+    pub fn extract_document_markdown_with_url(
+        &self,
+        document: Document<'_>,
+        url: &Url,
+    ) -> Result<MarkdownArticle> {
+        self.extract_document_markdown_with_url_and_options(
+            document,
+            url,
+            &MarkdownOptions::default(),
+        )
+    }
+    pub fn extract_document_markdown_with_url_and_options(
+        &self,
+        document: Document<'_>,
+        url: &Url,
+        options: &MarkdownOptions,
+    ) -> Result<MarkdownArticle> {
+        render_markdown_article(
+            self.extract_source_from_document(document, Some(url))?,
+            options,
+        )
+    }
+
+    /// Extracts normalized text with default format options.
+    pub fn extract_text(&self, html: &str) -> Result<TextArticle> {
+        self.extract_text_with(html, &TextOptions::default())
+    }
+    /// Extracts normalized text with explicit format options.
+    pub fn extract_text_with(&self, html: &str, options: &TextOptions) -> Result<TextArticle> {
+        render_text_article(self.extract_source_from_html(html, None)?, options)
+    }
+    pub fn extract_text_with_url(&self, html: &str, url: &Url) -> Result<TextArticle> {
+        self.extract_text_with_url_and_options(html, url, &TextOptions::default())
+    }
+    pub fn extract_text_with_url_and_options(
+        &self,
+        html: &str,
+        url: &Url,
+        options: &TextOptions,
+    ) -> Result<TextArticle> {
+        render_text_article(self.extract_source_from_html(html, Some(url))?, options)
+    }
+    pub fn extract_document_text(&self, document: Document<'_>) -> Result<TextArticle> {
+        self.extract_document_text_with(document, &TextOptions::default())
+    }
+    pub fn extract_document_text_with(
+        &self,
+        document: Document<'_>,
+        options: &TextOptions,
+    ) -> Result<TextArticle> {
+        render_text_article(self.extract_source_from_document(document, None)?, options)
+    }
+    pub fn extract_document_text_with_url(
+        &self,
+        document: Document<'_>,
+        url: &Url,
+    ) -> Result<TextArticle> {
+        self.extract_document_text_with_url_and_options(document, url, &TextOptions::default())
+    }
+    pub fn extract_document_text_with_url_and_options(
+        &self,
+        document: Document<'_>,
+        url: &Url,
+        options: &TextOptions,
+    ) -> Result<TextArticle> {
+        render_text_article(
+            self.extract_source_from_document(document, Some(url))?,
+            options,
+        )
+    }
+
+    fn extract_source_from_html(&self, html: &str, url: Option<&Url>) -> Result<ExtractedArticle> {
         self.check_size(html)?;
-        self.extract_document(Document::parse(html)?)
+        let document = Document::parse(html)?;
+        self.extract_source(document, url)
     }
-    pub fn extract_with_url(&self, html: &str, url: &Url) -> Result<Article> {
-        self.check_size(html)?;
-        self.extract_document_with_url(Document::parse(html)?, url)
+    fn extract_source_from_document(
+        &self,
+        document: Document<'_>,
+        url: Option<&Url>,
+    ) -> Result<ExtractedArticle> {
+        self.check_size(document.html)?;
+        self.extract_source(document, url)
     }
-    pub fn extract_document(&self, document: Document<'_>) -> Result<Article> {
-        self.extract_document_inner(document, None)
-    }
-    pub fn extract_document_with_url(&self, document: Document<'_>, url: &Url) -> Result<Article> {
-        self.extract_document_inner(document, Some(url))
+    fn extract_source(
+        &self,
+        document: Document<'_>,
+        url: Option<&Url>,
+    ) -> Result<ExtractedArticle> {
+        crate::readability::Readability::from_document(
+            document.doc,
+            document.html,
+            url.map(Url::as_str),
+            &self.config,
+        )
+        .extract_source()
     }
     fn check_size(&self, html: &str) -> Result<()> {
         if let Some(limit) = self.max_input_bytes
@@ -43,16 +183,49 @@ impl Extractor {
         }
         Ok(())
     }
-    fn extract_document_inner(&self, document: Document<'_>, url: Option<&Url>) -> Result<Article> {
-        self.check_size(document.html)?;
-        crate::readability::Readability::from_document(
-            document.doc,
-            document.html,
-            url.map(Url::as_str),
-            &self.config,
-        )
-        .extract()
-    }
+}
+
+fn render_html_article(source: ExtractedArticle) -> Result<HtmlArticle> {
+    let (dom, root, metadata, text_char_count) = source.into_parts();
+    let content = crate::dom::render_html(&dom, root, text_char_count);
+    drop(dom);
+    Ok(HtmlArticle {
+        metadata,
+        content,
+        text_char_count,
+    })
+}
+
+fn render_markdown_article(
+    source: ExtractedArticle,
+    options: &MarkdownOptions,
+) -> Result<MarkdownArticle> {
+    let (dom, root, metadata, text_char_count) = source.into_parts();
+    let content = crate::markdown::render_markdown(
+        &dom,
+        root,
+        text_char_count,
+        options.include_links(),
+        options.include_images(),
+    );
+    let content = options.apply(content);
+    drop(dom);
+    Ok(MarkdownArticle {
+        metadata,
+        content,
+        text_char_count,
+    })
+}
+
+fn render_text_article(source: ExtractedArticle, options: &TextOptions) -> Result<TextArticle> {
+    let (dom, root, metadata, text_char_count) = source.into_parts();
+    let content = crate::text::render_text(&dom, root, text_char_count, options);
+    drop(dom);
+    Ok(TextArticle {
+        metadata,
+        content,
+        text_char_count,
+    })
 }
 pub struct ExtractorBuilder {
     extractor: Extractor,
@@ -243,11 +416,15 @@ fn allow_hosts_regex(hosts: Vec<String>) -> Result<regex::Regex> {
     })
 }
 
-pub fn extract(html: &str) -> Result<Article> {
-    Extractor::default().extract(html)
+/// Extracts an HTML article with default extraction configuration.
+///
+/// The returned HTML fragment is not sanitized.
+pub fn extract_html(html: &str) -> Result<HtmlArticle> {
+    Extractor::default().extract_html(html)
 }
-pub fn extract_with_url(html: &str, url: &Url) -> Result<Article> {
-    Extractor::default().extract_with_url(html, url)
+/// Extracts an HTML article and resolves relative URLs against `url`.
+pub fn extract_html_with_url(html: &str, url: &Url) -> Result<HtmlArticle> {
+    Extractor::default().extract_html_with_url(html, url)
 }
 
 #[cfg(test)]
@@ -284,7 +461,7 @@ mod tests {
         let extractor = Extractor::builder().max_input_bytes(8).build().unwrap();
         let document = Document::parse("<p>article text</p>").unwrap();
         assert!(matches!(
-            extractor.extract_document(document),
+            extractor.extract_document_html(document),
             Err(Error::InputTooLarge { .. })
         ));
 
@@ -295,7 +472,7 @@ mod tests {
             .build()
             .unwrap();
         assert!(!matches!(
-            extractor.extract(html),
+            extractor.extract_html(html),
             Err(Error::TooManyElements { .. })
         ));
     }
@@ -308,7 +485,7 @@ mod tests {
             .retry_length_threshold(0)
             .build()
             .unwrap()
-            .extract_with_url(html, &base)
+            .extract_html_with_url(html, &base)
             .unwrap();
         let metadata = article.metadata();
         assert_eq!(metadata.publisher(), Some("Publisher"));
@@ -339,7 +516,7 @@ mod tests {
             .retry_length_threshold(0)
             .build()
             .unwrap()
-            .extract_with_url(html, &base)
+            .extract_html_with_url(html, &base)
             .unwrap();
         let image = article.metadata().lead_image().unwrap();
         assert_eq!(image.url().as_str(), "https://example.test/first.jpg");
@@ -358,9 +535,9 @@ mod tests {
             .retry_length_threshold(0)
             .build()
             .unwrap()
-            .extract(html)
+            .extract_html(html)
             .unwrap();
-        assert_eq!(none.title(), Some("Fallback title"));
+        assert_eq!(none.metadata().title(), Some("Fallback title"));
         assert!(none.metadata().site_name().is_none());
         assert!(none.metadata().canonical_url().is_none());
         assert!(none.metadata().tags().is_empty());
@@ -370,9 +547,153 @@ mod tests {
             .retry_length_threshold(0)
             .build()
             .unwrap()
-            .extract(html)
+            .extract_html(html)
             .unwrap();
-        assert_eq!(twitter.excerpt(), Some("Twitter excerpt"));
+        assert_eq!(twitter.metadata().excerpt(), Some("Twitter excerpt"));
         assert!(twitter.metadata().site_name().is_none());
+    }
+
+    fn test_extractor() -> Extractor {
+        Extractor::builder()
+            .retry_length_threshold(0)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn explicit_results_and_formats_match_legacy_output() {
+        let html = r#"<title>Example</title><article><h1>Example</h1><p>Hello <em>world</em>!</p><p>Second line.</p></article>"#;
+        let extractor = test_extractor();
+        let html_article = extractor.extract_html(html).unwrap();
+        let markdown = extractor.extract_markdown(html).unwrap();
+        let text = extractor.extract_text(html).unwrap();
+
+        assert_eq!(html_article.metadata(), markdown.metadata());
+        assert_eq!(markdown.metadata(), text.metadata());
+        assert!(html_article.content().contains("Hello <em>world</em>!"));
+        assert!(
+            markdown.content().contains("Hello *world*\\!"),
+            "{}",
+            markdown.content()
+        );
+        assert_eq!(text.content(), "Hello world!Second line.");
+        assert_eq!(text.content().chars().count(), text.text_char_count());
+        assert_eq!(html_article.text_char_count(), text.text_char_count());
+        assert!(markdown.into_content().contains("Second line."));
+        assert!(html_article.into_content().contains("<p>"));
+
+        #[allow(deprecated)]
+        let legacy =
+            crate::parse(html, None, Some(crate::Options::new().char_threshold(0))).unwrap();
+        let html_article = extractor.extract_html(html).unwrap();
+        let markdown = extractor.extract_markdown(html).unwrap();
+        assert_eq!(legacy.content, html_article.content());
+        assert_eq!(legacy.markdown_content, markdown.content());
+        assert_eq!(legacy.text_content, text.content());
+        assert_eq!(legacy.length, text.text_char_count());
+    }
+
+    #[test]
+    fn format_options_and_url_variants_are_applied() {
+        let html = r#"<article><h1>Heading</h1><ul><li>Item</li></ul><p>A<br>B <a href="/path">link</a><img src="/image.jpg" alt="photo"></p></article>"#;
+        let extractor = test_extractor();
+        let base = Url::parse("https://example.test/base/").unwrap();
+        let html_article = extractor.extract_html_with_url(html, &base).unwrap();
+        assert!(html_article.content().contains("https://example.test/path"));
+        assert!(
+            html_article
+                .content()
+                .contains("https://example.test/image.jpg")
+        );
+
+        let options = MarkdownOptions::default()
+            .heading_style(crate::HeadingStyle::Setext)
+            .bullet_marker(crate::BulletMarker::Plus)
+            .images(false);
+        let markdown = extractor
+            .extract_markdown_with_url_and_options(html, &base, &options)
+            .unwrap();
+        assert!(
+            markdown.content().contains("Heading\n-------"),
+            "{}",
+            markdown.content()
+        );
+        assert!(markdown.content().contains("+ Item"));
+        assert!(markdown.content().contains("https://example.test/path"));
+        assert!(!markdown.content().contains("!["));
+
+        let without_links = extractor
+            .extract_markdown_with(html, &MarkdownOptions::default().links(false))
+            .unwrap();
+        assert!(!without_links.content().contains("[link]("));
+        let text = extractor
+            .extract_text_with_url_and_options(
+                html,
+                &base,
+                &TextOptions::default()
+                    .block_separator(crate::TextSeparator::Newline)
+                    .preserve_line_breaks(true),
+            )
+            .unwrap();
+        assert!(text.content().contains("A\nB link"));
+    }
+
+    #[test]
+    fn document_variants_work_after_readability_borrow() {
+        let html = format!(
+            "<article><p>{}</p></article>",
+            "Readable article sentence. ".repeat(30)
+        );
+        let extractor = test_extractor();
+        let document = Document::parse(&html).unwrap();
+        assert!(document.is_probably_readable());
+        assert!(
+            extractor
+                .extract_document_markdown(document)
+                .unwrap()
+                .content()
+                .contains("Readable article")
+        );
+
+        let base = Url::parse("https://example.test/").unwrap();
+        let document =
+            Document::parse("<article><p><a href='/x'>Text link</a></p></article>").unwrap();
+        let article = extractor
+            .extract_document_markdown_with_url_and_options(
+                document,
+                &base,
+                &MarkdownOptions::default(),
+            )
+            .unwrap();
+        assert!(article.content().contains("https://example.test/x"));
+    }
+
+    #[test]
+    fn deeply_nested_content_renders_without_recursion() {
+        let depth = 1_000;
+        let html = format!(
+            "<article>{}deep text{}</article>",
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        );
+        let extractor = test_extractor();
+        assert!(
+            extractor
+                .extract_html(&html)
+                .unwrap()
+                .content()
+                .contains("deep text")
+        );
+        assert!(
+            extractor
+                .extract_markdown(&html)
+                .unwrap()
+                .content()
+                .contains("deep text")
+        );
+        assert_eq!(
+            extractor.extract_text(&html).unwrap().content(),
+            "deep text"
+        );
     }
 }

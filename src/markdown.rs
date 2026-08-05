@@ -1,14 +1,13 @@
-//! Markdown serialization for cleaned article trees.
+//! Markdown serialization for the cleaned extraction DOM.
 //!
-//! The serializer walks a read-only tree directly. It supports the extraction DOM
-//! and the compact article tree. Its explicit work stack keeps deeply nested input
-//! from using the Rust call stack.
+//! The serializer uses an explicit work stack. Deeply nested input does not use the
+//! Rust call stack.
 
 use smallvec::SmallVec;
 
 use crate::dom::{Dom, NodeId, Tag};
 
-pub(crate) trait MarkdownTree {
+trait MarkdownTree {
     type Node: Copy + Eq;
 
     fn first_child(&self, node: Self::Node) -> Option<Self::Node>;
@@ -71,10 +70,20 @@ impl MarkdownTree for Dom {
 /// Serializes the children of `root` as CommonMark.
 #[cfg(test)]
 pub(crate) fn dom_to_markdown(dom: &Dom, root: NodeId, capacity: usize) -> String {
-    tree_to_markdown_filtered(dom, root, capacity, true, true)
+    render_markdown(dom, root, capacity, true, true)
 }
 
-pub(crate) fn tree_to_markdown_filtered<T: MarkdownTree>(
+pub(crate) fn render_markdown(
+    dom: &Dom,
+    root: NodeId,
+    capacity: usize,
+    include_links: bool,
+    include_images: bool,
+) -> String {
+    serialize_markdown(dom, root, capacity, include_links, include_images)
+}
+
+fn serialize_markdown<T: MarkdownTree>(
     tree: &T,
     root: T::Node,
     capacity: usize,

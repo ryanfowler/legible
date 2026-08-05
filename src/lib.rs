@@ -1,24 +1,23 @@
 //! Legible extracts readable article content from HTML.
 //!
-//! Use [`extract`] for one extraction. Use [`Extractor`] for reusable configuration.
-//! The returned [`Article`] stores a compact immutable tree and renders HTML, Markdown,
-//! or normalized text only when requested.
+//! Use [`extract_html`] for one HTML extraction. Use [`Extractor`] for reusable
+//! configuration and for Markdown or text extraction. Each method creates only the
+//! requested format.
 //!
 //! ```rust
-//! let article = legible::extract("<article><h1>Title</h1><p>Article text.</p></article>")?;
-//! println!("{}", article.title().unwrap_or("Untitled"));
-//! let html = article.to_html();
+//! let article = legible::extract_html("<article><h1>Title</h1><p>Article text.</p></article>")?;
+//! println!("{}", article.metadata().title().unwrap_or("Untitled"));
+//! println!("{}", article.content());
 //! # Ok::<(), legible::Error>(())
 //! ```
 //!
-//! [`Article::to_html`] does not return sanitized HTML. Apply a sanitizer before you
+//! [`HtmlArticle::content`] does not return sanitized HTML. Apply a sanitizer before you
 //! render the result. The quick [`is_probably_readable`] check is a heuristic and can
 //! return false positives or false negatives.
 
 #![allow(deprecated)]
 
 mod article;
-mod article_tree;
 mod cleaning;
 mod constants;
 mod document;
@@ -32,16 +31,17 @@ mod options;
 mod readability;
 mod readerable;
 mod scoring;
+mod text;
 
 pub use article::{
-    Article, ArticleMetadata, Author, BulletMarker, HeadingStyle, ImageMetadata, MarkdownOptions,
-    TextDirection, TextOptions, TextSeparator,
+    ArticleMetadata, Author, BulletMarker, HeadingStyle, HtmlArticle, ImageMetadata,
+    MarkdownArticle, MarkdownOptions, TextArticle, TextDirection, TextOptions, TextSeparator,
 };
 pub use document::Document;
 pub use error::{Error, ParseError, Result};
 pub use extractor::{
-    ClassPolicy, EmbedPolicy, Extractor, ExtractorBuilder, Heuristics, MetadataSources, extract,
-    extract_with_url,
+    ClassPolicy, EmbedPolicy, Extractor, ExtractorBuilder, Heuristics, MetadataSources,
+    extract_html, extract_html_with_url,
 };
 pub use options::{Options, ReadabilityOptions, ReaderableOptions};
 pub use readability::LegacyArticle;
@@ -89,7 +89,7 @@ pub fn is_probably_readable(html: &str, options: Option<ReadabilityOptions>) -> 
 /// ```
 #[deprecated(
     since = "0.5.0",
-    note = "use extract(), Extractor, and Article rendering methods"
+    note = "use extract_html() or an explicit Extractor format method"
 )]
 pub fn parse(html: &str, url: Option<&str>, options: Option<Options>) -> Result<legacy::Article> {
     let document = Document::parse(html)?;

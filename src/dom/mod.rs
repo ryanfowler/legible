@@ -6,7 +6,6 @@ mod mutation;
 mod node;
 mod parse;
 mod query;
-#[cfg(test)]
 mod serialize;
 mod state;
 mod tag;
@@ -16,6 +15,7 @@ pub(crate) use arena::Dom;
 pub(crate) use attr::{AttrName, Attribute};
 pub(crate) use id::{DomError, NodeId, NodeLink};
 pub(crate) use node::{ElementData, Node, NodeData};
+pub(crate) use serialize::render_html;
 pub(crate) use state::{DataTableState, NodeStateStore, NodeStats};
 pub(crate) use tag::Tag;
 pub(crate) use traversal::build_match_string;

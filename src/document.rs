@@ -20,7 +20,7 @@ use crate::readerable::is_probably_readerable_doc;
 /// let document = Document::parse(&html)?;
 ///
 /// if document.is_probably_readable() {
-///     let result = legible::Extractor::default().extract_document(document);
+///     let result = legible::Extractor::default().extract_document_html(document);
 ///     // Use the extraction result.
 /// }
 /// # Ok::<(), legible::Error>(())
@@ -29,8 +29,8 @@ use crate::readerable::is_probably_readerable_doc;
 /// # Ownership
 ///
 /// [`Document::is_probably_readerable`] borrows the document. You can extract the
-/// article after the check. [`Document::parse`] consumes the document because
-/// extraction changes the internal document tree.
+/// article after the check. Extraction consumes the `Document` because it changes the
+/// internal document tree.
 pub struct Document<'a> {
     pub(crate) doc: Dom,
     pub(crate) html: &'a str,
@@ -56,7 +56,7 @@ impl<'a> Document<'a> {
     /// This quick check is a heuristic. A `true` result does not guarantee successful
     /// extraction. A `false` result does not prove that the document has no article.
     /// This method borrows the document. You can later pass the document to
-    /// [`Extractor::extract_document`](crate::Extractor::extract_document).
+    /// [`Extractor::extract_document_html`](crate::Extractor::extract_document_html).
     /// Default options apply if `options` is `None`.
     pub fn is_probably_readerable(&self, options: Option<ReaderableOptions>) -> bool {
         is_probably_readerable_doc(&self.doc, options)
@@ -101,7 +101,7 @@ mod tests {
             "<html><body><img src=\"article.jpg\" alt=\"Article image\"></body></html>",
         ] {
             assert!(matches!(
-                crate::Extractor::default().extract_document(Document::parse(html).unwrap()),
+                crate::Extractor::default().extract_document_html(Document::parse(html).unwrap()),
                 Err(crate::Error::NoContent)
             ));
         }

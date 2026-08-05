@@ -14,25 +14,38 @@ legible = "0.5"
 
 ## Extract an article
 
-```rust
-let article = legible::extract(html)?;
-println!("{}", article.title().unwrap_or("Untitled"));
+Use the function for HTML output:
 
-// Legible creates only the format that you request.
-let markdown = article.to_markdown();
+```rust
+let article = legible::extract_html(html)?;
+println!("{}", article.metadata().title().unwrap_or("Untitled"));
+println!("{}", article.content());
 # Ok::<(), legible::Error>(())
 ```
+
+Use `Extractor` for Markdown or normalized text:
+
+```rust
+use legible::Extractor;
+
+let extractor = Extractor::default();
+let markdown = extractor.extract_markdown(html)?;
+let text = extractor.extract_text(html)?;
+# Ok::<(), legible::Error>(())
+```
+
+Each extraction method creates only its requested format. Run extraction again if you need another public format. The deprecated `parse` adapter can still create all three formats in one extraction.
 
 Use a typed base URL to resolve relative links and media URLs:
 
 ```rust
 use url::Url;
 let url = Url::parse("https://example.com/articles/1")?;
-let article = legible::extract_with_url(html, &url)?;
+let article = legible::extract_html_with_url(html, &url)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`Article` owns a compact immutable article tree and metadata. Use `to_html()`, `to_markdown()`, and `to_text()` to create output on demand. Use `text_char_count()` to get the normalized text character count without rendering text.
+`text_char_count()` returns the normalized source text character count. Text options can add line breaks without changing this count.
 
 ## Reuse extraction configuration
 
@@ -46,7 +59,7 @@ let extractor = Extractor::builder()
     .class_policy(ClassPolicy::StripSourceClasses)
     .build()?;
 
-let article = extractor.extract(html)?;
+let article = extractor.extract_html(html)?;
 # Ok::<(), legible::Error>(())
 ```
 
@@ -61,7 +74,7 @@ use legible::{Document, Extractor};
 
 let document = Document::parse(html)?;
 if document.is_probably_readable() {
-    let article = Extractor::default().extract_document(document)?;
+    let article = Extractor::default().extract_document_html(document)?;
 }
 # Ok::<(), legible::Error>(())
 ```
@@ -70,16 +83,16 @@ For a one-step check, use `is_probably_readable(html, options)`.
 
 ## Metadata
 
-Use `article.metadata()` or the common convenience methods. Metadata includes the title, byline, authors, excerpt, site name, publisher, canonical URL, lead image, publication and modification times, section, tags, language, and text direction.
+Use `article.metadata()`. Metadata includes the title, byline, authors, excerpt, site name, publisher, canonical URL, lead image, publication and modification times, section, tags, language, and text direction.
 
 ## Security
 
-**The value from `Article::to_html()` is not sanitized.**
+**`HtmlArticle::content()` is not sanitized.**
 
 Legible cleans article content, but it is not an HTML security sanitizer. Apply a sanitizer that matches your security policy before you render the HTML.
 
 ```rust
-let safe_html = ammonia::clean(&article.to_html());
+let safe_html = ammonia::clean(article.content());
 ```
 
 Markdown does not contain raw HTML. Legible removes destinations that use unsupported URI schemes. Sanitize HTML that you create from Markdown.
@@ -102,9 +115,8 @@ The old result type and options also exist under `legible::legacy`.
 1. Legible parses HTML into a mutable extraction DOM.
 2. It collects metadata and scores article candidates.
 3. It cleans the selected article subtree.
-4. It copies only reachable output nodes into an immutable `ArticleTree`.
-5. It drops the mutable source DOM.
-6. It renders output only when requested.
+4. It renders the requested format directly from the cleaned DOM.
+5. It drops the DOM before it returns the result.
 
 The test suite includes Mozilla's official Readability.js fixtures.
 

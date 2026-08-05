@@ -33,13 +33,13 @@ The extraction pipeline flows through these stages:
 
 - **`document.rs`** - Public fallible `Document<'a>` parser for checking readability before extraction
 - **`extractor.rs`** - Reusable extraction configuration and the primary extraction entry points
-- **`article.rs` / `article_tree.rs`** - Private-field public result API and compact immutable `Send + Sync` output tree with direct HTML, text, and Markdown rendering
+- **`article.rs`** - Private-field public HTML, Markdown, and text result types and format options
 - **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
 - **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
-- **`markdown.rs`** - Iterative, direct DOM-to-CommonMark serialization of cleaned article content
+- **`markdown.rs` / `text.rs`** - Iterative direct rendering of cleaned article content
 - **`constants.rs`** - Static regex patterns (via `once_cell::Lazy`) and configuration flags
 - **`src/dom/`** - Compact arena storage, typed tags and attributes, iterative traversal, centralized mutation, fragment parsing, and `html5ever` serialization
 - **`dom/state.rs`** - Dense Readability state indexed by stable `NodeId` values
@@ -59,9 +59,9 @@ The extraction pipeline flows through these stages:
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.
-- Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Serialize only the final selected article for `Article::content`.
-- Generate legacy Markdown directly from the final cleaned DOM. Render the immutable `Article` directly from `ArticleTree` through the shared read-only Markdown traversal interface. Do not rebuild a temporary DOM. Keep Markdown traversal iterative and escape text, link destinations, and code fences for CommonMark.
-- Keep `ArticleTree` links and Markdown node IDs as `u32` values. Cache typed tags in its compact nodes. This reduces retained-tree size and avoids repeated tag classification during rendering.
+- Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Render only the requested final format from the cleaned DOM.
+- Render HTML, Markdown, and text directly from the final cleaned DOM. Do not freeze an intermediate output tree or rebuild a temporary DOM. Drop the DOM before returning the public result.
+- The deprecated `parse` adapter must render all formats from one cleaned DOM. Keep final rendering iterative. Escape HTML through `html5ever`. Escape Markdown text, link destinations, and code fences for CommonMark.
 - Preserve the byte-wise ASCII paths in Markdown and normalized article text, compact task fields, the heap-backed Markdown task stack, and output capacity hints from normalized article text. These avoid per-character work, excess task-stack traffic, stack-resident task buffers on complex articles, and repeated output growth.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
 - Borrow reusable `Extractor` configuration during extraction. Keep owned legacy `Options` alive at the compatibility API boundary.
@@ -82,7 +82,7 @@ The algorithm retries with progressively fewer flags if initial extraction fails
 
 - Keep `README.md` and the public Rust API docs consistent.
 - Write user documentation in ASD-STE100 Simplified Technical English. Use short sentences, active voice, and consistent terms.
-- State that `Article::content` is not sanitized. Do not describe cleaned HTML as safe HTML.
+- State that `HtmlArticle::content` is not sanitized. Do not describe cleaned HTML as safe HTML.
 - State that `char_threshold` causes less-filtered retries and is not a strict output minimum.
 - State that the quick readability check is a heuristic and can return false positives or false negatives.
 
@@ -97,14 +97,14 @@ Extraction with default options must return `Error::NoContent` when the best ret
 ## Public API
 
 ```rust
-use legible::{extract, Document, Extractor};
+use legible::{extract_html, Document, Extractor};
 
-let article = extract(html)?;
-let markdown = article.to_markdown();
+let article = extract_html(html)?;
+let markdown = Extractor::default().extract_markdown(html)?;
 
 let document = Document::parse(html)?;
 if document.is_probably_readable() {
-    let article = Extractor::default().extract_document(document)?;
+    let article = Extractor::default().extract_document_html(document)?;
 }
 ```
 

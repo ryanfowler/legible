@@ -1,7 +1,7 @@
-//! The immutable, tree-backed public article result.
+//! Explicit article result types and rendering options.
 use url::Url;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArticleMetadata {
     title: Option<String>,
     byline: Option<String>,
@@ -104,65 +104,48 @@ pub enum TextDirection {
     Auto,
 }
 
-/// An extracted article. Rendering is performed only when a format method is called.
-#[derive(Debug)]
-pub struct Article {
-    pub(crate) tree: crate::article_tree::ArticleTree,
-    pub(crate) metadata: ArticleMetadata,
-    pub(crate) text_char_count: usize,
-}
-impl Article {
-    pub fn metadata(&self) -> &ArticleMetadata {
-        &self.metadata
-    }
-    pub fn title(&self) -> Option<&str> {
-        self.metadata.title()
-    }
-    pub fn byline(&self) -> Option<&str> {
-        self.metadata.byline()
-    }
-    pub fn excerpt(&self) -> Option<&str> {
-        self.metadata.excerpt()
-    }
-    pub fn language(&self) -> Option<&str> {
-        self.metadata.language()
-    }
-    pub fn direction(&self) -> Option<TextDirection> {
-        self.metadata.direction()
-    }
-    pub fn text_char_count(&self) -> usize {
-        self.text_char_count
-    }
-    pub fn to_html(&self) -> String {
-        self.tree.to_html(self.text_char_count)
-    }
-    pub fn to_markdown(&self) -> String {
-        self.tree.to_markdown(self.text_char_count)
-    }
-    pub fn to_text(&self) -> String {
-        self.tree.to_text(self.text_char_count)
-    }
-    pub fn to_markdown_with(&self, options: &MarkdownOptions) -> String {
-        let markdown = self.tree.to_markdown_filtered(
-            self.text_char_count,
-            options.include_links,
-            options.include_images,
-        );
-        options.apply(markdown)
-    }
-    pub fn to_text_with(&self, options: &TextOptions) -> String {
-        if options.preserve_line_breaks || matches!(options.block_separator, TextSeparator::Newline)
-        {
-            self.tree.to_block_text(
-                self.text_char_count,
-                matches!(options.block_separator, TextSeparator::Newline),
-                options.preserve_line_breaks,
-            )
-        } else {
-            self.to_text()
+macro_rules! article_result {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Debug)]
+        pub struct $name {
+            pub(crate) metadata: ArticleMetadata,
+            pub(crate) content: String,
+            pub(crate) text_char_count: usize,
         }
-    }
+        impl $name {
+            /// Returns the extracted metadata.
+            pub fn metadata(&self) -> &ArticleMetadata {
+                &self.metadata
+            }
+            /// Returns the rendered article content.
+            pub fn content(&self) -> &str {
+                &self.content
+            }
+            /// Consumes the result and returns the rendered article content.
+            pub fn into_content(self) -> String {
+                self.content
+            }
+            /// Returns the normalized source text character count.
+            pub fn text_char_count(&self) -> usize {
+                self.text_char_count
+            }
+        }
+    };
 }
+
+article_result!(
+    HtmlArticle,
+    "An extracted article rendered as an HTML fragment. The HTML is not sanitized."
+);
+article_result!(
+    MarkdownArticle,
+    "An extracted article rendered as CommonMark Markdown."
+);
+article_result!(
+    TextArticle,
+    "An extracted article rendered as normalized text."
+);
 #[derive(Clone, Debug)]
 pub struct MarkdownOptions {
     heading_style: HeadingStyle,
@@ -197,7 +180,13 @@ impl MarkdownOptions {
         self.include_links = value;
         self
     }
-    fn apply(&self, mut text: String) -> String {
+    pub(crate) fn include_links(&self) -> bool {
+        self.include_links
+    }
+    pub(crate) fn include_images(&self) -> bool {
+        self.include_images
+    }
+    pub(crate) fn apply(&self, mut text: String) -> String {
         if matches!(self.heading_style, HeadingStyle::Setext) {
             text = map_markdown_outside_fences(&text, |line| {
                 if let Some(title) = line.strip_prefix("# ") {
@@ -266,6 +255,12 @@ impl TextOptions {
         self.preserve_line_breaks = value;
         self
     }
+    pub(crate) fn block_newlines(&self) -> bool {
+        matches!(self.block_separator, TextSeparator::Newline)
+    }
+    pub(crate) fn preserves_line_breaks(&self) -> bool {
+        self.preserve_line_breaks
+    }
 }
 fn map_markdown_outside_fences(text: &str, mut map: impl FnMut(&str) -> String) -> String {
     let mut fence: Option<(char, usize)> = None;
@@ -295,24 +290,6 @@ fn map_markdown_outside_fences(text: &str, mut map: impl FnMut(&str) -> String) 
 fn push_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|v| v.eq_ignore_ascii_case(value)) {
         values.push(value.into())
-    }
-}
-
-impl Article {
-    pub(crate) fn from_parts(
-        tree: crate::article_tree::ArticleTree,
-        metadata: ArticleMetadata,
-        text_char_count: usize,
-    ) -> Self {
-        Self {
-            tree,
-            metadata,
-            text_char_count,
-        }
-    }
-    #[cfg(test)]
-    pub(crate) fn retained_node_count(&self) -> usize {
-        self.tree.node_count()
     }
 }
 
@@ -557,79 +534,10 @@ fn metadata_source_enabled(name: &str, sources: u8) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn article_is_send_and_sync() {
+    fn result_types_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<super::Article>();
-    }
-    #[test]
-    fn inline_text_boundaries_preserve_punctuation() {
-        let article=crate::Extractor::builder().retry_length_threshold(0).build().unwrap()
-            .extract("<article><p>Hello <em>world</em>!</p><p><span>A</span><span>B</span></p></article>").unwrap();
-        assert_eq!(article.to_text(), "Hello world!AB");
-        assert_eq!(article.to_text().chars().count(), article.text_char_count());
-    }
-
-    #[test]
-    fn rendering_options_preserve_structure() {
-        let html = r#"<article><p>A<br>B</p><p>C <a href="https://example.test/a(b)">link [nested]</a><img src="image.jpg" alt="photo"></p></article>"#;
-        let article = crate::Extractor::builder()
-            .retry_length_threshold(0)
-            .build()
-            .unwrap()
-            .extract(html)
-            .unwrap();
-        let markdown =
-            article.to_markdown_with(&super::MarkdownOptions::default().links(false).images(false));
-        assert!(markdown.contains("link \\[nested\\]"));
-        assert!(!markdown.contains("]("));
-        assert!(!markdown.contains("!["));
-
-        let breaks =
-            article.to_text_with(&super::TextOptions::default().preserve_line_breaks(true));
-        assert_eq!(breaks, "A\nB C link [nested]");
-        let blocks = article.to_text_with(
-            &super::TextOptions::default().block_separator(super::TextSeparator::Newline),
-        );
-        assert_eq!(blocks, "AB\nC link [nested]");
-        let nested = crate::Extractor::builder()
-            .retry_length_threshold(0)
-            .build()
-            .unwrap()
-            .extract("<article><div>A<p>B</p>C</div></article>")
-            .unwrap();
-        assert_eq!(
-            nested.to_text_with(
-                &super::TextOptions::default().block_separator(super::TextSeparator::Newline)
-            ),
-            "A\nB\nC"
-        );
-
-        let code = crate::Extractor::builder()
-            .retry_length_threshold(0)
-            .build()
-            .unwrap()
-            .extract("<article><pre># literal heading\n- literal item</pre></article>")
-            .unwrap();
-        let rendered = code.to_markdown_with(
-            &super::MarkdownOptions::default()
-                .heading_style(super::HeadingStyle::Setext)
-                .bullet_marker(super::BulletMarker::Plus),
-        );
-        assert!(rendered.contains("# literal heading\n- literal item"));
-    }
-
-    #[test]
-    fn extraction_compacts_and_renders_on_demand() {
-        let noise = (0..100)
-            .map(|i| format!("<aside>noise {i}</aside>"))
-            .collect::<String>();
-        let html = format!(
-            "<body>{noise}<article><p>{}</p></article></body>",
-            "article text ".repeat(50)
-        );
-        let article = crate::extract(&html).unwrap();
-        assert!(article.retained_node_count() < 20);
-        assert!(article.to_html().contains("article text"));
-        assert_eq!(article.to_text().chars().count(), article.text_char_count());
+        assert_send_sync::<super::HtmlArticle>();
+        assert_send_sync::<super::MarkdownArticle>();
+        assert_send_sync::<super::TextArticle>();
     }
 }

@@ -1,8 +1,25 @@
-use super::{Dom, DomError, NodeData, NodeId};
+#[cfg(test)]
+use super::DomError;
+use super::{Dom, NodeData, NodeId};
 use html5ever::QualName;
 use html5ever::serialize::{self, Serialize, Serializer, TraversalScope};
 use smallvec::SmallVec;
 use std::io;
+
+/// Serializes the children of `root` as an HTML fragment.
+pub(crate) fn render_html(dom: &Dom, root: NodeId, capacity: usize) -> String {
+    let mut bytes = Vec::with_capacity(capacity);
+    serialize::serialize(
+        &mut bytes,
+        &Serializable { dom, node: root },
+        serialize::SerializeOpts {
+            traversal_scope: TraversalScope::ChildrenOnly(None),
+            ..Default::default()
+        },
+    )
+    .expect("writing HTML to a Vec cannot fail");
+    String::from_utf8(bytes).expect("HTML serialization is UTF-8")
+}
 struct Serializable<'a> {
     dom: &'a Dom,
     node: NodeId,
@@ -75,6 +92,7 @@ impl Dom {
         *out = String::from_utf8(bytes).map_err(|e| DomError(e.to_string()))?;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn serialize_children(
         &self,
         node: NodeId,
