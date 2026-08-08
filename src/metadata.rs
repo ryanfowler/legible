@@ -81,8 +81,25 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
         false,
         &mut scripts,
     );
+    let mut content_buffer = String::new();
     for id in scripts {
-        let content = dom.text(id);
+        let mut children = dom.children(id);
+        let first = children.next();
+        let content = match first {
+            Some(node) if children.next().is_none() => match dom.text_node(node) {
+                Some(text) => text,
+                None => {
+                    content_buffer.clear();
+                    dom.append_text(id, &mut content_buffer);
+                    &content_buffer
+                }
+            },
+            _ => {
+                content_buffer.clear();
+                dom.append_text(id, &mut content_buffer);
+                &content_buffer
+            }
+        };
         let content = content
             .trim()
             .trim_start_matches("<![CDATA[")

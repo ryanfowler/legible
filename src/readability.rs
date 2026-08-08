@@ -219,7 +219,6 @@ impl<'a> Readability<'a> {
         } else {
             metadata::get_json_ld(&self.dom, &title)
         };
-        remove_scripts(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_title = title;
         self.metadata =
@@ -409,8 +408,9 @@ impl<'a> Readability<'a> {
                 if stats.text_length < 25 {
                     continue;
                 }
-                let cs =
-                    1.0 + (stats.comma_count + 1) as f64 + (stats.text_length / 100).min(3) as f64;
+                let cs = 2.0
+                    + f64::from(stats.comma_count)
+                    + f64::from((stats.text_length / 100).min(3));
                 let mut a = Some(parent);
                 for level in 0..5 {
                     let Some(x) = a else { break };
@@ -963,7 +963,6 @@ impl<'a> Readability<'a> {
     fn reparse_prepare(&mut self) -> Result<()> {
         self.dom = Dom::parse_document(self.original_html).map_err(|_| Error::NoContent)?;
         unwrap_noscript_images(&mut self.dom);
-        remove_scripts(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_byline = None;
         self.article_dir = None;

@@ -4,6 +4,9 @@ use crate::error::Result;
 use crate::options::{Options, ReaderableOptions};
 use crate::readability::{Article, Readability};
 use crate::readerable::is_probably_readerable_doc;
+use std::sync::LazyLock;
+
+static DEFAULT_OPTIONS: LazyLock<Options> = LazyLock::new(Options::default);
 
 /// A parsed HTML document.
 ///
@@ -63,8 +66,8 @@ impl<'a> Document<'a> {
     ///
     /// See [`parse`](crate::parse) for all parameters and errors.
     pub fn parse(self, url: Option<&str>, options: Option<Options>) -> Result<Article> {
-        let options = options.unwrap_or_default();
-        Readability::from_document(self.doc, self.html, url, &options).parse()
+        let options = options.as_ref().unwrap_or(&DEFAULT_OPTIONS);
+        Readability::from_document(self.doc, self.html, url, options).parse()
     }
 }
 #[cfg(test)]
