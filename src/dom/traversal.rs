@@ -227,39 +227,6 @@ impl Dom {
             }
         }
     }
-    pub(crate) fn trimmed_text_utf16_len(&self, root: NodeId) -> usize {
-        let mut count = 0;
-        let mut pending_whitespace = 0;
-        for id in std::iter::once(root).chain(self.descendants(root)) {
-            let Some(text) = self.text_node(id) else {
-                continue;
-            };
-            if text.is_ascii() {
-                for &byte in text.as_bytes() {
-                    if byte.is_ascii_whitespace() {
-                        if count > 0 {
-                            pending_whitespace += 1;
-                        }
-                    } else {
-                        count += pending_whitespace + 1;
-                        pending_whitespace = 0;
-                    }
-                }
-            } else {
-                for c in text.chars() {
-                    if c.is_whitespace() {
-                        if count > 0 {
-                            pending_whitespace += c.len_utf16();
-                        }
-                    } else {
-                        count += pending_whitespace + c.len_utf16();
-                        pending_whitespace = 0;
-                    }
-                }
-            }
-        }
-        count
-    }
     pub(crate) fn normalized_char_count(&self, root: NodeId) -> usize {
         let mut count = 0;
         let mut has_text = false;
