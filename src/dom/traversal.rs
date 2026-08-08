@@ -234,14 +234,27 @@ impl Dom {
             let Some(text) = self.text_node(id) else {
                 continue;
             };
-            for c in text.chars() {
-                if c.is_whitespace() {
-                    if count > 0 {
-                        pending_whitespace += c.len_utf16();
+            if text.is_ascii() {
+                for &byte in text.as_bytes() {
+                    if byte.is_ascii_whitespace() {
+                        if count > 0 {
+                            pending_whitespace += 1;
+                        }
+                    } else {
+                        count += pending_whitespace + 1;
+                        pending_whitespace = 0;
                     }
-                } else {
-                    count += pending_whitespace + c.len_utf16();
-                    pending_whitespace = 0;
+                }
+            } else {
+                for c in text.chars() {
+                    if c.is_whitespace() {
+                        if count > 0 {
+                            pending_whitespace += c.len_utf16();
+                        }
+                    } else {
+                        count += pending_whitespace + c.len_utf16();
+                        pending_whitespace = 0;
+                    }
                 }
             }
         }
@@ -255,16 +268,31 @@ impl Dom {
             let Some(text) = self.text_node(id) else {
                 continue;
             };
-            for c in text.chars() {
-                if c.is_whitespace() {
-                    pending_whitespace |= has_text;
-                } else {
-                    if pending_whitespace {
+            if text.is_ascii() {
+                for &byte in text.as_bytes() {
+                    if byte.is_ascii_whitespace() {
+                        pending_whitespace |= has_text;
+                    } else {
+                        if pending_whitespace {
+                            count += 1;
+                            pending_whitespace = false;
+                        }
                         count += 1;
-                        pending_whitespace = false;
+                        has_text = true;
                     }
-                    count += 1;
-                    has_text = true;
+                }
+            } else {
+                for c in text.chars() {
+                    if c.is_whitespace() {
+                        pending_whitespace |= has_text;
+                    } else {
+                        if pending_whitespace {
+                            count += 1;
+                            pending_whitespace = false;
+                        }
+                        count += 1;
+                        has_text = true;
+                    }
                 }
             }
         }
@@ -287,23 +315,44 @@ impl Dom {
             let Some(text) = self.text_node(id) else {
                 continue;
             };
-            for c in text.chars() {
-                if c.is_whitespace() {
-                    pending_whitespace |= has_text;
-                    continue;
-                }
-                if pending_whitespace {
+            if text.is_ascii() {
+                for &byte in text.as_bytes() {
+                    if byte.is_ascii_whitespace() {
+                        pending_whitespace |= has_text;
+                        continue;
+                    }
+                    if pending_whitespace {
+                        count += 1;
+                        if count >= threshold {
+                            return None;
+                        }
+                        pending_whitespace = false;
+                    }
                     count += 1;
                     if count >= threshold {
                         return None;
                     }
-                    pending_whitespace = false;
+                    has_text = true;
                 }
-                count += 1;
-                if count >= threshold {
-                    return None;
+            } else {
+                for c in text.chars() {
+                    if c.is_whitespace() {
+                        pending_whitespace |= has_text;
+                        continue;
+                    }
+                    if pending_whitespace {
+                        count += 1;
+                        if count >= threshold {
+                            return None;
+                        }
+                        pending_whitespace = false;
+                    }
+                    count += 1;
+                    if count >= threshold {
+                        return None;
+                    }
+                    has_text = true;
                 }
-                has_text = true;
             }
         }
         Some(count)
@@ -316,16 +365,14 @@ impl Dom {
         (out, char_count)
     }
     pub(crate) fn has_non_whitespace_text(&self, root: NodeId) -> bool {
-        if self
-            .text_node(root)
-            .is_some_and(|s| s.chars().any(|c| !c.is_whitespace()))
-        {
+        fn has_text(text: &str) -> bool {
+            !text.trim().is_empty()
+        }
+        if self.text_node(root).is_some_and(has_text) {
             return true;
         }
-        self.descendants(root).any(|id| {
-            self.text_node(id)
-                .is_some_and(|s| s.chars().any(|c| !c.is_whitespace()))
-        })
+        self.descendants(root)
+            .any(|id| self.text_node(id).is_some_and(has_text))
     }
 }
 
