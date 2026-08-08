@@ -60,6 +60,7 @@ The extraction pipeline flows through these stages:
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
 - Use the `dom_parse` Criterion group to isolate custom DOM construction.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
+- Keep byte-wise ASCII paths in normalized character counts and readerable text-length scans. These paths avoid UTF-8 decoding on common article text while preserving Unicode behavior.
 - Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
 - Keep cached text and comma counts as saturating `u32` values. Scan each text node with native `usize` counters, then clamp it before storage. This keeps the dense cache compact without adding overflow checks to the byte-wise hot loop.
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
