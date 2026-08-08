@@ -1,0 +1,54 @@
+[package]
+name = "legible-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+legible = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "document_parse"
+path = "fuzz_targets/document_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dom_mutation_serialization"
+path = "fuzz_targets/dom_mutation_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render_markdown_text"
+path = "fuzz_targets/render_markdown_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_ld_metadata"
+path = "fuzz_targets/json_ld_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_rewriting"
+path = "fuzz_targets/url_rewriting.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nested_malformed_html"
+path = "fuzz_targets/nested_malformed_html.rs"
+test = false
+doc = false
+bench = false
