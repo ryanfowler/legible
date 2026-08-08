@@ -17,7 +17,7 @@ Or add the dependency to `Cargo.toml`:
 
 ```toml
 [dependencies]
-legible = "0.4"
+legible = "0.5"
 ```
 
 ## Extract an article
@@ -93,19 +93,19 @@ The readability check borrows the `Document`. Article extraction consumes it bec
 
 `parse` and `Document::parse` return an `Article` with these fields:
 
-| Field              | Type             | Description                                      |
-| ------------------ | ---------------- | ------------------------------------------------ |
-| `title`            | `String`         | Article title                                    |
-| `content`          | `String`         | Extracted HTML; not sanitized                    |
+| Field              | Type             | Description                                            |
+| ------------------ | ---------------- | ------------------------------------------------------ |
+| `title`            | `String`         | Article title                                          |
+| `content`          | `String`         | Extracted HTML; not sanitized                          |
 | `markdown_content` | `String`         | CommonMark without raw HTML or unsupported URI schemes |
-| `text_content`     | `String`         | Normalized plain text                            |
-| `byline`           | `Option<String>` | Author byline                                    |
-| `excerpt`          | `Option<String>` | Short article excerpt                            |
-| `site_name`        | `Option<String>` | Site name                                        |
-| `published_time`   | `Option<String>` | Publication time from the source metadata        |
-| `dir`              | `Option<String>` | Text direction, such as `ltr` or `rtl`            |
-| `lang`             | `Option<String>` | Document language, such as `en` or `fr`           |
-| `length`           | `usize`          | Number of characters in `text_content`            |
+| `text_content`     | `String`         | Normalized plain text                                  |
+| `byline`           | `Option<String>` | Author byline                                          |
+| `excerpt`          | `Option<String>` | Short article excerpt                                  |
+| `site_name`        | `Option<String>` | Site name                                              |
+| `published_time`   | `Option<String>` | Publication time from the source metadata              |
+| `dir`              | `Option<String>` | Text direction, such as `ltr` or `rtl`                 |
+| `lang`             | `Option<String>` | Document language, such as `en` or `fr`                |
+| `length`           | `usize`          | Number of characters in `text_content`                 |
 
 ## Configure extraction
 
@@ -128,17 +128,17 @@ let result = parse(
 
 Extraction options have these defaults:
 
-| Option                  | Default    | Effect |
-| ----------------------- | ---------- | ------ |
-| `max_elems_to_parse`    | `0`        | Sets the maximum number of HTML elements to analyze. `0` sets no limit. |
-| `nb_top_candidates`     | `5`        | Sets the number of high-score content candidates to compare. |
-| `char_threshold`        | `500`      | Sets the target minimum article length. Legible retries with less filtering below this value. |
-| `keep_classes`          | `false`    | Keeps all CSS classes when set to `true`. |
+| Option                  | Default    | Effect                                                                                          |
+| ----------------------- | ---------- | ----------------------------------------------------------------------------------------------- |
+| `max_elems_to_parse`    | `0`        | Sets the maximum number of HTML elements to analyze. `0` sets no limit.                         |
+| `nb_top_candidates`     | `5`        | Sets the number of high-score content candidates to compare.                                    |
+| `char_threshold`        | `500`      | Sets the target minimum article length. Legible retries with less filtering below this value.   |
+| `keep_classes`          | `false`    | Keeps all CSS classes when set to `true`.                                                       |
 | `classes_to_preserve`   | `["page"]` | Lists CSS classes to keep when `keep_classes` is `false`. The builder method extends this list. |
-| `disable_json_ld`       | `false`    | Disables JSON-LD metadata extraction when set to `true`. |
-| `allowed_video_regex`   | `None`     | Uses a built-in list. A custom regular expression replaces that list. |
-| `link_density_modifier` | `0.0`      | Changes link-density limits. A positive value keeps more link-heavy content. |
-| `debug`                 | `false`    | Writes extraction decisions to standard error when set to `true`. |
+| `disable_json_ld`       | `false`    | Disables JSON-LD metadata extraction when set to `true`.                                        |
+| `allowed_video_regex`   | `None`     | Uses a built-in list. A custom regular expression replaces that list.                           |
+| `link_density_modifier` | `0.0`      | Changes link-density limits. A positive value keeps more link-heavy content.                    |
+| `debug`                 | `false`    | Writes extraction decisions to standard error when set to `true`.                               |
 
 `char_threshold` is a retry threshold, not a strict minimum. After all retries, Legible can return shorter nonempty content.
 
