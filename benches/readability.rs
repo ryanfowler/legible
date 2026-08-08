@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::{Document, Options, is_probably_readerable, parse};
+use legible::{Document, Options, ReaderableOptions, is_probably_readerable, parse};
 use std::fs;
 use std::hint::black_box;
 
@@ -93,6 +93,39 @@ fn bench_parse_retries(c: &mut Criterion) {
     });
 }
 
+/// Build readerable inputs that force the heuristic to inspect the whole tree.
+fn adversarial_readerable_cases() -> Vec<(&'static str, String)> {
+    let mut nested_candidates = String::from("<body>");
+    for _ in 0..1_024 {
+        nested_candidates.push_str("<article>");
+    }
+    nested_candidates.push_str("<p>article text</p>");
+    nested_candidates.push_str(&"</article>".repeat(1_024));
+    nested_candidates.push_str("</body>");
+
+    let mut nested_list = String::from("<body><li>");
+    for _ in 0..1_024 {
+        nested_list.push_str("<div>");
+    }
+    for _ in 0..128 {
+        nested_list.push_str("<p>x</p>");
+    }
+    nested_list.push_str(&"</div>".repeat(1_024));
+    nested_list.push_str("</li></body>");
+
+    let mut br_parents = String::from("<body>");
+    for _ in 0..4_096 {
+        br_parents.push_str("<div><br><span>text</span></div>");
+    }
+    br_parents.push_str("</body>");
+
+    vec![
+        ("nested-candidates", nested_candidates),
+        ("nested-list-items", nested_list),
+        ("many-br-parents", br_parents),
+    ]
+}
+
 /// Benchmark is_probably_readerable check
 fn bench_readerable(c: &mut Criterion) {
     let mut group = c.benchmark_group("is_probably_readerable");
@@ -108,6 +141,19 @@ fn bench_readerable(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
             b.iter(|| is_probably_readerable(black_box(html), None))
+        });
+    }
+
+    // Use an unreachable score so these cases never return from the candidate loop.
+    // They exercise overlapping subtree lengths, deep paragraph exclusions, and the
+    // old linear search for previously seen BR parents.
+    let options = ReaderableOptions::new()
+        .min_content_length(0)
+        .min_score(f64::MAX);
+    for (name, html) in adversarial_readerable_cases() {
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::new("adversarial", name), &html, |b, html| {
+            b.iter(|| is_probably_readerable(black_box(html), Some(options.clone())))
         });
     }
 

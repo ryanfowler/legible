@@ -62,6 +62,7 @@ The extraction pipeline flows through these stages:
 - Use the `dom_parse` Criterion group to isolate custom DOM construction.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
 - Keep byte-wise ASCII paths in normalized character counts and readerable text-length scans. These paths avoid UTF-8 decoding on common article text while preserving Unicode behavior.
+- Keep quick readerability state dense by NodeId. Compute trimmed subtree text lengths bottom-up and propagate list-item exclusions once. Keep adversarial no-early-return Criterion cases for nested candidates and repeated BR parents.
 - Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
 - Keep cached text and comma counts as saturating `u32` values. Scan each text node with native `usize` counters, then clamp it before storage. This keeps the dense cache compact without adding overflow checks to the byte-wise hot loop.
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
