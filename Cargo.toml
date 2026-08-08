@@ -9,7 +9,7 @@ repository = "https://github.com/ryanfowler/legible"
 documentation = "https://docs.rs/legible"
 keywords = ["readability", "article", "extraction", "html", "parser"]
 categories = ["parsing", "text-processing", "web-programming"]
-exclude = [".github/", "examples/", "tests/"]
+exclude = [".github/", "examples/", "tests/", "fuzz/"]
 
 [lib]
 bench = false

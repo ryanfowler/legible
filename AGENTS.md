@@ -16,6 +16,7 @@ cargo test test_name   # Run a specific test (test names are sanitized from test
 cargo fmt              # Format code - run after making changes
 cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
+cargo +nightly fuzz run <target> # Run a fuzz target (requires nightly + cargo-fuzz)
 prettier -w .          # Format other files
 ```
 
@@ -117,3 +118,9 @@ if document.is_probably_readerable(None) {
 ```
 
 `Article` contains public HTML, Markdown, text, and metadata fields.
+
+## Fuzzing
+
+Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public document parsing,
+DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL
+rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.
