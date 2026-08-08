@@ -9,6 +9,7 @@ use crate::scoring::{
     get_class_weight, get_inner_text, get_link_density_cached, get_or_compute_stats,
     has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
+use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
 use smallvec::SmallVec;
 
@@ -42,7 +43,7 @@ pub fn prep_document(dom: &mut Dom) {
     }
 }
 
-fn next_element(dom: &Dom, id: NodeId) -> Option<NodeId> {
+pub(crate) fn next_non_whitespace_sibling(dom: &Dom, id: NodeId) -> Option<NodeId> {
     let mut n = dom.next_sibling(id);
     while let Some(x) = n {
         if dom.is_element(x) {
@@ -63,12 +64,12 @@ fn replace_brs(dom: &mut Dom, ids: &[NodeId]) {
         if dom.parent(br).is_none() {
             continue;
         }
-        let mut next = next_element(dom, br);
+        let mut next = next_non_whitespace_sibling(dom, br);
         let mut replaced = false;
         while let Some(x) = next {
             if dom.tag(x) == Some(Tag::Br) {
                 replaced = true;
-                next = next_element(dom, x);
+                next = next_non_whitespace_sibling(dom, x);
                 dom.detach(x);
             } else {
                 break;
@@ -81,7 +82,7 @@ fn replace_brs(dom: &mut Dom, ids: &[NodeId]) {
         let mut n = dom.next_sibling(br);
         while let Some(x) = n {
             if dom.tag(x) == Some(Tag::Br)
-                && next_element(dom, x).is_some_and(|y| dom.tag(y) == Some(Tag::Br))
+                && next_non_whitespace_sibling(dom, x).is_some_and(|y| dom.tag(y) == Some(Tag::Br))
             {
                 break;
             }
@@ -92,7 +93,7 @@ fn replace_brs(dom: &mut Dom, ids: &[NodeId]) {
             dom.append_child(br, x);
         }
         while let Some(x) = dom.last_child(br) {
-            if dom.is_text(x) && dom.text_node(x).is_some_and(|t| t.trim().is_empty()) {
+            if crate::scoring::is_whitespace(dom, x) {
                 dom.detach(x);
             } else {
                 break;
@@ -442,14 +443,26 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
                     }
                 }
                 AttrName::Srcset => srcset = !v.is_empty() && v != "null",
+                AttrName::DataSrc => {
+                    other |= has_image_extension(v);
+                    if has_image_src(v) {
+                        lazy_src = Some(v.to_string())
+                    }
+                }
+                AttrName::DataSrcset => {
+                    other |= has_image_extension(v);
+                    if has_image_srcset(v) {
+                        lazy_srcset = Some(v.to_string())
+                    }
+                }
                 AttrName::Class => {
                     lazy |= v.split_whitespace().any(|x| x.eq_ignore_ascii_case("lazy"))
                 }
                 _ => {
                     other |= has_image_extension(v);
-                    if has_image_srcset(v) {
+                    if has_image_srcset(v) && lazy_srcset.is_none() {
                         lazy_srcset = Some(v.to_string())
-                    } else if has_image_src(v) {
+                    } else if has_image_src(v) && lazy_src.is_none() {
                         lazy_src = Some(v.to_string())
                     }
                 }
@@ -479,7 +492,6 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
             Some(Tag::Figure) if !dom.any_descendant_by_tags(id, &[Tag::Img, Tag::Picture]) => {
                 if let Ok(image) = dom.create_html_element(Tag::Img) {
                     dom.set_attr(image, attr, &value);
-                    dom.detach_children(id);
                     dom.append_child(id, image);
                 }
             }
@@ -515,17 +527,26 @@ fn copy_image_attributes(dom: &mut Dom, from: NodeId, to: NodeId) {
         .attrs(from)
         .iter()
         .filter(|a| {
-            matches!(
-                AttrName::from_local(a.name.local.as_ref()),
-                AttrName::Src | AttrName::Srcset
-            ) || has_image_extension(a.value.as_ref())
+            !a.value.is_empty()
+                && (matches!(
+                    AttrName::from_local(a.name.local.as_ref()),
+                    AttrName::Src | AttrName::Srcset
+                ) || has_image_extension(a.value.as_ref()))
         })
         .map(|a| (a.name.clone(), a.value.clone()))
         .collect();
-    for (name, value) in attrs {
-        if dom.attr_by_local_name(to, name.local.as_ref()).is_none() {
-            dom.set_attr_qual(to, name, value);
+    for (mut name, value) in attrs {
+        if dom.attr_by_local_name(to, name.local.as_ref()) == Some(value.as_ref()) {
+            continue;
         }
+        if dom.attr_by_local_name(to, name.local.as_ref()).is_some() {
+            name = QualName::new(
+                None,
+                ns!(),
+                LocalName::from(format!("data-old-{}", name.local)),
+            );
+        }
+        dom.set_attr_qual(to, name, value);
     }
 }
 
@@ -768,7 +789,24 @@ mod tests {
     }
 
     #[test]
-    fn creates_lazy_figure_image_directly() {
+    fn prefers_data_src_over_image_like_alt_text() {
+        let mut dom = Dom::parse_document(
+            r#"<img class="lazy" alt="placeholder.jpg" data-src="https://example.com/article.jpg">"#,
+        )
+        .unwrap();
+        let root = dom.root();
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+
+        fix_lazy_images(&mut dom, root, &mut Vec::new());
+
+        assert_eq!(
+            dom.attr(image, AttrName::Src),
+            Some("https://example.com/article.jpg")
+        );
+    }
+
+    #[test]
+    fn adds_lazy_figure_image_without_removing_caption() {
         let mut dom = Dom::parse_document(
             r#"<figure data-src="image.jpg?x=1&amp;y=2"><figcaption>old</figcaption></figure>"#,
         )
@@ -780,7 +818,11 @@ mod tests {
 
         let image = dom.first_descendant_by_tag(figure, Tag::Img).unwrap();
         assert_eq!(dom.attr(image, AttrName::Src), Some("image.jpg?x=1&y=2"));
-        assert_eq!(dom.element_children(figure).count(), 1);
+        assert_eq!(dom.element_children(figure).count(), 2);
+        assert!(
+            dom.first_descendant_by_tag(figure, Tag::Figcaption)
+                .is_some()
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crate::logging::debug_log;
 use crate::metadata::{self, Metadata};
 use crate::options::Options;
 use crate::scoring::*;
+use html5ever::ns;
 use regex::Regex;
 use smallvec::SmallVec;
 use url::Url;
@@ -106,6 +107,7 @@ pub(crate) struct Readability<'a> {
     article_lang: Option<String>,
     metadata: Metadata,
     base_uri: Option<Url>,
+    resolve_fragment_links: bool,
     url_error: Option<url::ParseError>,
     best_attempt: Option<BestAttempt>,
 }
@@ -162,6 +164,7 @@ impl<'a> Readability<'a> {
             article_lang: None,
             metadata: Metadata::default(),
             base_uri,
+            resolve_fragment_links: false,
             url_error,
             best_attempt: None,
         }
@@ -211,6 +214,19 @@ impl<'a> Readability<'a> {
             if n > self.options.max_elems_to_parse {
                 return Err(Error::TooManyElements(n, self.options.max_elems_to_parse));
             }
+        }
+        if let Some(document_uri) = self.base_uri.as_ref()
+            && let Some(base) = self.dom.descendants(self.dom.root()).find(|&id| {
+                self.dom
+                    .qual_name(id)
+                    .is_some_and(|name| name.ns == ns!(html) && name.local.as_ref() == "base")
+                    && self.dom.attr(id, AttrName::Href).is_some()
+            })
+            && let Some(href) = self.dom.attr(base, AttrName::Href)
+            && let Ok(base_uri) = document_uri.join(href)
+        {
+            self.resolve_fragment_links = base_uri != *document_uri;
+            self.base_uri = Some(base_uri);
         }
         unwrap_noscript_images(&mut self.dom);
         let title = metadata::get_article_title(&self.dom);
@@ -310,13 +326,13 @@ impl<'a> Readability<'a> {
                         continue;
                     }
                 }
-                if remove_title
-                    && matches!(tag, Tag::H1 | Tag::H2)
-                    && metadata::text_similarity(
-                        &self.article_title,
-                        get_inner_text(&self.dom, id, &mut text_buffer),
-                    ) > 0.75
-                {
+                let duplicates_title = if remove_title && matches!(tag, Tag::H1 | Tag::H2) {
+                    let heading = get_inner_text(&self.dom, id, &mut text_buffer);
+                    heading_matches_article_title(&self.article_title, heading)
+                } else {
+                    false
+                };
+                if duplicates_title {
                     remove_title = false;
                     remove.push(id);
                     removed_depth = Some(depth);
@@ -579,10 +595,12 @@ impl<'a> Readability<'a> {
                 {
                     let excerpt = self.article_excerpt(article_id);
                     self.post_process(article_id, &mut cleaning_nodes);
-                    let dom = self
-                        .dom
-                        .copy_subtree_as_fragment(article_id)
-                        .map_err(|_| Error::NoContent)?;
+                    let dom = if synthetic {
+                        self.dom.copy_subtree_as_fragment(article_id)
+                    } else {
+                        self.dom.copy_children_as_fragment(article_id)
+                    }
+                    .map_err(|_| Error::NoContent)?;
                     self.best_attempt = Some(BestAttempt {
                         content: FrozenContent { dom },
                         text_len_chars: len,
@@ -631,7 +649,11 @@ impl<'a> Readability<'a> {
             return Ok(ArticleContent {
                 text_length: len,
                 excerpt,
-                article_root: article_id,
+                article_root: if synthetic {
+                    self.dom.parent(article_id).unwrap_or(article_id)
+                } else {
+                    article_id
+                },
             });
         }
     }
@@ -824,10 +846,8 @@ impl<'a> Readability<'a> {
             .filter(|&x| self.dom.tag(x) == Some(Tag::Br))
             .collect();
         for br in brs {
-            if self
-                .dom
-                .next_sibling(br)
-                .is_some_and(|x| self.dom.is_element(x) && self.dom.tag(x) == Some(Tag::P))
+            if crate::cleaning::next_non_whitespace_sibling(&self.dom, br)
+                .is_some_and(|x| self.dom.tag(x) == Some(Tag::P))
             {
                 self.dom.detach(br)
             }
@@ -889,15 +909,25 @@ impl<'a> Readability<'a> {
             if let Some(base) = self.base_uri.as_ref() {
                 if tag == Tag::A {
                     if let Some(href) = self.dom.attr(id, AttrName::Href) {
-                        if href.starts_with('#') {
-                            // Fragment links do not need URI resolution.
+                        if href.starts_with('#') && !self.resolve_fragment_links {
+                            // Fragment links do not need URI resolution when the
+                            // document does not override its base URL.
                         } else if href.starts_with("javascript:") {
-                            let text = self.dom.text(id);
-                            self.dom.detach_children(id);
-                            if let Ok(text_node) = self.dom.create_text(&text) {
-                                self.dom.append_child(id, text_node)
+                            let replacement = if self.dom.first_child(id) == self.dom.last_child(id)
+                                && self
+                                    .dom
+                                    .first_child(id)
+                                    .is_some_and(|child| self.dom.is_text(child))
+                            {
+                                self.dom.create_text(&self.dom.text(id))
+                            } else {
+                                self.dom.create_html_element(Tag::Span).inspect(|&span| {
+                                    self.dom.move_children(id, span);
+                                })
+                            };
+                            if let Ok(replacement) = replacement {
+                                self.dom.replace_with(id, replacement)
                             }
-                            self.dom.rename_html(id, Tag::Span)
                         } else if let Ok(url) = base.join(href) {
                             self.dom.set_attr(id, AttrName::Href, url.as_str())
                         }
@@ -975,8 +1005,33 @@ impl<'a> Readability<'a> {
         }
     }
 }
+fn heading_matches_article_title(article_title: &str, heading: &str) -> bool {
+    metadata::text_similarity(article_title, heading) > 0.75
+        || article_title.strip_prefix(heading).is_some_and(|suffix| {
+            let suffix = suffix.trim_start();
+            !heading.is_empty()
+                && suffix.chars().next().is_some_and(|c| {
+                    matches!(c, '|' | '-' | '–' | '—' | '/' | '>' | '»' | '_' | ':')
+                })
+        })
+}
+
 fn has_ancestor_tags_any(dom: &Dom, id: NodeId, tags: &[Tag], max: usize) -> bool {
     dom.ancestors(id)
         .take(max)
         .any(|x| dom.tag(x).is_some_and(|t| tags.contains(&t)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_title_prefix_with_whitespace_before_separator() {
+        assert!(heading_matches_article_title(
+            "Article | Example",
+            "Article"
+        ));
+        assert!(!heading_matches_article_title("Different title", "Article"));
+    }
 }

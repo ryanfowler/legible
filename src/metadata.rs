@@ -170,7 +170,12 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
         };
         if let Some(author) = o.get("author") {
             let mut authors = Vec::new();
-            collect_json_authors(author, &mut authors);
+            let allow_string_author = o
+                .get("@type")
+                .and_then(Value::as_str)
+                .map(|kind| !kind.ends_with("SocialMediaPosting"))
+                .unwrap_or(true);
+            collect_json_authors(author, &mut authors, allow_string_author);
             if !authors.is_empty() {
                 out.byline = Some(authors.join(", "));
             }
@@ -195,14 +200,23 @@ fn json_name(value: &Value) -> Option<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
 }
-fn collect_json_authors(value: &Value, out: &mut Vec<String>) {
+fn collect_json_authors(value: &Value, out: &mut Vec<String>, allow_string: bool) {
     if let Some(values) = value.as_array() {
         for value in values {
-            collect_json_authors(value, out)
+            collect_json_authors(value, out, allow_string)
         }
         return;
     }
-    let Some(name) = json_name(value) else { return };
+    let name = if allow_string {
+        json_name(value)
+    } else {
+        value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    };
+    let Some(name) = name else { return };
     if !out
         .iter()
         .any(|existing| existing.eq_ignore_ascii_case(name))
@@ -428,4 +442,19 @@ pub fn text_similarity(a: &str, b: &str) -> f64 {
             .count()
             .saturating_sub(1);
     1. - unique as f64 / total as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_string_json_ld_authors() {
+        let dom = Dom::parse_document(
+            r#"<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","author":"Jane Doe"}</script>"#,
+        )
+        .unwrap();
+
+        assert_eq!(get_json_ld(&dom, "").byline.as_deref(), Some("Jane Doe"));
+    }
 }

@@ -103,11 +103,6 @@ impl Dom {
             self.append_child(to, id)
         }
     }
-    pub(crate) fn detach_children(&mut self, parent: NodeId) {
-        while let Some(id) = self.first_child(parent) {
-            self.detach(id)
-        }
-    }
     pub(crate) fn rename_html(&mut self, node: NodeId, tag: Tag) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.tag = tag;
@@ -155,7 +150,9 @@ impl Dom {
     #[cfg(test)]
     pub(crate) fn set_inner_html(&mut self, node: NodeId, html: &str) -> Result<(), DomError> {
         let source = Dom::parse_fragment(html, self.tag(node).unwrap_or(Tag::Div))?;
-        self.detach_children(node);
+        while let Some(child) = self.first_child(node) {
+            self.detach(child)
+        }
         let roots: SmallVec<[NodeId; 4]> = source.children(source.root()).collect();
         for id in roots {
             let imported = self.import_subtree(&source, id)?;
@@ -167,6 +164,14 @@ impl Dom {
         let mut fragment = Dom::new(NodeData::Fragment);
         let copied = fragment.import_subtree(self, source_root)?;
         fragment.append_child(fragment.root(), copied);
+        Ok(fragment)
+    }
+    pub(crate) fn copy_children_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
+        let mut fragment = Dom::new(NodeData::Fragment);
+        for child in self.children(source_root) {
+            let copied = fragment.import_subtree(self, child)?;
+            fragment.append_child(fragment.root(), copied);
+        }
         Ok(fragment)
     }
     pub(crate) fn import_subtree(

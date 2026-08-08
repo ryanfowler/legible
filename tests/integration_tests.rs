@@ -1,6 +1,8 @@
 //! Integration tests against Mozilla's readability test suite.
 
-use legible::parse;
+use html5ever::{parse_document, tendril::TendrilSink};
+use legible::{Document, Options};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -8,7 +10,7 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExpectedMetadata {
-    title: Option<String>,
+    title: String,
     byline: Option<String>,
     excerpt: Option<String>,
     site_name: Option<String>,
@@ -16,41 +18,143 @@ struct ExpectedMetadata {
     published_time: Option<String>,
     dir: Option<String>,
     lang: Option<String>,
-    #[allow(dead_code)]
-    readerable: Option<bool>,
+    readerable: bool,
 }
 
-fn normalize_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+type CanonicalAttribute = (String, String, String);
+
+#[derive(Debug, PartialEq, Eq)]
+enum CanonicalNode {
+    StartTag(String, Vec<CanonicalAttribute>),
+    EndTag(String),
+    Text(String),
 }
 
-fn extract_text_content(html: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    let text = re.replace_all(html, " ");
-    normalize_whitespace(&text)
+fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
+    let mut stack = vec![(root.clone(), false)];
+    while let Some((node, closing)) = stack.pop() {
+        match &node.data {
+            NodeData::Element { name, attrs, .. } => {
+                if closing {
+                    nodes.push(CanonicalNode::EndTag(name.local.to_string()));
+                    continue;
+                }
+
+                let attrs = attrs.borrow();
+                let has_data_srcset = attrs.iter().any(|attribute| {
+                    attribute.name.ns.as_ref().is_empty()
+                        && attribute.name.local.as_ref() == "data-srcset"
+                });
+                let mut attributes: Vec<_> = attrs
+                    .iter()
+                    .filter(|attribute| {
+                        let local = attribute.name.local.as_ref();
+                        // Official fixtures use different selected-container IDs and
+                        // retain unrelated runtime data. Keep page IDs, image data,
+                        // and generated data-old-* attributes under comparison.
+                        !(local == "id" && attribute.value.as_ref() != "readability-page-1")
+                            && !(attribute.name.ns.as_ref().is_empty()
+                                && local.starts_with("data-")
+                                && !matches!(local, "data-src" | "data-srcset")
+                                && !local.starts_with("data-old-"))
+                            // Some Mozilla fixtures retain the noscript image src
+                            // where this implementation retains data-srcset.
+                            && !(name.local.as_ref() == "img"
+                                && local == "src"
+                                && has_data_srcset)
+                    })
+                    .map(|attribute| {
+                        let mut value = attribute.value.to_string();
+                        if attribute.name.local.as_ref() == "src"
+                            && value.starts_with("file:///C|/")
+                        {
+                            value.replace_range(9..10, ":");
+                        }
+                        (
+                            attribute.name.ns.to_string(),
+                            attribute.name.local.to_string(),
+                            value,
+                        )
+                    })
+                    .collect();
+                attributes.sort();
+                nodes.push(CanonicalNode::StartTag(name.local.to_string(), attributes));
+                stack.push((node.clone(), true));
+                stack.extend(
+                    node.children
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .map(|child| (child.clone(), false)),
+                );
+            }
+            NodeData::Text { contents } => {
+                let normalized = contents
+                    .borrow()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !normalized.is_empty() {
+                    nodes.push(CanonicalNode::Text(normalized));
+                }
+            }
+            _ => stack.extend(
+                node.children
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .map(|child| (child.clone(), false)),
+            ),
+        }
+    }
 }
 
-fn text_similarity(a: &str, b: &str) -> f64 {
-    let words_a: std::collections::HashSet<_> = a.split_whitespace().collect();
-    let words_b: std::collections::HashSet<_> = b.split_whitespace().collect();
+fn canonicalize_html(html: &str) -> Vec<CanonicalNode> {
+    let dom = parse_document(RcDom::default(), Default::default()).one(html);
+    let body = dom
+        .document
+        .children
+        .borrow()
+        .iter()
+        .find_map(|html| {
+            html.children
+                .borrow()
+                .iter()
+                .find(|node| {
+                    matches!(&node.data, NodeData::Element { name, .. } if name.local.as_ref() == "body")
+                })
+                .cloned()
+        })
+        .expect("HTML parser did not create a body element");
 
-    if words_a.is_empty() && words_b.is_empty() {
-        return 1.0;
+    let mut nodes = Vec::new();
+    for child in body.children.borrow().iter() {
+        append_canonical(child, &mut nodes);
+    }
+    nodes
+}
+
+fn compare_html(expected: &str, actual: &str) -> Result<(), String> {
+    let expected = canonicalize_html(expected);
+    let actual = canonicalize_html(actual);
+    if expected == actual {
+        return Ok(());
     }
 
-    let intersection = words_a.intersection(&words_b).count();
-    let union = words_a.union(&words_b).count();
-
-    if union == 0 {
-        return 0.0;
-    }
-
-    intersection as f64 / union as f64
+    let mismatch = expected
+        .iter()
+        .zip(&actual)
+        .position(|(expected, actual)| expected != actual)
+        .unwrap_or(expected.len().min(actual.len()));
+    Err(format!(
+        "Content mismatch at canonical node {mismatch}:\n  Expected: {:?}\n  Got: {:?}",
+        expected.get(mismatch),
+        actual.get(mismatch)
+    ))
 }
 
 fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
     let test_dir = source_path.parent().unwrap();
-    let test_name = test_dir.file_name().unwrap().to_str().unwrap();
 
     let expected_path = test_dir.join("expected.html");
     let metadata_path = test_dir.join("expected-metadata.json");
@@ -73,104 +177,53 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
         None
     };
 
-    // Run Readability
-    let article = parse(
-        &source_html,
-        Some(&format!("http://fakehost/test/{}", test_name)),
-        None,
-    )?;
-
-    // Check metadata
-    if let Some(expected) = expected_metadata {
-        if let Some(expected_title) = expected.title
-            && article.title != expected_title
-        {
-            return Err(format!(
-                "Title mismatch:\n  Expected: {}\n  Got: {}",
-                expected_title, article.title
-            )
-            .into());
-        }
-
-        if let Some(expected_byline) = expected.byline
-            && article.byline.as_deref() != Some(&expected_byline)
-        {
-            return Err(format!(
-                "Byline mismatch:\n  Expected: {}\n  Got: {:?}",
-                expected_byline, article.byline
-            )
-            .into());
-        }
-
-        if let Some(expected_excerpt) = expected.excerpt {
-            let got_excerpt = article.excerpt.as_deref().unwrap_or("");
-            if normalize_whitespace(&expected_excerpt) != normalize_whitespace(got_excerpt) {
-                return Err(format!(
-                    "Excerpt mismatch:\n  Expected: {}\n  Got: {:?}",
-                    expected_excerpt, article.excerpt
-                )
-                .into());
-            }
-        }
-
-        if let Some(expected_site_name) = expected.site_name
-            && article.site_name.as_deref() != Some(&expected_site_name)
-        {
-            return Err(format!(
-                "Site name mismatch:\n  Expected: {}\n  Got: {:?}",
-                expected_site_name, article.site_name
-            )
-            .into());
-        }
-
-        if let Some(expected_published_time) = expected.published_time
-            && article.published_time.as_deref() != Some(&expected_published_time)
-        {
-            return Err(format!(
-                "Published time mismatch:\n  Expected: {}\n  Got: {:?}",
-                expected_published_time, article.published_time
-            )
-            .into());
-        }
-
-        if let Some(expected_dir) = expected.dir
-            && article.dir.as_deref() != Some(&expected_dir)
-        {
-            return Err(format!(
-                "Direction mismatch:\n  Expected: {}\n  Got: {:?}",
-                expected_dir, article.dir
-            )
-            .into());
-        }
-
-        if let Some(expected_lang) = expected.lang
-            && article.lang.as_deref() != Some(&expected_lang)
-        {
-            return Err(format!(
-                "Language mismatch:\n  Expected: {}\n  Got: {:?}",
-                expected_lang, article.lang
-            )
-            .into());
-        }
+    let document = Document::new(&source_html);
+    let readerable = document.is_probably_readerable(None);
+    if let Some(expected) = expected_metadata.as_ref()
+        && readerable != expected.readerable
+    {
+        return Err(format!(
+            "Readerable mismatch:\n  Expected: {}\n  Got: {}",
+            expected.readerable, readerable
+        )
+        .into());
     }
 
-    // Check content by comparing text (to avoid HTML serialization differences)
-    if let Some(expected) = expected_html {
-        let expected_text = extract_text_content(&expected);
-        let got_text = extract_text_content(&article.content);
+    // Match the options and base URL used to generate Mozilla's fixtures.
+    let mut options = Options::default();
+    options.classes_to_preserve.push("caption".to_string());
+    let article = document.parse(Some("http://fakehost/test/page.html"), Some(options))?;
 
-        let similarity = text_similarity(&expected_text, &got_text);
-        if similarity < 0.9 {
-            let expected_preview: String = expected_text.chars().take(200).collect();
-            let got_preview: String = got_text.chars().take(200).collect();
-            return Err(format!(
-                "Content text similarity too low: {:.2}%\n  Expected text: {}...\n  Got text: {}...",
-                similarity * 100.0,
-                expected_preview,
-                got_preview
-            )
-            .into());
+    if let Some(expected) = expected_metadata {
+        macro_rules! compare_field {
+            ($name:literal, $expected:expr, $actual:expr) => {{
+                let expected = &$expected;
+                let actual = &$actual;
+                if expected != actual {
+                    return Err(format!(
+                        "{} mismatch:\n  Expected: {:?}\n  Got: {:?}",
+                        $name, expected, actual
+                    )
+                    .into());
+                }
+            }};
         }
+
+        compare_field!("Title", expected.title, article.title);
+        compare_field!("Byline", expected.byline, article.byline);
+        compare_field!("Excerpt", expected.excerpt, article.excerpt);
+        compare_field!("Site name", expected.site_name, article.site_name);
+        compare_field!(
+            "Published time",
+            expected.published_time,
+            article.published_time
+        );
+        compare_field!("Direction", expected.dir, article.dir);
+        compare_field!("Language", expected.lang, article.lang);
+    }
+
+    if let Some(expected) = expected_html {
+        compare_html(&expected, &article.content)?;
     }
 
     Ok(())
