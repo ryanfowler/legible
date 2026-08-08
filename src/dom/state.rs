@@ -1,7 +1,9 @@
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct NodeStats {
-    pub(crate) text_length: usize,
-    pub(crate) comma_count: usize,
+    // Readability compares these values with small thresholds. Saturating
+    // 32-bit counters keep the dense per-node cache compact on 64-bit targets.
+    pub(crate) text_length: u32,
+    pub(crate) comma_count: u32,
     pub(crate) has_sentence_end: bool,
     pub(crate) has_text: bool,
     pub(crate) has_non_whitespace: bool,

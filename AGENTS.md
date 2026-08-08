@@ -50,14 +50,18 @@ The extraction pipeline flows through these stages:
 - Use borrowed attribute values for hot reads and `Tag`/`AttrName` for common predicates. Keep parser tag and attribute classification allocation-free for html5ever's normalized lowercase names.
 - Collect attached preorder snapshots before mutation when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots with depth when a pass processes only elements and can skip removed subtrees.
 - Reuse the cleaning node snapshot and text buffers across extraction retries and sequential mutation passes. Keep URI repair, class cleanup, and comment removal in one post-processing snapshot.
+- Preserve preparation order: remove scripts and styles, normalize body BR runs, then rename font elements. Use one linear traversal for each stage. Do not add per-target ancestor scans. Keep unusable-image and noscript-image discovery in one traversal.
+- Borrow a JSON-LD script's single text child. Allocate a fallback buffer only when the script has a more complex subtree.
 - Use `SmallVec` for hot, short-lived traversal stacks, scoring candidates, metadata tables, and small child snapshots. Keep full-document snapshots in `Vec`.
 - Keep structural mutation in `dom/mutation.rs` and validate links in debug builds.
 - Preserve the O(1) leaf fast path in DOM cycle checks. The parser appends new leaf nodes, so do not add another depth-dependent scan to this path.
 - Keep the bounded, markup-density-aware node capacity hint. Count markup with `memchr` so preallocation does not add a full scalar scan or overallocate for dense adversarial input.
+- Preallocate the element-and-depth mutation snapshot from half of the arena length. This avoids repeated growth on normal mixed element/text trees and limits over-allocation on markup-only trees.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
 - Use the `dom_parse` Criterion group to isolate custom DOM construction.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
 - Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
+- Keep cached text and comma counts as saturating `u32` values. Scan each text node with native `usize` counters, then clamp it before storage. This keeps the dense cache compact without adding overflow checks to the byte-wise hot loop.
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.
 - Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.

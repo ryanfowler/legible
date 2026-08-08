@@ -144,7 +144,9 @@ impl Dom {
     /// returned snapshot lets mutation passes skip a removed subtree without
     /// walking the current ancestor chain of each descendant.
     pub(crate) fn element_descendants_snapshot_with_depth(&self, id: NodeId) -> Vec<(NodeId, u32)> {
-        let mut out = Vec::new();
+        // Documents usually alternate elements and text nodes. Start near the
+        // expected element count and grow once for markup-only documents.
+        let mut out = Vec::with_capacity((self.len() / 2).max(16));
         let Some(mut current) = self.first_child(id) else {
             return out;
         };
@@ -304,18 +306,6 @@ impl Dom {
             self.text_node(id)
                 .is_some_and(|s| s.chars().any(|c| !c.is_whitespace()))
         })
-    }
-    pub(crate) fn collect_descendants_by_tag(
-        &self,
-        root: NodeId,
-        tag: super::Tag,
-        out: &mut Vec<NodeId>,
-    ) {
-        out.clear();
-        out.extend(
-            self.descendants(root)
-                .filter(|&id| self.tag(id) == Some(tag)),
-        )
     }
 }
 

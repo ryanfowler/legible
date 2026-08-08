@@ -14,6 +14,8 @@ fn stats_for_text(text: &str) -> NodeStats {
     };
     let mut prev = true;
     let mut dot = false;
+    let mut text_length = 0usize;
+    let mut comma_count = 0usize;
 
     // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
     // Unicode whitespace tables in the hot loop.
@@ -23,14 +25,14 @@ fn stats_for_text(text: &str) -> NodeStats {
                 s.has_sentence_break |= dot;
                 dot = false;
                 if !prev {
-                    s.text_length += 1;
+                    text_length += 1;
                     prev = true
                 }
             } else {
                 s.has_non_whitespace = true;
                 dot = byte == b'.';
-                s.comma_count += usize::from(byte == b',');
-                s.text_length += 1;
+                comma_count += usize::from(byte == b',');
+                text_length += 1;
                 prev = false
             }
         }
@@ -40,13 +42,13 @@ fn stats_for_text(text: &str) -> NodeStats {
                 s.has_sentence_break |= dot;
                 dot = false;
                 if !prev {
-                    s.text_length += 1;
+                    text_length += 1;
                     prev = true
                 }
             } else {
                 s.has_non_whitespace = true;
                 dot = c == '.';
-                s.comma_count += usize::from(
+                comma_count += usize::from(
                     c == ','
                         || matches!(
                             c,
@@ -60,14 +62,16 @@ fn stats_for_text(text: &str) -> NodeStats {
                                 | '\u{FF0C}'
                         ),
                 );
-                s.text_length += 1;
+                text_length += 1;
                 prev = false
             }
         }
     }
-    if prev && s.text_length > 0 {
-        s.text_length -= 1
+    if prev && text_length > 0 {
+        text_length -= 1
     }
+    s.text_length = text_length.min(u32::MAX as usize) as u32;
+    s.comma_count = comma_count.min(u32::MAX as usize) as u32;
     s.ends_with_dot = dot;
     s.has_sentence_end = s.has_sentence_break || dot;
     s
@@ -85,10 +89,10 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
         && b.has_non_whitespace
         && (a.ends_with_whitespace || b.starts_with_whitespace)
     {
-        a.text_length += 1
+        a.text_length = a.text_length.saturating_add(1)
     }
-    a.text_length += b.text_length;
-    a.comma_count += b.comma_count;
+    a.text_length = a.text_length.saturating_add(b.text_length);
+    a.comma_count = a.comma_count.saturating_add(b.comma_count);
     a.has_non_whitespace |= b.has_non_whitespace;
     a.ends_with_whitespace = b.ends_with_whitespace;
     a.ends_with_dot = b.ends_with_dot;
@@ -98,6 +102,7 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
     if let Some(s) = store.get_stats(id) {
         return *s;
     }
+
     let mut stack = SmallVec::<[(NodeId, bool); 16]>::new();
     stack.push((id, false));
     while let Some((n, expanded)) = stack.pop() {
@@ -221,7 +226,7 @@ pub fn get_link_density_with_text(
             continue;
         }
         let len = if let Some(st) = store.as_deref_mut() {
-            get_or_compute_stats(dom, x, st).text_length
+            get_or_compute_stats(dom, x, st).text_length as usize
         } else {
             dom.normalized_char_count(x)
         };
@@ -237,12 +242,7 @@ pub fn get_link_density_with_text(
 pub fn get_link_density(dom: &Dom, id: NodeId) -> f64 {
     get_link_density_with_text(dom, id, None, None)
 }
-pub fn get_link_density_cached(
-    dom: &Dom,
-    id: NodeId,
-    len: usize,
-    store: &mut NodeStateStore,
-) -> f64 {
+pub fn get_link_density_cached(dom: &Dom, id: NodeId, len: u32, store: &mut NodeStateStore) -> f64 {
     if len == 0 {
         return 0.;
     }
@@ -319,10 +319,10 @@ pub fn wrap_phrasing_content_in_p(dom: &mut Dom, div: NodeId) {
 }
 pub fn is_element_without_content(dom: &Dom, id: NodeId) -> bool {
     dom.is_element(id)
-        && !dom.has_non_whitespace_text(id)
         && dom
             .element_children(id)
             .all(|c| matches!(dom.tag(c), Some(Tag::Br | Tag::Hr)))
+        && !dom.has_non_whitespace_text(id)
 }
 pub fn has_single_tag_inside_element(dom: &Dom, id: NodeId, tag: Tag) -> bool {
     let mut found = false;
@@ -437,7 +437,7 @@ mod tests {
         let len = dom.normalized_char_count(root);
 
         let expected = get_link_density(&dom, root);
-        let actual = get_link_density_cached(&dom, root, len, &mut store);
+        let actual = get_link_density_cached(&dom, root, len as u32, &mut store);
         assert!((actual - expected).abs() < f64::EPSILON);
     }
 }

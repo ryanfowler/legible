@@ -10,24 +10,38 @@ use crate::scoring::{
     has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
 };
 use regex::Regex;
+use smallvec::SmallVec;
 
 pub fn prep_document(dom: &mut Dom) {
-    let mut ids = Vec::new();
-    dom.collect_descendants_by_tag(dom.root(), Tag::Style, &mut ids);
+    // Preserve Readability's preparation order. Remove inactive subtrees,
+    // normalize BR runs, and only then rename deprecated font elements.
+    let mut ids: Vec<_> = dom
+        .descendants(dom.root())
+        .filter(|&id| matches!(dom.tag(id), Some(Tag::Script | Tag::Noscript | Tag::Style)))
+        .collect();
     for &id in &ids {
         dom.detach(id);
     }
-    if let Some(body) = dom.body() {
-        replace_brs(dom, body);
-    }
+
     ids.clear();
-    dom.collect_descendants_by_tag(dom.root(), Tag::Font, &mut ids);
+    if let Some(body) = dom.body() {
+        ids.extend(
+            dom.descendants(body)
+                .filter(|&id| dom.tag(id) == Some(Tag::Br)),
+        );
+    }
+    replace_brs(dom, &ids);
+
+    ids.clear();
+    ids.extend(
+        dom.descendants(dom.root())
+            .filter(|&id| dom.tag(id) == Some(Tag::Font)),
+    );
     for id in ids {
-        if dom.parent(id).is_some() {
-            dom.rename_html(id, Tag::Span);
-        }
+        dom.rename_html(id, Tag::Span);
     }
 }
+
 fn next_element(dom: &Dom, id: NodeId) -> Option<NodeId> {
     let mut n = dom.next_sibling(id);
     while let Some(x) = n {
@@ -41,12 +55,11 @@ fn next_element(dom: &Dom, id: NodeId) -> Option<NodeId> {
     }
     None
 }
-fn replace_brs(dom: &mut Dom, root: NodeId) {
-    let ids: Vec<_> = dom
-        .descendants(root)
-        .filter(|&x| dom.tag(x) == Some(Tag::Br))
-        .collect();
-    for br in ids {
+fn replace_brs(dom: &mut Dom, ids: &[NodeId]) {
+    for &br in ids {
+        if dom.tag(br) != Some(Tag::Br) {
+            continue;
+        }
         if dom.parent(br).is_none() {
             continue;
         }
@@ -89,17 +102,6 @@ fn replace_brs(dom: &mut Dom, root: NodeId) {
             && dom.tag(p) == Some(Tag::P)
         {
             dom.rename_html(p, Tag::Div);
-        }
-    }
-}
-pub fn remove_scripts(dom: &mut Dom) {
-    let ids: Vec<_> = dom
-        .descendants(dom.root())
-        .filter(|&x| matches!(dom.tag(x), Some(Tag::Script | Tag::Noscript)))
-        .collect();
-    for id in ids {
-        if dom.parent(id).is_some() {
-            dom.detach(id);
         }
     }
 }
@@ -261,35 +263,35 @@ fn should_remove(
     let mut lis = 0usize;
     let mut inputs = 0;
     let mut embeds = 0;
-    let mut heading = 0;
-    let mut textish = 0;
-    let mut list = 0;
+    let mut heading = 0u64;
+    let mut textish = 0u64;
+    let mut list = 0u64;
     for x in dom.descendants(id) {
         match dom.tag(x) {
             Some(Tag::P) => {
                 pc += 1;
-                textish += get_or_compute_stats(dom, x, store).text_length;
+                textish += u64::from(get_or_compute_stats(dom, x, store).text_length);
             }
             Some(Tag::Img) => {
                 imgs += 1;
-                textish += get_or_compute_stats(dom, x, store).text_length;
+                textish += u64::from(get_or_compute_stats(dom, x, store).text_length);
             }
             Some(Tag::Li) => {
                 lis += 1;
-                textish += get_or_compute_stats(dom, x, store).text_length;
+                textish += u64::from(get_or_compute_stats(dom, x, store).text_length);
             }
             Some(Tag::Input) => inputs += 1,
             Some(Tag::Ul | Tag::Ol) => {
-                let n = get_or_compute_stats(dom, x, store).text_length;
-                list += n;
-                textish += n;
+                let length = u64::from(get_or_compute_stats(dom, x, store).text_length);
+                list += length;
+                textish += length;
             }
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
-                heading += get_or_compute_stats(dom, x, store).text_length
+                heading += u64::from(get_or_compute_stats(dom, x, store).text_length)
             }
             Some(
                 Tag::Span | Tag::Td | Tag::Blockquote | Tag::Dl | Tag::Div | Tag::Pre | Tag::Table,
-            ) => textish += get_or_compute_stats(dom, x, store).text_length,
+            ) => textish += u64::from(get_or_compute_stats(dom, x, store).text_length),
             Some(Tag::Object | Tag::Embed | Tag::Iframe) => {
                 if has_allowed_media(dom, x, allowed) {
                     return false;
@@ -545,36 +547,32 @@ fn single_image_element(dom: &Dom, id: NodeId) -> Option<NodeId> {
     if dom.has_non_whitespace_text(id) {
         return None;
     }
-    let images: Vec<_> = dom
+    let mut images = dom
         .descendants(id)
-        .filter(|&node| dom.tag(node) == Some(Tag::Img))
-        .collect();
-    if images.len() == 1 {
-        Some(images[0])
-    } else {
-        None
-    }
+        .filter(|&node| dom.tag(node) == Some(Tag::Img));
+    let image = images.next()?;
+    images.next().is_none().then_some(image)
 }
 
 pub fn unwrap_noscript_images(dom: &mut Dom) {
-    let images: Vec<_> = dom
+    let candidates: Vec<_> = dom
         .descendants(dom.root())
-        .filter(|&id| dom.tag(id) == Some(Tag::Img) && !useful_image(dom, id))
+        .filter(|&id| match dom.tag(id) {
+            Some(Tag::Img) => !useful_image(dom, id),
+            Some(Tag::Noscript) => true,
+            _ => false,
+        })
         .collect();
-    for id in images {
-        if dom.parent(id).is_some() {
+    for &id in &candidates {
+        if dom.tag(id) == Some(Tag::Img) && dom.parent(id).is_some() {
             dom.detach(id);
         }
     }
-    let ids: Vec<_> = dom
-        .descendants(dom.root())
-        .filter(|&x| dom.tag(x) == Some(Tag::Noscript))
-        .collect();
-    for id in ids {
-        if dom.parent(id).is_none() {
+    for id in candidates {
+        if dom.tag(id) != Some(Tag::Noscript) || dom.parent(id).is_none() {
             continue;
         }
-        let image_ids: Vec<_> = dom
+        let image_ids: SmallVec<[NodeId; 2]> = dom
             .descendants(id)
             .filter(|&node| dom.tag(node) == Some(Tag::Img))
             .collect();
@@ -684,6 +682,19 @@ pub fn clean_matched_nodes<F>(
 mod tests {
     use super::*;
     use crate::dom::{AttrName, NodeStateStore};
+
+    #[test]
+    fn normalizes_br_runs_before_renaming_fonts() {
+        let mut dom = Dom::parse_document("<body><div><br><br><font>text</font></div>").unwrap();
+
+        prep_document(&mut dom);
+
+        let body = dom.body().unwrap();
+        let paragraph = dom.first_descendant_by_tag(body, Tag::P).unwrap();
+        let span = dom.first_descendant_by_tag(body, Tag::Span).unwrap();
+        assert_eq!(dom.parent(paragraph), dom.parent(span));
+        assert!(!dom.descendants(paragraph).any(|id| id == span));
+    }
 
     #[test]
     fn replaces_short_base64_image_placeholders() {
