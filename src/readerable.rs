@@ -83,17 +83,32 @@ fn score_node(
     if m.matched(0) && !m.matched(1) {
         return false;
     }
-    let mut p = dom.parent(id);
-    while let Some(x) = p {
-        if dom.tag(x) == Some(Tag::Li) {
-            return false;
+    if dom.tag(id) == Some(Tag::P) {
+        let mut parent = dom.parent(id);
+        while let Some(ancestor) = parent {
+            if dom.tag(ancestor) == Some(Tag::Li) {
+                return false;
+            }
+            parent = dom.parent(ancestor)
         }
-        p = dom.parent(x)
     }
-    let len = dom.normalized_char_count(id);
+    let len = dom.trimmed_text_utf16_len(id);
     if len < o.min_content_length {
         return false;
     }
     *score += ((len - o.min_content_length) as f64).sqrt();
     *score > o.min_score
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_surrogate_pairs_as_two_readerable_characters() {
+        let options = ReaderableOptions::new()
+            .min_content_length(2)
+            .min_score(-0.1);
+        assert!(is_probably_readerable("<p>😀</p>", Some(options)));
+    }
 }

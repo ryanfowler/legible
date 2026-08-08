@@ -96,4 +96,21 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn resolves_urls_against_the_first_base_with_href() {
+        let text = "This article contains enough text to be extracted. ".repeat(8);
+        let html = format!(
+            "<svg><base href=\"https://evil.example/\"></svg><base><base href=\"/assets/\"><article><p>{text}<a href=\"story.html\">Read more</a></p></article>"
+        );
+        let article = Document::new(&html)
+            .parse(Some("https://example.com/read/page.html"), None)
+            .unwrap();
+
+        assert!(
+            article
+                .content
+                .contains(r#"href="https://example.com/assets/story.html""#)
+        );
+    }
 }

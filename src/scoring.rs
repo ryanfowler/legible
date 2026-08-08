@@ -264,7 +264,7 @@ pub fn is_whitespace(dom: &Dom, id: NodeId) -> bool {
 }
 pub fn is_phrasing_content(dom: &Dom, id: NodeId) -> bool {
     fn go(d: &Dom, n: NodeId, depth: u32) -> bool {
-        if d.is_text(n) {
+        if d.is_text(n) || d.is_comment(n) {
             return true;
         }
         let Some(t) = d.tag(n) else { return false };
@@ -288,7 +288,7 @@ pub fn wrap_phrasing_content_in_p(dom: &mut Dom, div: NodeId) {
         let mut j = i;
         let mut content = false;
         while j < children.len() && is_phrasing_content(dom, children[j]) {
-            content |= !dom.is_text(children[j])
+            content |= dom.is_element(children[j])
                 || dom
                     .text_node(children[j])
                     .is_some_and(|t| !t.trim().is_empty());

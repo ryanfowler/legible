@@ -98,7 +98,7 @@ The algorithm retries with progressively fewer flags if initial extraction fails
 
 The custom DOM uses safe Rust only. Run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings` after DOM changes.
 
-Tests run against Mozilla's official Readability.js test suite (git submodule at `tests/readability-js/`). The `build.rs` script auto-generates test functions from `tests/readability-js/test/test-pages/` directories. Each test directory contains `source.html`, `expected.html`, and `expected-metadata.json`.
+Tests run against Mozilla's official Readability.js test suite (git submodule at `tests/readability-js/`). The integration harness compares canonical HTML structure and ordered text, every metadata field, and the fixture's readerable value. Each test directory contains `source.html`, `expected.html`, and `expected-metadata.json`.
 
 Extraction with default options must return `Error::NoContent` when the best retry has no text. This includes empty, head-only, and image-only documents.
 
