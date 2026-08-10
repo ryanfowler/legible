@@ -515,10 +515,10 @@ fn single_image_fragment(dom: &Dom) -> Option<NodeId> {
 }
 
 fn useful_image(dom: &Dom, id: NodeId) -> bool {
-    dom.attrs(id).iter().any(|a| {
-        let name = a.name.local.as_ref();
+    dom.attrs(id).iter().any(|attribute| {
+        let name = attribute.name.local.as_ref();
         matches!(name, "src" | "srcset" | "data-src" | "data-srcset")
-            || has_image_extension(a.value.as_ref())
+            || has_image_extension(attribute.value.as_ref())
     })
 }
 
@@ -575,22 +575,105 @@ fn single_image_element(dom: &Dom, id: NodeId) -> Option<NodeId> {
     images.next().is_none().then_some(image)
 }
 
-pub fn unwrap_noscript_images(dom: &mut Dom) {
-    let candidates: Vec<_> = dom
-        .descendants(dom.root())
-        .filter(|&id| match dom.tag(id) {
-            Some(Tag::Img) => !useful_image(dom, id),
-            Some(Tag::Noscript) => true,
-            _ => false,
-        })
-        .collect();
-    for &id in &candidates {
-        if dom.tag(id) == Some(Tag::Img) && dom.parent(id).is_some() {
-            dom.detach(id);
+fn is_tracking_image(dom: &Dom, id: NodeId) -> bool {
+    [AttrName::Width, AttrName::Height]
+        .into_iter()
+        .filter_map(|name| dom.attr(id, name)?.parse::<u32>().ok())
+        .any(|size| size <= 1)
+}
+
+fn is_placeholder_image(dom: &Dom, id: NodeId) -> bool {
+    dom.attr(id, AttrName::Src).is_some_and(|src| {
+        src.to_ascii_lowercase().contains("placeholder")
+            || parse_b64_data_url(src).is_some_and(|(end, _)| src.len().saturating_sub(end) < 133)
+    })
+}
+
+fn images_are_variants(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    let same_nonempty_attr = |name| {
+        dom.attr(first, name)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|value| dom.attr(second, name) == Some(value))
+    };
+    let url_attrs = [
+        AttrName::Src,
+        AttrName::Srcset,
+        AttrName::DataSrc,
+        AttrName::DataSrcset,
+    ];
+    let mut same_url = false;
+    let mut same_basename = false;
+    for first_url in url_attrs.iter().filter_map(|&name| dom.attr(first, name)) {
+        for second_url in url_attrs.iter().filter_map(|&name| dom.attr(second, name)) {
+            same_url |= !first_url.is_empty() && first_url == second_url;
+            let first_name = first_url
+                .split(['?', '#'])
+                .next()
+                .and_then(|value| value.rsplit('/').next())
+                .filter(|value| !value.is_empty());
+            let second_name = second_url
+                .split(['?', '#'])
+                .next()
+                .and_then(|value| value.rsplit('/').next())
+                .filter(|value| !value.is_empty());
+            same_basename |= first_name.is_some() && first_name == second_name;
         }
     }
+    let same_dimensions =
+        same_nonempty_attr(AttrName::Width) && same_nonempty_attr(AttrName::Height);
+    let same_alt = dom
+        .attr_by_local_name(first, "alt")
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| dom.attr_by_local_name(second, "alt") == Some(value));
+    same_url || same_dimensions && (same_basename || same_alt)
+}
+
+fn previous_useful_image(
+    dom: &Dom,
+    id: NodeId,
+    fallback: NodeId,
+) -> (Option<(NodeId, NodeId)>, SmallVec<[NodeId; 1]>) {
+    let Some(immediate) = previous_element(dom, id) else {
+        return (None, SmallVec::new());
+    };
+    let Some(immediate_image) = single_image_element(dom, immediate) else {
+        return (None, SmallVec::new());
+    };
+    if useful_image(dom, immediate_image) {
+        return if images_are_variants(dom, immediate_image, fallback)
+            || is_placeholder_image(dom, immediate_image)
+        {
+            (Some((immediate, immediate_image)), SmallVec::new())
+        } else {
+            (None, SmallVec::new())
+        };
+    }
+
+    // Some lazy-image implementations put an empty hydration image between a
+    // low-resolution image and its noscript fallback. Scan past only one such
+    // placeholder, and require matching image metadata before merging them.
+    if let Some(previous) = previous_element(dom, immediate)
+        && let Some(previous_image) = single_image_element(dom, previous)
+        && useful_image(dom, previous_image)
+        && images_are_variants(dom, previous_image, fallback)
+    {
+        let mut placeholders = SmallVec::new();
+        placeholders.push(immediate);
+        return (Some((previous, previous_image)), placeholders);
+    }
+
+    (Some((immediate, immediate_image)), SmallVec::new())
+}
+
+pub fn unwrap_noscript_images(dom: &mut Dom) {
+    // Inspect noscript fallbacks without first deleting placeholder images.
+    // Replace a placeholder only after a usable fallback image is available.
+    let candidates: Vec<_> = dom
+        .descendants(dom.root())
+        .filter(|&id| dom.tag(id) == Some(Tag::Noscript))
+        .collect();
     for id in candidates {
-        if dom.tag(id) != Some(Tag::Noscript) || dom.parent(id).is_none() {
+        if dom.parent(id).is_none() {
             continue;
         }
         let image_ids: SmallVec<[NodeId; 2]> = dom
@@ -599,15 +682,19 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
             .collect();
         if image_ids.len() == 1 && !dom.has_non_whitespace_text(id) {
             let image = image_ids[0];
-            if let Some(previous) = previous_element(dom, id)
-                && let Some(previous_image) = single_image_element(dom, previous)
-            {
-                copy_image_attributes(dom, previous_image, image);
-                dom.insert_before(id, image);
-                dom.detach(previous);
-                dom.detach(id);
+            if is_tracking_image(dom, image) {
                 continue;
             }
+            let (previous, placeholders) = previous_useful_image(dom, id, image);
+            if let Some((previous, previous_image)) = previous {
+                copy_image_attributes(dom, previous_image, image);
+                dom.detach(previous);
+                for placeholder in placeholders {
+                    dom.detach(placeholder);
+                }
+            }
+            dom.insert_before(id, image);
+            dom.detach(id);
             continue;
         }
         if !image_ids.is_empty() {
@@ -631,17 +718,22 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
         let Some(source_image) = single_image_fragment(&fragment) else {
             continue;
         };
+        if is_tracking_image(&fragment, source_image) {
+            continue;
+        }
         let Ok(new_image) = dom.import_subtree(&fragment, source_image) else {
             continue;
         };
-        if let Some(previous) = previous_element(dom, id)
-            && let Some(previous_image) = single_image_element(dom, previous)
-        {
+        let (previous, placeholders) = previous_useful_image(dom, id, new_image);
+        if let Some((previous, previous_image)) = previous {
             copy_image_attributes(dom, previous_image, new_image);
-            dom.insert_before(id, new_image);
             dom.detach(previous);
-            dom.detach(id);
+            for placeholder in placeholders {
+                dom.detach(placeholder);
+            }
         }
+        dom.insert_before(id, new_image);
+        dom.detach(id);
     }
 }
 pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
@@ -756,6 +848,87 @@ mod tests {
     }
 
     #[test]
+    fn preserves_unmatched_image_placeholders() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img id="placeholder"><noscript>Image unavailable</noscript></main>"#,
+        )
+        .unwrap();
+        let placeholder = dom.first_descendant_by_tag(dom.root(), Tag::Img).unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        assert!(dom.parent(placeholder).is_some());
+    }
+
+    #[test]
+    fn does_not_merge_a_fallback_with_an_unrelated_adjacent_image() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img src="first.jpg"><noscript><img src="second.jpg"></noscript></main>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let sources: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&id| dom.tag(id) == Some(Tag::Img))
+            .filter_map(|id| dom.attr(id, AttrName::Src))
+            .collect();
+        assert_eq!(sources, ["first.jpg", "second.jpg"]);
+    }
+
+    #[test]
+    fn does_not_merge_distinct_images_with_equal_dimensions() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img src="first.jpg" width="300" height="200"><noscript><img src="second.jpg" width="300" height="200"></noscript></main>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let sources: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&id| dom.tag(id) == Some(Tag::Img))
+            .filter_map(|id| dom.attr(id, AttrName::Src))
+            .collect();
+        assert_eq!(sources, ["first.jpg", "second.jpg"]);
+    }
+
+    #[test]
+    fn does_not_merge_distinct_images_with_the_same_basename() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img src="/first/image.jpg"><noscript><img src="/second/image.jpg"></noscript></main>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let sources: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&id| dom.tag(id) == Some(Tag::Img))
+            .filter_map(|id| dom.attr(id, AttrName::Src))
+            .collect();
+        assert_eq!(sources, ["/first/image.jpg", "/second/image.jpg"]);
+    }
+
+    #[test]
+    fn does_not_merge_a_fallback_with_an_unrelated_earlier_image() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img src="first.jpg"><img><noscript><img src="second.jpg"></noscript></main>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let sources: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&id| dom.tag(id) == Some(Tag::Img))
+            .filter_map(|id| dom.attr(id, AttrName::Src))
+            .collect();
+        assert_eq!(sources, ["first.jpg", "second.jpg"]);
+    }
+
+    #[test]
     fn unwraps_only_single_image_noscripts_and_replaces_placeholder() {
         let mut dom = Dom::parse_document(
             r#"<img src="placeholder.jpg"><noscript><img src="real.jpg"></noscript>"#,
@@ -768,6 +941,22 @@ mod tests {
             .collect();
         assert_eq!(images.len(), 1);
         assert_eq!(dom.attr(images[0], AttrName::Src), Some("real.jpg"));
+    }
+
+    #[test]
+    fn promotes_a_standalone_direct_noscript_image() {
+        let mut dom =
+            Dom::parse_document(r#"<main><noscript><img src="standalone.jpg"></noscript></main>"#)
+                .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let image = dom.first_descendant_by_tag(dom.root(), Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("standalone.jpg"));
+        assert!(
+            !dom.descendants(dom.root())
+                .any(|id| dom.tag(id) == Some(Tag::Noscript))
+        );
     }
 
     #[test]
@@ -786,6 +975,23 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(dom.attr(images[0], AttrName::Src), Some("real.jpg"));
         assert_eq!(dom.attr_by_local_name(images[0], "data-id"), Some("1"));
+    }
+
+    #[test]
+    fn promotes_a_standalone_escaped_noscript_image() {
+        let mut dom = Dom::parse_document(
+            r#"<main><noscript>&lt;img src="standalone.jpg"&gt;</noscript></main>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let image = dom.first_descendant_by_tag(dom.root(), Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("standalone.jpg"));
+        assert!(
+            !dom.descendants(dom.root())
+                .any(|id| dom.tag(id) == Some(Tag::Noscript))
+        );
     }
 
     #[test]

@@ -50,6 +50,12 @@ struct ArticleContent {
     article_root: NodeId,
 }
 
+struct CandidateDiscovery {
+    to_score: SmallVec<[NodeId; 256]>,
+    divs_to_prepare: SmallVec<[NodeId; 128]>,
+    remove_after_scoring: SmallVec<[NodeId; 64]>,
+}
+
 impl<'a> Readability<'a> {
     pub(crate) fn from_document(
         dom: Dom,
@@ -116,7 +122,9 @@ impl<'a> Readability<'a> {
                 self.base_uri = Some(base_uri);
             }
         }
-        unwrap_noscript_images(&mut self.dom);
+        // Metadata must inspect the parsed source before preparation removes or
+        // rewrites any nodes. Image preparation happens afterwards because it
+        // can replace placeholder and noscript subtrees.
         let title = metadata::get_article_title(&self.dom);
         if self.options.structured_data {
             self.structured_data = StructuredData::parse(&self.dom);
@@ -131,6 +139,7 @@ impl<'a> Readability<'a> {
         if self.structured_data.article_texts().next().is_some() {
             debug_log!(self, "Structured data contains a content-location hint");
         }
+        unwrap_noscript_images(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_title = self.metadata.title.take().unwrap_or(title);
         let content = self.grab_article()?;
@@ -163,216 +172,35 @@ impl<'a> Readability<'a> {
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
         loop {
-            let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
-            let mut to_score = SmallVec::<[NodeId; 256]>::new();
-            if let Some(html) = self.dom.html_element() {
-                if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
-                    self.article_lang = Some(lang.into())
-                }
-                if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
-                    self.article_dir = Some(dir.into())
-                }
-            }
-            let mut remove = SmallVec::<[NodeId; 64]>::new();
-            // Allocate dense state once. Scoring IDs follow document order and
-            // would otherwise grow this vector several times during the pass.
-            self.node_data.sync_len(self.dom.len());
-            // Tree repair can make arena order differ from document order. Record
-            // only attached elements in preorder before this pass starts mutating.
-            // Snapshot depths identify removed subtrees without ancestor walks.
-            let initial_nodes = self
-                .dom
-                .element_descendants_snapshot_with_depth(self.dom.root());
-            let mut removed_depth = None;
-            let mut remove_title = true;
-            for (id, depth) in initial_nodes {
-                if let Some(root_depth) = removed_depth {
-                    if depth > root_depth {
-                        continue;
-                    }
-                    removed_depth = None
-                }
-                let tag = self
-                    .dom
-                    .tag(id)
-                    .expect("element snapshot must contain only elements");
-                if tag == Tag::A {
-                    self.node_data.enable_link_lengths();
-                }
-                if !is_probably_visible(&self.dom, id) {
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if self.dom.attr(id, AttrName::AriaModal) == Some("true")
-                    && self.dom.attr(id, AttrName::Role) == Some("dialog")
-                {
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if self.article_byline.is_none() && !self.metadata.has_source_author {
-                    build_match_string(&self.dom, id, &mut match_buffer);
-                    if is_valid_byline(&self.dom, id, &match_buffer, &mut text_buffer) {
-                        let mut names = Vec::new();
-                        self.dom
-                            .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
-                        let n = names.first().copied().unwrap_or(id);
-                        self.article_byline =
-                            Some(get_inner_text(&self.dom, n, &mut text_buffer).to_owned());
-                        remove.push(id);
-                        removed_depth = Some(depth);
-                        continue;
-                    }
-                }
-                let duplicates_title = if remove_title && matches!(tag, Tag::H1 | Tag::H2) {
-                    let heading = get_inner_text(&self.dom, id, &mut text_buffer);
-                    heading_matches_article_title(&self.article_title, heading)
-                } else {
-                    false
-                };
-                if duplicates_title {
-                    remove_title = false;
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if strip && tag != Tag::Body && tag != Tag::A {
-                    build_match_string(&self.dom, id, &mut match_buffer);
-                    let m = regexps::CANDIDATE_FILTER_SET.matches(&match_buffer);
-                    if m.matched(0)
-                        && !m.matched(1)
-                        && !has_ancestor_tags_any(&self.dom, id, &[Tag::Table, Tag::Code], 3)
-                    {
-                        remove.push(id);
-                        removed_depth = Some(depth);
-                        continue;
-                    }
-                    if self
-                        .dom
-                        .attr(id, AttrName::Role)
-                        .is_some_and(is_unlikely_role)
-                    {
-                        remove.push(id);
-                        removed_depth = Some(depth);
-                        continue;
-                    }
-                }
-                if matches!(
-                    tag,
-                    Tag::Div
-                        | Tag::Section
-                        | Tag::Header
-                        | Tag::H1
-                        | Tag::H2
-                        | Tag::H3
-                        | Tag::H4
-                        | Tag::H5
-                        | Tag::H6
-                ) && is_element_without_content(&self.dom, id)
-                {
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if is_default_tag_to_score(tag) && self.node_data.mark_score_seen(id) {
+            // Discovery only records nodes. It does not mutate the source DOM.
+            // Deferred removals stay attached until all candidate scores and
+            // link-density values have been calculated.
+            let discovery = self.discover_candidates(&mut match_buffer, &mut text_buffer);
+
+            // Score a prepared working copy. The source tree stays intact until
+            // discovery, score propagation, and final ranking are complete.
+            let mut scoring_dom = self.dom.clone();
+            let mut to_score = discovery.to_score;
+            let prepared =
+                Self::prepare_scoring_structure(&mut scoring_dom, &discovery.divs_to_prepare);
+            self.node_data.sync_len(scoring_dom.len());
+            for id in prepared {
+                if self.node_data.mark_score_seen(id) {
                     to_score.push(id)
                 }
-                if tag == Tag::Div {
-                    wrap_phrasing_content_in_p(&mut self.dom, id);
-                    if has_single_tag_inside_element(&self.dom, id, Tag::P)
-                        && get_link_density(&self.dom, id) < 0.25
-                    {
-                        if let Some(p) = self.dom.element_children(id).next() {
-                            let pid = p;
-                            self.dom.replace_with(id, pid);
-                            if self.node_data.mark_score_seen(pid) {
-                                to_score.push(pid)
-                            }
-                        }
-                    } else if !has_child_block_element(&self.dom, id) {
-                        self.dom.rename_html(id, Tag::P);
-                        if self.node_data.mark_score_seen(id) {
-                            to_score.push(id)
-                        }
-                    } else {
-                        for p in self
-                            .dom
-                            .element_children(id)
-                            .filter(|&x| self.dom.tag(x) == Some(Tag::P))
-                        {
-                            if self.node_data.mark_score_seen(p) {
-                                to_score.push(p)
-                            }
-                        }
-                    }
-                }
             }
-            for id in remove {
+            let candidates = self.propagate_candidate_scores(&scoring_dom, to_score);
+            let top =
+                self.rank_candidates(&scoring_dom, candidates, &discovery.remove_after_scoring);
+
+            // Apply the already-planned preparation and cleanup only after the
+            // non-destructive discovery and scoring phase has selected a root.
+            Self::prepare_scoring_structure(&mut self.dom, &discovery.divs_to_prepare);
+            for id in discovery.remove_after_scoring {
                 if self.dom.parent(id).is_some() {
                     self.dom.detach(id)
                 }
             }
-            self.node_data.sync_len(self.dom.len());
-            let mut candidates = SmallVec::<[NodeId; 256]>::new();
-            for id in to_score {
-                let Some(parent) = self.dom.parent(id).filter(|&x| self.dom.is_element(x)) else {
-                    continue;
-                };
-                let stats = get_or_compute_stats(&self.dom, id, &mut self.node_data);
-                if stats.text_length < 25 {
-                    continue;
-                }
-                let cs = 2.0
-                    + f64::from(stats.comma_count)
-                    + f64::from((stats.text_length / 100).min(3));
-                let mut a = Some(parent);
-                for level in 0..5 {
-                    let Some(x) = a else { break };
-                    a = self.dom.parent(x);
-                    if !self.dom.is_element(x) || !a.is_some_and(|z| self.dom.is_element(z)) {
-                        continue;
-                    }
-                    if Self::initialize_node_once(&self.dom, x, &mut self.node_data, self.flags) {
-                        candidates.push(x)
-                    }
-                    let div = if level == 0 {
-                        1.0
-                    } else if level == 1 {
-                        2.0
-                    } else {
-                        (level * 3) as f64
-                    };
-                    self.node_data.add_content_score(x, cs / div)
-                }
-            }
-            let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
-                .iter()
-                .enumerate()
-                .map(|(order, &id)| {
-                    let s = self.node_data.get_content_score(id);
-                    let len = get_or_compute_stats(&self.dom, id, &mut self.node_data).text_length;
-                    let d = get_link_density_cached(&self.dom, id, len, &mut self.node_data);
-                    let f = s * (1.0 - d);
-                    self.node_data.set_score(id, f);
-                    (id, f, order)
-                })
-                .collect();
-            let top_count = self.options.top_candidates.min(scored.len());
-            if top_count < scored.len() {
-                scored.select_nth_unstable_by(top_count, |a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.2.cmp(&b.2))
-                });
-                scored.truncate(top_count);
-            }
-            scored.sort_unstable_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.2.cmp(&b.2))
-            });
-            let top = scored;
             let body = self.dom.body().ok_or(Error::NoBody)?;
             let (top_id, synthetic) = if top.is_empty() || top[0].0 == body {
                 let c = self
@@ -552,6 +380,235 @@ impl<'a> Readability<'a> {
             });
         }
     }
+    fn discover_candidates(
+        &mut self,
+        match_buffer: &mut String,
+        text_buffer: &mut String,
+    ) -> CandidateDiscovery {
+        let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
+        let mut to_score = SmallVec::<[NodeId; 256]>::new();
+        let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
+        let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
+        if let Some(html) = self.dom.html_element() {
+            if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
+                self.article_lang = Some(lang.into())
+            }
+            if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
+                self.article_dir = Some(dir.into())
+            }
+        }
+        self.node_data.sync_len(self.dom.len());
+        let initial_nodes = self
+            .dom
+            .element_descendants_snapshot_with_depth(self.dom.root());
+        let mut excluded_depth = None;
+        let mut remove_title = true;
+        for (id, depth) in initial_nodes {
+            if let Some(root_depth) = excluded_depth {
+                if depth > root_depth {
+                    continue;
+                }
+                excluded_depth = None
+            }
+            let tag = self
+                .dom
+                .tag(id)
+                .expect("element snapshot must contain only elements");
+            if tag == Tag::A {
+                self.node_data.enable_link_lengths();
+            }
+            if !is_probably_visible(&self.dom, id)
+                || self.dom.attr(id, AttrName::AriaModal) == Some("true")
+                    && self.dom.attr(id, AttrName::Role) == Some("dialog")
+            {
+                remove_after_scoring.push(id);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if self.article_byline.is_none() && !self.metadata.has_source_author {
+                build_match_string(&self.dom, id, match_buffer);
+                if is_valid_byline(&self.dom, id, match_buffer, text_buffer) {
+                    let mut names = Vec::new();
+                    self.dom
+                        .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
+                    let name = names.first().copied().unwrap_or(id);
+                    self.article_byline =
+                        Some(get_inner_text(&self.dom, name, text_buffer).to_owned());
+                    remove_after_scoring.push(id);
+                    excluded_depth = Some(depth);
+                    continue;
+                }
+            }
+            let duplicates_title = if remove_title && matches!(tag, Tag::H1 | Tag::H2) {
+                let heading = get_inner_text(&self.dom, id, text_buffer);
+                heading_matches_article_title(&self.article_title, heading)
+            } else {
+                false
+            };
+            if duplicates_title {
+                remove_title = false;
+                remove_after_scoring.push(id);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if strip && tag != Tag::Body && tag != Tag::A {
+                build_match_string(&self.dom, id, match_buffer);
+                let matches = regexps::CANDIDATE_FILTER_SET.matches(match_buffer);
+                if matches.matched(0)
+                    && !matches.matched(1)
+                    && !has_ancestor_tags_any(&self.dom, id, &[Tag::Table, Tag::Code], 3)
+                    || self
+                        .dom
+                        .attr(id, AttrName::Role)
+                        .is_some_and(is_unlikely_role)
+                {
+                    remove_after_scoring.push(id);
+                    excluded_depth = Some(depth);
+                    continue;
+                }
+            }
+            if matches!(
+                tag,
+                Tag::Div
+                    | Tag::Section
+                    | Tag::Header
+                    | Tag::H1
+                    | Tag::H2
+                    | Tag::H3
+                    | Tag::H4
+                    | Tag::H5
+                    | Tag::H6
+            ) && is_element_without_content(&self.dom, id)
+            {
+                remove_after_scoring.push(id);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if is_default_tag_to_score(tag) && self.node_data.mark_score_seen(id) {
+                to_score.push(id)
+            }
+            if tag == Tag::Div {
+                divs_to_prepare.push(id)
+            }
+        }
+        CandidateDiscovery {
+            to_score,
+            divs_to_prepare,
+            remove_after_scoring,
+        }
+    }
+
+    fn prepare_scoring_structure(dom: &mut Dom, divs: &[NodeId]) -> SmallVec<[NodeId; 256]> {
+        let mut to_score = SmallVec::new();
+        for &id in divs {
+            if dom.parent(id).is_none() {
+                continue;
+            }
+            wrap_phrasing_content_in_p(dom, id);
+            if has_single_tag_inside_element(dom, id, Tag::P) && get_link_density(dom, id) < 0.25 {
+                if let Some(paragraph) = dom.element_children(id).next() {
+                    dom.replace_with(id, paragraph);
+                    to_score.push(paragraph)
+                }
+            } else if !has_child_block_element(dom, id) {
+                dom.rename_html(id, Tag::P);
+                to_score.push(id)
+            } else {
+                to_score.extend(
+                    dom.element_children(id)
+                        .filter(|&child| dom.tag(child) == Some(Tag::P)),
+                );
+            }
+        }
+        to_score
+    }
+
+    fn propagate_candidate_scores(
+        &mut self,
+        dom: &Dom,
+        to_score: SmallVec<[NodeId; 256]>,
+    ) -> SmallVec<[NodeId; 256]> {
+        let mut candidates = SmallVec::<[NodeId; 256]>::new();
+        for id in to_score {
+            let Some(parent) = dom.parent(id).filter(|&x| dom.is_element(x)) else {
+                continue;
+            };
+            let stats = get_or_compute_stats(dom, id, &mut self.node_data);
+            if stats.text_length < 25 {
+                continue;
+            }
+            let content_score =
+                2.0 + f64::from(stats.comma_count) + f64::from((stats.text_length / 100).min(3));
+            let mut ancestor = Some(parent);
+            for level in 0..5 {
+                let Some(id) = ancestor else { break };
+                ancestor = dom.parent(id);
+                if !dom.is_element(id) || !ancestor.is_some_and(|parent| dom.is_element(parent)) {
+                    continue;
+                }
+                if Self::initialize_node_once(dom, id, &mut self.node_data, self.flags) {
+                    candidates.push(id)
+                }
+                let divisor = if level == 0 {
+                    1.0
+                } else if level == 1 {
+                    2.0
+                } else {
+                    (level * 3) as f64
+                };
+                self.node_data
+                    .add_content_score(id, content_score / divisor)
+            }
+        }
+        candidates
+    }
+
+    fn rank_candidates(
+        &mut self,
+        dom: &Dom,
+        candidates: SmallVec<[NodeId; 256]>,
+        excluded: &[NodeId],
+    ) -> SmallVec<[(NodeId, f64, usize); 64]> {
+        // Keep the scoring DOM intact through ranking. Calculate final density
+        // against a cleanup view so deferred clutter does not change the legacy
+        // ranking behavior.
+        let mut ranking_dom = dom.clone();
+        for &id in excluded {
+            if ranking_dom.parent(id).is_some() {
+                ranking_dom.detach(id)
+            }
+        }
+        let dom = &ranking_dom;
+        self.node_data.clear_stats();
+        let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
+            .iter()
+            .enumerate()
+            .map(|(order, &id)| {
+                let score = self.node_data.get_content_score(id);
+                let length = get_or_compute_stats(dom, id, &mut self.node_data).text_length;
+                let density = get_link_density_cached(dom, id, length, &mut self.node_data);
+                let final_score = score * (1.0 - density);
+                self.node_data.set_score(id, final_score);
+                (id, final_score, order)
+            })
+            .collect();
+        let top_count = self.options.top_candidates.min(scored.len());
+        if top_count < scored.len() {
+            scored.select_nth_unstable_by(top_count, |a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            scored.truncate(top_count);
+        }
+        scored.sort_unstable_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored
+    }
+
     fn initialize_node_once(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) -> bool {
         let score = compute_initial_readability_data(dom, id, flags);
         store.initialize_if_absent(id, score)
@@ -928,5 +985,56 @@ mod tests {
             "Article"
         ));
         assert!(!heading_matches_article_title("Different title", "Article"));
+    }
+
+    #[test]
+    fn discovery_and_scoring_preserve_unlikely_subtrees() {
+        let html = r#"<body>
+            <div class="sidebar" id="unlikely"><p>This sidebar text is long enough to inspect.</p></div>
+            <main><p>This primary content is long enough to score as a candidate.</p></main>
+        </body>"#;
+        let dom = Dom::parse_document(html).unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(dom, html, None, &config);
+        let unlikely = readability
+            .dom
+            .descendants(readability.dom.root())
+            .find(|&id| readability.dom.attr(id, AttrName::Id) == Some("unlikely"))
+            .unwrap();
+        let parent = readability.dom.parent(unlikely);
+        let dom_len = readability.dom.len();
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+
+        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let normal = readability
+            .dom
+            .descendants(readability.dom.root())
+            .find(|&id| readability.dom.tag(id) == Some(Tag::Main))
+            .unwrap();
+        let normal_parent = readability.dom.parent(normal);
+        let normal_tag = readability.dom.tag(normal);
+        let normal_attrs = readability.dom.attrs(normal).to_vec();
+        let mut scoring_dom = readability.dom.clone();
+        let prepared =
+            Readability::prepare_scoring_structure(&mut scoring_dom, &discovery.divs_to_prepare);
+        let mut to_score = discovery.to_score.clone();
+        readability.node_data.sync_len(scoring_dom.len());
+        for id in prepared {
+            if readability.node_data.mark_score_seen(id) {
+                to_score.push(id)
+            }
+        }
+        let candidates = readability.propagate_candidate_scores(&scoring_dom, to_score);
+        let _ =
+            readability.rank_candidates(&scoring_dom, candidates, &discovery.remove_after_scoring);
+
+        assert!(scoring_dom.parent(unlikely).is_some());
+        assert_eq!(readability.dom.parent(unlikely), parent);
+        assert_eq!(readability.dom.parent(normal), normal_parent);
+        assert_eq!(readability.dom.tag(normal), normal_tag);
+        assert_eq!(readability.dom.attrs(normal), normal_attrs);
+        assert_eq!(readability.dom.len(), dom_len);
+        assert!(discovery.remove_after_scoring.contains(&unlikely));
     }
 }

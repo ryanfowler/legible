@@ -2,6 +2,7 @@ use super::{AttrName, DomError, ElementData, Node, NodeData, NodeId, NodeLink, T
 use html5ever::{LocalName, QualName, ns};
 use tendril::StrTendril;
 
+#[derive(Clone)]
 pub(crate) struct Dom {
     pub(crate) nodes: Vec<Node>,
     pub(crate) root: NodeId,

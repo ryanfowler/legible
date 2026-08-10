@@ -61,7 +61,8 @@ These invariants are costly to violate:
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
 - **Lazy rendering.** `ExtractedPage` owns the cleaned DOM. Render HTML, Markdown, and text lazily. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
-- **Preparation order:** remove scripts and styles, normalise body BR runs, then rename font elements. One linear traversal per stage.
+- **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
+- **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Reuse across retries.** Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
 
