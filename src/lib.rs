@@ -58,6 +58,7 @@ mod extractor;
 mod logging;
 mod markdown;
 mod metadata;
+mod normalize;
 mod page;
 mod readability;
 mod scoring;

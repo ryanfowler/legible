@@ -4,14 +4,13 @@ use crate::candidate::{
     CandidateSet, CandidateSource, RankedCandidate, RootSelectionReason, select_content_root,
 };
 use crate::cleaning::*;
-use crate::constants::{
-    flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score, regexps,
-};
+use crate::constants::{flags::*, is_alter_to_div_exception, is_default_tag_to_score, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
 use crate::extractor::ExtractorConfig;
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, StructuredData};
+use crate::normalize::{finish_normalization, normalize_semantics};
 use crate::page::ExtractedPage;
 use crate::scoring::*;
 use html5ever::ns;
@@ -762,172 +761,76 @@ impl<'a> Readability<'a> {
         &mut self,
         root: NodeId,
         video: &Regex,
-        match_buffer: &mut String,
+        _match_buffer: &mut String,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
     ) {
+        // Cleanup mutates only the compact selected fragment. Hard cleanup
+        // removes executable and interactive markup. Heuristic cleanup needs
+        // several agreeing clutter signals before it removes a subtree.
         clean_styles(&mut self.dom, root, nodes);
-        mark_data_tables(&self.dom, root, &mut self.node_data, nodes);
-        fix_lazy_images(&mut self.dom, root, nodes);
-        clean_conditionally(
-            &mut self.dom,
-            root,
-            &[Tag::Form],
-            Tag::Form,
-            self.flags,
-            video,
-            &mut self.node_data,
-            text_buffer,
-            nodes,
-            self.options.link_density_modifier,
-        );
-        clean_conditionally(
-            &mut self.dom,
-            root,
-            &[Tag::Fieldset],
-            Tag::Fieldset,
-            self.flags,
-            video,
-            &mut self.node_data,
-            text_buffer,
-            nodes,
-            self.options.link_density_modifier,
-        );
-        clean_breadcrumb_navigation(&mut self.dom, root, nodes);
-        clean_tags(
-            &mut self.dom,
-            root,
-            &[Tag::Object, Tag::Embed, Tag::Footer, Tag::Link, Tag::Aside],
-            video,
-            nodes,
-        );
-        let threshold = crate::constants::defaults::DEFAULT_CHAR_THRESHOLD;
-        let children: SmallVec<[NodeId; 16]> = self.dom.element_children(root).collect();
-        for c in children {
-            clean_matched_nodes(&mut self.dom, c, nodes, match_buffer, |d, id, m| {
-                has_share_element(m) && get_inner_text(d, id, text_buffer).len() < threshold
-            })
+        hard_cleanup(&mut self.dom, root, video, nodes);
+        if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
+            heuristic_cleanup(&mut self.dom, root, &mut self.node_data, text_buffer, nodes);
         }
-        clean_tags(
-            &mut self.dom,
-            root,
-            &[
-                Tag::Iframe,
-                Tag::Input,
-                Tag::Textarea,
-                Tag::Select,
-                Tag::Button,
-            ],
-            video,
-            nodes,
-        );
-        clean_conditionally(
-            &mut self.dom,
-            root,
-            &[Tag::Table],
-            Tag::Table,
-            self.flags,
-            video,
-            &mut self.node_data,
-            text_buffer,
-            nodes,
-            self.options.link_density_modifier,
-        );
-        clean_conditionally(
-            &mut self.dom,
-            root,
-            &[Tag::Ul, Tag::Ol],
-            Tag::Ul,
-            self.flags,
-            video,
-            &mut self.node_data,
-            text_buffer,
-            nodes,
-            self.options.link_density_modifier,
-        );
-        clean_conditionally(
-            &mut self.dom,
-            root,
-            &[Tag::Div],
-            Tag::Div,
-            self.flags,
-            video,
-            &mut self.node_data,
-            text_buffer,
-            nodes,
-            self.options.link_density_modifier,
-        );
-        let hs: SmallVec<[NodeId; 4]> = self
+
+        // Normalization is separate from relevance cleanup. Serializers receive
+        // stable code, figure, image, footnote, and table structures.
+        normalize_semantics(&mut self.dom, root, nodes);
+
+        let paragraphs: SmallVec<[NodeId; 64]> = self
             .dom
             .descendants(root)
-            .filter(|&x| self.dom.tag(x) == Some(Tag::H1))
+            .filter(|&node| self.dom.tag(node) == Some(Tag::P))
             .collect();
-        for x in hs {
-            self.dom.rename_html(x, Tag::H2)
-        }
-        let ps: SmallVec<[NodeId; 64]> = self
-            .dom
-            .descendants(root)
-            .filter(|&x| self.dom.tag(x) == Some(Tag::P))
-            .collect();
-        for p in ps {
-            let media = self.dom.descendants(p).any(|x| {
+        for paragraph in paragraphs {
+            let media = self.dom.descendants(paragraph).any(|node| {
                 matches!(
-                    self.dom.tag(x),
+                    self.dom.tag(node),
                     Some(Tag::Img | Tag::Embed | Tag::Object | Tag::Iframe)
                 )
             });
-            if !media && !has_non_empty_inner_text(&self.dom, p) {
-                self.dom.detach(p)
+            if !media && !has_non_empty_inner_text(&self.dom, paragraph) {
+                self.dom.detach(paragraph);
             }
         }
-        let brs: SmallVec<[NodeId; 32]> = self
+        let breaks: SmallVec<[NodeId; 32]> = self
             .dom
             .descendants(root)
-            .filter(|&x| self.dom.tag(x) == Some(Tag::Br))
+            .filter(|&node| self.dom.tag(node) == Some(Tag::Br))
             .collect();
-        for br in brs {
-            if crate::cleaning::next_non_whitespace_sibling(&self.dom, br)
-                .is_some_and(|x| self.dom.tag(x) == Some(Tag::P))
+        for line_break in breaks {
+            if crate::cleaning::next_non_whitespace_sibling(&self.dom, line_break)
+                .is_some_and(|node| self.dom.tag(node) == Some(Tag::P))
             {
-                self.dom.detach(br)
-            }
-        }
-        let tables: SmallVec<[NodeId; 16]> = self
-            .dom
-            .descendants(root)
-            .filter(|&x| self.dom.tag(x) == Some(Tag::Table))
-            .collect();
-        for t in tables {
-            let tb = if has_single_tag_inside_element(&self.dom, t, Tag::Tbody) {
-                self.dom.element_children(t).next()
-            } else {
-                Some(t)
-            };
-            if let Some(tb) = tb {
-                if has_single_tag_inside_element(&self.dom, tb, Tag::Tr) {
-                    if let Some(row) = self.dom.element_children(tb).next() {
-                        if has_single_tag_inside_element(&self.dom, row, Tag::Td) {
-                            if let Some(cell) = self.dom.element_children(row).next() {
-                                let phr = self
-                                    .dom
-                                    .children(cell)
-                                    .all(|x| is_phrasing_content(&self.dom, x));
-                                self.dom
-                                    .rename_html(cell, if phr { Tag::P } else { Tag::Div });
-                                self.dom.replace_with(t, cell)
-                            }
-                        }
-                    }
-                }
+                self.dom.detach(line_break);
             }
         }
     }
     fn article_excerpt(&self, root: NodeId) -> Option<String> {
         self.dom
-            .first_descendant_by_tag(root, Tag::P)
-            .map(|id| get_inner_text_owned(&self.dom, id))
-            .filter(|text| !text.is_empty())
+            .descendants(root)
+            .filter(|&node| self.dom.tag(node) == Some(Tag::P))
+            .filter(|&node| {
+                !self
+                    .dom
+                    .ancestors(node)
+                    .take_while(|&ancestor| ancestor != root)
+                    .any(|ancestor| {
+                        matches!(self.dom.tag(ancestor), Some(Tag::Aside | Tag::Nav))
+                            || [AttrName::Class, AttrName::Id]
+                                .into_iter()
+                                .filter_map(|name| self.dom.attr(ancestor, name))
+                                .any(|value| {
+                                    let value = value.to_ascii_lowercase();
+                                    value.contains("hatnote")
+                                        || value.contains("dablink")
+                                        || value.contains("shortdescription")
+                                })
+                    })
+            })
+            .map(|node| get_inner_text_owned(&self.dom, node))
+            .find(|text| !text.is_empty())
     }
     fn post_process(&mut self, root: NodeId, nodes: &mut Vec<NodeId>) {
         // URI repair, class cleanup, and comment removal share one stable
@@ -1029,7 +932,7 @@ impl<'a> Readability<'a> {
                 }
             }
         }
-        simplify_nested_elements(&mut self.dom, root, nodes);
+        finish_normalization(&mut self.dom, root, nodes);
     }
     fn restore_source(&mut self, source: Dom) {
         self.dom = source;

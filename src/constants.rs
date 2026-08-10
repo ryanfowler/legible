@@ -10,12 +10,6 @@ pub mod flags {
     pub const FLAG_CLEAN_CONDITIONALLY: u32 = 0x4;
 }
 
-/// Default configuration values.
-pub mod defaults {
-    /// The default number of chars an article must have to return a result.
-    pub const DEFAULT_CHAR_THRESHOLD: usize = 500;
-}
-
 #[inline]
 pub fn is_default_tag_to_score(tag: Tag) -> bool {
     matches!(
@@ -56,10 +50,6 @@ pub mod regexps {
         Regex::new(r"(?i)//(www\.)?((dailymotion|youtube|youtube-nocookie|player\.vimeo|v\.qq|bilibili|live.bilibili)\.com|(archive|upload\.wikimedia)\.org|player\.twitch\.tv)").unwrap()
     });
 
-    /// Matches share-related elements.
-    pub static SHARE_ELEMENTS: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)(\b|_)(share|sharedaddy)(\b|_)").unwrap());
-
     /// Tokenizes text on word boundaries.
     pub static TOKENIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\W+").unwrap());
 
@@ -67,35 +57,12 @@ pub mod regexps {
     pub static SRCSET_URL: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap());
 
-    /// Matches ad-related words.
-    pub static AD_WORDS: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r"(?iu)^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|广告|Реклама|Anuncio)$",
-        )
-        .unwrap()
-    });
-
-    /// Matches loading indicator words.
-    pub static LOADING_WORDS: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?iu)^((loading|正在加载|Загрузка|chargement|cargando)(…|\.\.\.)?)$").unwrap()
-    });
-
     /// RegexSet for class weight scoring - combines NEGATIVE (index 0) and POSITIVE (index 1).
     /// Allows single-pass matching instead of 4 separate regex calls.
     pub static CLASS_WEIGHT_SET: LazyLock<RegexSet> = LazyLock::new(|| {
         RegexSet::new([
             NEGATIVE.as_str(), // Index 0 - negative patterns
             POSITIVE.as_str(), // Index 1 - positive patterns
-        ])
-        .unwrap()
-    });
-
-    /// RegexSet for ad/loading word detection - combines AD_WORDS (index 0)
-    /// and LOADING_WORDS (index 1) for single-pass matching.
-    pub static AD_LOADING_SET: LazyLock<RegexSet> = LazyLock::new(|| {
-        RegexSet::new([
-            AD_WORDS.as_str(),      // Index 0 - ad-related words
-            LOADING_WORDS.as_str(), // Index 1 - loading indicator words
         ])
         .unwrap()
     });
@@ -383,17 +350,6 @@ pub fn parse_b64_data_url(s: &str) -> Option<(usize, &str)> {
     }
     pos += 1;
     Some((pos, media_type))
-}
-
-/// Check if `s` contains "share" or "sharedaddy" surrounded by word boundaries
-/// or underscores (case-insensitive).
-/// Replaces `regexps::SHARE_ELEMENTS.is_match`.
-#[inline]
-pub fn has_share_element(s: &str) -> bool {
-    s.as_bytes()
-        .windows(5)
-        .any(|window| window.eq_ignore_ascii_case(b"share"))
-        && regexps::SHARE_ELEMENTS.is_match(s)
 }
 
 #[inline]
@@ -809,24 +765,5 @@ mod tests {
 
         // Empty media type
         assert!(parse_b64_data_url("data:;base64,").is_none());
-    }
-
-    // ---- has_share_element ----
-
-    #[test]
-    fn test_has_share_element() {
-        assert!(has_share_element("share"));
-        assert!(has_share_element("sharedaddy"));
-        assert!(has_share_element("_share_"));
-        assert!(has_share_element("share_button"));
-        assert!(has_share_element("some share text"));
-        assert!(!has_share_element("shares")); // word char follows
-        assert!(!has_share_element("noshare")); // word char precedes
-        assert!(!has_share_element("éshare")); // Unicode word char precedes
-        assert!(!has_share_element("share東京")); // Unicode word char follows
-        assert!(!has_share_element(""));
-        assert!(!has_share_element("unrelated"));
-        // "share" inside "sharedaddy" should not double-match
-        // (this only matters if we count matches; has_share_element returns bool so it's fine)
     }
 }

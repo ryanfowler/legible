@@ -1,0 +1,528 @@
+//! Semantic normalization for retained content.
+
+use crate::cleaning::{fix_lazy_images, simplify_nested_elements};
+use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::scoring::{has_single_tag_inside_element, is_element_without_content};
+use smallvec::SmallVec;
+
+/// Normalizes retained markup into a predictable tree for all serializers.
+pub(crate) fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    normalize_images(dom, root, nodes);
+    normalize_code_blocks(dom, root);
+    normalize_figures(dom, root);
+    normalize_footnotes(dom, root);
+    normalize_layout_tables(dom, root);
+}
+
+/// Finishes normalization after URL and attribute cleanup.
+pub(crate) fn finish_normalization(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    simplify_nested_elements(dom, root, nodes);
+    remove_empty_nodes(dom, root, nodes);
+}
+
+fn normalize_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    fix_lazy_images(dom, root, nodes);
+
+    // Markdown needs one concrete image URL. Use the first srcset candidate
+    // when an image has no src. Keep the complete srcset for HTML output.
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img)),
+    );
+    for &image in nodes.iter() {
+        let replace_placeholder =
+            dom.attr(image, AttrName::Src).is_none() || image_has_placeholder_source(dom, image);
+        if replace_placeholder
+            && let Some((value, is_srcset)) =
+                picture_source(dom, image).map(|(value, is_srcset)| (value.to_owned(), is_srcset))
+        {
+            if is_srcset {
+                dom.set_attr(image, AttrName::Srcset, &value);
+                if let Some(src) = first_srcset_candidate(&value) {
+                    dom.set_attr(image, AttrName::Src, src);
+                }
+            } else {
+                dom.set_attr(image, AttrName::Src, &value);
+            }
+        }
+        if dom.attr(image, AttrName::Src).is_none()
+            && let Some(src) = dom
+                .attr(image, AttrName::Srcset)
+                .and_then(first_srcset_candidate)
+                .map(str::to_owned)
+        {
+            dom.set_attr(image, AttrName::Src, &src);
+        }
+    }
+
+    // Remove only adjacent hydration variants. Repeated images separated by
+    // text or another element remain distinct content.
+    let images: SmallVec<[NodeId; 32]> = nodes.iter().copied().collect();
+    for image in images {
+        if dom.parent(image).is_none() {
+            continue;
+        }
+        let Some(previous) = previous_element_sibling(dom, image) else {
+            continue;
+        };
+        let Some(previous_image) = single_image(dom, previous) else {
+            continue;
+        };
+        if same_image_url(dom, previous_image, image)
+            && (is_hydration_placeholder(dom, previous_image)
+                || is_hydration_placeholder(dom, image))
+        {
+            let remove = if is_hydration_placeholder(dom, previous_image) {
+                previous
+            } else {
+                image
+            };
+            dom.detach(remove);
+        }
+    }
+}
+
+fn picture_source(dom: &Dom, image: NodeId) -> Option<(&str, bool)> {
+    let picture = dom
+        .ancestors(image)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))?;
+    if let Some(value) = valid_image_attribute(dom.attr(picture, AttrName::DataSrcset)) {
+        return Some((value, true));
+    }
+    if let Some(value) = valid_image_attribute(dom.attr(picture, AttrName::DataSrc)) {
+        return Some((value, false));
+    }
+    for source in dom
+        .descendants(picture)
+        .filter(|&node| dom.tag(node) == Some(Tag::Source))
+    {
+        if let Some(value) = valid_image_attribute(
+            dom.attr(source, AttrName::DataSrcset)
+                .or_else(|| dom.attr(source, AttrName::Srcset)),
+        ) {
+            return Some((value, true));
+        }
+        if let Some(value) = valid_image_attribute(
+            dom.attr(source, AttrName::DataSrc)
+                .or_else(|| dom.attr(source, AttrName::Src)),
+        ) {
+            return Some((value, false));
+        }
+    }
+    None
+}
+
+fn valid_image_attribute(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null"))
+}
+
+fn image_has_placeholder_source(dom: &Dom, image: NodeId) -> bool {
+    dom.attr(image, AttrName::Src).is_some_and(|source| {
+        let source = source.to_ascii_lowercase();
+        source.contains("placeholder")
+            || source.contains("blank.gif")
+            || source.contains("spacer.gif")
+            || source.contains("transparent.gif")
+            || crate::constants::parse_b64_data_url(&source)
+                .is_some_and(|(end, _)| source.len().saturating_sub(end) < 133)
+    })
+}
+
+fn first_srcset_candidate(srcset: &str) -> Option<&str> {
+    srcset
+        .split(',')
+        .next()?
+        .split_ascii_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+}
+
+fn previous_element_sibling(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    let mut previous = dom.prev_sibling(node);
+    while let Some(candidate) = previous {
+        if dom.is_element(candidate) {
+            return Some(candidate);
+        }
+        if dom
+            .text_node(candidate)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return None;
+        }
+        previous = dom.prev_sibling(candidate);
+    }
+    None
+}
+
+fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    if dom.tag(node) == Some(Tag::Img) {
+        return Some(node);
+    }
+    if dom.has_non_whitespace_text(node) {
+        return None;
+    }
+    let mut images = dom
+        .descendants(node)
+        .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img));
+    let image = images.next()?;
+    images.next().is_none().then_some(image)
+}
+
+fn same_image_url(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    [
+        AttrName::Src,
+        AttrName::Srcset,
+        AttrName::DataSrc,
+        AttrName::DataSrcset,
+    ]
+    .into_iter()
+    .any(|attribute| {
+        dom.attr(first, attribute)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|value| dom.attr(second, attribute) == Some(value))
+    })
+}
+
+fn is_hydration_placeholder(dom: &Dom, image: NodeId) -> bool {
+    let name = [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(image, attribute))
+        .any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("placeholder") || value.contains("lazy") || value.contains("hydration")
+        });
+    name || dom.attr(image, AttrName::Src).is_none()
+        || [AttrName::Width, AttrName::Height]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(image, attribute)?.parse::<u32>().ok())
+            .any(|size| size <= 1)
+}
+
+fn normalize_code_blocks(dom: &mut Dom, root: NodeId) {
+    let nodes = dom.element_descendants_snapshot_with_depth(root);
+    for (node, _) in nodes {
+        if dom.parent(node).is_none() {
+            continue;
+        }
+        match dom.tag(node) {
+            Some(Tag::Pre) => {
+                let code = if has_single_tag_inside_element(dom, node, Tag::Code) {
+                    dom.element_children(node).next()
+                } else {
+                    let Ok(code) = dom.create_html_element(Tag::Code) else {
+                        continue;
+                    };
+                    dom.move_children(node, code);
+                    dom.append_child(node, code);
+                    Some(code)
+                };
+                if let Some(code) = code
+                    && let Some(language) =
+                        language_hint(dom, code).or_else(|| language_hint(dom, node))
+                {
+                    dom.set_attr(code, AttrName::DataLanguage, &language);
+                }
+            }
+            Some(Tag::Code) if dom.tag(dom.parent(node).unwrap_or(root)) != Some(Tag::Pre) => {
+                let block = dom
+                    .text_node(dom.first_child(node).unwrap_or(node))
+                    .is_some_and(|text| text.contains('\n'))
+                    || language_hint(dom, node).is_some();
+                if block {
+                    let language = language_hint(dom, node);
+                    let Ok(pre) = dom.create_html_element(Tag::Pre) else {
+                        continue;
+                    };
+                    dom.insert_before(node, pre);
+                    dom.append_child(pre, node);
+                    if let Some(language) = language {
+                        dom.set_attr(node, AttrName::DataLanguage, &language);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Common syntax highlighters put one pre block inside a decorative div.
+    let wrappers = dom.element_descendants_snapshot_with_depth(root);
+    for (wrapper, _) in wrappers.into_iter().rev() {
+        if dom.parent(wrapper).is_none() || dom.tag(wrapper) != Some(Tag::Div) {
+            continue;
+        }
+        let named_as_code = [AttrName::Class, AttrName::Id]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(wrapper, attribute))
+            .any(|value| {
+                value.split_whitespace().any(|token| {
+                    let token = token.to_ascii_lowercase();
+                    token == "highlight"
+                        || token == "codehilite"
+                        || token == "sourcecode"
+                        || token.starts_with("highlight-")
+                })
+            });
+        if named_as_code
+            && has_single_tag_inside_element(dom, wrapper, Tag::Pre)
+            && let Some(pre) = dom.element_children(wrapper).next()
+        {
+            dom.replace_with(wrapper, pre);
+        }
+    }
+}
+
+fn language_hint(dom: &Dom, node: NodeId) -> Option<String> {
+    if let Some(value) = dom
+        .attr(node, AttrName::DataLanguage)
+        .or_else(|| dom.attr(node, AttrName::Lang))
+        .or_else(|| dom.attr_by_local_name(node, "data-lang"))
+        && let Some(language) = valid_language(value)
+    {
+        return Some(language.to_owned());
+    }
+    for token in dom.attr(node, AttrName::Class)?.split_whitespace() {
+        let Some(value) = token
+            .strip_prefix("language-")
+            .or_else(|| token.strip_prefix("lang-"))
+        else {
+            continue;
+        };
+        if let Some(language) = valid_language(value) {
+            return Some(language.to_owned());
+        }
+    }
+    None
+}
+
+fn valid_language(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'_' | b'.')))
+    .then_some(value)
+}
+
+fn normalize_figures(dom: &mut Dom, root: NodeId) {
+    let nodes = dom.element_descendants_snapshot_with_depth(root);
+    for (wrapper, _) in nodes.into_iter().rev() {
+        if dom.parent(wrapper).is_none()
+            || !matches!(dom.tag(wrapper), Some(Tag::Div | Tag::P | Tag::Section))
+        {
+            continue;
+        }
+        let named_as_figure = [AttrName::Class, AttrName::Id]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(wrapper, attribute))
+            .any(|value| {
+                value.split_whitespace().any(|token| {
+                    matches!(
+                        token.to_ascii_lowercase().as_str(),
+                        "figure" | "image-with-caption" | "media-with-caption"
+                    )
+                })
+            });
+        if !named_as_figure
+            || dom
+                .descendants(wrapper)
+                .any(|node| dom.tag(node) == Some(Tag::Figure))
+        {
+            continue;
+        }
+        let images: SmallVec<[NodeId; 2]> = dom
+            .descendants(wrapper)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .collect();
+        if images.len() != 1 {
+            continue;
+        }
+        let caption = dom.descendants(wrapper).find(|&node| {
+            dom.tag(node) == Some(Tag::Figcaption)
+                || [AttrName::Class, AttrName::Id]
+                    .into_iter()
+                    .filter_map(|attribute| dom.attr(node, attribute))
+                    .any(|value| {
+                        value.split_whitespace().any(|token| {
+                            matches!(
+                                token.to_ascii_lowercase().as_str(),
+                                "caption" | "figcaption" | "image-caption"
+                            )
+                        })
+                    })
+        });
+        if let Some(caption) = caption {
+            dom.rename_html(wrapper, Tag::Figure);
+            dom.rename_html(caption, Tag::Figcaption);
+        }
+    }
+}
+
+fn normalize_footnotes(dom: &mut Dom, root: NodeId) {
+    let nodes = dom.element_descendants_snapshot_with_depth(root);
+    for (node, _) in nodes {
+        if dom.parent(node).is_some()
+            && dom.attr(node, AttrName::Role).is_some_and(|role| {
+                role.split_whitespace()
+                    .any(|value| value.eq_ignore_ascii_case("doc-footnote"))
+            })
+            && matches!(dom.tag(node), Some(Tag::Div | Tag::Aside))
+        {
+            dom.rename_html(node, Tag::Section);
+        }
+    }
+}
+
+fn normalize_layout_tables(dom: &mut Dom, root: NodeId) {
+    let tables: SmallVec<[NodeId; 16]> = dom
+        .descendants(root)
+        .filter(|&node| dom.tag(node) == Some(Tag::Table))
+        .collect();
+    for table in tables {
+        if dom.parent(table).is_none() {
+            continue;
+        }
+        let body = if has_single_tag_inside_element(dom, table, Tag::Tbody) {
+            dom.element_children(table).next()
+        } else {
+            Some(table)
+        };
+        let Some(body) = body else { continue };
+        if !has_single_tag_inside_element(dom, body, Tag::Tr) {
+            continue;
+        }
+        let Some(row) = dom.element_children(body).next() else {
+            continue;
+        };
+        if !has_single_tag_inside_element(dom, row, Tag::Td) {
+            continue;
+        }
+        let Some(cell) = dom.element_children(row).next() else {
+            continue;
+        };
+        let phrasing = dom
+            .children(cell)
+            .all(|node| crate::scoring::is_phrasing_content(dom, node));
+        dom.rename_html(cell, if phrasing { Tag::P } else { Tag::Div });
+        dom.replace_with(table, cell);
+    }
+}
+
+fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    nodes.clear();
+    nodes.extend(dom.descendants(root));
+    for &node in nodes.iter().rev() {
+        if dom.parent(node).is_some()
+            && matches!(
+                dom.tag(node),
+                Some(
+                    Tag::Div
+                        | Tag::Section
+                        | Tag::P
+                        | Tag::Span
+                        | Tag::Aside
+                        | Tag::Footer
+                        | Tag::Header
+                )
+            )
+            && is_element_without_content(dom, node)
+        {
+            dom.detach(node);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown::dom_to_markdown;
+
+    fn normalized(html: &str) -> (Dom, NodeId) {
+        let mut dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let root = dom.root();
+        let mut nodes = Vec::new();
+        normalize_semantics(&mut dom, root, &mut nodes);
+        finish_normalization(&mut dom, root, &mut nodes);
+        (dom, root)
+    }
+
+    #[test]
+    fn normalizes_highlighted_code_and_language() {
+        let (dom, root) = normalized(
+            r#"<div class="highlight"><pre class="highlight language-rust"><span>fn main() {</span>
+<span>}</span></pre></div>"#,
+        );
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "```rust\nfn main() {\n}\n```\n"
+        );
+    }
+
+    #[test]
+    fn does_not_create_nested_figures() {
+        let (dom, root) = normalized(
+            r#"<div class="image-with-caption"><figure><img src="plot.png"><figcaption>Plot</figcaption></figure></div>"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Figure))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn normalizes_captioned_image_wrapper() {
+        let (dom, root) = normalized(
+            r#"<div class="image-with-caption"><img src="plot.png" alt="Plot"><p class="caption">Result plot</p></div>"#,
+        );
+        assert!(
+            dom.descendants(root)
+                .any(|node| dom.tag(node) == Some(Tag::Figure))
+        );
+        assert!(
+            dom.descendants(root)
+                .any(|node| dom.tag(node) == Some(Tag::Figcaption))
+        );
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "![Plot](plot.png)\n\nResult plot\n"
+        );
+    }
+
+    #[test]
+    fn uses_srcset_when_src_is_missing() {
+        let (dom, root) = normalized(r#"<img srcset="small.jpg 1x, large.jpg 2x" alt="Photo">"#);
+        assert_eq!(dom_to_markdown(&dom, root, 0), "![Photo](small.jpg)\n");
+    }
+
+    #[test]
+    fn uses_a_lazy_picture_source_for_markdown() {
+        let (dom, root) = normalized(
+            r#"<picture><source><source data-srcset="hero.webp 1x, hero-large.webp 2x"><img src="blank.gif" alt="Hero"></picture>"#,
+        );
+        assert_eq!(dom_to_markdown(&dom, root, 0), "![Hero](hero.webp)\n");
+
+        let (dom, root) = normalized(
+            r#"<picture><source data-src="null"><source data-src="hero.jpg"><img src="placeholder.gif" alt="Hero"></picture>"#,
+        );
+        assert_eq!(dom_to_markdown(&dom, root, 0), "![Hero](hero.jpg)\n");
+
+        let (dom, root) = normalized(
+            r#"<picture data-src="parent.jpg"><img width="1" src="blank.gif" alt="Parent"></picture>"#,
+        );
+        assert_eq!(dom_to_markdown(&dom, root, 0), "![Parent](parent.jpg)\n");
+    }
+
+    #[test]
+    fn preserves_heading_levels_and_footnotes() {
+        let (dom, root) = normalized(
+            r##"<h1>Guide</h1><p>Text<a href="#note">[1]</a></p><aside id="note" role="doc-footnote">A reference.</aside>"##,
+        );
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "# Guide\n\nText[\\[1\\]](#note)\n\nA reference.\n"
+        );
+    }
+}

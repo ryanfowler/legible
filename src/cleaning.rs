@@ -1,13 +1,13 @@
 //! DOM preparation and article cleanup.
 #![allow(clippy::collapsible_if)]
 use crate::constants::{
-    PRESENTATIONAL_ATTRIBUTES, flags::*, has_image_extension, has_image_src, has_image_srcset,
-    is_deprecated_size_attribute_elem, parse_b64_data_url, regexps,
+    PRESENTATIONAL_ATTRIBUTES, has_image_extension, has_image_src, has_image_srcset,
+    is_deprecated_size_attribute_elem, parse_b64_data_url,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::{
-    get_class_weight, get_inner_text, get_link_density_cached, get_or_compute_stats,
-    has_single_tag_inside_element, is_element_without_content, is_phrasing_content,
+    get_inner_text, get_link_density_cached, get_or_compute_stats, has_single_tag_inside_element,
+    is_element_without_content, is_phrasing_content,
 };
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
@@ -125,56 +125,6 @@ fn has_allowed_media(dom: &Dom, id: NodeId, allowed: &Regex) -> bool {
         })
 }
 
-pub fn clean_tags(
-    dom: &mut Dom,
-    root: NodeId,
-    tags: &[Tag],
-    allowed: &Regex,
-    nodes: &mut Vec<NodeId>,
-) {
-    nodes.clear();
-    nodes.extend(
-        dom.descendants(root)
-            .filter(|&id| dom.tag(id).is_some_and(|t| tags.contains(&t))),
-    );
-    for &id in nodes.iter() {
-        if dom.parent(id).is_none() {
-            continue;
-        }
-        let tag = dom.tag(id).unwrap();
-        if matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe) {
-            if has_allowed_media(dom, id, allowed) {
-                continue;
-            }
-        }
-        dom.detach(id);
-    }
-}
-pub fn clean_breadcrumb_navigation(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    nodes.clear();
-    nodes.extend(
-        dom.descendants(root)
-            .filter(|&id| dom.tag(id) == Some(Tag::Nav)),
-    );
-    for &id in nodes.iter() {
-        let is_breadcrumb = [AttrName::Class, AttrName::Id]
-            .into_iter()
-            .filter_map(|name| dom.attr(id, name))
-            .any(|value| value.to_ascii_lowercase().contains("breadcrumb"))
-            || dom
-                .attr_by_local_name(id, "aria-label")
-                .is_some_and(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "breadcrumb" | "breadcrumbs"
-                    )
-                });
-        if is_breadcrumb && dom.parent(id).is_some() {
-            dom.detach(id);
-        }
-    }
-}
-
 pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.clear();
     nodes.extend(std::iter::once(root).chain(dom.descendants(root)));
@@ -189,188 +139,6 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         }
     }
 }
-#[allow(clippy::too_many_arguments)]
-pub fn clean_conditionally(
-    dom: &mut Dom,
-    root: NodeId,
-    tags: &[Tag],
-    semantic: Tag,
-    flags: u32,
-    allowed: &Regex,
-    store: &mut crate::dom::NodeStateStore,
-    text_buffer: &mut String,
-    nodes: &mut Vec<NodeId>,
-    modifier: f64,
-) {
-    if flags & FLAG_CLEAN_CONDITIONALLY == 0 {
-        return;
-    }
-    nodes.clear();
-    nodes.extend(
-        dom.descendants(root)
-            .filter(|&id| dom.tag(id).is_some_and(|t| tags.contains(&t))),
-    );
-    store.clear_stats();
-    for &id in nodes.iter().rev() {
-        if dom.parent(id).is_some()
-            && should_remove(
-                dom,
-                id,
-                semantic,
-                flags,
-                allowed,
-                store,
-                text_buffer,
-                modifier,
-            )
-        {
-            hoist_protected_descendants(dom, id, store);
-            dom.detach(id);
-        }
-    }
-}
-#[allow(clippy::too_many_arguments)]
-fn should_remove(
-    dom: &Dom,
-    id: NodeId,
-    semantic: Tag,
-    flags: u32,
-    allowed: &Regex,
-    store: &mut crate::dom::NodeStateStore,
-    text_buffer: &mut String,
-    modifier: f64,
-) -> bool {
-    if semantic == Tag::Table && store.is_data_table(id) == Some(true) {
-        return false;
-    }
-    let mut p = dom.parent(id);
-    let mut depth = 0;
-    let mut figure = false;
-    while let Some(x) = p {
-        if dom.tag(x) == Some(Tag::Table) && store.is_data_table(x) == Some(true) {
-            return false;
-        }
-        if depth <= 3 && dom.tag(x) == Some(Tag::Code) {
-            return false;
-        }
-        if depth <= 3 && dom.tag(x) == Some(Tag::Figure) {
-            figure = true;
-        }
-        p = dom.parent(x);
-        depth += 1;
-    }
-    let stats = get_or_compute_stats(dom, id, store);
-    let weight = get_class_weight(dom, id, flags);
-    if stats.comma_count >= 10 {
-        return false;
-    }
-    let mut pc = 0;
-    let mut imgs = 0;
-    let mut lis = 0usize;
-    let mut inputs = 0;
-    let mut embeds = 0;
-    let mut heading = 0u64;
-    let mut textish = 0u64;
-    let mut list = 0u64;
-    for x in dom.descendants(id) {
-        match dom.tag(x) {
-            Some(Tag::P) => {
-                pc += 1;
-                textish += u64::from(get_or_compute_stats(dom, x, store).text_length);
-            }
-            Some(Tag::Img) => {
-                imgs += 1;
-                textish += u64::from(get_or_compute_stats(dom, x, store).text_length);
-            }
-            Some(Tag::Li) => {
-                lis += 1;
-                textish += u64::from(get_or_compute_stats(dom, x, store).text_length);
-            }
-            Some(Tag::Input) => inputs += 1,
-            Some(Tag::Ul | Tag::Ol) => {
-                let length = u64::from(get_or_compute_stats(dom, x, store).text_length);
-                list += length;
-                textish += length;
-            }
-            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
-                heading += u64::from(get_or_compute_stats(dom, x, store).text_length)
-            }
-            Some(
-                Tag::Span | Tag::Td | Tag::Blockquote | Tag::Dl | Tag::Div | Tag::Pre | Tag::Table,
-            ) => textish += u64::from(get_or_compute_stats(dom, x, store).text_length),
-            Some(Tag::Object | Tag::Embed | Tag::Iframe) => {
-                if has_allowed_media(dom, x, allowed) {
-                    return false;
-                }
-                embeds += 1;
-            }
-            _ => {}
-        }
-    }
-    let raw_lis = lis;
-    lis = lis.saturating_sub(100);
-    let is_list = semantic == Tag::Ul
-        || semantic == Tag::Ol
-        || stats.text_length > 0 && list as f64 / stats.text_length as f64 > 0.9;
-    if stats.text_length <= 32
-        && regexps::AD_LOADING_SET.is_match(get_inner_text(dom, id, text_buffer))
-    {
-        return true;
-    }
-    let hd = if stats.text_length > 0 {
-        heading as f64 / stats.text_length as f64
-    } else {
-        0.
-    };
-    let ld = get_link_density_cached(dom, id, stats.text_length, store);
-    let td = if stats.text_length > 0 {
-        textish as f64 / stats.text_length as f64
-    } else {
-        0.
-    };
-    let has_positive_name = [AttrName::Class, AttrName::Id]
-        .into_iter()
-        .filter_map(|name| dom.attr(id, name))
-        .any(|value| regexps::POSITIVE.is_match(value));
-    let has_unlikely_name = [AttrName::Class, AttrName::Id]
-        .into_iter()
-        .filter_map(|name| dom.attr(id, name))
-        .any(|value| regexps::UNLIKELY_CANDIDATES.is_match(value));
-    if is_list && raw_lis >= 10 && heading > 0 && has_unlikely_name && !has_positive_name {
-        return true;
-    }
-    let remove = (!figure && imgs > 1 && (pc as f64 / imgs as f64) < 0.5)
-        || (!is_list && lis > pc)
-        || inputs > pc / 3
-        || (!is_list
-            && !figure
-            && hd < 0.9
-            && stats.text_length < 25
-            && (imgs == 0 || imgs > 2)
-            && ld > 0.0)
-        || (!is_list && weight < 25 && ld > 0.2 + modifier)
-        || (weight >= 25 && ld > 0.5 + modifier)
-        || (embeds == 1 && stats.text_length < 75)
-        || embeds > 1
-        || (imgs == 0 && td == 0.0);
-    if is_list && remove {
-        if dom
-            .element_children(id)
-            .any(|child| dom.element_children(child).nth(1).is_some())
-        {
-            return true;
-        }
-        let li = dom
-            .descendants(id)
-            .filter(|&x| dom.tag(x) == Some(Tag::Li))
-            .count();
-        if imgs == li {
-            return false;
-        }
-    }
-    remove
-}
-
 fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
     matches!(
         dom.tag(id),
@@ -385,22 +153,6 @@ fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStor
                 | Tag::Dl
         )
     ) || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
-}
-
-fn hoist_protected_descendants(dom: &mut Dom, wrapper: NodeId, store: &crate::dom::NodeStateStore) {
-    let protected: SmallVec<[NodeId; 4]> = dom
-        .descendants(wrapper)
-        .filter(|&node| {
-            is_protected_content(dom, node, store)
-                && !dom
-                    .ancestors(node)
-                    .take_while(|&ancestor| ancestor != wrapper)
-                    .any(|ancestor| is_protected_content(dom, ancestor, store))
-        })
-        .collect();
-    for node in protected {
-        dom.insert_before(wrapper, node);
-    }
 }
 
 pub fn mark_data_tables(
@@ -538,7 +290,18 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
             continue;
         };
         match dom.tag(id) {
-            Some(Tag::Img | Tag::Picture) => dom.set_attr(id, attr, &value),
+            Some(Tag::Img) => dom.set_attr(id, attr, &value),
+            Some(Tag::Picture) => {
+                let image = dom
+                    .first_descendant_by_tag(id, Tag::Img)
+                    .or_else(|| dom.create_html_element(Tag::Img).ok());
+                if let Some(image) = image {
+                    dom.set_attr(image, attr, &value);
+                    if dom.parent(image).is_none() {
+                        dom.append_child(id, image);
+                    }
+                }
+            }
             Some(Tag::Figure) if !dom.any_descendant_by_tags(id, &[Tag::Img, Tag::Picture]) => {
                 if let Ok(image) = dom.create_html_element(Tag::Img) {
                     dom.set_attr(image, attr, &value);
@@ -822,23 +585,331 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
         }
     }
 }
-pub fn clean_matched_nodes<F>(
+/// Removes content that is not useful in a retained semantic fragment.
+///
+/// This phase uses only high-confidence rules. It removes executable markup,
+/// hidden scaffolding, tracking images, and interactive controls. It keeps the
+/// text and structure around removed form controls.
+pub(crate) fn hard_cleanup(
     dom: &mut Dom,
     root: NodeId,
+    allowed_media: &Regex,
     nodes: &mut Vec<NodeId>,
-    match_buffer: &mut String,
-    mut filter: F,
-) where
-    F: FnMut(&Dom, NodeId, &str) -> bool,
-{
+) {
     nodes.clear();
-    nodes.extend(dom.descendants(root));
-    for &id in nodes.iter().rev() {
-        crate::dom::build_match_string(dom, id, match_buffer);
-        if dom.parent(id).is_some() && filter(dom, id, match_buffer) {
-            dom.detach(id)
+    nodes.extend(
+        dom.element_descendants_snapshot_with_depth(root)
+            .into_iter()
+            .map(|(node, _)| node),
+    );
+    for &node in nodes.iter().rev() {
+        if dom.parent(node).is_none() {
+            continue;
+        }
+        let Some(tag) = dom.tag(node) else { continue };
+        let fallback_image = tag == Tag::Img
+            && dom
+                .attr(node, AttrName::Class)
+                .is_some_and(|class| class.contains("fallback-image"));
+        let hidden = dom.has_attr(node, AttrName::Hidden)
+            || dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image
+            || dom.attr(node, AttrName::Style).is_some_and(|style| {
+                let compact: String = style
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .map(char::from)
+                    .collect();
+                let compact = compact.to_ascii_lowercase();
+                compact.contains("display:none") || compact.contains("visibility:hidden")
+            });
+        let tracking_image = tag == Tag::Img
+            && is_tracking_image(dom, node)
+            && !has_lazy_image_candidate(dom, node)
+            && !picture_has_lazy_source(dom, node);
+        let executable = matches!(tag, Tag::Script | Tag::Style | Tag::Template | Tag::Link);
+        let control = matches!(
+            tag,
+            Tag::Input | Tag::Textarea | Tag::Select | Tag::Button | Tag::Datalist | Tag::Option
+        );
+        let disallowed_embed = matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe)
+            && !has_allowed_media(dom, node, allowed_media);
+        if hidden || tracking_image || executable || control || disallowed_embed {
+            dom.detach(node);
         }
     }
+}
+
+/// Removes clutter only when several independent signals agree.
+pub(crate) fn heuristic_cleanup(
+    dom: &mut Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    text_buffer: &mut String,
+    nodes: &mut Vec<NodeId>,
+) {
+    nodes.clear();
+    let mut boundary_depth = None;
+    for (node, depth) in dom.element_descendants_snapshot_with_depth(root) {
+        if let Some(outer_depth) = boundary_depth {
+            if depth > outer_depth {
+                continue;
+            }
+            boundary_depth = None;
+        }
+        if is_heuristic_boundary(dom, node) {
+            nodes.push(node);
+            boundary_depth = Some(depth);
+        }
+    }
+    store.clear_stats();
+    store.enable_link_lengths();
+    mark_data_tables(dom, root, store, &mut Vec::new());
+    let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
+    for &node in nodes.iter().rev() {
+        if dom.parent(node).is_none() || is_protected_content(dom, node, store) {
+            continue;
+        }
+        let stats = get_or_compute_stats(dom, node, store);
+        let text = get_inner_text(dom, node, text_buffer).to_ascii_lowercase();
+        let name = node_name(dom, node);
+        let links = dom
+            .descendants(node)
+            .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
+            .count();
+        let controls = dom
+            .descendants(node)
+            .filter(|&descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(Tag::Input | Tag::Textarea | Tag::Select | Tag::Button)
+                )
+            })
+            .count();
+        let protected = dom
+            .descendants(node)
+            .any(|descendant| is_protected_content(dom, descendant, store));
+        let link_density = get_link_density_cached(dom, node, stats.text_length, store);
+        let short = stats.text_length < 350 || stats.text_length * 5 < root_length;
+
+        let related_name = contains_any(
+            &name,
+            &["related", "recommended", "more-stories", "more_stories"],
+        ) || dom.descendants(node).any(|descendant| {
+            contains_any(
+                &node_name(dom, descendant),
+                &["related", "recommended", "more-stories", "more_stories"],
+            )
+        });
+        let related_text = starts_with_any(
+            &text,
+            &[
+                "related",
+                "recommended",
+                "more stories",
+                "you may also like",
+            ],
+        );
+        let related = (related_name || related_text) && links >= 2 && link_density >= 0.2 && short;
+
+        let social_name = contains_any(&name, &["share", "social", "sharedaddy"]);
+        let social_links = dom
+            .descendants(node)
+            .filter(|&descendant| {
+                dom.tag(descendant) == Some(Tag::A)
+                    && dom.attr(descendant, AttrName::Href).is_some_and(|href| {
+                        contains_any(
+                            &href.to_ascii_lowercase(),
+                            &["facebook.", "twitter.", "x.com/", "linkedin.", "reddit."],
+                        )
+                    })
+            })
+            .count();
+        let social = social_name && (social_links > 0 || links >= 2) && short;
+
+        let signup_terms = contains_any(
+            &format!("{name} {text}"),
+            &["newsletter", "subscribe", "sign-up", "signup", "sign up"],
+        );
+        let signup = signup_terms
+            && (controls > 0 || links > 0 || dom.tag(node) == Some(Tag::Form))
+            && short;
+
+        let navigation_semantic = dom.tag(node) == Some(Tag::Nav)
+            || dom.attr(node, AttrName::Role).is_some_and(|role| {
+                role.split_whitespace()
+                    .any(|value| value.eq_ignore_ascii_case("navigation"))
+            });
+        let menu_name = contains_any(&name, &["menu", "navigation", "breadcrumb"]);
+        let documentation_toc = dom
+            .attr_by_local_name(node, "aria-label")
+            .is_some_and(|label| {
+                let label = label.trim().to_ascii_lowercase();
+                label == "on this page" || label == "table of contents" || label == "contents"
+            })
+            || contains_any(
+                &name,
+                &["table-of-contents", "table_of_contents", "docs-toc"],
+            );
+        let navigation = navigation_semantic
+            && !documentation_toc
+            && (menu_name || links >= 3)
+            && link_density >= 0.6
+            && stats.text_length < 500;
+
+        let author_name = contains_any(&name, &["author-bio", "author_bio", "profile", "bio"]);
+        let author = author_name && short && (social_links > 0 || links >= 2);
+
+        let advertisement =
+            strong_ad_name(&name) && short && (links > 0 || stats.text_length < 100);
+        let consent = contains_any(
+            &format!("{name} {text}"),
+            &["cookie consent", "cookie-banner", "consent-banner"],
+        ) && short;
+        let account = contains_any(&name, &["login", "sign-in", "signin"])
+            && (controls > 0 || links > 0)
+            && short;
+
+        if related
+            || social
+            || signup
+            || navigation
+            || author
+            || advertisement
+            || consent
+            || account
+        {
+            if protected {
+                hoist_protected_children(dom, node, store);
+            }
+            dom.detach(node);
+        }
+    }
+}
+
+fn hoist_protected_children(dom: &mut Dom, wrapper: NodeId, store: &crate::dom::NodeStateStore) {
+    let protected: SmallVec<[NodeId; 4]> = dom
+        .descendants(wrapper)
+        .filter(|&node| {
+            is_protected_content(dom, node, store)
+                && !dom
+                    .ancestors(node)
+                    .take_while(|&ancestor| ancestor != wrapper)
+                    .any(|ancestor| is_protected_content(dom, ancestor, store))
+        })
+        .collect();
+    for node in protected {
+        dom.insert_before(wrapper, node);
+    }
+}
+
+fn has_lazy_image_candidate(dom: &Dom, image: NodeId) -> bool {
+    dom.attrs(image).iter().any(|attribute| {
+        let name = attribute.name.local.as_ref();
+        name.starts_with("data-")
+            && (has_image_src(attribute.value.as_ref())
+                || has_image_srcset(attribute.value.as_ref()))
+    })
+}
+
+fn picture_has_lazy_source(dom: &Dom, image: NodeId) -> bool {
+    let Some(picture) = dom
+        .ancestors(image)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))
+    else {
+        return false;
+    };
+    if dom
+        .attr(picture, AttrName::DataSrc)
+        .is_some_and(has_image_src)
+        || dom
+            .attr(picture, AttrName::DataSrcset)
+            .is_some_and(has_image_srcset)
+    {
+        return true;
+    }
+    dom.descendants(picture).any(|source| {
+        dom.tag(source) == Some(Tag::Source)
+            && (dom
+                .attr(source, AttrName::DataSrc)
+                .or_else(|| dom.attr(source, AttrName::Src))
+                .is_some_and(has_image_src)
+                || dom
+                    .attr(source, AttrName::DataSrcset)
+                    .or_else(|| dom.attr(source, AttrName::Srcset))
+                    .is_some_and(has_image_srcset))
+    })
+}
+
+fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
+    if matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Footer | Tag::Form | Tag::Header | Tag::Nav)
+    ) {
+        return true;
+    }
+    matches!(
+        dom.tag(node),
+        Some(Tag::Div | Tag::Ol | Tag::Section | Tag::Ul)
+    ) && contains_any(
+        &node_name(dom, node),
+        &[
+            "related",
+            "recommend",
+            "share",
+            "social",
+            "newsletter",
+            "subscribe",
+            "signup",
+            "menu",
+            "navigation",
+            "breadcrumb",
+            "author",
+            "profile",
+            "bio",
+            "advert",
+            "sponsor",
+            "cookie",
+            "consent",
+            "login",
+            "signin",
+            "sign-in",
+            "sidebar",
+        ],
+    )
+}
+
+fn node_name(dom: &Dom, node: NodeId) -> String {
+    let mut value = String::new();
+    for name in [AttrName::Class, AttrName::Id] {
+        if let Some(part) = dom.attr(node, name) {
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(part);
+        }
+    }
+    value.make_ascii_lowercase();
+    value
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn starts_with_any(value: &str, needles: &[&str]) -> bool {
+    let value = value.trim_start();
+    needles.iter().any(|needle| value.starts_with(needle))
+}
+
+fn strong_ad_name(value: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "ad" | "ads" | "advert" | "advertisement" | "sponsor" | "sponsored"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -872,29 +943,6 @@ mod tests {
             dom.attr(image, AttrName::Src),
             Some("https://example.com/image.jpg")
         );
-    }
-
-    #[test]
-    fn removes_loading_placeholders_during_conditional_cleanup() {
-        let mut dom = Dom::parse_document("<div>Loading...</div>").unwrap();
-        let root = dom.root();
-        let div = dom.first_descendant_by_tag(root, Tag::Div).unwrap();
-        let mut store = NodeStateStore::new();
-        let mut text_buffer = String::new();
-        let mut nodes = Vec::new();
-        clean_conditionally(
-            &mut dom,
-            root,
-            &[Tag::Div],
-            Tag::Div,
-            FLAG_CLEAN_CONDITIONALLY,
-            &Regex::new("$").unwrap(),
-            &mut store,
-            &mut text_buffer,
-            &mut nodes,
-            0.0,
-        );
-        assert!(dom.parent(div).is_none());
     }
 
     #[test]
@@ -1062,6 +1110,22 @@ mod tests {
     }
 
     #[test]
+    fn applies_lazy_picture_source_to_its_image() {
+        let mut dom = Dom::parse_document(
+            r#"<picture data-src="photo.jpg"><source srcset="photo.webp"><img alt="Photo"></picture>"#,
+        )
+        .unwrap();
+        let root = dom.root();
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+
+        fix_lazy_images(&mut dom, root, &mut Vec::new());
+
+        assert_eq!(dom.attr(image, AttrName::Src), Some("photo.jpg"));
+        let picture = dom.first_descendant_by_tag(root, Tag::Picture).unwrap();
+        assert_eq!(dom.attr(picture, AttrName::Src), None);
+    }
+
+    #[test]
     fn adds_lazy_figure_image_without_removing_caption() {
         let mut dom = Dom::parse_document(
             r#"<figure data-src="image.jpg?x=1&amp;y=2"><figcaption>old</figcaption></figure>"#,
@@ -1081,64 +1145,109 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detects_allowed_media_in_object_descendant_attributes_and_text() {
+    fn clean_fragment(html: &str) -> String {
+        let mut dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let root = dom.root();
+        let mut nodes = Vec::new();
+        let mut store = NodeStateStore::new();
+        let mut text = String::new();
         let allowed = Regex::new("video\\.example").unwrap();
-        let mut dom = Dom::parse_document(
-            r#"<div><object id="attr"><param value="//video.example/id"></object><object id="text">//video.example/other</object><object id="remove"><param value="//ads.example/id"></object></div>"#,
-        )
-        .unwrap();
-        let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
-
-        clean_tags(&mut dom, root, &[Tag::Object], &allowed, &mut Vec::new());
-
-        assert!(
-            dom.descendants(root)
-                .any(|id| dom.attr(id, AttrName::Id) == Some("attr"))
-        );
-        assert!(
-            dom.descendants(root)
-                .any(|id| dom.attr(id, AttrName::Id) == Some("text"))
-        );
-        assert!(
-            !dom.descendants(root)
-                .any(|id| dom.attr(id, AttrName::Id) == Some("remove"))
-        );
+        clean_styles(&mut dom, root, &mut nodes);
+        hard_cleanup(&mut dom, root, &allowed, &mut nodes);
+        heuristic_cleanup(&mut dom, root, &mut store, &mut text, &mut nodes);
+        dom.text(root)
     }
 
     #[test]
-    fn does_not_allow_iframe_from_matching_fallback_text() {
-        let allowed = Regex::new("video\\.example").unwrap();
-        let mut dom = Dom::parse_document(
-            r#"<div><iframe src="//ads.example">//video.example/id</iframe></div>"#,
-        )
-        .unwrap();
-        let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
-
-        clean_tags(&mut dom, root, &[Tag::Iframe], &allowed, &mut Vec::new());
-
-        assert!(
-            !dom.descendants(root)
-                .any(|id| dom.tag(id) == Some(Tag::Iframe))
+    fn hard_cleanup_removes_controls_and_keeps_form_text() {
+        let text = clean_fragment(
+            r#"<form><p>Configuration details remain useful.</p><label>Name<input></label><button>Submit</button></form><script>bad()</script>"#,
         );
+        assert!(text.contains("Configuration details"), "{text}");
+        assert!(!text.contains("Submit"), "{text}");
+        assert!(!text.contains("bad"), "{text}");
     }
 
     #[test]
-    fn removes_singular_and_plural_breadcrumb_navigation() {
-        let mut dom = Dom::parse_document(
-            r#"<main><nav aria-label=" Breadcrumb ">One</nav><nav aria-label="Breadcrumbs">Two</nav><nav aria-label="Sections">Keep</nav></main>"#,
+    fn heuristic_cleanup_removes_strong_clutter() {
+        let text = clean_fragment(
+            r#"<main><p>Primary documentation remains.</p>
+            <nav class="menu"><a href="/a">A</a><a href="/b">B</a><a href="/c">C</a></nav>
+            <aside class="related"><h2>Related stories</h2><a href="/1">One story</a><a href="/2">Two story</a></aside>
+            <div class="social-share"><a href="https://twitter.com/share">Twitter</a><a href="https://facebook.com/share">Facebook</a></div>
+            <form class="newsletter"><p>Subscribe to our newsletter</p><input><button>Join</button></form>
+            <aside class="author-bio"><p>About the author</p><a href="/author">Profile</a><a href="https://x.com/a">Social</a></aside>
+            <div class="advertisement"><a href="/buy">Sponsored</a></div></main>"#,
+        );
+        assert!(text.contains("Primary documentation"), "{text}");
+        for clutter in [
+            "One story",
+            "Twitter",
+            "Subscribe",
+            "About the author",
+            "Sponsored",
+        ] {
+            assert!(!text.contains(clutter), "retained {clutter}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_substantial_callouts_and_documentation_toc() {
+        let text = clean_fragment(
+            r##"<main>
+            <aside class="sidebar callout"><h2>Compatibility note</h2><p>This callout contains substantial guidance. It explains supported systems, migration constraints, failure behavior, recovery steps, and validation requirements.</p><pre><code>cargo test</code></pre></aside>
+            <nav aria-label="On this page"><h2>Contents</h2><a href="#one">Installation and configuration reference</a><a href="#two">Detailed API behavior and examples</a><a href="#three">Troubleshooting and recovery guidance</a></nav>
+            <p>The primary guide provides complete instructions.</p></main>"##,
+        );
+        assert!(text.contains("Compatibility note"), "{text}");
+        assert!(text.contains("cargo test"), "{text}");
+        assert!(text.contains("Installation and configuration"), "{text}");
+    }
+
+    #[test]
+    fn hard_cleanup_preserves_lazy_tracking_placeholders() {
+        let mut dom = Dom::parse_fragment(
+            r#"<img width="1" height="1" src="blank.gif" data-src="photo.jpg" alt="Photo"><picture data-src="other.jpg"><img width="1" alt="Other"></picture><img width="1" data-lazy-src="lazy.jpg"><img height="1" data-original="original.jpg">"#,
+            Tag::Div,
         )
         .unwrap();
-        let root = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
-
-        clean_breadcrumb_navigation(&mut dom, root, &mut Vec::new());
-
-        let labels: Vec<_> = dom
+        let root = dom.root();
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        hard_cleanup(&mut dom, root, &Regex::new("$").unwrap(), &mut Vec::new());
+        assert!(dom.parent(image).is_some());
+        let picture_image = dom
             .descendants(root)
-            .filter(|&id| dom.tag(id) == Some(Tag::Nav))
-            .filter_map(|id| dom.attr_by_local_name(id, "aria-label"))
-            .collect();
-        assert_eq!(labels, ["Sections"]);
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .nth(1)
+            .unwrap();
+        assert!(dom.parent(picture_image).is_some());
+        let remaining_images = dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .count();
+        assert_eq!(remaining_images, 4);
+    }
+
+    #[test]
+    fn hard_cleanup_preserves_math_fallback_images() {
+        let mut dom = Dom::parse_fragment(
+            r#"<math><mi>x</mi></math><img class="mwe-math-fallback-image-inline" aria-hidden="true" src="equation.svg" alt="x">"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        hard_cleanup(&mut dom, root, &Regex::new("$").unwrap(), &mut Vec::new());
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_some());
+    }
+
+    #[test]
+    fn heuristic_cleanup_scans_nested_boundaries_once() {
+        let depth = 2_000;
+        let mut html = "<div class=\"sidebar\">".repeat(depth);
+        html.push_str("Retained documentation.");
+        html.push_str(&"</div>".repeat(depth));
+        let text = clean_fragment(&html);
+        assert!(text.contains("Retained documentation"));
     }
 
     #[test]

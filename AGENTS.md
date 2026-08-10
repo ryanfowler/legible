@@ -34,7 +34,8 @@ The extraction pipeline flows through these stages:
 2. **Preparation** (`cleaning.rs`) - Script removal, BR/font normalization, lazy image fixing
 3. **Metadata Extraction** (`metadata.rs`) - Candidate resolution from JSON-LD, OpenGraph, meta tags, and HTML elements
 4. **Content Extraction** (`readability.rs`) - Main algorithm in `grab_article()`
-5. **Content Cleaning** (`cleaning.rs`) - Conditional removal of low-scoring elements
+5. **Content Cleaning** (`cleaning.rs`) - Hard cleanup and multi-signal heuristic cleanup
+6. **Semantic Normalization** (`normalize.rs`) - Image, code, figure, footnote, table, and wrapper normalization
 
 ### Key Modules
 
@@ -45,7 +46,8 @@ The extraction pipeline flows through these stages:
 | `candidate.rs` | Internal candidate model and structural root selection |
 | `readability.rs` | Candidate selection, scoring, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
-| `cleaning.rs` | Pre-extraction preparation, post-extraction cleanup |
+| `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup |
+| `normalize.rs` | Semantic normalization before lazy serialization |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
@@ -65,6 +67,8 @@ These invariants are costly to violate:
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
+- **Separate cleanup and normalization.** Cleanup decides what to remove. Normalization makes retained markup predictable for serializers.
+- **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
 
