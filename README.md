@@ -7,8 +7,12 @@ Legible extracts relevant content and metadata from HTML. It stores a cleaned DO
 subtree. It renders Markdown, HTML, or normalized text only when you request that
 format.
 
-Legible currently uses an extraction algorithm derived from Mozilla Readability.
-The public API is designed for general page content.
+Legible uses general semantic candidates, source-relative quality checks, and
+conservative fallbacks. Mozilla Readability is an important algorithmic ancestor,
+but article-style prose is not required.
+
+Legible has no browser engine. It does not execute JavaScript or make network
+requests. Extraction is deterministic for the same input and configuration.
 
 ## Extract content
 
@@ -75,6 +79,12 @@ let markdown = page
     .render();
 # Ok::<(), legible::Error>(())
 ```
+
+## Supported pages
+
+Legible handles articles, documentation, API references, indexes, listings, code,
+tables, figures, and short pages. It falls back to a conservatively cleaned body
+when a page has useful content but no clear primary container.
 
 ## Metadata
 

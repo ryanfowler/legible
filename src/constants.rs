@@ -1,14 +1,8 @@
-//! Constants and regex patterns used by Readability.
+//! Constants and regex patterns used by content extraction.
 
 use crate::dom::{AttrName, Tag};
 use regex::{Regex, RegexSet};
 use std::sync::LazyLock;
-
-/// Parsing flags that control the behavior of the algorithm.
-pub mod flags {
-    pub const FLAG_WEIGHT_CLASSES: u32 = 0x2;
-    pub const FLAG_CLEAN_CONDITIONALLY: u32 = 0x4;
-}
 
 #[inline]
 pub fn is_default_tag_to_score(tag: Tag) -> bool {

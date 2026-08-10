@@ -1,8 +1,6 @@
 //! Content scoring and DOM text helpers.
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
-use crate::constants::{
-    flags::*, has_byline, is_div_to_p_elem, is_phrasing_elem, is_unlikely_role, regexps,
-};
+use crate::constants::{has_byline, is_div_to_p_elem, is_phrasing_elem, is_unlikely_role, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use smallvec::SmallVec;
 
@@ -259,7 +257,7 @@ impl CandidateFeatureIndex {
         dom: &Dom,
         candidate: Candidate,
         store: &mut NodeStateStore,
-        flags: u32,
+        weight_classes: bool,
     ) -> CandidateFeatures {
         let text = get_or_compute_stats(dom, candidate.node, store);
         let counts = self.counts[candidate.node.index()];
@@ -273,7 +271,7 @@ impl CandidateFeatureIndex {
         } else {
             (link_text_chars / f64::from(text.text_length)).clamp(0.0, 1.0)
         };
-        let (positive_name_score, negative_name_score) = if flags & FLAG_WEIGHT_CLASSES != 0 {
+        let (positive_name_score, negative_name_score) = if weight_classes {
             name_signals(dom, candidate.node)
         } else {
             (0.0, 0.0)
@@ -389,7 +387,7 @@ fn name_signals(dom: &Dom, node: NodeId) -> (f64, f64) {
     (f64::from(positive), f64::from(negative))
 }
 
-pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, flags: u32) -> f64 {
+pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, weight_classes: bool) -> f64 {
     let score = match dom.tag(id) {
         Some(Tag::Div) => 5.,
         Some(Tag::Pre | Tag::Td | Tag::Blockquote) => 3.,
@@ -399,10 +397,13 @@ pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, flags: u32) -> f6
         Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::Th) => -5.,
         _ => 0.,
     };
-    score + get_class_weight(dom, id, flags) as f64
+    score + get_class_weight(dom, id, weight_classes) as f64
 }
-pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) {
-    store.initialize_if_absent(id, compute_initial_readability_data(dom, id, flags));
+pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, weight_classes: bool) {
+    store.initialize_if_absent(
+        id,
+        compute_initial_readability_data(dom, id, weight_classes),
+    );
 }
 
 /// Prepares a scoring-only DOM and returns paragraphs created by the pass.
@@ -454,7 +455,7 @@ pub(crate) fn compute_readability_scores(
     to_score: impl IntoIterator<Item = NodeId>,
     excluded: &[NodeId],
     store: &mut NodeStateStore,
-    flags: u32,
+    weight_classes: bool,
 ) -> SmallVec<[ReadabilityScore; 64]> {
     let mut discovered = SmallVec::<[NodeId; 256]>::new();
     for node in to_score {
@@ -474,7 +475,7 @@ pub(crate) fn compute_readability_scores(
             if !dom.is_element(node) || !ancestor.is_some_and(|parent| dom.is_element(parent)) {
                 continue;
             }
-            let initial = compute_initial_readability_data(dom, node, flags);
+            let initial = compute_initial_readability_data(dom, node, weight_classes);
             if store.initialize_if_absent(node, initial) {
                 discovered.push(node)
             }
@@ -517,8 +518,8 @@ fn is_excluded_candidate(dom: &Dom, node: NodeId, excluded: &[NodeId]) -> bool {
             .ancestors(node)
             .any(|ancestor| excluded.contains(&ancestor))
 }
-pub fn get_class_weight(dom: &Dom, id: NodeId, flags: u32) -> i32 {
-    if flags & FLAG_WEIGHT_CLASSES == 0 {
+pub fn get_class_weight(dom: &Dom, id: NodeId, weight_classes: bool) -> i32 {
+    if !weight_classes {
         return 0;
     }
     let mut w = 0;
@@ -762,7 +763,6 @@ mod tests {
         get_link_density_cached, stats_for_text,
     };
     use crate::candidate::CandidateSet;
-    use crate::constants::flags::{FLAG_CLEAN_CONDITIONALLY, FLAG_WEIGHT_CLASSES};
     use crate::dom::{Dom, NodeStateStore, Tag};
 
     #[test]
@@ -810,7 +810,7 @@ mod tests {
         crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut table_nodes);
         let index = CandidateFeatureIndex::new(&dom, &store);
         index.prepare_text_cache(&mut store);
-        let features = index.features(&dom, candidate, &mut store, FLAG_WEIGHT_CLASSES);
+        let features = index.features(&dom, candidate, &mut store, true);
 
         assert!(features.word_count >= 12);
         assert_eq!(features.paragraph_count, 2);
@@ -826,7 +826,7 @@ mod tests {
         assert!(features.positive_name_score > 0.0);
         assert!(features.negative_name_score > 0.0);
 
-        let unweighted = index.features(&dom, candidate, &mut store, 0);
+        let unweighted = index.features(&dom, candidate, &mut store, false);
         assert_eq!(unweighted.positive_name_score, 0.0);
         assert_eq!(unweighted.negative_name_score, 0.0);
     }
@@ -882,9 +882,8 @@ mod tests {
             .filter(|&node| dom.tag(node) == Some(Tag::P))
             .collect();
         let mut store = NodeStateStore::new();
-        let flags = FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY;
 
-        let scores = compute_readability_scores(&mut dom, paragraphs, &[], &mut store, flags);
+        let scores = compute_readability_scores(&mut dom, paragraphs, &[], &mut store, true);
 
         let article_score = scores
             .iter()

@@ -1296,7 +1296,7 @@ fn parse_numeric(value: &str) -> Option<char> {
     }
 }
 
-pub(crate) fn get_article_title(dom: &Dom) -> String {
+pub(crate) fn get_page_title(dom: &Dom) -> String {
     let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
     };
@@ -1394,7 +1394,7 @@ mod tests {
             StructuredData::default()
         };
         let base = url.map(Url::parse).transpose().unwrap();
-        let title = get_article_title(&dom);
+        let title = get_page_title(&dom);
         discover(&dom, &data, &title, base.as_ref(), base.as_ref())
     }
 
@@ -1576,7 +1576,7 @@ mod tests {
         )
         .unwrap();
         let data = StructuredData::parse(&dom);
-        let title = get_article_title(&dom);
+        let title = get_page_title(&dom);
         let resolved = discover(&dom, &data, &title, None, None);
 
         assert_eq!(resolved.authors, ["Ada"]);

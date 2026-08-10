@@ -92,7 +92,11 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                         // Official fixtures use different selected-container IDs and
                         // retain unrelated runtime data. Keep page IDs, image data,
                         // and generated data-old-* attributes under comparison.
-                        !(local == "id" && attribute.value.as_ref() != "readability-page-1")
+                        !(local == "id"
+                            && !matches!(
+                                attribute.value.as_ref(),
+                                "readability-page-1" | "legible-content"
+                            ))
                             && !(attribute.name.ns.as_ref().is_empty()
                                 && local.starts_with("data-")
                                 && !matches!(local, "data-src" | "data-srcset")
@@ -105,6 +109,11 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                     })
                     .map(|attribute| {
                         let mut value = attribute.value.to_string();
+                        if attribute.name.local.as_ref() == "id"
+                            && matches!(value.as_str(), "readability-page-1" | "legible-content")
+                        {
+                            value = "content-root".to_owned();
+                        }
                         if attribute.name.local.as_ref() == "src"
                             && value.starts_with("file:///C|/")
                         {
@@ -254,6 +263,9 @@ fn compare_retained_words(expected: &str, actual: &str) -> Result<(), String> {
 }
 
 fn output_fingerprint(html: &str) -> String {
+    // Keep the established liberal-output snapshots stable across the neutral
+    // product marker rename.
+    let html = html.replace("legible-content", "readability-page-1");
     let hash = html.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });

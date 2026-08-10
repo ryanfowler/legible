@@ -1,14 +1,14 @@
 use legible::extract;
 
 #[test]
-fn short_article_fallback_does_not_import_synthetic_html() {
+fn short_content_fallback_does_not_import_synthetic_html() {
     let page = extract(
         "<html><body><article><p>This is a short article.</p></article></body></html>",
         None,
     )
     .unwrap();
 
-    assert!(page.html().contains("id=\"readability-page-1\""));
+    assert!(page.html().contains("id=\"legible-content\""));
     assert!(!page.html().contains("<html>"));
 }
 
@@ -32,7 +32,7 @@ fn exact_output_preserves_metadata_and_rewrites_urls() {
     );
     assert_eq!(
         page.html(),
-        r#"<div id="readability-page-1" class="page"><article><p>
+        r#"<div id="legible-content" class="page"><article><p>
         <a href="https://example.com/story?x=1&amp;y=2">A relative link</a>
         <img src="https://example.com/news/images/photo.jpg" srcset="https://example.com/news/small.jpg 1x, https://example.com/large.jpg 2x" alt="Photo">
         This paragraph has enough useful article text for deterministic extraction.

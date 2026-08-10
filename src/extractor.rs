@@ -2,8 +2,8 @@
 
 use crate::dom::Dom;
 use crate::error::Result;
+use crate::extraction::ContentExtractor;
 use crate::page::ExtractedPage;
-use crate::readability::Readability;
 
 /// A reusable HTML content extractor.
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ impl Extractor {
     /// relative links and media URLs.
     pub fn extract(&self, html: &str, url: Option<&str>) -> Result<ExtractedPage> {
         let dom = Dom::parse_document(html).expect("HTML DOM node limit exceeded");
-        Readability::from_document(dom, url, &self.config).extract()
+        ContentExtractor::from_document(dom, url, &self.config).extract()
     }
 }
 
