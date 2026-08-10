@@ -1,4 +1,4 @@
-//! DOM preparation and article cleanup.
+//! DOM preparation and content cleanup.
 #![allow(clippy::collapsible_if)]
 use crate::constants::{
     PRESENTATIONAL_ATTRIBUTES, has_image_extension, has_image_src, has_image_srcset,
@@ -14,7 +14,7 @@ use regex::Regex;
 use smallvec::SmallVec;
 
 pub fn prep_document(dom: &mut Dom) {
-    // Preserve Readability's preparation order. Remove inactive subtrees,
+    // Preserve the required preparation order. Remove inactive subtrees,
     // normalize BR runs, and only then rename deprecated font elements.
     let mut ids: Vec<_> = dom
         .descendants(dom.root())
@@ -558,7 +558,7 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
         }
         if dom
             .attr(id, AttrName::Id)
-            .is_some_and(|x| x.starts_with("readability"))
+            .is_some_and(|value| value.starts_with("legible-content"))
         {
             continue;
         }

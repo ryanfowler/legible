@@ -2,7 +2,8 @@
 //!
 //! Legible keeps an extracted DOM and renders each requested output format lazily.
 //! Markdown is the primary output, with HTML and normalized plain text available from
-//! the same extracted tree.
+//! the same extracted tree. Legible does not use a browser, execute JavaScript, fetch
+//! URLs, or make network requests.
 //!
 //! ```rust
 //! use legible::extract;
@@ -54,6 +55,7 @@ mod cleaning;
 mod constants;
 mod dom;
 mod error;
+mod extraction;
 mod extractor;
 mod logging;
 mod markdown;
@@ -61,7 +63,6 @@ mod metadata;
 mod normalize;
 mod page;
 mod quality;
-mod readability;
 mod scoring;
 mod text;
 

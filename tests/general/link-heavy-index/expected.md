@@ -1,0 +1,4 @@
+- [Alpha module reference](https://example.test/docs/alpha)
+- [Beta module reference](https://example.test/docs/beta)
+- [Gamma module reference](https://example.test/docs/gamma)
+- [Delta module reference](https://example.test/docs/delta)

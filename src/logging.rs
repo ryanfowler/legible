@@ -3,13 +3,13 @@ macro_rules! debug_log {
     (@bool $debug:expr, $($arg:tt)*) => {
         if $debug {
             #[cfg(feature = "tracing")]
-            tracing::debug!(target: "legible::readability", "{}", format_args!($($arg)*));
+            tracing::debug!(target: "legible::extraction", "{}", format_args!($($arg)*));
         }
     };
     ($self:ident, $($arg:tt)*) => {
         if $self.options.debug {
             #[cfg(feature = "tracing")]
-            tracing::debug!(target: "legible::readability", "{}", format_args!($($arg)*));
+            tracing::debug!(target: "legible::extraction", "{}", format_args!($($arg)*));
         }
     };
 }

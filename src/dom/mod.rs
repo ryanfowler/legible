@@ -1,4 +1,4 @@
-//! A compact, parser-compatible DOM specialized for Readability extraction.
+//! A compact, parser-compatible DOM for deterministic content extraction.
 mod arena;
 mod attr;
 mod id;

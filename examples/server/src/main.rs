@@ -23,7 +23,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/article", get(article));
+        .route("/content", get(content));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
@@ -41,11 +41,11 @@ async fn index() -> Html<&'static str> {
 }
 
 #[derive(Deserialize)]
-struct ArticleQuery {
+struct ContentQuery {
     url: String,
 }
 
-async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
+async fn content(Query(query): Query<ContentQuery>) -> impl IntoResponse {
     let url = query.url.trim();
 
     // Validate URL
@@ -148,7 +148,7 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
     let sanitized_content = sanitize_html(&extracted.html());
     let metadata = extracted.metadata();
 
-    // Build the article page
+    // Build the extracted-content page
     let byline_html = (!metadata.authors.is_empty())
         .then(|| {
             format!(
@@ -318,8 +318,8 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
             {content}
         </div>
         <div class="article-footer">
-            <a href="{url}" class="original-link" target="_blank" rel="noopener noreferrer">View original article</a>
-            <a href="/" class="back-link">Read another article</a>
+            <a href="{url}" class="original-link" target="_blank" rel="noopener noreferrer">View original page</a>
+            <a href="/" class="back-link">Extract another page</a>
         </div>
     </article>
 </body>
@@ -516,19 +516,19 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <body>
     <div class="container">
         <h1>Legible Reader</h1>
-        <p class="tagline">Extract clean, readable articles from any webpage</p>
-        <form action="/article" method="GET">
+        <p class="tagline">Extract relevant content from any web page</p>
+        <form action="/content" method="GET">
             <input
                 type="url"
                 name="url"
-                placeholder="https://example.com/article"
+                placeholder="https://example.com/page"
                 required
                 autofocus
             >
-            <button type="submit">Extract Article</button>
+            <button type="submit">Extract Content</button>
         </form>
         <p class="info">
-            Powered by Legible, a Rust port of Mozilla's Readability
+            Powered by Legible, a general HTML content extractor
         </p>
     </div>
 </body>

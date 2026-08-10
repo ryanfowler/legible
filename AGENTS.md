@@ -33,7 +33,7 @@ The extraction pipeline flows through these stages:
 1. **Document Parsing** - HTML parsed by `html5ever` into the internal stable-ID arena DOM
 2. **Preparation** (`cleaning.rs`) - Script removal, BR/font normalization, lazy image fixing
 3. **Metadata Extraction** (`metadata.rs`) - Candidate resolution from JSON-LD, OpenGraph, meta tags, and HTML elements
-4. **Content Extraction** (`readability.rs`) - Main algorithm in `grab_article()`
+4. **Content Extraction** (`extraction.rs`) - Strategy retries, candidate selection, and content consolidation
 5. **Content Cleaning** (`cleaning.rs`) - Hard cleanup and multi-signal heuristic cleanup
 6. **Semantic Normalization** (`normalize.rs`) - Image, code, figure, footnote, table, and wrapper normalization
 
@@ -44,7 +44,7 @@ The extraction pipeline flows through these stages:
 | `extractor.rs` | Public builder, extraction config |
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
 | `candidate.rs` | Internal candidate model and structural root selection |
-| `readability.rs` | Candidate selection, scoring, content consolidation |
+| `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup |
 | `normalize.rs` | Semantic normalization before lazy serialization |
@@ -53,7 +53,7 @@ The extraction pipeline flows through these stages:
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
-| `dom/state.rs` | Dense Readability state indexed by `NodeId` |
+| `dom/state.rs` | Dense scoring state indexed by `NodeId` |
 
 ### Design Rules
 
@@ -84,11 +84,6 @@ These invariants are costly to violate:
 
 Candidate ranking combines Readability propagation with text, structure, link-density, and class/ID features. It gives extra weight to code, data tables, and meaningful link lists. A separate structural pass selects a precise child, a common semantic parent, or a close schema-text match. Readability initial scores remain: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, and ADDRESS/OL/UL/DL/FORM -3. Class/ID patterns matching positive/negative regexes add ±25 to the Readability feature.
 
-### Algorithm Flags
-
-- `FLAG_WEIGHT_CLASSES` (0x2) - Score based on class/id patterns
-- `FLAG_CLEAN_CONDITIONALLY` (0x4) - Conditional cleanup pass
-
 Unlikely class, ID, and role values are negative ranking evidence. They do not remove candidates during discovery. The algorithm retries with normal, relaxed-cleanup, broad-content, structured-data, and body-fallback strategies when extraction quality is weak.
 
 ## Documentation
@@ -99,7 +94,7 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 
 ## Testing
 
-Tests run against Mozilla's official Readability.js test suite (`tests/readability-js/`). Each test directory contains `source.html`, `expected.html`, and `expected-metadata.json`.
+`tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html`, `expected.md`, and optional `metadata.json`. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite.
 
 Default extraction must return `Error::NoContent` for empty, head-only, and image-only documents.
 

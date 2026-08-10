@@ -40,6 +40,10 @@ pretty_assertions = "1.4"
 name = "integration_tests"
 harness = false
 
+[[test]]
+name = "general_tests"
+harness = false
+
 [[bench]]
-name = "readability"
+name = "extraction"
 harness = false
