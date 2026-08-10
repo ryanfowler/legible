@@ -900,13 +900,18 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
             out.add(|set| &mut set.title, text, MetadataSource::HtmlElement, 78);
         }
         let itemprop = dom.attr(id, AttrName::ItemProp).unwrap_or("");
+        let mut has_author_itemprop = false;
+        let mut has_published_itemprop = false;
+        for part in itemprop.split_ascii_whitespace() {
+            has_author_itemprop |= part.eq_ignore_ascii_case("author");
+            has_published_itemprop |= part.eq_ignore_ascii_case("datePublished");
+        }
+        // Most elements have no relevant itemprop. Do not calculate their
+        // distance from the heading because that scans ancestors and siblings.
         let itemprop_is_page_metadata = dom.tag(id) == Some(Tag::Meta)
-            || primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading));
-        if itemprop_is_page_metadata
-            && itemprop
-                .split_ascii_whitespace()
-                .any(|part| part.eq_ignore_ascii_case("author"))
-        {
+            || (has_author_itemprop || has_published_itemprop)
+                && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading));
+        if itemprop_is_page_metadata && has_author_itemprop {
             let name_node = dom.descendants(id).find(|&child| {
                 dom.attr(child, AttrName::ItemProp).is_some_and(|value| {
                     value
@@ -925,11 +930,7 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
                 84,
             );
         }
-        if itemprop_is_page_metadata
-            && itemprop
-                .split_ascii_whitespace()
-                .any(|part| part.eq_ignore_ascii_case("datePublished"))
-        {
+        if itemprop_is_page_metadata && has_published_itemprop {
             let value = dom
                 .attr_by_local_name(id, "datetime")
                 .or_else(|| dom.attr(id, AttrName::Content))
@@ -979,10 +980,9 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
             .flatten()
             .flat_map(|value| value.split_ascii_whitespace())
             .any(|token| {
-                matches!(
-                    token.to_ascii_lowercase().as_str(),
-                    "author" | "byline" | "p-author"
-                )
+                token.eq_ignore_ascii_case("author")
+                    || token.eq_ignore_ascii_case("byline")
+                    || token.eq_ignore_ascii_case("p-author")
             });
         if author_element
             && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading))
