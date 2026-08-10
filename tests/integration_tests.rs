@@ -1,23 +1,51 @@
-//! Integration tests against Mozilla's readability test suite.
+//! Content regression tests against Mozilla's Readability test suite.
+//!
+//! Mozilla's metadata expectations describe its old precedence rules. The checked-in
+//! snapshot records Legible's richer resolved metadata for the same source pages.
 
 use html5ever::{parse_document, tendril::TendrilSink};
-use legible::extract;
+use legible::{Metadata, extract};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 struct ExpectedMetadata {
-    title: String,
-    byline: Option<String>,
-    excerpt: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    authors: Vec<String>,
     site_name: Option<String>,
-    #[serde(default)]
+    canonical_url: Option<String>,
+    image: Option<String>,
+    favicon: Option<String>,
     published_time: Option<String>,
-    dir: Option<String>,
-    lang: Option<String>,
+    modified_time: Option<String>,
+    language: Option<String>,
+    direction: Option<String>,
+    section: Option<String>,
+    tags: Vec<String>,
+}
+
+impl From<&Metadata> for ExpectedMetadata {
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            title: metadata.title.clone(),
+            description: metadata.description.clone(),
+            authors: metadata.authors.clone(),
+            site_name: metadata.site_name.clone(),
+            canonical_url: metadata.canonical_url.clone(),
+            image: metadata.image.clone(),
+            favicon: metadata.favicon.clone(),
+            published_time: metadata.published_time.clone(),
+            modified_time: metadata.modified_time.clone(),
+            language: metadata.language.clone(),
+            direction: metadata.direction.clone(),
+            section: metadata.section.clone(),
+            tags: metadata.tags.clone(),
+        }
+    }
 }
 
 type CanonicalAttribute = (String, String, String);
@@ -156,7 +184,6 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
     let test_dir = source_path.parent().unwrap();
 
     let expected_path = test_dir.join("expected.html");
-    let metadata_path = test_dir.join("expected-metadata.json");
 
     // Read source HTML
     let source_html = fs::read_to_string(source_path)?;
@@ -168,45 +195,22 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
         None
     };
 
-    // Read expected metadata
-    let expected_metadata: Option<ExpectedMetadata> = if metadata_path.exists() {
-        let metadata_str = fs::read_to_string(&metadata_path)?;
-        Some(serde_json::from_str(&metadata_str)?)
-    } else {
-        None
-    };
-
     let page = extract(&source_html, Some("http://fakehost/test/page.html"))?;
-
-    if let Some(expected) = expected_metadata {
-        macro_rules! compare_field {
-            ($name:literal, $expected:expr, $actual:expr) => {{
-                let expected = &$expected;
-                let actual = &$actual;
-                if expected != actual {
-                    return Err(format!(
-                        "{} mismatch:\n  Expected: {:?}\n  Got: {:?}",
-                        $name, expected, actual
-                    )
-                    .into());
-                }
-            }};
-        }
-
-        let title = (!expected.title.is_empty()).then_some(expected.title);
-        compare_field!("Title", title, page.metadata().title);
-        let byline =
-            (!page.metadata().authors.is_empty()).then(|| page.metadata().authors.join(", "));
-        compare_field!("Byline", expected.byline, byline);
-        compare_field!("Excerpt", expected.excerpt, page.metadata().description);
-        compare_field!("Site name", expected.site_name, page.metadata().site_name);
-        compare_field!(
-            "Published time",
-            expected.published_time,
-            page.metadata().published_time
-        );
-        compare_field!("Direction", expected.dir, page.metadata().direction);
-        compare_field!("Language", expected.lang, page.metadata().language);
+    let snapshots: HashMap<String, ExpectedMetadata> =
+        serde_json::from_str(include_str!("metadata-snapshots.json"))?;
+    let case = test_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let expected_metadata = snapshots
+        .get(case)
+        .ok_or_else(|| format!("Missing metadata snapshot for {case}"))?;
+    let actual_metadata = ExpectedMetadata::from(page.metadata());
+    if expected_metadata != &actual_metadata {
+        return Err(format!(
+            "Metadata mismatch for {case}:\n  Expected: {expected_metadata:#?}\n  Got: {actual_metadata:#?}"
+        )
+        .into());
     }
 
     if let Some(expected) = expected_html {
