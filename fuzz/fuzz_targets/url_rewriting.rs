@@ -19,8 +19,8 @@ fuzz_target!(|data: &[u8]| {
 
     // The extraction post-processing resolves links, media URLs, and srcset
     // entries against the base URL. Invalid URLs must remain harmless inputs.
-    let Some(article) = parse_article(&html) else {
+    let Some(page) = parse_article(&html) else {
         return;
     };
-    reparse_serialized(&article.content);
+    reparse_serialized(&page.html());
 });

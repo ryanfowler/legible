@@ -7,6 +7,21 @@ use smallvec::SmallVec;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MarkdownConfig {
+    pub(crate) links: bool,
+    pub(crate) images: bool,
+}
+
+impl Default for MarkdownConfig {
+    fn default() -> Self {
+        Self {
+            links: true,
+            images: true,
+        }
+    }
+}
+
 trait MarkdownTree {
     type Node: Copy + Eq;
 
@@ -68,27 +83,25 @@ impl MarkdownTree for Dom {
 /// Serializes the children of `root` as CommonMark.
 #[cfg(test)]
 pub(crate) fn dom_to_markdown(dom: &Dom, root: NodeId, capacity: usize) -> String {
-    render_markdown(dom, root, capacity, true, true)
+    render_markdown(dom, root, capacity, MarkdownConfig::default())
 }
 
 pub(crate) fn render_markdown(
     dom: &Dom,
     root: NodeId,
     capacity: usize,
-    include_links: bool,
-    include_images: bool,
+    config: MarkdownConfig,
 ) -> String {
-    serialize_markdown(dom, root, capacity, include_links, include_images)
+    serialize_markdown(dom, root, capacity, config)
 }
 
 fn serialize_markdown<T: MarkdownTree>(
     tree: &T,
     root: T::Node,
     capacity: usize,
-    include_links: bool,
-    include_images: bool,
+    config: MarkdownConfig,
 ) -> String {
-    MarkdownSerializer::new(tree, capacity, include_links, include_images).serialize(root)
+    MarkdownSerializer::new(tree, capacity, config).serialize(root)
 }
 
 #[derive(Clone, Copy)]
@@ -148,12 +161,11 @@ struct MarkdownSerializer<'a, T: MarkdownTree> {
     out: Output,
     tasks: Vec<Task<T::Node>>,
     list_depth: usize,
-    include_links: bool,
-    include_images: bool,
+    config: MarkdownConfig,
 }
 
 impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
-    fn new(dom: &'a T, capacity: usize, include_links: bool, include_images: bool) -> Self {
+    fn new(dom: &'a T, capacity: usize, config: MarkdownConfig) -> Self {
         Self {
             dom,
             out: Output::new(capacity),
@@ -161,8 +173,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             // adversarial nesting cannot exhaust the call stack.
             tasks: Vec::with_capacity(32),
             list_depth: 0,
-            include_links,
-            include_images,
+            config,
         }
     }
 
@@ -281,7 +292,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             Tag::Ul | Tag::Ol => self.list(id, tag == Tag::Ol),
             Tag::Pre => self.code_block(id),
             Tag::A => {
-                if self.include_links
+                if self.config.links
                     && self
                         .dom
                         .attr(id, AttrName::Href)
@@ -293,7 +304,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 }
                 self.push_children(id, Mode::Inline);
             }
-            Tag::Img if self.include_images => self.image(id),
+            Tag::Img if self.config.images => self.image(id),
             Tag::Img => {}
             Tag::Strong | Tag::B => self.format(id, RunKind::Strong),
             Tag::Em | Tag::I => self.format(id, RunKind::Emphasis),
@@ -1435,22 +1446,14 @@ mod tests {
     }
 
     #[test]
-    fn extracted_article_uses_the_final_cleaned_dom() {
+    fn extracted_page_uses_the_final_cleaned_dom() {
         let html = "<html><head><title>Test</title></head><body><article><p>This is enough article text for extraction and Markdown output.</p><p><a href=\"javascript:alert(1)\">Unsafe link</a></p></article></body></html>";
-        let article = crate::parse(
-            html,
-            Some("https://example.com"),
-            Some(crate::Options::new().char_threshold(0)),
-        )
-        .unwrap();
-        assert!(
-            article
-                .markdown_content
-                .contains("This is enough article text")
-        );
-        assert!(article.markdown_content.contains("Unsafe link"));
-        assert!(!article.markdown_content.contains("javascript:"));
-        assert!(!article.markdown_content.contains('<'));
+        let page = crate::extract(html, Some("https://example.com")).unwrap();
+        let markdown = page.markdown();
+        assert!(markdown.contains("This is enough article text"));
+        assert!(markdown.contains("Unsafe link"));
+        assert!(!markdown.contains("javascript:"));
+        assert!(!markdown.contains('<'));
     }
 
     #[test]

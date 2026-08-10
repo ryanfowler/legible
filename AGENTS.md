@@ -32,9 +32,9 @@ The extraction pipeline flows through these stages:
 
 ### Key Modules
 
-- **`document.rs`** - Public `Document<'a>` wrapper for checking readability before extraction
-- **`readability.rs`** - Core algorithm: candidate selection, scoring, content consolidation
-- **`readerable.rs`** - Quick heuristic check for whether a document is likely parseable; exposes `pub(crate) is_probably_readerable_doc` for use by `Document`
+- **`extractor.rs`** - Public `Extractor` builder and private extraction configuration
+- **`page.rs`** - DOM-backed `ExtractedPage` and lazy serialization builders
+- **`readability.rs`** - Current internal algorithm: candidate selection, scoring, content consolidation
 - **`scoring.rs`** - Node scoring by tag type, class/id weight, link density, and bottom-up cached text statistics
 - **`cleaning.rs`** - DOM preparation and cleanup functions
 - **`metadata.rs`** - Multi-source metadata extraction (JSON-LD, meta tags, heuristics)
@@ -59,23 +59,21 @@ The extraction pipeline flows through these stages:
 - Keep the bounded, markup-density-aware node capacity hint. Count markup with `memchr` so preallocation does not add a full scalar scan or overallocate for dense adversarial input.
 - Preallocate the element-and-depth mutation snapshot from half of the arena length. This avoids repeated growth on normal mixed element/text trees and limits over-allocation on markup-only trees.
 - Use the `deeply_nested_document` Criterion benchmark for parser-scaling changes. `html5ever` currently scans its open-element stack for each nested `<div>`, so this adversarial case is quadratic upstream.
-- Use the `dom_parse` Criterion group to isolate custom DOM construction.
 - Keep the byte-wise ASCII fast path in text-statistics scans. Use the Unicode path for non-ASCII text.
 - Keep byte-wise ASCII paths in normalized character counts and readerable text-length scans. These paths avoid UTF-8 decoding on common article text while preserving Unicode behavior.
-- Keep quick readerability state dense by NodeId. Compute trimmed subtree text lengths bottom-up and propagate list-item exclusions once. Keep adversarial no-early-return Criterion cases for nested candidates and repeated BR parents.
 - Keep weighted descendant link length in cached text statistics. Candidate link-density reads must stay O(1).
 - Keep cached text and comma counts as saturating `u32` values. Scan each text node with native `usize` counters, then clamp it before storage. This keeps the dense cache compact without adding overflow checks to the byte-wise hot loop.
 - Use the dense `NodeStateStore` for scores, score-scan deduplication, table state, and cached text statistics.
 - Use iterative traversal for untrusted HTML depth.
-- Use the Criterion fixtures in `benches/readability.rs` for changes to parsing or extraction. Use `parse_retries/medium-2` for retry-storage changes, and preserve output compatibility with the Mozilla fixture suite.
+- Use the Criterion fixtures in `benches/readability.rs` for changes to parsing, extraction, or lazy rendering, and preserve output compatibility with the Mozilla fixture suite.
 - Keep extraction structural. Do not serialize DOM content for internal inspection or mutation. Render only the requested final format from the cleaned DOM.
-- Render HTML, Markdown, and text directly from the final cleaned DOM. Do not freeze an intermediate output tree or rebuild a temporary DOM. Drop the DOM before returning the public result.
+- Keep the final cleaned DOM in `ExtractedPage`. Render HTML, Markdown, and text lazily from that DOM. Do not freeze an intermediate serialized output tree or rebuild a temporary DOM.
 - Keep final HTML rendering on the direct iterative serializer. Escape text and attributes in byte runs. Do not route final output through html5ever's character-at-a-time serializer.
-- The public `parse` function must render all formats from one cleaned DOM. Keep final rendering iterative. Match html5ever's HTML escaping and namespace rules. Escape Markdown text, link destinations, and code fences for CommonMark.
+- The public `extract` function must not eagerly render output formats. Keep final rendering iterative. Match html5ever's HTML escaping and namespace rules. Escape Markdown text, link destinations, and code fences for CommonMark.
 - Preserve the byte-wise ASCII paths in Markdown and normalized article text, compact task fields, the preallocated heap-backed Markdown task stack, and output capacity hints from normalized article text. Keep code span and code block rendering free of temporary text and fence allocations. These avoid per-character work, excess task-stack traffic, stack-resident task buffers on complex articles, and repeated output growth.
 - Use typed `AttrName` lookups for hot Markdown link and image attributes. Keep local-name lookups only for attributes without a known enum variant.
 - Keep only the best below-threshold retry as a compact frozen DOM subtree. Compare attempts with allocation-free normalized character counts.
-- Borrow `Options` during extraction. Keep the owned options alive at the public API boundary.
+- Borrow the private `ExtractorConfig` during extraction. Keep it owned by `Extractor`.
 
 ### Scoring System
 
@@ -93,35 +91,31 @@ The algorithm retries with progressively fewer flags if initial extraction fails
 
 - Keep `README.md` and the public Rust API docs consistent.
 - Write user documentation in ASD-STE100 Simplified Technical English. Use short sentences, active voice, and consistent terms.
-- State that `Article::content` is not sanitized. Do not describe cleaned HTML as safe HTML.
-- State that `char_threshold` causes less-filtered retries and is not a strict output minimum.
-- State that the quick readability check is a heuristic and can return false positives or false negatives.
+- State that `ExtractedPage::html()` is not sanitized. Do not describe cleaned HTML as safe HTML.
 
 ## Testing
 
 The custom DOM uses safe Rust only. Run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings` after DOM changes.
 
-Tests run against Mozilla's official Readability.js test suite (git submodule at `tests/readability-js/`). The integration harness compares canonical HTML structure and ordered text, every metadata field, and the fixture's readerable value. Each test directory contains `source.html`, `expected.html`, and `expected-metadata.json`.
+Tests run against Mozilla's official Readability.js test suite (git submodule at `tests/readability-js/`). The integration harness compares canonical HTML structure, ordered text, and migrated metadata fields. Each test directory contains `source.html`, `expected.html`, and `expected-metadata.json`.
 
-Extraction with default options must return `Error::NoContent` when the best retry has no text. This includes empty, head-only, and image-only documents.
+Default extraction must return `Error::NoContent` when the best retry has no text. This includes empty, head-only, and image-only documents.
 
 ## Public API
 
 ```rust
-use legible::{Document, parse};
+use legible::{Extractor, extract};
 
-let article = parse(html, None, None)?;
+let page = extract(html, None)?;
 
-let document = Document::new(html);
-if document.is_probably_readerable(None) {
-    let article = document.parse(None, None)?;
-}
+let extractor = Extractor::builder().structured_data(true).build();
+let page = extractor.extract(html, None)?;
 ```
 
-`Article` contains public HTML, Markdown, text, and metadata fields.
+`ExtractedPage` owns the cleaned extraction DOM. It provides lazy HTML, Markdown, and text methods plus page metadata.
 
 ## Fuzzing
 
-Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public document parsing,
+Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction,
 DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL
 rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.

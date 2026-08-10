@@ -50,6 +50,28 @@ pub(crate) fn render_text(
     }
 }
 
+pub(crate) fn count_words(dom: &Dom, root: NodeId) -> usize {
+    let mut count = 0;
+    let mut in_word = false;
+    let mut nodes = SmallVec::<[NodeId; 32]>::new();
+    nodes.extend(dom.children_rev(root));
+    while let Some(node) = nodes.pop() {
+        if let Some(text) = dom.text_node(node) {
+            for character in text.chars() {
+                if character.is_whitespace() {
+                    in_word = false;
+                } else if !in_word {
+                    count += 1;
+                    in_word = true;
+                }
+            }
+        } else if dom.tag(node) != Some(Tag::Template) {
+            nodes.extend(dom.children_rev(node));
+        }
+    }
+    count
+}
+
 fn render_normalized_text(dom: &Dom, root: NodeId, capacity: usize) -> String {
     let mut output = NormalizedOutput::with_capacity(capacity);
     let mut nodes = SmallVec::<[NodeId; 32]>::new();

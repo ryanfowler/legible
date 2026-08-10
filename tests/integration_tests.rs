@@ -1,7 +1,7 @@
 //! Integration tests against Mozilla's readability test suite.
 
 use html5ever::{parse_document, tendril::TendrilSink};
-use legible::{Document, Options};
+use legible::extract;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde::Deserialize;
 use std::fs;
@@ -18,7 +18,6 @@ struct ExpectedMetadata {
     published_time: Option<String>,
     dir: Option<String>,
     lang: Option<String>,
-    readerable: bool,
 }
 
 type CanonicalAttribute = (String, String, String);
@@ -177,22 +176,7 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
         None
     };
 
-    let document = Document::new(&source_html);
-    let readerable = document.is_probably_readerable(None);
-    if let Some(expected) = expected_metadata.as_ref()
-        && readerable != expected.readerable
-    {
-        return Err(format!(
-            "Readerable mismatch:\n  Expected: {}\n  Got: {}",
-            expected.readerable, readerable
-        )
-        .into());
-    }
-
-    // Match the options and base URL used to generate Mozilla's fixtures.
-    let mut options = Options::default();
-    options.classes_to_preserve.push("caption".to_string());
-    let article = document.parse(Some("http://fakehost/test/page.html"), Some(options))?;
+    let page = extract(&source_html, Some("http://fakehost/test/page.html"))?;
 
     if let Some(expected) = expected_metadata {
         macro_rules! compare_field {
@@ -209,21 +193,24 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
             }};
         }
 
-        compare_field!("Title", expected.title, article.title);
-        compare_field!("Byline", expected.byline, article.byline);
-        compare_field!("Excerpt", expected.excerpt, article.excerpt);
-        compare_field!("Site name", expected.site_name, article.site_name);
+        let title = (!expected.title.is_empty()).then_some(expected.title);
+        compare_field!("Title", title, page.metadata().title);
+        let byline =
+            (!page.metadata().authors.is_empty()).then(|| page.metadata().authors.join(", "));
+        compare_field!("Byline", expected.byline, byline);
+        compare_field!("Excerpt", expected.excerpt, page.metadata().description);
+        compare_field!("Site name", expected.site_name, page.metadata().site_name);
         compare_field!(
             "Published time",
             expected.published_time,
-            article.published_time
+            page.metadata().published_time
         );
-        compare_field!("Direction", expected.dir, article.dir);
-        compare_field!("Language", expected.lang, article.lang);
+        compare_field!("Direction", expected.dir, page.metadata().direction);
+        compare_field!("Language", expected.lang, page.metadata().language);
     }
 
     if let Some(expected) = expected_html {
-        compare_html(&expected, &article.content)?;
+        compare_html(&expected, &page.html())?;
     }
 
     Ok(())

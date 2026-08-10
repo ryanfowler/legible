@@ -10,10 +10,9 @@ fuzz_target!(|data: &[u8]| {
     let Some(body) = input(data) else { return };
     let html = article_document(body.as_ref());
 
-    // Article extraction performs the DOM detach, append, replace, and cleanup
-    // operations. Its content is produced by the direct iterative serializer.
-    let Some(article) = parse_article(&html) else {
+    // Extraction performs the DOM detach, append, replace, and cleanup operations.
+    let Some(page) = parse_article(&html) else {
         return;
     };
-    reparse_serialized(&article.content);
+    reparse_serialized(&page.html());
 });

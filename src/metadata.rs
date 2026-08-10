@@ -12,13 +12,36 @@ use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::LazyLock;
+/// Metadata discovered in the source page.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
+    /// Page title.
     pub title: Option<String>,
-    pub byline: Option<String>,
-    pub excerpt: Option<String>,
+    /// Page description or summary.
+    pub description: Option<String>,
+    /// Author names in source order.
+    pub authors: Vec<String>,
+    /// Site or publication name.
     pub site_name: Option<String>,
+    /// Canonical page URL.
+    pub canonical_url: Option<String>,
+    /// Representative image URL.
+    pub image: Option<String>,
+    /// Favicon URL.
+    pub favicon: Option<String>,
+    /// Publication time in its source format.
     pub published_time: Option<String>,
+    /// Modification time in its source format.
+    pub modified_time: Option<String>,
+    /// Document language, such as `"en"` or `"fr"`.
+    pub language: Option<String>,
+    /// Text direction, such as `"ltr"` or `"rtl"`.
+    pub direction: Option<String>,
+    /// Page section or category.
+    pub section: Option<String>,
+    /// Page tags in source order.
+    pub tags: Vec<String>,
 }
 pub fn unescape_html_entities<'a>(s: &'a str) -> Cow<'a, str> {
     if s.is_empty() || !s.contains('&') {
@@ -177,10 +200,10 @@ pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
                 .unwrap_or(true);
             collect_json_authors(author, &mut authors, allow_string_author);
             if !authors.is_empty() {
-                out.byline = Some(authors.join(", "));
+                out.authors = authors;
             }
         }
-        out.excerpt = o
+        out.description = o
             .get("description")
             .and_then(Value::as_str)
             .map(|s| s.trim().into());
@@ -360,12 +383,14 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str, sources: u8
         .map(|(_, value)| value)
         .filter(|v| url::Url::parse(v).is_err())
         .cloned();
-    m.byline = json
-        .byline
-        .clone()
-        .or_else(|| pick(&["dc:creator", "dcterm:creator", "author", "parsely-author"]))
-        .or(author);
-    m.excerpt = json.excerpt.clone().or_else(|| {
+    if !json.authors.is_empty() {
+        m.authors.clone_from(&json.authors);
+    } else if let Some(author) =
+        pick(&["dc:creator", "dcterm:creator", "author", "parsely-author"]).or(author)
+    {
+        m.authors.push(author);
+    }
+    m.description = json.description.clone().or_else(|| {
         pick(&[
             "dc:description",
             "dcterm:description",
@@ -382,8 +407,10 @@ pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str, sources: u8
         .clone()
         .or_else(|| pick(&["article:published_time", "parsely-pub-date"]));
     m.title = m.title.map(unescape_owned);
-    m.byline = m.byline.map(unescape_owned);
-    m.excerpt = m.excerpt.map(unescape_owned);
+    for author in &mut m.authors {
+        *author = unescape_owned(std::mem::take(author));
+    }
+    m.description = m.description.map(unescape_owned);
     m.site_name = m.site_name.map(unescape_owned);
     m.published_time = m.published_time.map(unescape_owned);
     m
@@ -455,6 +482,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(get_json_ld(&dom, "").byline.as_deref(), Some("Jane Doe"));
+        assert_eq!(get_json_ld(&dom, "").authors, ["Jane Doe"]);
     }
 }

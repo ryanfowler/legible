@@ -23,10 +23,10 @@ fuzz_target!(|data: &[u8]| {
     }
     html.push_str("</p><p>Trailing article text.</p></article></body></html>");
 
-    let Some(article) = parse_article(&html) else {
+    let Some(page) = parse_article(&html) else {
         return;
     };
-    let _ = &article.markdown_content;
-    let _ = &article.text_content;
-    reparse_serialized(&article.content);
+    let _ = page.markdown();
+    let _ = page.text();
+    reparse_serialized(&page.html());
 });
