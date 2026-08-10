@@ -1915,7 +1915,9 @@
     "title": "Alaskan halibut, caught by a century-old Seattle boat, provides a glimpse of Amazon’s strategy with Whole Foods"
   },
   "simplyfound-1": {
-    "authors": [],
+    "authors": [
+      "Joe Wee"
+    ],
     "canonical_url": "https://simplyfound.com/article/eb9a5e137034/raspberry-pi-3-the-credit-card-sized-pc-that-cost-only-35-all-time-bestselling-computer-in-uk",
     "description": "The Raspberry Pi Foundation started by a handful of volunteers in 2012 when they released the original Raspberry Pi 256MB Model B without knowing what to expect. In a short four-year period they have grown to over sixty full-time employees and ha...",
     "direction": null,
@@ -2007,7 +2009,9 @@
     "title": "linux video"
   },
   "telegraph": {
-    "authors": [],
+    "authors": [
+      "Our Foreign Staff"
+    ],
     "canonical_url": "http://www.telegraph.co.uk/news/2017/11/16/zimbabwes-robert-mugabe-wife-grace-insisting-finishes-term-priest/",
     "description": "Zimbabwe President Robert Mugabe, his wife Grace and two key figures from her G40 political faction are under house arrest at Mugabe's \"Blue House\" compound in Harare and are insisting the 93 year-old finishes his presidential term, a source said.",
     "direction": null,

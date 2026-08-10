@@ -3,8 +3,7 @@
 use crate::candidate::{CandidateSet, CandidateSource};
 use crate::cleaning::*;
 use crate::constants::{
-    flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score,
-    is_unlikely_role, regexps,
+    flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score, regexps,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
@@ -76,7 +75,7 @@ impl<'a> Readability<'a> {
             dom,
             original_html,
             options,
-            flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
+            flags: FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeStateStore::new(),
             article_title: String::new(),
             article_byline: None,
@@ -359,10 +358,7 @@ impl<'a> Readability<'a> {
                         excerpt,
                     });
                 }
-                let retry = if self.flags & FLAG_STRIP_UNLIKELYS != 0 {
-                    self.flags &= !FLAG_STRIP_UNLIKELYS;
-                    true
-                } else if self.flags & FLAG_WEIGHT_CLASSES != 0 {
+                let retry = if self.flags & FLAG_WEIGHT_CLASSES != 0 {
                     self.flags &= !FLAG_WEIGHT_CLASSES;
                     true
                 } else if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
@@ -414,7 +410,6 @@ impl<'a> Readability<'a> {
         match_buffer: &mut String,
         text_buffer: &mut String,
     ) -> CandidateDiscovery {
-        let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
         let candidates = CandidateSet::discover_semantic(&self.dom);
         let mut to_score = SmallVec::<[NodeId; 256]>::new();
         let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
@@ -461,9 +456,24 @@ impl<'a> Readability<'a> {
                     let mut names = Vec::new();
                     self.dom
                         .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
-                    let name = names.first().copied().unwrap_or(id);
+                    let name = names.first().copied().or_else(|| {
+                        let has_timestamp_separator = self
+                            .dom
+                            .descendants(id)
+                            .filter_map(|node| self.dom.text_node(node))
+                            .any(|text| text.split_whitespace().any(|token| token == "@"));
+                        if !has_timestamp_separator {
+                            return None;
+                        }
+                        let mut links = self
+                            .dom
+                            .descendants(id)
+                            .filter(|&node| dom_text_candidate(&self.dom, node));
+                        let link = links.next()?;
+                        links.next().is_none().then_some(link)
+                    });
                     self.article_byline =
-                        Some(get_inner_text(&self.dom, name, text_buffer).to_owned());
+                        Some(get_inner_text(&self.dom, name.unwrap_or(id), text_buffer).to_owned());
                     remove_after_scoring.push(id);
                     excluded_depth = Some(depth);
                     continue;
@@ -480,22 +490,6 @@ impl<'a> Readability<'a> {
                 remove_after_scoring.push(id);
                 excluded_depth = Some(depth);
                 continue;
-            }
-            if strip && tag != Tag::Body && tag != Tag::A {
-                build_match_string(&self.dom, id, match_buffer);
-                let matches = regexps::CANDIDATE_FILTER_SET.matches(match_buffer);
-                if matches.matched(0)
-                    && !matches.matched(1)
-                    && !has_ancestor_tags_any(&self.dom, id, &[Tag::Table, Tag::Code], 3)
-                    || self
-                        .dom
-                        .attr(id, AttrName::Role)
-                        .is_some_and(is_unlikely_role)
-                {
-                    remove_after_scoring.push(id);
-                    excluded_depth = Some(depth);
-                    continue;
-                }
             }
             if matches!(
                 tag,
@@ -718,6 +712,7 @@ impl<'a> Readability<'a> {
             nodes,
             self.options.link_density_modifier,
         );
+        clean_breadcrumb_navigation(&mut self.dom, root, nodes);
         clean_tags(
             &mut self.dom,
             root,
@@ -745,7 +740,6 @@ impl<'a> Readability<'a> {
             video,
             nodes,
         );
-        clean_headers(&mut self.dom, root, self.flags, nodes);
         clean_conditionally(
             &mut self.dom,
             root,
@@ -971,6 +965,12 @@ impl<'a> Readability<'a> {
         }
     }
 }
+fn dom_text_candidate(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::A)
+        && dom.has_non_whitespace_text(node)
+        && dom.normalized_char_count(node) < 100
+}
+
 fn heading_matches_article_title(article_title: &str, heading: &str) -> bool {
     metadata::text_similarity(article_title, heading) > 0.75
         || article_title.strip_prefix(heading).is_some_and(|suffix| {
@@ -980,12 +980,6 @@ fn heading_matches_article_title(article_title: &str, heading: &str) -> bool {
                     matches!(c, '|' | '-' | '–' | '—' | '/' | '>' | '»' | '_' | ':')
                 })
         })
-}
-
-fn has_ancestor_tags_any(dom: &Dom, id: NodeId, tags: &[Tag], max: usize) -> bool {
-    dom.ancestors(id)
-        .take(max)
-        .any(|x| dom.tag(x).is_some_and(|t| tags.contains(&t)))
 }
 
 #[cfg(test)]
@@ -1075,6 +1069,79 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         for (html, expected) in fixtures {
             assert_eq!(ranked_winner_id(html), expected, "{html}");
         }
+    }
+
+    #[test]
+    fn conflicting_class_tokens_do_not_delete_substantial_content() {
+        let html = r#"<body>
+            <div class="sidebar article-content">
+                <h1>Retained guide</h1>
+                <p>This substantial article explains the subject with complete sentences and useful detail.</p>
+                <pre><code>cargo test</code></pre>
+                <table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td>test</td><td>Validate changes</td></tr></tbody></table>
+                <figure><img src="diagram.png" alt="Flow"><figcaption>Extraction flow</figcaption></figure>
+            </div>
+            <div class="article-content"><p>Short competing teaser.</p></div>
+        </body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("substantial article"), "{markdown}");
+        assert!(markdown.contains("cargo test"), "{markdown}");
+        assert!(markdown.contains("Command"), "{markdown}");
+        assert!(markdown.contains("Extraction flow"), "{markdown}");
+        assert!(!markdown.contains("competing teaser"), "{markdown}");
+    }
+
+    #[test]
+    fn cleanup_protects_semantic_content_inside_negative_wrappers() {
+        let html = r#"<body><main>
+            <div class="sidebar">
+                <h2 class="related">Unrelated recommendations</h2>
+                <ul>
+                    <li><a href="/one">Unrelated linked item one</a></li>
+                    <li><a href="/two">Unrelated linked item two</a></li>
+                    <li><a href="/three">Unrelated linked item three</a></li>
+                </ul>
+                <pre><code>cargo test --all-features</code></pre>
+                <figure><img src="flow.png" alt="Flow"><figcaption>Validation flow</figcaption></figure>
+            </div>
+            <div><p>This sibling has enough prose to keep the main root selected while cleanup inspects the negative wrapper. It explains the primary topic in detail, provides careful context, describes the expected behavior, and gives readers a complete answer. The next part adds implementation constraints, practical examples, validation steps, and recovery guidance. Another part documents the inputs, outputs, edge cases, compatibility requirements, and important tradeoffs. The final part summarizes the recommended approach, explains why it works, and identifies the checks that confirm a correct result.</p></div>
+        </main></body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("cargo test --all-features"), "{markdown}");
+        assert!(markdown.contains("Validation flow"), "{markdown}");
+        assert!(!markdown.contains("Unrelated linked item"), "{markdown}");
+    }
+
+    #[test]
+    fn unlikely_roles_are_evidence_instead_of_deletion_rules() {
+        let html = r#"<body><div role="complementary" class="article-content">
+            <p>This complete guide remains available despite its conflicting semantic role.</p>
+            <p>Strong content evidence keeps the useful extraction candidate.</p>
+        </div></body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("complete guide"), "{markdown}");
+        assert!(markdown.contains("Strong content evidence"), "{markdown}");
+    }
+
+    #[test]
+    fn email_addresses_are_not_treated_as_byline_timestamp_separators() {
+        let html = r#"<body><main>
+            <div class="byline">Contact editor@example.com <a href="/team">Editorial team</a></div>
+            <p>This article has enough complete prose to produce useful extracted content for the test.</p>
+        </main></body>"#;
+
+        let page = crate::extract(html, None).unwrap();
+
+        assert_eq!(
+            page.metadata().authors,
+            ["Contact editor@example.com Editorial team"]
+        );
     }
 
     #[test]
@@ -1225,7 +1292,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     }
 
     #[test]
-    fn discovery_and_scoring_preserve_unlikely_subtrees() {
+    fn discovery_preserves_unlikely_subtrees_for_scoring() {
         let html = r#"<body>
             <div class="sidebar" id="unlikely"><p>This sidebar text is long enough to inspect.</p></div>
             <main><p>This primary content is long enough to score as a candidate.</p></main>
@@ -1286,12 +1353,18 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             &discovery.remove_after_scoring,
         );
 
-        assert!(scoring_dom.parent(unlikely).is_some());
+        // Scoring can replace simple wrappers in its private copy. The source
+        // subtree remains intact and contributes the same visible text.
+        assert!(
+            scoring_dom
+                .text(scoring_dom.root())
+                .contains("sidebar text")
+        );
         assert_eq!(readability.dom.parent(unlikely), parent);
         assert_eq!(readability.dom.parent(normal), normal_parent);
         assert_eq!(readability.dom.tag(normal), normal_tag);
         assert_eq!(readability.dom.attrs(normal), normal_attrs);
         assert_eq!(readability.dom.len(), dom_len);
-        assert!(discovery.remove_after_scoring.contains(&unlikely));
+        assert!(!discovery.remove_after_scoring.contains(&unlikely));
     }
 }

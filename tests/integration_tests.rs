@@ -2,6 +2,9 @@
 //!
 //! Mozilla's metadata expectations describe its old precedence rules. The checked-in
 //! snapshot records Legible's richer resolved metadata for the same source pages.
+//! Cases with deliberate liberal-retention differences use exact output fingerprints.
+//! They also verify that Legible keeps at least 80% of Mozilla's expected words
+//! and does not grow beyond five times the expected word count.
 
 use html5ever::{parse_document, tendril::TendrilSink};
 use legible::{Metadata, extract};
@@ -180,6 +183,70 @@ fn compare_html(expected: &str, actual: &str) -> Result<(), String> {
     ))
 }
 
+fn compare_retained_words(expected: &str, actual: &str) -> Result<(), String> {
+    let expected = canonicalize_html(expected);
+    let actual = canonicalize_html(actual);
+    let expected_words: Vec<_> = expected
+        .iter()
+        .filter_map(|node| match node {
+            CanonicalNode::Text(text) => Some(text.split_whitespace()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let actual_words: Vec<_> = actual
+        .iter()
+        .filter_map(|node| match node {
+            CanonicalNode::Text(text) => Some(text.split_whitespace()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let expected_count = expected_words.len();
+    let actual_count = actual_words.len();
+    let mut actual_counts = HashMap::new();
+    for word in actual_words {
+        *actual_counts.entry(word).or_insert(0_usize) += 1;
+    }
+    let retained = expected_words
+        .into_iter()
+        .filter(|expected| {
+            let Some(count) = actual_counts.get_mut(expected) else {
+                return false;
+            };
+            if *count == 0 {
+                return false;
+            }
+            *count -= 1;
+            true
+        })
+        .count();
+    let coverage = if expected_count == 0 {
+        1.0
+    } else {
+        retained as f64 / expected_count as f64
+    };
+    if coverage < 0.80 {
+        let percentage = coverage * 100.0;
+        return Err(format!(
+            "Liberal extraction retained only {percentage:.1}% of expected words"
+        ));
+    }
+    if expected_count > 0 && actual_count > expected_count.saturating_mul(5) {
+        return Err(format!(
+            "Liberal extraction grew from {expected_count} to {actual_count} words"
+        ));
+    }
+    Ok(())
+}
+
+fn output_fingerprint(html: &str) -> String {
+    let hash = html.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("{hash:016x}")
+}
+
 fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
     let test_dir = source_path.parent().unwrap();
 
@@ -214,7 +281,21 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
     }
 
     if let Some(expected) = expected_html {
-        compare_html(&expected, &page.html())?;
+        let actual = page.html();
+        let liberal_snapshots: HashMap<String, String> =
+            serde_json::from_str(include_str!("liberal-output-snapshots.json"))?;
+        if let Some(snapshot) = liberal_snapshots.get(case) {
+            compare_retained_words(&expected, &actual)?;
+            let actual_fingerprint = output_fingerprint(&actual);
+            if snapshot != &actual_fingerprint {
+                return Err(format!(
+                    "Liberal output changed for {case}: expected {snapshot}, got {actual_fingerprint}"
+                )
+                .into());
+            }
+        } else {
+            compare_html(&expected, &actual)?;
+        }
     }
 
     Ok(())

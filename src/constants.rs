@@ -6,7 +6,6 @@ use std::sync::LazyLock;
 
 /// Parsing flags that control the behavior of the algorithm.
 pub mod flags {
-    pub const FLAG_STRIP_UNLIKELYS: u32 = 0x1;
     pub const FLAG_WEIGHT_CLASSES: u32 = 0x2;
     pub const FLAG_CLEAN_CONDITIONALLY: u32 = 0x4;
 }
@@ -40,11 +39,6 @@ pub mod regexps {
     /// Matches unlikely candidates for main content.
     pub static UNLIKELY_CANDIDATES: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)-ad-|ai2html|banner|breadcrumbs|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager|popup|yom-remote").unwrap()
-    });
-
-    /// Matches elements that might be candidates even if they look unlikely.
-    pub static OK_MAYBE_ITS_A_CANDIDATE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)and|article|body|column|content|main|mathjax|shadow").unwrap()
     });
 
     /// Matches positive indicators for content.
@@ -92,16 +86,6 @@ pub mod regexps {
         RegexSet::new([
             NEGATIVE.as_str(), // Index 0 - negative patterns
             POSITIVE.as_str(), // Index 1 - positive patterns
-        ])
-        .unwrap()
-    });
-
-    /// RegexSet for candidate filtering - combines UNLIKELY_CANDIDATES (index 0)
-    /// and OK_MAYBE_ITS_A_CANDIDATE (index 1).
-    pub static CANDIDATE_FILTER_SET: LazyLock<RegexSet> = LazyLock::new(|| {
-        RegexSet::new([
-            UNLIKELY_CANDIDATES.as_str(),      // Index 0 - unlikely patterns
-            OK_MAYBE_ITS_A_CANDIDATE.as_str(), // Index 1 - maybe ok patterns
         ])
         .unwrap()
     });
@@ -413,11 +397,21 @@ pub fn has_share_element(s: &str) -> bool {
 }
 
 #[inline]
-pub fn is_unlikely_role(role: &str) -> bool {
-    matches!(
-        role,
-        "menu" | "menubar" | "complementary" | "navigation" | "alert" | "alertdialog" | "dialog"
-    )
+pub fn is_unlikely_role(roles: &str) -> bool {
+    roles.split_whitespace().any(|role| {
+        [
+            "menu",
+            "menubar",
+            "banner",
+            "complementary",
+            "navigation",
+            "alert",
+            "alertdialog",
+            "dialog",
+        ]
+        .iter()
+        .any(|unlikely| role.eq_ignore_ascii_case(unlikely))
+    })
 }
 
 #[inline]

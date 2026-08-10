@@ -150,6 +150,31 @@ pub fn clean_tags(
         dom.detach(id);
     }
 }
+pub fn clean_breadcrumb_navigation(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    nodes.clear();
+    nodes.extend(
+        dom.descendants(root)
+            .filter(|&id| dom.tag(id) == Some(Tag::Nav)),
+    );
+    for &id in nodes.iter() {
+        let is_breadcrumb = [AttrName::Class, AttrName::Id]
+            .into_iter()
+            .filter_map(|name| dom.attr(id, name))
+            .any(|value| value.to_ascii_lowercase().contains("breadcrumb"))
+            || dom
+                .attr_by_local_name(id, "aria-label")
+                .is_some_and(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "breadcrumb" | "breadcrumbs"
+                    )
+                });
+        if is_breadcrumb && dom.parent(id).is_some() {
+            dom.detach(id);
+        }
+    }
+}
+
 pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.clear();
     nodes.extend(std::iter::once(root).chain(dom.descendants(root)));
@@ -161,18 +186,6 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         dom.remove_attrs(id, PRESENTATIONAL_ATTRIBUTES);
         if has_size && dom.tag(id).is_some_and(is_deprecated_size_attribute_elem) {
             dom.remove_attrs(id, &[AttrName::Width, AttrName::Height]);
-        }
-    }
-}
-pub fn clean_headers(dom: &mut Dom, root: NodeId, flags: u32, nodes: &mut Vec<NodeId>) {
-    nodes.clear();
-    nodes.extend(
-        dom.descendants(root)
-            .filter(|&id| matches!(dom.tag(id), Some(Tag::H1 | Tag::H2))),
-    );
-    for &id in nodes.iter() {
-        if get_class_weight(dom, id, flags) < 0 {
-            dom.detach(id);
         }
     }
 }
@@ -211,6 +224,7 @@ pub fn clean_conditionally(
                 modifier,
             )
         {
+            hoist_protected_descendants(dom, id, store);
             dom.detach(id);
         }
     }
@@ -245,17 +259,8 @@ fn should_remove(
         p = dom.parent(x);
         depth += 1;
     }
-    if dom
-        .descendants(id)
-        .any(|x| dom.tag(x) == Some(Tag::Table) && store.is_data_table(x) == Some(true))
-    {
-        return false;
-    }
     let stats = get_or_compute_stats(dom, id, store);
     let weight = get_class_weight(dom, id, flags);
-    if weight < 0 {
-        return true;
-    }
     if stats.comma_count >= 10 {
         return false;
     }
@@ -302,6 +307,7 @@ fn should_remove(
             _ => {}
         }
     }
+    let raw_lis = lis;
     lis = lis.saturating_sub(100);
     let is_list = semantic == Tag::Ul
         || semantic == Tag::Ol
@@ -322,6 +328,17 @@ fn should_remove(
     } else {
         0.
     };
+    let has_positive_name = [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|name| dom.attr(id, name))
+        .any(|value| regexps::POSITIVE.is_match(value));
+    let has_unlikely_name = [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|name| dom.attr(id, name))
+        .any(|value| regexps::UNLIKELY_CANDIDATES.is_match(value));
+    if is_list && raw_lis >= 10 && heading > 0 && has_unlikely_name && !has_positive_name {
+        return true;
+    }
     let remove = (!figure && imgs > 1 && (pc as f64 / imgs as f64) < 0.5)
         || (!is_list && lis > pc)
         || inputs > pc / 3
@@ -353,6 +370,39 @@ fn should_remove(
     }
     remove
 }
+
+fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
+    matches!(
+        dom.tag(id),
+        Some(
+            Tag::Pre
+                | Tag::Code
+                | Tag::Figure
+                | Tag::Picture
+                | Tag::Blockquote
+                | Tag::Details
+                | Tag::Math
+                | Tag::Dl
+        )
+    ) || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
+}
+
+fn hoist_protected_descendants(dom: &mut Dom, wrapper: NodeId, store: &crate::dom::NodeStateStore) {
+    let protected: SmallVec<[NodeId; 4]> = dom
+        .descendants(wrapper)
+        .filter(|&node| {
+            is_protected_content(dom, node, store)
+                && !dom
+                    .ancestors(node)
+                    .take_while(|&ancestor| ancestor != wrapper)
+                    .any(|ancestor| is_protected_content(dom, ancestor, store))
+        })
+        .collect();
+    for node in protected {
+        dom.insert_before(wrapper, node);
+    }
+}
+
 pub fn mark_data_tables(
     dom: &Dom,
     root: NodeId,
@@ -1071,6 +1121,24 @@ mod tests {
             !dom.descendants(root)
                 .any(|id| dom.tag(id) == Some(Tag::Iframe))
         );
+    }
+
+    #[test]
+    fn removes_singular_and_plural_breadcrumb_navigation() {
+        let mut dom = Dom::parse_document(
+            r#"<main><nav aria-label=" Breadcrumb ">One</nav><nav aria-label="Breadcrumbs">Two</nav><nav aria-label="Sections">Keep</nav></main>"#,
+        )
+        .unwrap();
+        let root = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+
+        clean_breadcrumb_navigation(&mut dom, root, &mut Vec::new());
+
+        let labels: Vec<_> = dom
+            .descendants(root)
+            .filter(|&id| dom.tag(id) == Some(Tag::Nav))
+            .filter_map(|id| dom.attr_by_local_name(id, "aria-label"))
+            .collect();
+        assert_eq!(labels, ["Sections"]);
     }
 
     #[test]

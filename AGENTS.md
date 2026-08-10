@@ -80,11 +80,10 @@ Candidate ranking combines Readability propagation with text, structure, link-de
 
 ### Algorithm Flags
 
-- `FLAG_STRIP_UNLIKELYS` (0x1) - Remove non-content-like elements
 - `FLAG_WEIGHT_CLASSES` (0x2) - Score based on class/id patterns
 - `FLAG_CLEAN_CONDITIONALLY` (0x4) - Conditional cleanup pass
 
-The algorithm retries with progressively fewer flags if initial extraction fails.
+Unlikely class, ID, and role values are negative ranking evidence. They do not remove candidates during discovery. The algorithm retries with progressively fewer flags if initial extraction fails.
 
 ## Documentation
 

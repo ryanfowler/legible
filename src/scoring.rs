@@ -1,6 +1,8 @@
 //! Content scoring and DOM text helpers.
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
-use crate::constants::{flags::*, has_byline, is_div_to_p_elem, is_phrasing_elem, regexps};
+use crate::constants::{
+    flags::*, has_byline, is_div_to_p_elem, is_phrasing_elem, is_unlikely_role, regexps,
+};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use smallvec::SmallVec;
 
@@ -335,7 +337,16 @@ impl CandidateFeatures {
             + (f64::from(self.protected_block_count) / 100_000.0).min(0.001);
         let link_penalty = (self.link_density * 0.2).min(0.1);
         let link_volume_evidence = (self.link_text_chars / 1_000_000.0).min(0.001);
-        let name_evidence = self.positive_name_score * 0.001 - self.negative_name_score * 0.001;
+        let negative_name_penalty = if self.positive_name_score > 0.0 {
+            // Conflicting names are uncertain. Let content evidence decide.
+            self.negative_name_score * 0.1
+        } else {
+            // Preserve a substantial candidate even when its name looks
+            // suspicious. The penalty scales with, but cannot erase, its
+            // strongest content signal.
+            self.negative_name_score * (1.0 + self.readability_score.max(0.0) * 0.6).min(125.0)
+        };
+        let name_evidence = self.positive_name_score * 0.001 - negative_name_penalty;
 
         self.readability_score
             + self.semantic_prior
@@ -349,15 +360,31 @@ impl CandidateFeatures {
 }
 
 fn name_signals(dom: &Dom, node: NodeId) -> (f64, f64) {
-    let mut positive = false;
-    let mut negative = false;
-    for name in [AttrName::Class, AttrName::Id] {
-        let Some(value) = dom.attr(node, name).filter(|value| !value.is_empty()) else {
-            continue;
-        };
-        let matches = regexps::CLASS_WEIGHT_SET.matches(value);
-        positive |= matches.matched(1);
-        negative |= matches.matched(0);
+    fn signals_for_node(dom: &Dom, node: NodeId) -> (bool, bool) {
+        let mut positive = false;
+        let mut negative = false;
+        for name in [AttrName::Class, AttrName::Id] {
+            let Some(value) = dom.attr(node, name).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let matches = regexps::CLASS_WEIGHT_SET.matches(value);
+            positive |= matches.matched(1);
+            negative |= matches.matched(0) || regexps::UNLIKELY_CANDIDATES.is_match(value);
+        }
+        let role = dom.attr(node, AttrName::Role);
+        positive |= role.is_some_and(|roles| {
+            roles.split_whitespace().any(|role| {
+                role.eq_ignore_ascii_case("article") || role.eq_ignore_ascii_case("main")
+            })
+        });
+        negative |= role.is_some_and(is_unlikely_role);
+        (positive, negative)
+    }
+
+    let (positive, mut negative) = signals_for_node(dom, node);
+    for ancestor in dom.ancestors(node).take(3) {
+        let (ancestor_positive, ancestor_negative) = signals_for_node(dom, ancestor);
+        negative |= ancestor_negative && !ancestor_positive;
     }
     (f64::from(positive), f64::from(negative))
 }
@@ -736,9 +763,7 @@ mod tests {
         get_link_density_cached, stats_for_text,
     };
     use crate::candidate::CandidateSet;
-    use crate::constants::flags::{
-        FLAG_CLEAN_CONDITIONALLY, FLAG_STRIP_UNLIKELYS, FLAG_WEIGHT_CLASSES,
-    };
+    use crate::constants::flags::{FLAG_CLEAN_CONDITIONALLY, FLAG_WEIGHT_CLASSES};
     use crate::dom::{Dom, NodeStateStore, Tag};
 
     #[test]
@@ -824,6 +849,27 @@ mod tests {
     }
 
     #[test]
+    fn substantial_content_can_overcome_negative_name_evidence() {
+        let substantial_negative = crate::candidate::CandidateFeatures {
+            readability_score: 100.0,
+            negative_name_score: 1.0,
+            ..Default::default()
+        };
+        let ordinary = crate::candidate::CandidateFeatures {
+            readability_score: 20.0,
+            ..Default::default()
+        };
+
+        assert!(substantial_negative.ranking_score() > ordinary.ranking_score());
+
+        let zero_score_negative = crate::candidate::CandidateFeatures {
+            negative_name_score: 1.0,
+            ..Default::default()
+        };
+        assert!(zero_score_negative.ranking_score() < 0.0);
+    }
+
+    #[test]
     fn traditional_article_produces_a_readability_candidate() {
         let dom = Dom::parse_document(
             r#"<body><article><p>This traditional article paragraph contains enough prose, commas, and detail to contribute a strong content score.</p></article><aside><p>Short note.</p></aside></body>"#,
@@ -837,7 +883,7 @@ mod tests {
             .filter(|&node| dom.tag(node) == Some(Tag::P))
             .collect();
         let mut store = NodeStateStore::new();
-        let flags = FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY;
+        let flags = FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY;
 
         let scores = compute_readability_scores(&dom, &dom, paragraphs, &[], &mut store, flags);
 
