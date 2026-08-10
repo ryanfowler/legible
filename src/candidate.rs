@@ -46,12 +46,36 @@ impl CandidateSources {
     }
 }
 
+/// Content evidence calculated for one possible extraction root.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CandidateFeatures {
+    pub(crate) text_chars: u32,
+    pub(crate) word_count: u32,
+    pub(crate) paragraph_count: u32,
+    pub(crate) heading_count: u32,
+    pub(crate) list_item_count: u32,
+    pub(crate) code_block_count: u32,
+    pub(crate) table_count: u32,
+    pub(crate) figure_count: u32,
+    pub(crate) image_count: u32,
+    pub(crate) link_text_chars: f64,
+    pub(crate) link_density: f64,
+    pub(crate) sentence_end_count: u32,
+    pub(crate) comma_count: u32,
+    pub(crate) protected_block_count: u32,
+    pub(crate) readability_score: f64,
+    pub(crate) semantic_prior: f64,
+    pub(crate) positive_name_score: f64,
+    pub(crate) negative_name_score: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Candidate {
     pub(crate) node: NodeId,
     sources: CandidateSources,
     pub(crate) semantic_prior: f64,
     pub(crate) readability_score: f64,
+    pub(crate) features: CandidateFeatures,
 }
 
 impl Candidate {
@@ -161,6 +185,10 @@ impl CandidateSet {
         self.candidates.iter()
     }
 
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Candidate> {
+        self.candidates.iter_mut()
+    }
+
     pub(crate) fn is_authoritative_semantic(&self, dom: &Dom, node: NodeId) -> bool {
         matches!(dom.tag(node), Some(Tag::Article | Tag::Main))
             || dom
@@ -262,6 +290,7 @@ impl CandidateSet {
                 } else {
                     0.0
                 },
+                features: CandidateFeatures::default(),
             });
             return;
         }

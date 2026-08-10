@@ -540,6 +540,18 @@ impl<'a> Readability<'a> {
             candidates.add_readability(readability.node, readability.score);
         }
 
+        // Ranking can receive a tree with deferred clutter detached. Do not
+        // reuse text or link totals from an earlier view of the same node IDs.
+        self.node_data.clear_stats();
+        let mut table_nodes = Vec::new();
+        mark_data_tables(dom, dom.root(), &mut self.node_data, &mut table_nodes);
+        let feature_index = CandidateFeatureIndex::new(dom, &self.node_data);
+        feature_index.prepare_text_cache(&mut self.node_data);
+        for candidate in candidates.iter_mut() {
+            candidate.features =
+                feature_index.features(dom, *candidate, &mut self.node_data, self.flags);
+        }
+
         let context = candidates.ranking_context(dom);
         let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
             .iter()
@@ -559,11 +571,6 @@ impl<'a> Readability<'a> {
                 if is_semantic && !is_authoritative && !has_readability {
                     return None;
                 }
-                let semantic_content_score = if is_semantic {
-                    (f64::from(length) / 1_000_000.0).min(0.001)
-                } else {
-                    0.0
-                };
                 let short_semantic_bonus = if is_authoritative
                     && !context.has_authoritative_ancestor(candidate.node)
                     && !context.has_authoritative_descendant(candidate.node, is_authoritative)
@@ -589,9 +596,7 @@ impl<'a> Readability<'a> {
                 } else {
                     0.0
                 };
-                let final_score = candidate.readability_score
-                    + candidate.semantic_prior
-                    + semantic_content_score
+                let final_score = candidate.features.ranking_score()
                     + short_semantic_bonus
                     + sibling_content_bonus;
                 self.node_data.set_score(candidate.node, final_score);
@@ -987,6 +992,91 @@ fn has_ancestor_tags_any(dom: &Dom, id: NodeId, tags: &[Tag], max: usize) -> boo
 mod tests {
     use super::*;
 
+    fn ranked_winner_id(html: &str) -> String {
+        let dom = Dom::parse_document(html).unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(dom, html, None, &config);
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let mut scoring_dom = readability.dom.clone();
+        let mut to_score = discovery.to_score;
+        let prepared = prepare_readability_structure(
+            &mut scoring_dom,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+        );
+        readability.node_data.sync_len(scoring_dom.len());
+        for node in prepared {
+            if readability.node_data.mark_score_seen(node) {
+                to_score.push(node);
+            }
+        }
+        let mut ranking_dom = scoring_dom.clone();
+        for &node in &discovery.remove_after_scoring {
+            if ranking_dom.parent(node).is_some() {
+                ranking_dom.detach(node);
+            }
+        }
+        let scores = compute_readability_scores(
+            &scoring_dom,
+            &ranking_dom,
+            to_score,
+            &discovery.remove_after_scoring,
+            &mut readability.node_data,
+            readability.flags,
+        );
+        let ranked = readability.rank_candidates(
+            &ranking_dom,
+            discovery.candidates,
+            scores,
+            &discovery.remove_after_scoring,
+        );
+        ranking_dom
+            .attr(ranked[0].0, AttrName::Id)
+            .expect("winner must have a test ID")
+            .to_owned()
+    }
+
+    #[test]
+    fn ranks_article_and_non_article_content() {
+        let fixtures = [
+            (
+                r#"<body><aside><p>Brief promotion with ordinary prose.</p></aside><article id="wanted"><p>A normal article has complete sentences, useful detail, commas, and enough text for paragraph scoring.</p></article></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="summary"><p>A misleading prose summary has many words, clauses, and punctuation.</p></div><main id="wanted"><h1>Build reference</h1><pre><code>cargo build --release
+cargo test</code></pre><p>Run these commands.</p></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="summary"><p>A competing prose summary has complete sentences, commas, and article-like words.</p></div><main id="wanted"><h1>Status codes</h1><table><tr><th>Code</th><th>Meaning</th></tr><tr><td>200</td><td>Success</td></tr></table></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="post-content sidebar"><p>This sidebar has polished prose, but describes an unrelated promotion.</p></div><main id="wanted"><h1>API index</h1><ul><li><a href="/a">Alpha reference</a></li><li><a href="/b">Beta reference</a></li><li><a href="/c">Gamma reference</a></li><li><a href="/d">Delta reference</a></li></ul></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="post-content sidebar"><p>Misleading positive text in a sidebar with several ordinary words.</p></div><article id="wanted"><p>The actual article has useful prose, multiple clauses, commas, and stronger content evidence for ranking.</p><p>Its second paragraph adds relevant facts and a complete explanation.</p><p>Its third paragraph continues the primary discussion with useful detail.</p><p>Its final paragraph gives a clear conclusion for the reader.</p></article></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="post-content"><p>Short teaser.</p></div><main id="wanted" class="sidebar article-content"><p>This substantial guide remains useful although one class token is negative. It has complete sentences and enough detail.</p><p>A second paragraph confirms the content evidence.</p></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><main id="wanted"><article><h2>First card</h2><p>First useful summary.</p></article><article><h2>Second card</h2><p>Second useful summary.</p></article><article><h2>Third card</h2><p>Third useful summary.</p></article></main></body>"#,
+                "wanted",
+            ),
+        ];
+
+        for (html, expected) in fixtures {
+            assert_eq!(ranked_winner_id(html), expected, "{html}");
+        }
+    }
+
     #[test]
     fn recognizes_title_prefix_with_whitespace_before_separator() {
         assert!(heading_matches_article_title(
@@ -1104,6 +1194,34 @@ mod tests {
             &discovery.remove_after_scoring,
         );
         assert_eq!(ranked[0].0, main);
+    }
+
+    #[test]
+    fn ranking_invalidates_statistics_from_an_earlier_tree_view() {
+        let html = r#"<body><main id="wanted"><p>Visible answer.</p><div id="excluded"><a href="/ad">Excluded linked promotion with many extra words.</a></div></main></body>"#;
+        let source = Dom::parse_document(html).unwrap();
+        let main = source
+            .first_descendant_by_tag(source.root(), Tag::Main)
+            .unwrap();
+        let excluded = source
+            .descendants(source.root())
+            .find(|&node| source.attr(node, AttrName::Id) == Some("excluded"))
+            .unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(source.clone(), html, None, &config);
+        readability.node_data.enable_link_lengths();
+        let stale = get_or_compute_stats(&source, main, &mut readability.node_data);
+        assert!(stale.text_length > 50);
+        assert!(readability.node_data.link_length(main) > 0.0);
+
+        let mut ranking_dom = source;
+        ranking_dom.detach(excluded);
+        let candidates = CandidateSet::discover_semantic(&ranking_dom);
+        readability.rank_candidates(&ranking_dom, candidates, SmallVec::new(), &[]);
+
+        let fresh = get_or_compute_stats(&ranking_dom, main, &mut readability.node_data);
+        assert_eq!(fresh.text_length, 15);
+        assert_eq!(readability.node_data.link_length(main), 0.0);
     }
 
     #[test]

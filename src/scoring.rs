@@ -1,5 +1,5 @@
 //! Content scoring and DOM text helpers.
-use crate::candidate::CandidateSet;
+use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
 use crate::constants::{flags::*, has_byline, is_div_to_p_elem, is_phrasing_elem, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use smallvec::SmallVec;
@@ -23,7 +23,9 @@ fn stats_for_text(text: &str) -> NodeStats {
     let mut prev = true;
     let mut dot = false;
     let mut text_length = 0usize;
+    let mut word_count = 0usize;
     let mut comma_count = 0usize;
+    let mut sentence_end_count = 0usize;
 
     // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
     // Unicode whitespace tables in the hot loop.
@@ -38,8 +40,10 @@ fn stats_for_text(text: &str) -> NodeStats {
                 }
             } else {
                 s.has_non_whitespace = true;
+                word_count += usize::from(prev);
                 dot = byte == b'.';
                 comma_count += usize::from(byte == b',');
+                sentence_end_count += usize::from(matches!(byte, b'.' | b'!' | b'?'));
                 text_length += 1;
                 prev = false
             }
@@ -55,6 +59,7 @@ fn stats_for_text(text: &str) -> NodeStats {
                 }
             } else {
                 s.has_non_whitespace = true;
+                word_count += usize::from(prev);
                 dot = c == '.';
                 comma_count += usize::from(
                     c == ','
@@ -70,6 +75,10 @@ fn stats_for_text(text: &str) -> NodeStats {
                                 | '\u{FF0C}'
                         ),
                 );
+                sentence_end_count += usize::from(matches!(
+                    c,
+                    '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}'
+                ));
                 text_length += 1;
                 prev = false
             }
@@ -79,7 +88,9 @@ fn stats_for_text(text: &str) -> NodeStats {
         text_length -= 1
     }
     s.text_length = text_length.min(u32::MAX as usize) as u32;
+    s.word_count = word_count.min(u32::MAX as usize) as u32;
     s.comma_count = comma_count.min(u32::MAX as usize) as u32;
+    s.sentence_end_count = sentence_end_count.min(u32::MAX as usize) as u32;
     s.ends_with_dot = dot;
     s.has_sentence_end = s.has_sentence_break || dot;
     s
@@ -100,7 +111,16 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
         a.text_length = a.text_length.saturating_add(1)
     }
     a.text_length = a.text_length.saturating_add(b.text_length);
+    a.word_count = a.word_count.saturating_add(b.word_count);
+    if a.has_non_whitespace
+        && b.has_non_whitespace
+        && !a.ends_with_whitespace
+        && !b.starts_with_whitespace
+    {
+        a.word_count = a.word_count.saturating_sub(1);
+    }
     a.comma_count = a.comma_count.saturating_add(b.comma_count);
+    a.sentence_end_count = a.sentence_end_count.saturating_add(b.sentence_end_count);
     a.has_non_whitespace |= b.has_non_whitespace;
     a.ends_with_whitespace = b.ends_with_whitespace;
     a.ends_with_dot = b.ends_with_dot;
@@ -156,6 +176,192 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
     }
     store.get_stats(id).copied().unwrap_or_default()
 }
+/// Structural counts for all attached subtrees.
+///
+/// This index makes feature calculation linear in DOM size, even when many
+/// nested nodes become candidates.
+pub(crate) struct CandidateFeatureIndex {
+    counts: Vec<StructuralCounts>,
+    has_links: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StructuralCounts {
+    paragraphs: u32,
+    headings: u32,
+    list_items: u32,
+    code_blocks: u32,
+    tables: u32,
+    figures: u32,
+    images: u32,
+    protected_blocks: u32,
+}
+
+impl StructuralCounts {
+    fn add(&mut self, other: Self) {
+        self.paragraphs = self.paragraphs.saturating_add(other.paragraphs);
+        self.headings = self.headings.saturating_add(other.headings);
+        self.list_items = self.list_items.saturating_add(other.list_items);
+        self.code_blocks = self.code_blocks.saturating_add(other.code_blocks);
+        self.tables = self.tables.saturating_add(other.tables);
+        self.figures = self.figures.saturating_add(other.figures);
+        self.images = self.images.saturating_add(other.images);
+        self.protected_blocks = self.protected_blocks.saturating_add(other.protected_blocks);
+    }
+}
+
+impl CandidateFeatureIndex {
+    pub(crate) fn new(dom: &Dom, store: &NodeStateStore) -> Self {
+        let mut counts = vec![StructuralCounts::default(); dom.len()];
+        let mut nodes = Vec::with_capacity(dom.len());
+        nodes.push(dom.root());
+        nodes.extend(dom.descendants(dom.root()));
+        let mut has_links = false;
+
+        for &node in &nodes {
+            let Some(tag) = dom.tag(node) else { continue };
+            let own = &mut counts[node.index()];
+            match tag {
+                Tag::P => own.paragraphs = 1,
+                Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => own.headings = 1,
+                Tag::Li => own.list_items = 1,
+                Tag::Pre => own.code_blocks = 1,
+                Tag::Table if store.is_data_table(node) == Some(true) => own.tables = 1,
+                Tag::Figure => own.figures = 1,
+                Tag::Img => own.images = 1,
+                Tag::Blockquote | Tag::Details | Tag::Dl | Tag::Math | Tag::Picture => {
+                    own.protected_blocks = 1
+                }
+                Tag::A => has_links = true,
+                _ => {}
+            }
+        }
+        for &node in nodes.iter().rev() {
+            if let Some(parent) = dom.parent(node) {
+                let child = counts[node.index()];
+                counts[parent.index()].add(child);
+            }
+        }
+        Self { counts, has_links }
+    }
+
+    pub(crate) fn prepare_text_cache(&self, store: &mut NodeStateStore) {
+        if self.has_links && !store.link_lengths_enabled() {
+            store.enable_link_lengths();
+            store.clear_stats();
+        }
+    }
+
+    pub(crate) fn features(
+        &self,
+        dom: &Dom,
+        candidate: Candidate,
+        store: &mut NodeStateStore,
+        flags: u32,
+    ) -> CandidateFeatures {
+        let text = get_or_compute_stats(dom, candidate.node, store);
+        let counts = self.counts[candidate.node.index()];
+        let link_text_chars = if store.link_lengths_enabled() {
+            store.link_length(candidate.node)
+        } else {
+            0.0
+        };
+        let link_density = if text.text_length == 0 {
+            0.0
+        } else {
+            (link_text_chars / f64::from(text.text_length)).clamp(0.0, 1.0)
+        };
+        let (positive_name_score, negative_name_score) = if flags & FLAG_WEIGHT_CLASSES != 0 {
+            name_signals(dom, candidate.node)
+        } else {
+            (0.0, 0.0)
+        };
+
+        CandidateFeatures {
+            text_chars: text.text_length,
+            word_count: text.word_count,
+            paragraph_count: counts.paragraphs,
+            heading_count: counts.headings,
+            list_item_count: counts.list_items,
+            code_block_count: counts.code_blocks,
+            table_count: counts.tables,
+            figure_count: counts.figures,
+            image_count: counts.images,
+            link_text_chars,
+            link_density,
+            sentence_end_count: text.sentence_end_count,
+            comma_count: text.comma_count,
+            protected_block_count: counts.protected_blocks,
+            readability_score: candidate.readability_score,
+            semantic_prior: candidate.semantic_prior,
+            positive_name_score,
+            negative_name_score,
+        }
+    }
+}
+
+impl CandidateFeatures {
+    /// Combines prose, semantic, and structured-content evidence.
+    /// Link density is a bounded penalty because useful indexes can be links.
+    pub(crate) fn ranking_score(self) -> f64 {
+        // Readability already represents prose well. Keep duplicate prose
+        // evidence small so it only breaks close ties.
+        let text_evidence = (f64::from(self.word_count) / 100_000.0).min(0.001)
+            + (f64::from(self.text_chars) / 1_000_000.0).min(0.001);
+        let prose_evidence = (f64::from(self.paragraph_count) / 100_000.0).min(0.001)
+            + (f64::from(self.sentence_end_count) / 100_000.0).min(0.001)
+            + (f64::from(self.comma_count) / 100_000.0).min(0.001);
+
+        // Give large bonuses only when structure is the main content signal.
+        // This avoids promoting a broad article wrapper because it contains an
+        // incidental table, list, or media block.
+        let sparse_prose = self.paragraph_count <= 2;
+        let list_evidence =
+            if self.list_item_count >= 3 && self.paragraph_count <= 1 && self.link_density >= 0.5 {
+                (f64::from(self.list_item_count) * 1.5).min(12.0)
+            } else {
+                0.0
+            };
+        let structure_evidence = list_evidence
+            + if sparse_prose {
+                (f64::from(self.code_block_count) * 4.0).min(12.0)
+                    + (f64::from(self.table_count) * 4.0).min(12.0)
+            } else {
+                0.0
+            }
+            + (f64::from(self.heading_count) / 100_000.0).min(0.001)
+            + (f64::from(self.figure_count) / 100_000.0).min(0.001)
+            + (f64::from(self.image_count) / 100_000.0).min(0.001)
+            + (f64::from(self.protected_block_count) / 100_000.0).min(0.001);
+        let link_penalty = (self.link_density * 0.2).min(0.1);
+        let link_volume_evidence = (self.link_text_chars / 1_000_000.0).min(0.001);
+        let name_evidence = self.positive_name_score * 0.001 - self.negative_name_score * 0.001;
+
+        self.readability_score
+            + self.semantic_prior
+            + text_evidence
+            + prose_evidence
+            + structure_evidence
+            + link_volume_evidence
+            + name_evidence
+            - link_penalty
+    }
+}
+
+fn name_signals(dom: &Dom, node: NodeId) -> (f64, f64) {
+    let mut positive = false;
+    let mut negative = false;
+    for name in [AttrName::Class, AttrName::Id] {
+        let Some(value) = dom.attr(node, name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let matches = regexps::CLASS_WEIGHT_SET.matches(value);
+        positive |= matches.matched(1);
+        negative |= matches.matched(0);
+    }
+    (f64::from(positive), f64::from(negative))
+}
+
 pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, flags: u32) -> f64 {
     let score = match dom.tag(id) {
         Some(Tag::Div) => 5.,
@@ -526,8 +732,10 @@ fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value:
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_readability_scores, get_link_density, get_link_density_cached, stats_for_text,
+        CandidateFeatureIndex, compute_readability_scores, get_link_density,
+        get_link_density_cached, stats_for_text,
     };
+    use crate::candidate::CandidateSet;
     use crate::constants::flags::{
         FLAG_CLEAN_CONDITIONALLY, FLAG_STRIP_UNLIKELYS, FLAG_WEIGHT_CLASSES,
     };
@@ -537,7 +745,9 @@ mod tests {
     fn text_stats_match_for_ascii_and_unicode_paths() {
         let ascii = stats_for_text(" a,\t b. c ");
         assert_eq!(ascii.text_length, 7);
+        assert_eq!(ascii.word_count, 3);
         assert_eq!(ascii.comma_count, 1);
+        assert_eq!(ascii.sentence_end_count, 1);
         assert!(ascii.starts_with_whitespace);
         assert!(ascii.ends_with_whitespace);
         assert!(ascii.has_sentence_break);
@@ -545,10 +755,72 @@ mod tests {
 
         let unicode = stats_for_text("\u{3000}甲， 乙.\u{a0}");
         assert_eq!(unicode.text_length, 5);
+        assert_eq!(unicode.word_count, 2);
         assert_eq!(unicode.comma_count, 1);
+        assert_eq!(unicode.sentence_end_count, 1);
         assert!(unicode.starts_with_whitespace);
         assert!(unicode.ends_with_whitespace);
         assert!(unicode.has_sentence_end);
+    }
+
+    #[test]
+    fn general_features_include_text_structure_links_and_names() {
+        let dom = Dom::parse_document(
+            r#"<body><main class="article-content sidebar"><h1>Reference</h1>
+            <p>Read the <a href="/guide">complete guide</a>. Then continue!</p>
+            <ul><li>First</li><li>Second</li></ul><pre><code>cargo test</code></pre>
+            <table><thead><tr><th>Key</th><th>Value</th></tr></thead></table>
+            <table role="presentation"><tr><td>Left</td><td>Right</td></tr></table>
+            <figure><img src="plot.png"><figcaption>Plot</figcaption></figure>
+            <details><summary>Notes</summary><p>More detail.</p></details></main></body>"#,
+        )
+        .unwrap();
+        let main = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let candidate = *candidates
+            .iter()
+            .find(|candidate| candidate.node == main)
+            .unwrap();
+        let mut store = NodeStateStore::new();
+        let mut table_nodes = Vec::new();
+        crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut table_nodes);
+        let index = CandidateFeatureIndex::new(&dom, &store);
+        index.prepare_text_cache(&mut store);
+        let features = index.features(&dom, candidate, &mut store, FLAG_WEIGHT_CLASSES);
+
+        assert!(features.word_count >= 12);
+        assert_eq!(features.paragraph_count, 2);
+        assert_eq!(features.heading_count, 1);
+        assert_eq!(features.list_item_count, 2);
+        assert_eq!(features.code_block_count, 1);
+        assert_eq!(features.table_count, 1);
+        assert_eq!(features.figure_count, 1);
+        assert_eq!(features.image_count, 1);
+        assert!(features.protected_block_count >= 1);
+        assert!(features.link_text_chars > 0.0);
+        assert!(features.link_density > 0.0 && features.link_density < 1.0);
+        assert!(features.positive_name_score > 0.0);
+        assert!(features.negative_name_score > 0.0);
+
+        let unweighted = index.features(&dom, candidate, &mut store, 0);
+        assert_eq!(unweighted.positive_name_score, 0.0);
+        assert_eq!(unweighted.negative_name_score, 0.0);
+    }
+
+    #[test]
+    fn link_density_penalty_is_bounded() {
+        let sparse = crate::candidate::CandidateFeatures {
+            text_chars: 1_000,
+            word_count: 100,
+            ..Default::default()
+        };
+        let linked = crate::candidate::CandidateFeatures {
+            link_text_chars: 1_000.0,
+            link_density: 1.0,
+            ..sparse
+        };
+
+        assert!(sparse.ranking_score() - linked.ranking_score() <= 4.0);
     }
 
     #[test]

@@ -44,7 +44,7 @@ The extraction pipeline flows through these stages:
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
 | `candidate.rs` | Internal semantic and Readability candidate model |
 | `readability.rs` | Candidate selection, scoring, content consolidation |
-| `scoring.rs` | Tag/class/link-density scoring, cached text statistics |
+| `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation, post-extraction cleanup |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
@@ -76,7 +76,7 @@ These invariants are costly to violate:
 
 ### Scoring System
 
-Initial scores by tag: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, ADDRESS/OL/UL/DL/FORM -3. Class/ID patterns matching positive/negative regexes add ±25.
+Candidate ranking combines Readability propagation with text, structure, link-density, and class/ID features. It gives extra weight to code, data tables, and meaningful link lists. Readability initial scores remain: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, and ADDRESS/OL/UL/DL/FORM -3. Class/ID patterns matching positive/negative regexes add ±25 to the Readability feature.
 
 ### Algorithm Flags
 
