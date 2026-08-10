@@ -21,7 +21,6 @@ use url::Url;
 
 pub(crate) struct Readability<'a> {
     dom: Dom,
-    original_html: &'a str,
     options: &'a ExtractorConfig,
     flags: u32,
     node_data: NodeStateStore,
@@ -42,6 +41,7 @@ struct BestAttempt {
     content: FrozenContent,
     text_len_chars: usize,
     excerpt: Option<String>,
+    direction: Option<String>,
 }
 struct FrozenContent {
     dom: Dom,
@@ -61,12 +61,7 @@ struct CandidateDiscovery {
 }
 
 impl<'a> Readability<'a> {
-    pub(crate) fn from_document(
-        dom: Dom,
-        original_html: &'a str,
-        url: Option<&str>,
-        options: &'a ExtractorConfig,
-    ) -> Self {
+    pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let (base_uri, url_error) = match url {
             Some(x) => match Url::parse(x) {
                 Ok(u) => (Some(u), None),
@@ -76,7 +71,6 @@ impl<'a> Readability<'a> {
         };
         Self {
             dom,
-            original_html,
             options,
             flags: FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeStateStore::new(),
@@ -235,7 +229,12 @@ impl<'a> Readability<'a> {
                 self.structured_data
                     .primary_texts(&self.structured_title, self.source_uri.as_ref()),
             );
-            // Apply the already-planned preparation and cleanup only after the
+
+            // Keep the prepared source as the immutable input for retries.
+            // All mutations below happen in an attempt-local working DOM.
+            let source_dom = self.dom.clone();
+
+            // Apply the already-planned preparation only after the
             // non-destructive discovery and scoring phase has selected a root.
             let semantic_candidates = CandidateSet::discover_semantic(&self.dom);
             prepare_readability_structure(
@@ -347,6 +346,28 @@ impl<'a> Readability<'a> {
                 };
                 self.create_container(top_id, &siblings).unwrap_or(top_id)
             };
+
+            if let Some(direction) = std::iter::once(top_id)
+                .chain(self.dom.ancestors(top_id))
+                .find_map(|node| self.dom.attr(node, AttrName::Dir))
+            {
+                self.article_dir = Some(direction.to_owned());
+            }
+
+            // Cleanup owns a compact copy of the selected region. The source
+            // DOM remains available for a retry and is never affected by an
+            // earlier attempt's mutations.
+            let fragment = self
+                .dom
+                .copy_subtree_as_fragment(article_id)
+                .map_err(|_| Error::NoContent)?;
+            let article_id = fragment
+                .first_child(fragment.root())
+                .ok_or(Error::NoContent)?;
+            self.dom = fragment;
+            self.node_data.clear();
+            self.node_data.enable_link_lengths();
+
             let video = regexps::VIDEOS.clone();
             self.prep_article(
                 article_id,
@@ -393,6 +414,7 @@ impl<'a> Readability<'a> {
                         content: FrozenContent { dom },
                         text_len_chars: len,
                         excerpt,
+                        direction: self.article_dir.clone(),
                     });
                 }
                 let retry = if self.flags & FLAG_WEIGHT_CLASSES != 0 {
@@ -405,7 +427,7 @@ impl<'a> Readability<'a> {
                     false
                 };
                 if retry {
-                    self.reparse_prepare()?;
+                    self.restore_source(source_dom);
                     continue;
                 }
                 let best = self.best_attempt.take().ok_or(Error::NoContent)?;
@@ -413,20 +435,13 @@ impl<'a> Readability<'a> {
                     return Err(Error::NoContent);
                 }
                 self.dom = best.content.dom;
+                self.article_dir = best.direction;
                 let root = self.dom.root();
                 return Ok(ArticleContent {
                     text_length: best.text_len_chars,
                     excerpt: best.excerpt,
                     article_root: root,
                 });
-            }
-            let mut p = Some(top_id);
-            while let Some(x) = p {
-                if let Some(d) = self.dom.attr(x, AttrName::Dir) {
-                    self.article_dir = Some(d.into());
-                    break;
-                }
-                p = self.dom.parent(x)
             }
             let excerpt = self.article_excerpt(article_id);
             self.post_process(article_id, &mut cleaning_nodes);
@@ -993,19 +1008,12 @@ impl<'a> Readability<'a> {
         }
         simplify_nested_elements(&mut self.dom, root, nodes);
     }
-    fn reparse_prepare(&mut self) -> Result<()> {
-        self.dom = Dom::parse_document(self.original_html).map_err(|_| Error::NoContent)?;
-        unwrap_noscript_images(&mut self.dom);
-        prep_document(&mut self.dom);
+    fn restore_source(&mut self, source: Dom) {
+        self.dom = source;
         self.article_byline = None;
         self.article_dir = None;
         self.article_lang = None;
         self.node_data.clear();
-        if self.dom.body().is_none() {
-            Err(Error::NoBody)
-        } else {
-            Ok(())
-        }
     }
 }
 fn dom_text_candidate(dom: &Dom, node: NodeId) -> bool {
@@ -1032,7 +1040,7 @@ mod tests {
     fn ranked_winner_id(html: &str) -> String {
         let dom = Dom::parse_document(html).unwrap();
         let config = ExtractorConfig::default();
-        let mut readability = Readability::from_document(dom, html, None, &config);
+        let mut readability = Readability::from_document(dom, None, &config);
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
@@ -1174,6 +1182,26 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     }
 
     #[test]
+    fn retries_restore_the_source_before_relaxed_cleanup() {
+        let html = r#"<body><main dir="rtl">
+            <p>A short stable introduction.</p>
+            <div class="sidebar"><p><a href="/recovered">Useful linked reference recovered by the relaxed attempt.</a></p></div>
+        </main></body>"#;
+
+        let page = crate::extract(html, Some("https://example.com/docs/page")).unwrap();
+        let output = page.html();
+
+        // The normal conditional pass removes the link-heavy negative wrapper.
+        // The final retry disables that pass and must start from the source.
+        assert!(output.contains("Useful linked reference"), "{output}");
+        assert!(
+            output.contains("href=\"https://example.com/recovered\""),
+            "{output}"
+        );
+        assert_eq!(page.metadata().direction.as_deref(), Some("rtl"));
+    }
+
+    #[test]
     fn email_addresses_are_not_treated_as_byline_timestamp_separators() {
         let html = r#"<body><main>
             <div class="byline">Contact editor@example.com <a href="/team">Editorial team</a></div>
@@ -1207,7 +1235,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .first_descendant_by_tag(dom.root(), Tag::Blockquote)
             .unwrap();
         let config = ExtractorConfig::default();
-        let mut readability = Readability::from_document(dom, html, None, &config);
+        let mut readability = Readability::from_document(dom, None, &config);
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
@@ -1262,7 +1290,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .first_descendant_by_tag(dom.root(), Tag::Blockquote)
             .unwrap();
         let config = ExtractorConfig::default();
-        let mut readability = Readability::from_document(dom, html, None, &config);
+        let mut readability = Readability::from_document(dom, None, &config);
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
@@ -1321,7 +1349,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .find(|&node| source.attr(node, AttrName::Id) == Some("excluded"))
             .unwrap();
         let config = ExtractorConfig::default();
-        let mut readability = Readability::from_document(source.clone(), html, None, &config);
+        let mut readability = Readability::from_document(source.clone(), None, &config);
         readability.node_data.enable_link_lengths();
         let stale = get_or_compute_stats(&source, main, &mut readability.node_data);
         assert!(stale.text_length > 50);
@@ -1345,7 +1373,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         </body>"#;
         let dom = Dom::parse_document(html).unwrap();
         let config = ExtractorConfig::default();
-        let mut readability = Readability::from_document(dom, html, None, &config);
+        let mut readability = Readability::from_document(dom, None, &config);
         let unlikely = readability
             .dom
             .descendants(readability.dom.root())

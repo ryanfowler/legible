@@ -64,8 +64,9 @@ These invariants are costly to violate:
 - **Iterative traversal** for untrusted HTML depth.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
+- **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
-- **Reuse across retries.** Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
+- **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
 
 ### Common Pitfalls
 
