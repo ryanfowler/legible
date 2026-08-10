@@ -60,13 +60,23 @@ enum CanonicalNode {
     Text(String),
 }
 
+fn canonical_tag(name: &str) -> String {
+    // Legible preserves source heading levels. Mozilla rewrites H1 to H2 for
+    // Reader Mode styling. Treat only that known product difference as equal.
+    if matches!(name, "h1" | "h2") {
+        "primary-heading".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
 fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
     let mut stack = vec![(root.clone(), false)];
     while let Some((node, closing)) = stack.pop() {
         match &node.data {
             NodeData::Element { name, attrs, .. } => {
                 if closing {
-                    nodes.push(CanonicalNode::EndTag(name.local.to_string()));
+                    nodes.push(CanonicalNode::EndTag(canonical_tag(name.local.as_ref())));
                     continue;
                 }
 
@@ -108,7 +118,10 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                     })
                     .collect();
                 attributes.sort();
-                nodes.push(CanonicalNode::StartTag(name.local.to_string(), attributes));
+                nodes.push(CanonicalNode::StartTag(
+                    canonical_tag(name.local.as_ref()),
+                    attributes,
+                ));
                 stack.push((node.clone(), true));
                 stack.extend(
                     node.children

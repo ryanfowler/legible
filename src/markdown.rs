@@ -534,6 +534,9 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         });
         let fence_len = 3.max(longest + 1);
         self.out.markup_repeat('`', fence_len);
+        if let Some(language) = self.code_block_language(id).map(str::to_owned) {
+            self.out.markup(&language);
+        }
         self.out.newline();
         self.dom.for_each_text(id, |text| {
             let omit_last = !text.is_empty() && remaining == text.len() && ends_with_newline;
@@ -548,6 +551,27 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         self.out.newline();
         self.out.markup_repeat('`', fence_len);
         self.out.newline();
+    }
+
+    fn code_block_language(&self, pre: T::Node) -> Option<&str> {
+        let mut child = self.dom.first_child(pre);
+        let mut code = None;
+        while let Some(node) = child {
+            if self.dom.tag(node) == Some(Tag::Code) {
+                code = Some(node);
+                break;
+            }
+            child = self.dom.next_sibling(node);
+        }
+        code.and_then(|node| self.dom.attr(node, AttrName::DataLanguage))
+            .or_else(|| self.dom.attr(pre, AttrName::DataLanguage))
+            .filter(|language| {
+                !language.is_empty()
+                    && language.len() <= 32
+                    && language.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'_' | b'.')
+                    })
+            })
     }
 
     fn image(&mut self, id: T::Node) {
@@ -1284,6 +1308,13 @@ mod tests {
 
     #[test]
     fn blockquotes_and_code_choose_safe_fences() {
+        assert_eq!(
+            markdown(concat!(
+                "<pre> ",
+                "\n<code data-language=\"rust\">fn main() {}</code></pre>"
+            )),
+            "```rust\n \nfn main() {}\n```\n"
+        );
         assert_eq!(
             markdown("<blockquote><p>One</p><p>Two</p></blockquote>"),
             "> One\n>\n> Two\n"

@@ -25,7 +25,6 @@ pub(crate) struct ExtractorConfig {
     pub(crate) char_threshold: usize,
     pub(crate) classes_to_preserve: Vec<String>,
     pub(crate) keep_classes: bool,
-    pub(crate) link_density_modifier: f64,
     pub(crate) debug: bool,
 }
 
@@ -38,7 +37,6 @@ impl Default for ExtractorConfig {
             char_threshold: 500,
             classes_to_preserve: vec!["page".into(), "caption".into()],
             keep_classes: false,
-            link_density_modifier: 0.0,
             debug: false,
         }
     }
