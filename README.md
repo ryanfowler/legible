@@ -1,5 +1,8 @@
 # Legible
 
+[![Crates.io](https://img.shields.io/crates/v/legible.svg)](https://crates.io/crates/legible)
+[![Documentation](https://docs.rs/legible/badge.svg)](https://docs.rs/legible)
+
 Legible extracts relevant content and metadata from HTML. It stores a cleaned DOM
 subtree. It renders Markdown, HTML, or normalized text only when you request that
 format.
