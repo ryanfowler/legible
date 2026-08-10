@@ -10,6 +10,8 @@ use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use url::Url;
 
 /// Metadata discovered in the source page.
@@ -486,15 +488,40 @@ fn select_unique_structured_item<'a>(
     document_title: &str,
     source_url: Option<&Url>,
 ) -> Option<&'a Value> {
+    let mut fingerprint_buckets: HashMap<u64, Option<SmallVec<[&Value; 1]>>> = HashMap::new();
+    for item in items {
+        let bucket = fingerprint_buckets
+            .entry(structured_item_fingerprint(item))
+            .or_insert_with(|| Some(SmallVec::new()));
+        let Some(values) = bucket else {
+            continue;
+        };
+        if values.contains(&item) {
+            continue;
+        }
+        if values.len() == FINGERPRINT_COLLISION_LIMIT {
+            // The bounded fingerprint cannot distinguish this value from the
+            // stored values. Exclude the whole bucket instead of counting an
+            // unstored value again if an exact duplicate appears later.
+            *bucket = None;
+        } else {
+            values.push(item);
+        }
+    }
+
     let mut selected = None;
     let mut best_score = 0;
     let mut best_count = 0;
     let mut item_count = 0;
-    for item in items {
+    for item in fingerprint_buckets
+        .values()
+        .filter_map(Option::as_ref)
+        .flatten()
+    {
         item_count += 1;
         let score = structured_item_score(item, document_title, source_url);
         if selected.is_none() || score > best_score {
-            selected = Some(item);
+            selected = Some(*item);
             best_score = score;
             best_count = 1;
         } else if score == best_score {
@@ -504,6 +531,77 @@ fn select_unique_structured_item<'a>(
     (item_count == 1 || best_score > 0 && best_count == 1)
         .then_some(selected)
         .flatten()
+}
+
+// Bound deep equality checks when many distinct values share a bounded fingerprint.
+const FINGERPRINT_COLLISION_LIMIT: usize = 8;
+const FINGERPRINT_VALUE_LIMIT: usize = 256;
+const FINGERPRINT_BYTE_LIMIT: usize = 16 * 1024;
+
+struct FingerprintBudget {
+    values: usize,
+    bytes: usize,
+}
+
+fn structured_item_fingerprint(item: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let mut budget = FingerprintBudget {
+        values: FINGERPRINT_VALUE_LIMIT,
+        bytes: FINGERPRINT_BYTE_LIMIT,
+    };
+    hash_json_value(item, &mut hasher, &mut budget);
+    hasher.finish()
+}
+
+fn hash_json_value(value: &Value, hasher: &mut impl Hasher, budget: &mut FingerprintBudget) {
+    if budget.values == 0 {
+        0xff_u8.hash(hasher);
+        return;
+    }
+    budget.values -= 1;
+    match value {
+        Value::Null => 0_u8.hash(hasher),
+        Value::Bool(value) => {
+            1_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::Number(value) => {
+            2_u8.hash(hasher);
+            hash_bounded_bytes(value.to_string().as_bytes(), hasher, budget);
+        }
+        Value::String(value) => {
+            3_u8.hash(hasher);
+            hash_bounded_bytes(value.as_bytes(), hasher, budget);
+        }
+        Value::Array(values) => {
+            4_u8.hash(hasher);
+            values.len().hash(hasher);
+            for value in values {
+                if budget.values == 0 {
+                    break;
+                }
+                hash_json_value(value, hasher, budget);
+            }
+        }
+        Value::Object(values) => {
+            5_u8.hash(hasher);
+            values.len().hash(hasher);
+            for (key, value) in values {
+                if budget.values == 0 {
+                    break;
+                }
+                hash_bounded_bytes(key.as_bytes(), hasher, budget);
+                hash_json_value(value, hasher, budget);
+            }
+        }
+    }
+}
+
+fn hash_bounded_bytes(bytes: &[u8], hasher: &mut impl Hasher, budget: &mut FingerprintBudget) {
+    bytes.len().hash(hasher);
+    let count = bytes.len().min(budget.bytes);
+    bytes[..count].hash(hasher);
+    budget.bytes -= count;
 }
 
 fn article_text_values(item: &Value) -> impl Iterator<Item = &str> {
@@ -1467,6 +1565,133 @@ mod tests {
         let resolved = discover(&dom, &data, "", None, None);
         assert!(resolved.description.is_none());
         assert!(resolved.authors.is_empty());
+    }
+
+    #[test]
+    fn duplicate_structured_articles_retain_metadata_and_content_hints() {
+        let dom = Dom::parse_document(
+            r#"<title>Repeated article</title>
+            <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Repeated article","author":{"name":"Ada"},"datePublished":"2025-04-05","articleBody":"The repeated article body has enough useful words to identify its content."}</script>
+            <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Repeated article","author":{"name":"Ada"},"datePublished":"2025-04-05","articleBody":"The repeated article body has enough useful words to identify its content."}</script>"#,
+        )
+        .unwrap();
+        let data = StructuredData::parse(&dom);
+        let title = get_article_title(&dom);
+        let resolved = discover(&dom, &data, &title, None, None);
+
+        assert_eq!(resolved.authors, ["Ada"]);
+        assert_eq!(resolved.published_time.as_deref(), Some("2025-04-05"));
+        assert_eq!(
+            data.primary_texts(&title, None).collect::<Vec<_>>(),
+            ["The repeated article body has enough useful words to identify its content."]
+        );
+    }
+
+    #[test]
+    fn structured_item_fingerprints_are_stable_and_bounded() {
+        let first = serde_json::json!({
+            "@type": "Article",
+            "headline": "Same title",
+            "articleBody": "Body"
+        });
+        let duplicate = first.clone();
+        let different = serde_json::json!({
+            "@type": "Article",
+            "headline": "Different title",
+            "articleBody": "Body"
+        });
+
+        assert_eq!(
+            structured_item_fingerprint(&first),
+            structured_item_fingerprint(&duplicate)
+        );
+        assert_ne!(
+            structured_item_fingerprint(&first),
+            structured_item_fingerprint(&different)
+        );
+    }
+
+    #[test]
+    fn fingerprint_collisions_do_not_merge_distinct_structured_items() {
+        let mut first = serde_json::Map::new();
+        first.insert("@type".to_owned(), Value::String("Article".to_owned()));
+        for index in 0..300 {
+            first.insert(format!("a{index:03}"), Value::Null);
+        }
+        first.insert(
+            "headline".to_owned(),
+            Value::String("Related article".to_owned()),
+        );
+        let mut second = first.clone();
+        second.insert(
+            "headline".to_owned(),
+            Value::String("Primary article".to_owned()),
+        );
+        let first = Value::Object(first);
+        let second = Value::Object(second);
+
+        assert_eq!(
+            structured_item_fingerprint(&first),
+            structured_item_fingerprint(&second)
+        );
+        assert_eq!(
+            select_unique_structured_item([&first, &second], "Primary article", None,),
+            Some(&second)
+        );
+    }
+
+    #[test]
+    fn overflowing_collision_buckets_are_ambiguous() {
+        let mut items = Vec::new();
+        for index in 0..(FINGERPRINT_COLLISION_LIMIT + 4) {
+            let mut item = serde_json::Map::new();
+            item.insert("@type".to_owned(), Value::String("Article".to_owned()));
+            for field in 0..300 {
+                item.insert(format!("a{field:03}"), Value::Null);
+            }
+            item.insert(
+                "headline".to_owned(),
+                Value::String(format!("Article {index}")),
+            );
+            items.push(Value::Object(item));
+        }
+
+        let fingerprint = structured_item_fingerprint(&items[0]);
+        assert!(
+            items
+                .iter()
+                .all(|item| structured_item_fingerprint(item) == fingerprint)
+        );
+        assert_eq!(
+            select_unique_structured_item(items.iter(), "Article 11", None),
+            None
+        );
+    }
+
+    #[test]
+    fn overflow_duplicates_do_not_change_the_winner_count() {
+        let mut items = Vec::new();
+        for index in 0..FINGERPRINT_COLLISION_LIMIT {
+            let mut item = serde_json::Map::new();
+            item.insert("@type".to_owned(), Value::String("Article".to_owned()));
+            for field in 0..300 {
+                item.insert(format!("a{field:03}"), Value::Null);
+            }
+            item.insert(
+                "headline".to_owned(),
+                Value::String(format!("Related article {index}")),
+            );
+            items.push(Value::Object(item));
+        }
+        let mut primary = items[0].clone();
+        primary["headline"] = Value::String("Primary article".to_owned());
+        items.push(primary.clone());
+        items.push(primary);
+
+        assert_eq!(
+            select_unique_structured_item(items.iter(), "Primary article", None),
+            None
+        );
     }
 
     #[test]

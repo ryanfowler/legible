@@ -182,32 +182,24 @@ impl<'a> Readability<'a> {
             // link-density values have been calculated.
             let discovery = self.discover_candidates(&mut match_buffer, &mut text_buffer);
 
-            // Score a prepared working copy. The source tree stays intact until
-            // discovery, score propagation, and final ranking are complete.
-            let mut scoring_dom = self.dom.clone();
+            // Prepare and score one working copy. Score propagation runs before
+            // deferred clutter is detached. The prepared source stays intact
+            // for retries.
+            let mut working_dom = self.dom.clone();
             let mut to_score = discovery.to_score;
             let prepared = prepare_readability_structure(
-                &mut scoring_dom,
+                &mut working_dom,
                 &discovery.divs_to_prepare,
                 &discovery.candidates,
             );
-            self.node_data.sync_len(scoring_dom.len());
+            self.node_data.sync_len(working_dom.len());
             for id in prepared {
                 if self.node_data.mark_score_seen(id) {
                     to_score.push(id)
                 }
             }
-            // Readability scoring is one candidate feature. Compute it on the
-            // scoring copy, then attach it before the general root ranking.
-            let mut ranking_dom = scoring_dom.clone();
-            for &id in &discovery.remove_after_scoring {
-                if ranking_dom.parent(id).is_some() {
-                    ranking_dom.detach(id)
-                }
-            }
             let readability_scores = compute_readability_scores(
-                &scoring_dom,
-                &ranking_dom,
+                &mut working_dom,
                 to_score,
                 &discovery.remove_after_scoring,
                 &mut self.node_data,
@@ -215,14 +207,14 @@ impl<'a> Readability<'a> {
             );
             let mut candidates = discovery.candidates;
             let ranked = self.rank_candidates(
-                &ranking_dom,
+                &working_dom,
                 &mut candidates,
                 readability_scores,
                 &discovery.remove_after_scoring,
             );
-            let body = ranking_dom.body().ok_or(Error::NoBody)?;
+            let body = working_dom.body().ok_or(Error::NoBody)?;
             let selection = select_content_root(
-                &ranking_dom,
+                &working_dom,
                 &candidates,
                 &ranked,
                 body,
@@ -230,25 +222,17 @@ impl<'a> Readability<'a> {
                     .primary_texts(&self.structured_title, self.source_uri.as_ref()),
             );
 
-            // Keep the prepared source as the immutable input for retries.
-            // All mutations below happen in an attempt-local working DOM.
-            let source_dom = self.dom.clone();
-
-            // Apply the already-planned preparation only after the
-            // non-destructive discovery and scoring phase has selected a root.
-            let semantic_candidates = CandidateSet::discover_semantic(&self.dom);
-            prepare_readability_structure(
-                &mut self.dom,
-                &discovery.divs_to_prepare,
-                &semantic_candidates,
-            );
-            for id in discovery.remove_after_scoring {
-                if self.dom.parent(id).is_some() {
-                    self.dom.detach(id)
-                }
-            }
+            // Move the selected working tree into the extraction path. Keep the
+            // prepared source as the immutable input for a possible retry.
+            let source_dom = std::mem::replace(&mut self.dom, working_dom);
             let body = self.dom.body().ok_or(Error::NoBody)?;
-            let (top_id, synthetic) = if selection.node == body {
+            let (top_id, synthetic) = if !selection.branches.is_empty() {
+                let container = self
+                    .create_container(selection.branches[0], &selection.branches)
+                    .ok_or(Error::NoContent)?;
+                initialize_node(&self.dom, container, &mut self.node_data, self.flags);
+                (container, true)
+            } else if selection.node == body {
                 let container = self
                     .dom
                     .create_html_element(Tag::Div)
@@ -271,6 +255,12 @@ impl<'a> Readability<'a> {
                         .iter()
                         .skip(1)
                         .filter(|candidate| candidate.score / top_score >= 0.75)
+                        .filter(|candidate| {
+                            candidates.get(candidate.node).is_some_and(|candidate| {
+                                candidate.has_source(CandidateSource::Readability)
+                                    || candidate.has_source(CandidateSource::Semantic)
+                            })
+                        })
                         .map(|candidate| self.dom.ancestors(candidate.node).collect())
                         .collect();
                     if alternatives.len() >= 3 {
@@ -608,16 +598,36 @@ impl<'a> Readability<'a> {
                 }
                 let length =
                     get_or_compute_stats(dom, candidate.node, &mut self.node_data).text_length;
-                if length == 0 && !candidate.has_source(CandidateSource::Generic) {
+                if length == 0 && Some(candidate.node) != dom.body() {
                     return None;
                 }
                 let is_semantic = candidate.has_source(CandidateSource::Semantic);
                 let is_authoritative = candidates.is_authoritative_semantic(dom, candidate.node);
                 let has_readability = context.has_readability(candidate.node);
-                if is_semantic && !is_authoritative && !has_readability {
+                let has_meaningful_content = has_readability
+                    || candidate.features.code_block_count > 0
+                    || candidate.features.table_count > 0
+                    || candidate.features.list_item_count >= 3
+                    || candidate.features.figure_count > 0
+                    || candidate.features.paragraph_count > 0
+                        && candidate.features.word_count >= 3
+                        && candidate.features.sentence_end_count > 0;
+                if is_semantic && !is_authoritative && !has_readability && !has_meaningful_content {
+                    return None;
+                }
+                let is_generic_only = candidate.has_source(CandidateSource::Generic)
+                    && !is_semantic
+                    && !candidate.has_source(CandidateSource::Readability);
+                let has_distinct_structural_content = candidate.features.code_block_count > 0
+                    || candidate.features.table_count > 0
+                    || candidate.features.list_item_count >= 3
+                    || candidate.features.figure_count > 0
+                    || dom.tag(candidate.node) == Some(Tag::Td) && has_meaningful_content;
+                if is_generic_only && !has_distinct_structural_content {
                     return None;
                 }
                 let short_semantic_bonus = if is_authoritative
+                    && has_meaningful_content
                     && !context.has_authoritative_ancestor(candidate.node)
                     && !context.has_authoritative_descendant(candidate.node, is_authoritative)
                 {
@@ -642,9 +652,22 @@ impl<'a> Readability<'a> {
                 } else {
                     0.0
                 };
+                // A small boundary bonus lets a focused generic container beat
+                // a broad ancestor with the same structural evidence. It is too
+                // small to override a Readability prose score.
+                let generic_boundary_bonus = if candidate.node
+                    != dom.body().unwrap_or(candidate.node)
+                    && is_generic_only
+                    && has_distinct_structural_content
+                {
+                    0.01
+                } else {
+                    0.0
+                };
                 let final_score = candidate.features.ranking_score()
                     + short_semantic_bonus
-                    + sibling_content_bonus;
+                    + sibling_content_bonus
+                    + generic_boundary_bonus;
                 self.node_data.set_score(candidate.node, final_score);
                 Some(RankedCandidate {
                     node: candidate.node,
@@ -1057,15 +1080,8 @@ mod tests {
                 to_score.push(node);
             }
         }
-        let mut ranking_dom = scoring_dom.clone();
-        for &node in &discovery.remove_after_scoring {
-            if ranking_dom.parent(node).is_some() {
-                ranking_dom.detach(node);
-            }
-        }
         let scores = compute_readability_scores(
-            &scoring_dom,
-            &ranking_dom,
+            &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
             &mut readability.node_data,
@@ -1073,12 +1089,12 @@ mod tests {
         );
         let mut candidates = discovery.candidates;
         let ranked = readability.rank_candidates(
-            &ranking_dom,
+            &scoring_dom,
             &mut candidates,
             scores,
             &discovery.remove_after_scoring,
         );
-        ranking_dom
+        scoring_dom
             .attr(ranked[0].node, AttrName::Id)
             .expect("winner must have a test ID")
             .to_owned()
@@ -1121,6 +1137,15 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         for (html, expected) in fixtures {
             assert_eq!(ranked_winner_id(html), expected, "{html}");
         }
+    }
+
+    #[test]
+    fn tiny_semantic_placeholder_does_not_override_substantive_content() {
+        let html = r#"<body><main id="placeholder">Loading...</main><section id="wanted"><p>The substantive section contains complete article prose, useful details, commas, and enough text for normal paragraph scoring.</p></section></body>"#;
+
+        let text = crate::extract(html, None).unwrap().text();
+
+        assert!(text.contains("substantive section"), "{text}");
     }
 
     #[test]
@@ -1253,15 +1278,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 to_score.push(node);
             }
         }
-        let mut ranking_dom = scoring_dom.clone();
-        for &node in &discovery.remove_after_scoring {
-            if ranking_dom.parent(node).is_some() {
-                ranking_dom.detach(node);
-            }
-        }
         let scores = compute_readability_scores(
-            &scoring_dom,
-            &ranking_dom,
+            &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
             &mut readability.node_data,
@@ -1271,7 +1289,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
 
         let mut candidates = discovery.candidates;
         let ranked = readability.rank_candidates(
-            &ranking_dom,
+            &scoring_dom,
             &mut candidates,
             scores,
             &discovery.remove_after_scoring,
@@ -1307,15 +1325,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 to_score.push(node);
             }
         }
-        let mut ranking_dom = scoring_dom.clone();
-        for &node in &discovery.remove_after_scoring {
-            if ranking_dom.parent(node).is_some() {
-                ranking_dom.detach(node);
-            }
-        }
         let scores = compute_readability_scores(
-            &scoring_dom,
-            &ranking_dom,
+            &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
             &mut readability.node_data,
@@ -1329,7 +1340,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         assert_eq!(raw_winner.node, blockquote);
         let mut candidates = discovery.candidates;
         let ranked = readability.rank_candidates(
-            &ranking_dom,
+            &scoring_dom,
             &mut candidates,
             scores,
             &discovery.remove_after_scoring,
@@ -1406,15 +1417,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 to_score.push(id)
             }
         }
-        let mut ranking_dom = scoring_dom.clone();
-        for &id in &discovery.remove_after_scoring {
-            if ranking_dom.parent(id).is_some() {
-                ranking_dom.detach(id);
-            }
-        }
         let scores = compute_readability_scores(
-            &scoring_dom,
-            &ranking_dom,
+            &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
             &mut readability.node_data,
@@ -1422,7 +1426,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         );
         let mut candidates = discovery.candidates;
         let _ = readability.rank_candidates(
-            &ranking_dom,
+            &scoring_dom,
             &mut candidates,
             scores,
             &discovery.remove_after_scoring,

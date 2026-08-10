@@ -142,14 +142,31 @@ impl CandidateSet {
             candidates.add(body, CandidateSource::Generic, 0.0);
         }
 
-        for (node, _) in dom.element_descendants_snapshot_with_depth(dom.root()) {
-            let tag_prior = match dom.tag(node) {
+        let mut generic_clutter_depth = None;
+        for (node, depth) in dom.element_descendants_snapshot_with_depth(dom.root()) {
+            if generic_clutter_depth.is_some_and(|root_depth| depth <= root_depth) {
+                generic_clutter_depth = None;
+            }
+            let tag = dom.tag(node);
+            let in_generic_clutter = generic_clutter_depth.is_some();
+            if !in_generic_clutter && is_generic_clutter_container(dom, node) {
+                generic_clutter_depth = Some(depth);
+            }
+
+            let tag_prior = match tag {
                 Some(Tag::Article) => Some(ARTICLE_TAG_PRIOR),
                 Some(Tag::Main) => Some(MAIN_TAG_PRIOR),
                 _ => None,
             };
             if let Some(prior) = tag_prior {
                 candidates.add(node, CandidateSource::Semantic, prior);
+            }
+
+            if !in_generic_clutter
+                && generic_clutter_depth != Some(depth)
+                && is_generic_candidate(dom, node, tag)
+            {
+                candidates.add(node, CandidateSource::Generic, 0.0);
             }
 
             if let Some(role) = dom.attr(node, AttrName::Role) {
@@ -327,6 +344,30 @@ impl CandidateSet {
     }
 }
 
+fn is_generic_candidate(dom: &Dom, node: NodeId, tag: Option<Tag>) -> bool {
+    match tag {
+        Some(Tag::Section | Tag::Td) => true,
+        Some(Tag::Div) => dom.children(node).any(|child| {
+            matches!(
+                dom.tag(child),
+                Some(Tag::Dl | Tag::Figure | Tag::Ol | Tag::Pre | Tag::Table | Tag::Ul)
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn is_generic_clutter_container(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
+    ) || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+        ["banner", "complementary", "dialog", "navigation"]
+            .into_iter()
+            .any(|role| matches_role(roles, role))
+    })
+}
+
 fn matches_role(roles: &str, expected: &str) -> bool {
     roles
         .split_whitespace()
@@ -342,10 +383,12 @@ pub(crate) enum RootSelectionReason {
     BodyFallback,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RootSelection {
     pub(crate) node: NodeId,
     pub(crate) reason: RootSelectionReason,
+    /// Direct branches to copy when the common parent also contains clutter.
+    pub(crate) branches: SmallVec<[NodeId; 4]>,
 }
 
 /// Selects the content boundary after feature ranking.
@@ -365,6 +408,7 @@ pub(crate) fn select_content_root<'a>(
         return RootSelection {
             node: body,
             reason: RootSelectionReason::BodyFallback,
+            branches: SmallVec::new(),
         };
     };
     let mut selected = first.node;
@@ -401,10 +445,17 @@ pub(crate) fn select_content_root<'a>(
     // together form the useful page, such as article cards in a main element.
     // A schema match is already a high-confidence boundary, so do not broaden
     // it with unrelated peer candidates.
+    let mut branches = SmallVec::new();
     if reason != RootSelectionReason::StructuredData {
         if let Some(parent) = shared_semantic_parent(dom, candidates, ranked, selected, first.score)
         {
             selected = parent;
+            reason = RootSelectionReason::SharedParent;
+        } else if let Some((parent, shared_branches)) =
+            shared_generic_parent(dom, candidates, ranked, selected, body, first.score)
+        {
+            selected = parent;
+            branches = shared_branches;
             reason = RootSelectionReason::SharedParent;
         } else if let Some(child) =
             more_specific_candidate(dom, candidates, ranked, selected, first.score)
@@ -417,6 +468,7 @@ pub(crate) fn select_content_root<'a>(
     RootSelection {
         node: selected,
         reason,
+        branches,
     }
 }
 
@@ -475,6 +527,58 @@ fn shared_semantic_parent(
     })
 }
 
+fn shared_generic_parent(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    selected: NodeId,
+    body: NodeId,
+    top_score: f64,
+) -> Option<(NodeId, SmallVec<[NodeId; 4]>)> {
+    let anchor = ranked.iter().find(|candidate| {
+        competitive_score(candidate.score, top_score)
+            && candidates.get(candidate.node).is_some_and(|candidate| {
+                candidate.has_source(CandidateSource::Generic) && candidate.node != body
+            })
+    })?;
+    let expand_wrapped_branches = !dom
+        .ancestors(anchor.node)
+        .any(|node| candidates.is_authoritative_semantic(dom, node));
+
+    dom.ancestors(anchor.node).find_map(|parent| {
+        if is_generic_clutter_container(dom, parent)
+            || !(selected == body || selected == parent || is_descendant_of(dom, selected, parent))
+        {
+            return None;
+        }
+
+        let mut branch_set = SmallBranchSet::default();
+        for candidate in ranked.iter().filter(|candidate| {
+            competitive_score(candidate.score, top_score)
+                && candidates
+                    .get(candidate.node)
+                    .is_some_and(|candidate| candidate.has_source(CandidateSource::Generic))
+                && is_descendant_of(dom, candidate.node, parent)
+        }) {
+            if let Some(branch) = direct_branch(dom, candidate.node, parent)
+                && (expand_wrapped_branches || branch == candidate.node)
+            {
+                branch_set.insert(branch);
+            }
+        }
+        if branch_set.len() < 2 {
+            return None;
+        }
+
+        // Keep document order. Ranking order can differ from tree order.
+        let branches = dom
+            .children(parent)
+            .filter(|child| branch_set.contains(*child))
+            .collect();
+        Some((parent, branches))
+    })
+}
+
 #[derive(Default)]
 struct SmallBranchSet(SmallVec<[NodeId; 4]>);
 
@@ -483,6 +587,10 @@ impl SmallBranchSet {
         if !self.0.contains(&node) {
             self.0.push(node);
         }
+    }
+
+    fn contains(&self, node: NodeId) -> bool {
+        self.0.contains(&node)
     }
 
     fn len(&self) -> usize {
@@ -652,6 +760,49 @@ mod tests {
     }
 
     #[test]
+    fn discovers_generic_structural_roots() {
+        let dom = Dom::parse_document(
+            "<body><section><div><pre>code</pre></div><table><tr><td>value</td></tr></table></section></body>",
+        )
+        .unwrap();
+        let candidates = CandidateSet::discover_semantic(&dom);
+
+        for tag in [Tag::Section, Tag::Div, Tag::Td] {
+            let node = dom.first_descendant_by_tag(dom.root(), tag).unwrap();
+            assert!(
+                candidates
+                    .get(node)
+                    .is_some_and(|candidate| candidate.has_source(CandidateSource::Generic)),
+                "missing generic {tag:?} candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_discovery_skips_clutter_regions() {
+        let dom = Dom::parse_document(
+            "<body><div role=banner><div id=nav></div></div><section id=content></section></body>",
+        )
+        .unwrap();
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let nav = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("nav"))
+            .unwrap();
+        let content = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("content"))
+            .unwrap();
+
+        assert!(candidates.get(nav).is_none());
+        assert!(
+            candidates
+                .get(content)
+                .is_some_and(|candidate| candidate.has_source(CandidateSource::Generic))
+        );
+    }
+
+    #[test]
     fn strong_names_match_complete_tokens_only() {
         let dom = Dom::parse_document(
             r#"<body><div class="postscript"></div><div class="post"></div></body>"#,
@@ -694,6 +845,86 @@ mod tests {
             assert!(markdown.contains("Chosen semantic content"), "{opening}");
             assert!(!markdown.contains("Outside clutter"), "{opening}");
         }
+    }
+
+    #[test]
+    fn short_structural_semantic_roots_exclude_clutter() {
+        for content in [
+            "<pre>cargo test</pre>",
+            "<ul><li>Build</li><li>Test</li><li>Ship</li></ul>",
+        ] {
+            let html = format!(
+                "<body><header>Header clutter</header><div class=markdown-body>{content}</div><footer>Footer clutter</footer></body>"
+            );
+            let markdown = crate::extract(&html, None).unwrap().markdown();
+
+            assert!(!markdown.contains("Header clutter"), "{markdown}");
+            assert!(!markdown.contains("Footer clutter"), "{markdown}");
+        }
+    }
+
+    #[test]
+    fn generic_structural_root_excludes_header_clutter() {
+        let html =
+            "<body><header>Header clutter</header><section><pre>cargo test</pre></section></body>";
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("cargo test"), "{markdown}");
+        assert!(!markdown.contains("Header clutter"), "{markdown}");
+    }
+
+    #[test]
+    fn generic_sibling_roots_are_consolidated() {
+        let html = r#"<body>
+            <header>Header clutter</header>
+            <section><ul><li>One</li><li>Two</li><li>Three</li></ul></section>
+            <section><ul><li>Four</li><li>Five</li><li>Six</li></ul></section>
+        </body>"#;
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        for item in ["One", "Two", "Three", "Four", "Five", "Six"] {
+            assert!(markdown.contains(item), "missing {item}: {markdown}");
+        }
+        assert!(!markdown.contains("Header clutter"), "{markdown}");
+    }
+
+    #[test]
+    fn wrapped_generic_sibling_roots_are_consolidated() {
+        let html = r#"<body>
+            <header>Header clutter</header>
+            <div>
+                <div><section><ul><li>One</li><li>Two</li><li>Three</li></ul></section></div>
+                <div><section><ul><li>Four</li><li>Five</li><li>Six</li></ul></section></div>
+            </div>
+        </body>"#;
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        for item in ["One", "Two", "Three", "Four", "Five", "Six"] {
+            assert!(markdown.contains(item), "missing {item}: {markdown}");
+        }
+        assert!(!markdown.contains("Header clutter"), "{markdown}");
+    }
+
+    #[test]
+    fn linked_generic_sibling_roots_exclude_common_parent_clutter() {
+        let html = r#"<body>
+            <header>Header clutter</header>
+            <section><ul><li><a href="/1">One</a></li><li><a href="/2">Two</a></li><li><a href="/3">Three</a></li></ul></section>
+            <section><ul><li><a href="/4">Four</a></li><li><a href="/5">Five</a></li><li><a href="/6">Six</a></li></ul></section>
+        </body>"#;
+        let markdown = crate::extract(html, Some("https://example.com"))
+            .unwrap()
+            .markdown();
+
+        assert!(
+            markdown.contains("[One](https://example.com/1)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[Six](https://example.com/6)"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Header clutter"), "{markdown}");
     }
 
     #[test]

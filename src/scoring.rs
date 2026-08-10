@@ -446,12 +446,11 @@ pub(crate) fn prepare_readability_structure(
 
 /// Computes Readability paragraph-propagation scores without selecting a root.
 ///
-/// `scoring_dom` contains the scoring-only structural preparation.
-/// `density_dom` is the same tree with deferred clutter detached. Stable node
-/// IDs let this function reuse one [`NodeStateStore`] for both views.
+/// `dom` contains the scoring-only structural preparation. This function first
+/// propagates scores. It then detaches deferred clutter and calculates link
+/// density. This order avoids a second full DOM copy.
 pub(crate) fn compute_readability_scores(
-    scoring_dom: &Dom,
-    density_dom: &Dom,
+    dom: &mut Dom,
     to_score: impl IntoIterator<Item = NodeId>,
     excluded: &[NodeId],
     store: &mut NodeStateStore,
@@ -459,13 +458,10 @@ pub(crate) fn compute_readability_scores(
 ) -> SmallVec<[ReadabilityScore; 64]> {
     let mut discovered = SmallVec::<[NodeId; 256]>::new();
     for node in to_score {
-        let Some(parent) = scoring_dom
-            .parent(node)
-            .filter(|&parent| scoring_dom.is_element(parent))
-        else {
+        let Some(parent) = dom.parent(node).filter(|&parent| dom.is_element(parent)) else {
             continue;
         };
-        let stats = get_or_compute_stats(scoring_dom, node, store);
+        let stats = get_or_compute_stats(dom, node, store);
         if stats.text_length < 25 {
             continue;
         }
@@ -474,13 +470,11 @@ pub(crate) fn compute_readability_scores(
         let mut ancestor = Some(parent);
         for level in 0..5 {
             let Some(node) = ancestor else { break };
-            ancestor = scoring_dom.parent(node);
-            if !scoring_dom.is_element(node)
-                || !ancestor.is_some_and(|parent| scoring_dom.is_element(parent))
-            {
+            ancestor = dom.parent(node);
+            if !dom.is_element(node) || !ancestor.is_some_and(|parent| dom.is_element(parent)) {
                 continue;
             }
-            let initial = compute_initial_readability_data(scoring_dom, node, flags);
+            let initial = compute_initial_readability_data(dom, node, flags);
             if store.initialize_if_absent(node, initial) {
                 discovered.push(node)
             }
@@ -496,14 +490,19 @@ pub(crate) fn compute_readability_scores(
     // Structural preparation and deferred cleanup produce different text and
     // link totals. Keep propagated scores, but recompute cached statistics.
     store.clear_stats();
+    for &node in excluded {
+        if dom.parent(node).is_some() {
+            dom.detach(node);
+        }
+    }
     let mut scores = SmallVec::new();
     for node in discovered {
-        if is_excluded_candidate(density_dom, node, excluded) {
+        if is_excluded_candidate(dom, node, excluded) {
             continue;
         }
         let content_score = store.get_content_score(node);
-        let length = get_or_compute_stats(density_dom, node, store).text_length;
-        let density = get_link_density_cached(density_dom, node, length, store);
+        let length = get_or_compute_stats(dom, node, store).text_length;
+        let density = get_link_density_cached(dom, node, length, store);
         scores.push(ReadabilityScore {
             node,
             score: content_score * (1.0 - density),
@@ -871,7 +870,7 @@ mod tests {
 
     #[test]
     fn traditional_article_produces_a_readability_candidate() {
-        let dom = Dom::parse_document(
+        let mut dom = Dom::parse_document(
             r#"<body><article><p>This traditional article paragraph contains enough prose, commas, and detail to contribute a strong content score.</p></article><aside><p>Short note.</p></aside></body>"#,
         )
         .unwrap();
@@ -885,7 +884,7 @@ mod tests {
         let mut store = NodeStateStore::new();
         let flags = FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY;
 
-        let scores = compute_readability_scores(&dom, &dom, paragraphs, &[], &mut store, flags);
+        let scores = compute_readability_scores(&mut dom, paragraphs, &[], &mut store, flags);
 
         let article_score = scores
             .iter()
