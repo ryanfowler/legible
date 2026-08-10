@@ -1,7 +1,15 @@
 //! Content scoring and DOM text helpers.
+use crate::candidate::CandidateSet;
 use crate::constants::{flags::*, has_byline, is_div_to_p_elem, is_phrasing_elem, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use smallvec::SmallVec;
+
+/// A Readability-derived score for a possible content root.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReadabilityScore {
+    pub(crate) node: NodeId,
+    pub(crate) score: f64,
+}
 fn is_hash_url(s: &str) -> bool {
     s.starts_with('#') && s.len() > 1
 }
@@ -162,6 +170,120 @@ pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, flags: u32) -> f6
 }
 pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) {
     store.initialize_if_absent(id, compute_initial_readability_data(dom, id, flags));
+}
+
+/// Prepares a scoring-only DOM and returns paragraphs created by the pass.
+///
+/// The caller must pass a copy of the source DOM. This function can wrap
+/// phrasing content, replace simple wrappers, and rename leaf `div` elements.
+pub(crate) fn prepare_readability_structure(
+    dom: &mut Dom,
+    divs: &[NodeId],
+    candidates: &CandidateSet,
+) -> SmallVec<[NodeId; 256]> {
+    let mut to_score = SmallVec::new();
+    for &id in divs {
+        if dom.parent(id).is_none() {
+            continue;
+        }
+        wrap_phrasing_content_in_p(dom, id);
+        if candidates.is_semantic(id) {
+            to_score.extend(
+                dom.element_children(id)
+                    .filter(|&child| dom.tag(child) == Some(Tag::P)),
+            );
+        } else if has_single_tag_inside_element(dom, id, Tag::P) && get_link_density(dom, id) < 0.25
+        {
+            if let Some(paragraph) = dom.element_children(id).next() {
+                dom.replace_with(id, paragraph);
+                to_score.push(paragraph)
+            }
+        } else if !has_child_block_element(dom, id) {
+            dom.rename_html(id, Tag::P);
+            to_score.push(id)
+        } else {
+            to_score.extend(
+                dom.element_children(id)
+                    .filter(|&child| dom.tag(child) == Some(Tag::P)),
+            );
+        }
+    }
+    to_score
+}
+
+/// Computes Readability paragraph-propagation scores without selecting a root.
+///
+/// `scoring_dom` contains the scoring-only structural preparation.
+/// `density_dom` is the same tree with deferred clutter detached. Stable node
+/// IDs let this function reuse one [`NodeStateStore`] for both views.
+pub(crate) fn compute_readability_scores(
+    scoring_dom: &Dom,
+    density_dom: &Dom,
+    to_score: impl IntoIterator<Item = NodeId>,
+    excluded: &[NodeId],
+    store: &mut NodeStateStore,
+    flags: u32,
+) -> SmallVec<[ReadabilityScore; 64]> {
+    let mut discovered = SmallVec::<[NodeId; 256]>::new();
+    for node in to_score {
+        let Some(parent) = scoring_dom
+            .parent(node)
+            .filter(|&parent| scoring_dom.is_element(parent))
+        else {
+            continue;
+        };
+        let stats = get_or_compute_stats(scoring_dom, node, store);
+        if stats.text_length < 25 {
+            continue;
+        }
+        let content_score =
+            2.0 + f64::from(stats.comma_count) + f64::from((stats.text_length / 100).min(3));
+        let mut ancestor = Some(parent);
+        for level in 0..5 {
+            let Some(node) = ancestor else { break };
+            ancestor = scoring_dom.parent(node);
+            if !scoring_dom.is_element(node)
+                || !ancestor.is_some_and(|parent| scoring_dom.is_element(parent))
+            {
+                continue;
+            }
+            let initial = compute_initial_readability_data(scoring_dom, node, flags);
+            if store.initialize_if_absent(node, initial) {
+                discovered.push(node)
+            }
+            let divisor = match level {
+                0 => 1.0,
+                1 => 2.0,
+                _ => (level * 3) as f64,
+            };
+            store.add_content_score(node, content_score / divisor);
+        }
+    }
+
+    // Structural preparation and deferred cleanup produce different text and
+    // link totals. Keep propagated scores, but recompute cached statistics.
+    store.clear_stats();
+    let mut scores = SmallVec::new();
+    for node in discovered {
+        if is_excluded_candidate(density_dom, node, excluded) {
+            continue;
+        }
+        let content_score = store.get_content_score(node);
+        let length = get_or_compute_stats(density_dom, node, store).text_length;
+        let density = get_link_density_cached(density_dom, node, length, store);
+        scores.push(ReadabilityScore {
+            node,
+            score: content_score * (1.0 - density),
+        });
+    }
+    scores
+}
+
+fn is_excluded_candidate(dom: &Dom, node: NodeId, excluded: &[NodeId]) -> bool {
+    excluded.contains(&node)
+        || dom
+            .ancestors(node)
+            .any(|ancestor| excluded.contains(&ancestor))
 }
 pub fn get_class_weight(dom: &Dom, id: NodeId, flags: u32) -> i32 {
     if flags & FLAG_WEIGHT_CLASSES == 0 {
@@ -403,7 +525,12 @@ fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value:
 
 #[cfg(test)]
 mod tests {
-    use super::{get_link_density, get_link_density_cached, stats_for_text};
+    use super::{
+        compute_readability_scores, get_link_density, get_link_density_cached, stats_for_text,
+    };
+    use crate::constants::flags::{
+        FLAG_CLEAN_CONDITIONALLY, FLAG_STRIP_UNLIKELYS, FLAG_WEIGHT_CLASSES,
+    };
     use crate::dom::{Dom, NodeStateStore, Tag};
 
     #[test]
@@ -422,6 +549,32 @@ mod tests {
         assert!(unicode.starts_with_whitespace);
         assert!(unicode.ends_with_whitespace);
         assert!(unicode.has_sentence_end);
+    }
+
+    #[test]
+    fn traditional_article_produces_a_readability_candidate() {
+        let dom = Dom::parse_document(
+            r#"<body><article><p>This traditional article paragraph contains enough prose, commas, and detail to contribute a strong content score.</p></article><aside><p>Short note.</p></aside></body>"#,
+        )
+        .unwrap();
+        let article = dom
+            .first_descendant_by_tag(dom.root(), Tag::Article)
+            .unwrap();
+        let paragraphs: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::P))
+            .collect();
+        let mut store = NodeStateStore::new();
+        let flags = FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY;
+
+        let scores = compute_readability_scores(&dom, &dom, paragraphs, &[], &mut store, flags);
+
+        let article_score = scores
+            .iter()
+            .find(|candidate| candidate.node == article)
+            .map(|candidate| candidate.score)
+            .unwrap();
+        assert!(article_score > 2.0);
     }
 
     #[test]

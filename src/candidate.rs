@@ -51,7 +51,7 @@ pub(crate) struct Candidate {
     pub(crate) node: NodeId,
     sources: CandidateSources,
     pub(crate) semantic_prior: f64,
-    pub(crate) score: f64,
+    pub(crate) readability_score: f64,
 }
 
 impl Candidate {
@@ -219,7 +219,7 @@ impl CandidateSet {
             };
             if is_article && has_text[candidate.node.index()] {
                 article_peer_count[parent.index()] += 1;
-                article_peer_score[parent.index()] += candidate.score;
+                article_peer_score[parent.index()] += candidate.readability_score;
             }
         }
 
@@ -257,7 +257,7 @@ impl CandidateSet {
                 } else {
                     0.0
                 },
-                score: if source == CandidateSource::Readability {
+                readability_score: if source == CandidateSource::Readability {
                     value
                 } else {
                     0.0
@@ -279,7 +279,9 @@ impl CandidateSet {
                         .min(MAX_SEMANTIC_PRIOR);
                 }
             }
-            CandidateSource::Readability => candidate.score = candidate.score.max(value),
+            CandidateSource::Readability => {
+                candidate.readability_score = candidate.readability_score.max(value)
+            }
             CandidateSource::Generic => {}
         }
     }
@@ -366,6 +368,19 @@ mod tests {
             assert!(markdown.contains("Chosen semantic content"), "{opening}");
             assert!(!markdown.contains("Outside clutter"), "{opening}");
         }
+    }
+
+    #[test]
+    fn semantic_candidate_can_override_readability_winner() {
+        let html = r#"<body><main><h2>Semantic context</h2><blockquote>
+            <p>Focused sentence has enough text.</p>
+        </blockquote></main></body>"#;
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        // Readability gives the nested blockquote a larger propagated score.
+        // The chooser can still retain the short authoritative semantic root.
+        assert!(markdown.contains("Semantic context"), "{markdown}");
+        assert!(markdown.contains("Focused sentence"), "{markdown}");
     }
 
     #[test]
