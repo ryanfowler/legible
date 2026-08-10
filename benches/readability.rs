@@ -1,7 +1,13 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::{Extractor, extract};
+use legible::extract;
 use std::fs;
 use std::hint::black_box;
+
+// Criterion benchmarks compile as a separate crate. Include the private DOM module so
+// the parser benchmark measures the same parser that extraction uses.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/dom/mod.rs"]
+mod dom;
 
 const TEST_PAGES_DIR: &str = "tests/readability-js/test/test-pages";
 
@@ -57,12 +63,12 @@ fn bench_complex_pages(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks parser scaling on adversarial deeply nested markup.
 fn bench_deeply_nested(c: &mut Criterion) {
     let mut group = c.benchmark_group("deeply_nested_document");
-    let extractor = Extractor::default();
     for depth in [1_000, 2_000, 4_000, 8_000] {
         let mut html = String::with_capacity(depth * 11);
-        html.push_str("<!doctype html><body>");
+        html.push_str("<!doctype html>");
         for _ in 0..depth {
             html.push_str("<div>");
         }
@@ -72,7 +78,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
         }
         group.throughput(Throughput::Elements(depth as u64));
         group.bench_with_input(BenchmarkId::from_parameter(depth), &html, |b, html| {
-            b.iter(|| extractor.extract(black_box(html), None))
+            b.iter(|| dom::Dom::parse_document(black_box(html)))
         });
     }
     group.finish();
