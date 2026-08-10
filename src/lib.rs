@@ -60,6 +60,7 @@ mod markdown;
 mod metadata;
 mod normalize;
 mod page;
+mod quality;
 mod readability;
 mod scoring;
 mod text;

@@ -1,7 +1,8 @@
 //! Readability-derived content extraction.
 #![allow(clippy::collapsible_if)]
 use crate::candidate::{
-    CandidateSet, CandidateSource, RankedCandidate, RootSelectionReason, select_content_root,
+    CandidateSet, CandidateSource, RankedCandidate, RootSelection, RootSelectionReason,
+    locate_structured_content, select_content_root,
 };
 use crate::cleaning::*;
 use crate::constants::{flags::*, is_alter_to_div_exception, is_default_tag_to_score, regexps};
@@ -12,6 +13,7 @@ use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, StructuredData};
 use crate::normalize::{finish_normalization, normalize_semantics};
 use crate::page::ExtractedPage;
+use crate::quality::{ContentMetrics, ExtractionQuality};
 use crate::scoring::*;
 use html5ever::ns;
 use regex::Regex;
@@ -38,9 +40,38 @@ pub(crate) struct Readability<'a> {
 }
 struct BestAttempt {
     content: FrozenContent,
-    text_len_chars: usize,
+    quality: ExtractionQuality,
     excerpt: Option<String>,
     direction: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExtractionStrategy {
+    Normal,
+    RelaxedCleanup,
+    BroadContent,
+    StructuredDataHint,
+    BodyFallback,
+}
+
+impl ExtractionStrategy {
+    const ORDER: [Self; 5] = [
+        Self::Normal,
+        Self::RelaxedCleanup,
+        Self::BroadContent,
+        Self::StructuredDataHint,
+        Self::BodyFallback,
+    ];
+
+    fn flags(self) -> u32 {
+        match self {
+            Self::Normal | Self::StructuredDataHint => {
+                FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY
+            }
+            Self::RelaxedCleanup => FLAG_WEIGHT_CLASSES,
+            Self::BroadContent | Self::BodyFallback => 0,
+        }
+    }
 }
 struct FrozenContent {
     dom: Dom,
@@ -169,13 +200,24 @@ impl<'a> Readability<'a> {
         ))
     }
     fn grab_article(&mut self) -> Result<ArticleContent> {
-        if self.dom.body().is_none() {
-            return Err(Error::NoBody);
+        let body = self.dom.body().ok_or(Error::NoBody)?;
+        let source_metrics = ContentMetrics::measure_source(&self.dom, body);
+        if !source_metrics.has_meaningful_text() {
+            return Err(Error::NoContent);
         }
+        let structured_root = locate_structured_content(
+            &self.dom,
+            self.structured_data
+                .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+        );
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
-        loop {
+        for strategy in ExtractionStrategy::ORDER {
+            if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
+                continue;
+            }
+            self.flags = strategy.flags();
             // Discovery only records nodes. It does not mutate the source DOM.
             // Deferred removals stay attached until all candidate scores and
             // link-density values have been calculated.
@@ -205,6 +247,9 @@ impl<'a> Readability<'a> {
                 self.flags,
             );
             let mut candidates = discovery.candidates;
+            if let Some(root) = structured_root {
+                candidates.add_structured_data(root);
+            }
             let ranked = self.rank_candidates(
                 &working_dom,
                 &mut candidates,
@@ -212,7 +257,7 @@ impl<'a> Readability<'a> {
                 &discovery.remove_after_scoring,
             );
             let body = working_dom.body().ok_or(Error::NoBody)?;
-            let selection = select_content_root(
+            let mut selection = select_content_root(
                 &working_dom,
                 &candidates,
                 &ranked,
@@ -220,6 +265,19 @@ impl<'a> Readability<'a> {
                 self.structured_data
                     .primary_texts(&self.structured_title, self.source_uri.as_ref()),
             );
+            selection = self.selection_for_strategy(
+                strategy,
+                &working_dom,
+                body,
+                selection,
+                structured_root,
+            );
+            let root_in_document_chrome =
+                Self::is_document_chrome_root(&working_dom, selection.node, body);
+            if selection.node == body {
+                Self::prune_body_fallback_chrome(&mut working_dom, body);
+                selection.branches.clear();
+            }
 
             // Move the selected working tree into the extraction path. Keep the
             // prepared source as the immutable input for a possible retry.
@@ -382,70 +440,195 @@ impl<'a> Readability<'a> {
                 }
                 self.dom.append_child(article_id, w)
             }
-            if let Some(len) = self
-                .dom
-                .normalized_char_count_below(article_id, self.options.char_threshold)
-            {
-                if self
-                    .best_attempt
-                    .as_ref()
-                    .is_none_or(|best| len > best.text_len_chars)
-                {
-                    let excerpt = self.article_excerpt(article_id);
-                    self.post_process(article_id, &mut cleaning_nodes);
-                    let dom = if synthetic {
-                        self.dom.copy_subtree_as_fragment(article_id)
-                    } else {
-                        self.dom.copy_children_as_fragment(article_id)
-                    }
-                    .map_err(|_| Error::NoContent)?;
-                    self.best_attempt = Some(BestAttempt {
-                        content: FrozenContent { dom },
-                        text_len_chars: len,
-                        excerpt,
-                        direction: self.article_dir.clone(),
-                    });
-                }
-                let retry = if self.flags & FLAG_WEIGHT_CLASSES != 0 {
-                    self.flags &= !FLAG_WEIGHT_CLASSES;
-                    true
-                } else if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
-                    self.flags &= !FLAG_CLEAN_CONDITIONALLY;
-                    true
-                } else {
-                    false
-                };
-                if retry {
-                    self.restore_source(source_dom);
-                    continue;
-                }
-                let best = self.best_attempt.take().ok_or(Error::NoContent)?;
-                if best.text_len_chars == 0 {
-                    return Err(Error::NoContent);
-                }
-                self.dom = best.content.dom;
-                self.article_dir = best.direction;
+            let excerpt = self.article_excerpt(article_id);
+            self.post_process(article_id, &mut cleaning_nodes);
+            let result_dom = if synthetic {
+                self.dom.copy_subtree_as_fragment(article_id)
+            } else {
+                self.dom.copy_children_as_fragment(article_id)
+            }
+            .map_err(|_| Error::NoContent)?;
+            let result_metrics = ContentMetrics::measure(&result_dom, result_dom.root());
+            let quality = ExtractionQuality::new(
+                source_metrics,
+                result_metrics,
+                selection.node != body && strategy != ExtractionStrategy::BodyFallback,
+            );
+            debug_log!(
+                self,
+                "Extraction strategy {:?}: words={}, coverage={:.3}, links={:.3}",
+                strategy,
+                quality.word_count,
+                quality.coverage,
+                quality.link_density
+            );
+
+            let schema_match = structured_root == Some(selection.node)
+                && !quality.is_suspiciously_small()
+                && (quality.coverage >= 0.2 || quality.text_chars >= 500);
+            if !root_in_document_chrome && (quality.is_good() || schema_match) {
+                self.dom = result_dom;
                 let root = self.dom.root();
                 return Ok(ArticleContent {
-                    text_length: best.text_len_chars,
-                    excerpt: best.excerpt,
+                    text_length: quality.text_chars,
+                    excerpt,
                     article_root: root,
                 });
             }
-            let excerpt = self.article_excerpt(article_id);
-            self.post_process(article_id, &mut cleaning_nodes);
-            let len = self.dom.normalized_char_count(article_id);
-            return Ok(ArticleContent {
-                text_length: len,
-                excerpt,
-                article_root: if synthetic {
-                    self.dom.parent(article_id).unwrap_or(article_id)
-                } else {
-                    article_id
-                },
-            });
+
+            if !root_in_document_chrome
+                && self.best_attempt.as_ref().is_none_or(|best| {
+                    quality.best_attempt_score() > best.quality.best_attempt_score()
+                })
+            {
+                self.best_attempt = Some(BestAttempt {
+                    content: FrozenContent { dom: result_dom },
+                    quality,
+                    excerpt,
+                    direction: self.article_dir.clone(),
+                });
+            }
+            self.restore_source(source_dom);
+        }
+
+        let best = self.best_attempt.take().ok_or(Error::NoContent)?;
+        if !best.quality.is_good() && best.quality.is_suspiciously_small() {
+            return Err(Error::NoContent);
+        }
+        self.dom = best.content.dom;
+        self.article_dir = best.direction;
+        let root = self.dom.root();
+        Ok(ArticleContent {
+            text_length: best.quality.text_chars,
+            excerpt: best.excerpt,
+            article_root: root,
+        })
+    }
+    fn prune_body_fallback_chrome(dom: &mut Dom, body: NodeId) {
+        let elements = dom.element_descendants_snapshot_with_depth(body);
+        let has_primary_region = elements.iter().any(|&(node, _)| {
+            matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
+                || dom
+                    .attr(node, AttrName::Role)
+                    .is_some_and(Self::has_primary_role)
+        });
+        let mut in_primary_region = vec![false; dom.len()];
+        let mut remove = SmallVec::<[NodeId; 16]>::new();
+        for (node, _) in elements {
+            let parent_is_primary = dom
+                .parent(node)
+                .is_some_and(|parent| in_primary_region[parent.index()]);
+            in_primary_region[node.index()] = parent_is_primary
+                || matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
+                || dom
+                    .attr(node, AttrName::Role)
+                    .is_some_and(Self::has_primary_role);
+            let role = dom.attr(node, AttrName::Role);
+            let document_chrome =
+                matches!(dom.tag(node), Some(Tag::Header | Tag::Footer | Tag::Nav))
+                    || role.is_some_and(|roles| {
+                        roles.split_whitespace().any(|role| {
+                            role.eq_ignore_ascii_case("banner")
+                                || role.eq_ignore_ascii_case("navigation")
+                        })
+                    });
+            let contextual_sidebar = dom.tag(node) == Some(Tag::Aside)
+                || role.is_some_and(|roles| {
+                    roles
+                        .split_whitespace()
+                        .any(|role| role.eq_ignore_ascii_case("complementary"))
+                });
+            if (document_chrome || contextual_sidebar && has_primary_region)
+                && !in_primary_region[node.index()]
+            {
+                remove.push(node);
+            }
+        }
+        for node in remove {
+            dom.detach(node);
         }
     }
+
+    fn has_primary_role(roles: &str) -> bool {
+        roles
+            .split_whitespace()
+            .any(|role| role.eq_ignore_ascii_case("main") || role.eq_ignore_ascii_case("article"))
+    }
+
+    fn is_document_chrome_root(dom: &Dom, node: NodeId, body: NodeId) -> bool {
+        let protected = std::iter::once(node)
+            .chain(dom.ancestors(node))
+            .take_while(|&ancestor| ancestor != body)
+            .any(|ancestor| {
+                matches!(dom.tag(ancestor), Some(Tag::Main | Tag::Article))
+                    || dom
+                        .attr(ancestor, AttrName::Role)
+                        .is_some_and(Self::has_primary_role)
+            });
+        !protected
+            && std::iter::once(node)
+                .chain(dom.ancestors(node))
+                .take_while(|&ancestor| ancestor != body)
+                .any(|ancestor| {
+                    matches!(
+                        dom.tag(ancestor),
+                        Some(Tag::Aside | Tag::Header | Tag::Footer | Tag::Nav)
+                    ) || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
+                        roles.split_whitespace().any(|role| {
+                            role.eq_ignore_ascii_case("banner")
+                                || role.eq_ignore_ascii_case("complementary")
+                                || role.eq_ignore_ascii_case("navigation")
+                        })
+                    })
+                })
+    }
+
+    fn selection_for_strategy(
+        &self,
+        strategy: ExtractionStrategy,
+        dom: &Dom,
+        body: NodeId,
+        normal: RootSelection,
+        structured_root: Option<NodeId>,
+    ) -> RootSelection {
+        match strategy {
+            ExtractionStrategy::Normal | ExtractionStrategy::RelaxedCleanup => normal,
+            ExtractionStrategy::StructuredDataHint => RootSelection {
+                node: structured_root.unwrap_or(normal.node),
+                reason: RootSelectionReason::StructuredData,
+                branches: SmallVec::new(),
+            },
+            ExtractionStrategy::BroadContent => {
+                let node = std::iter::once(normal.node)
+                    .chain(dom.ancestors(normal.node))
+                    .find(|&node| {
+                        dom.tag(node) == Some(Tag::Main)
+                            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+                                roles
+                                    .split_whitespace()
+                                    .any(|role| role.eq_ignore_ascii_case("main"))
+                            })
+                    })
+                    .or_else(|| {
+                        std::iter::once(normal.node)
+                            .chain(dom.ancestors(normal.node))
+                            .find(|&node| dom.tag(node) == Some(Tag::Article))
+                    })
+                    .unwrap_or(normal.node);
+                RootSelection {
+                    node,
+                    reason: RootSelectionReason::SharedParent,
+                    branches: SmallVec::new(),
+                }
+            }
+            ExtractionStrategy::BodyFallback => RootSelection {
+                node: body,
+                reason: RootSelectionReason::BodyFallback,
+                branches: SmallVec::new(),
+            },
+        }
+    }
+
     fn discover_candidates(
         &mut self,
         match_buffer: &mut String,
@@ -1142,6 +1325,134 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             page.metadata().authors,
             ["Contact editor@example.com Editorial team"]
         );
+    }
+
+    #[test]
+    fn broad_and_body_fallbacks_retain_non_article_pages() {
+        let listing = r#"<body><header>Site navigation</header><main>
+            <h1>Package index</h1>
+            <ul>
+                <li><a href="/alpha">Alpha API reference</a></li>
+                <li><a href="/beta">Beta API reference</a></li>
+                <li><a href="/gamma">Gamma API reference</a></li>
+                <li><a href="/delta">Delta API reference</a></li>
+            </ul>
+        </main><footer>Legal links</footer></body>"#;
+        let markdown = crate::extract(listing, Some("https://example.com/index"))
+            .unwrap()
+            .markdown();
+        assert!(markdown.contains("Alpha API reference"), "{markdown}");
+        assert!(markdown.contains("Delta API reference"), "{markdown}");
+        assert!(!markdown.contains("Site navigation"), "{markdown}");
+
+        let old_page = crate::extract(
+            "<body><h1>Old page</h1>Useful text<br>Second useful line</body>",
+            None,
+        )
+        .unwrap()
+        .text();
+        assert!(old_page.contains("Useful text"), "{old_page}");
+        assert!(old_page.contains("Second useful line"), "{old_page}");
+    }
+
+    #[test]
+    fn empty_and_executable_only_pages_have_no_content() {
+        assert!(matches!(
+            crate::extract("<html><body></body></html>", None),
+            Err(Error::NoContent)
+        ));
+        assert!(matches!(
+            crate::extract("<body>... --- !!!</body>", None),
+            Err(Error::NoContent)
+        ));
+        assert!(matches!(
+            crate::extract("<html><head><title>Head only</title></head></html>", None),
+            Err(Error::NoContent)
+        ));
+        assert!(matches!(
+            crate::extract(
+                "<body><img src='photo.jpg' alt='A useful photo'></body>",
+                None
+            ),
+            Err(Error::NoContent)
+        ));
+        assert!(matches!(
+            crate::extract(
+                "<html><body><script>visible = false</script><style>body{}</style></body></html>",
+                None,
+            ),
+            Err(Error::NoContent)
+        ));
+
+        let hidden = "hidden navigation words ".repeat(500);
+        let html = format!(
+            "<body><div hidden>{hidden}</div><nav>{hidden}</nav><main><p>Short visible answer.</p></main></body>"
+        );
+        let page = crate::extract(&html, None).unwrap();
+        assert_eq!(page.text(), "Short visible answer.");
+    }
+
+    #[test]
+    fn short_schema_teaser_does_not_truncate_a_long_page() {
+        let prose = "The full guide explains configuration, validation, recovery, compatibility, and deployment with practical details. ".repeat(20);
+        let html = format!(
+            r#"<body><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Article","articleBody":"Brief schema teaser appears here"}}</script>
+            <div><p>Brief schema teaser appears here</p></div>
+            <main><h1>Full guide</h1><p>{prose}</p></main></body>"#
+        );
+        let text = crate::extract(&html, None).unwrap().text();
+        assert!(
+            text.contains("The full guide explains configuration"),
+            "{text}"
+        );
+        assert!(text.contains("deployment with practical details"), "{text}");
+    }
+
+    #[test]
+    fn document_chrome_cannot_replace_short_main_content() {
+        let html = r#"<body>
+            <header id="content"><p>This polished header text has enough words, punctuation, and a strong identifier to compete as content.</p></header>
+            <aside><p>Unrelated sidebar details and links.</p></aside>
+            <div role="complementary"><p>Another unrelated panel.</p></div>
+            <div role="main"><p>Short visible answer.</p></div>
+        </body>"#;
+        let text = crate::extract(html, None).unwrap().text();
+        assert_eq!(text, "Short visible answer.");
+    }
+
+    #[test]
+    fn strategies_choose_broad_main_and_final_body_boundaries() {
+        let dom = Dom::parse_document(
+            "<body><main><article><p>Useful result.</p></article></main><aside>Note</aside></body>",
+        )
+        .unwrap();
+        let body = dom.body().unwrap();
+        let article = dom.first_descendant_by_tag(body, Tag::Article).unwrap();
+        let config = ExtractorConfig::default();
+        let readability = Readability::from_document(dom.clone(), None, &config);
+        let normal = RootSelection {
+            node: article,
+            reason: RootSelectionReason::Ranked,
+            branches: SmallVec::new(),
+        };
+
+        let broad = readability.selection_for_strategy(
+            ExtractionStrategy::BroadContent,
+            &dom,
+            body,
+            normal.clone(),
+            None,
+        );
+        assert_eq!(dom.tag(broad.node), Some(Tag::Main));
+        let fallback = readability.selection_for_strategy(
+            ExtractionStrategy::BodyFallback,
+            &dom,
+            body,
+            normal,
+            None,
+        );
+        assert_eq!(fallback.node, body);
+        assert_eq!(ExtractionStrategy::BodyFallback.flags(), 0);
     }
 
     #[test]
