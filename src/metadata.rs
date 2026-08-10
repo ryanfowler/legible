@@ -81,6 +81,7 @@ impl StructuredData {
         Self { items }
     }
 
+    #[cfg(test)]
     pub(crate) fn article_texts(&self) -> impl Iterator<Item = &str> {
         self.items
             .iter()
@@ -90,11 +91,17 @@ impl StructuredData {
                         .any(|kind| is_article_type(kind) || is_general_content_type(kind))
                 })
             })
-            .flat_map(|item| {
-                ["articleBody", "text"]
-                    .into_iter()
-                    .filter_map(move |key| item.get(key).and_then(Value::as_str))
-            })
+            .flat_map(article_text_values)
+    }
+
+    pub(crate) fn primary_texts<'a>(
+        &'a self,
+        document_title: &str,
+        source_url: Option<&Url>,
+    ) -> impl Iterator<Item = &'a str> {
+        primary_hint_item(self, document_title, source_url)
+            .into_iter()
+            .flat_map(article_text_values)
     }
 
     fn article_items(&self) -> impl Iterator<Item = &Value> {
@@ -285,7 +292,8 @@ pub(crate) fn discover(
     source_url: Option<&Url>,
 ) -> Metadata {
     let mut candidates = CandidateSet::default();
-    collect_structured_candidates(structured, document_title, source_url, &mut candidates);
+    let identity_title = content_identity_title(dom, document_title);
+    collect_structured_candidates(structured, &identity_title, source_url, &mut candidates);
     collect_meta_candidates(dom, &mut candidates);
     collect_link_candidates(dom, &mut candidates);
     collect_element_candidates(dom, document_title, &mut candidates);
@@ -316,25 +324,8 @@ fn collect_structured_candidates(
     source_url: Option<&Url>,
     out: &mut CandidateSet,
 ) {
-    let primary_article = data
-        .article_items()
-        .max_by_key(|item| structured_item_score(item, document_title, source_url));
-    let primary_general = data
-        .items
-        .iter()
-        .filter(|item| {
-            item.get("@type")
-                .is_some_and(|kind| json_types(kind).any(is_general_content_type))
-        })
-        .max_by_key(|item| structured_item_score(item, document_title, source_url));
-    let use_article = match (primary_article, primary_general) {
-        (Some(article), Some(general)) => {
-            structured_item_score(article, document_title, source_url)
-                >= structured_item_score(general, document_title, source_url)
-        }
-        (Some(_), None) => true,
-        _ => false,
-    };
+    let (primary_article, primary_general, use_article, _) =
+        primary_structured_items(data, document_title, source_url);
     if let Some(item) = primary_article.filter(|_| use_article) {
         let headline = item.get("headline").and_then(Value::as_str);
         let name = item.get("name").and_then(Value::as_str);
@@ -430,6 +421,95 @@ fn collect_structured_candidates(
     for item in data.typed_items("WebSite") {
         add_json_string(out, |set| &mut set.site_name, item.get("name"), 86);
     }
+}
+
+pub(crate) fn content_identity_title(dom: &Dom, document_title: &str) -> String {
+    if !document_title.is_empty() {
+        return document_title.to_owned();
+    }
+    dom.first_descendant_by_tag(dom.root(), Tag::H1)
+        .map(|heading| get_inner_text_owned(dom, heading))
+        .unwrap_or_default()
+}
+
+fn primary_hint_item<'a>(
+    data: &'a StructuredData,
+    document_title: &str,
+    source_url: Option<&Url>,
+) -> Option<&'a Value> {
+    primary_structured_items(data, document_title, source_url).3
+}
+
+fn primary_structured_items<'a>(
+    data: &'a StructuredData,
+    document_title: &str,
+    source_url: Option<&Url>,
+) -> (
+    Option<&'a Value>,
+    Option<&'a Value>,
+    bool,
+    Option<&'a Value>,
+) {
+    let mut primary_article =
+        select_unique_structured_item(data.article_items(), document_title, source_url);
+    let mut primary_general = select_unique_structured_item(
+        data.items.iter().filter(|item| {
+            item.get("@type")
+                .is_some_and(|kind| json_types(kind).any(is_general_content_type))
+        }),
+        document_title,
+        source_url,
+    );
+    let use_article = match (primary_article, primary_general) {
+        (Some(article), Some(general)) => {
+            let article_score = structured_item_score(article, document_title, source_url);
+            let general_score = structured_item_score(general, document_title, source_url);
+            if article_score == general_score {
+                primary_article = None;
+                primary_general = None;
+            }
+            article_score > general_score
+        }
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let primary = if use_article {
+        primary_article
+    } else {
+        primary_general
+    };
+    (primary_article, primary_general, use_article, primary)
+}
+
+fn select_unique_structured_item<'a>(
+    items: impl IntoIterator<Item = &'a Value>,
+    document_title: &str,
+    source_url: Option<&Url>,
+) -> Option<&'a Value> {
+    let mut selected = None;
+    let mut best_score = 0;
+    let mut best_count = 0;
+    let mut item_count = 0;
+    for item in items {
+        item_count += 1;
+        let score = structured_item_score(item, document_title, source_url);
+        if selected.is_none() || score > best_score {
+            selected = Some(item);
+            best_score = score;
+            best_count = 1;
+        } else if score == best_score {
+            best_count += 1;
+        }
+    }
+    (item_count == 1 || best_score > 0 && best_count == 1)
+        .then_some(selected)
+        .flatten()
+}
+
+fn article_text_values(item: &Value) -> impl Iterator<Item = &str> {
+    ["articleBody", "text"]
+        .into_iter()
+        .filter_map(move |key| item.get(key).and_then(Value::as_str))
 }
 
 fn structured_item_score(item: &Value, document_title: &str, source_url: Option<&Url>) -> u16 {
@@ -1370,6 +1450,23 @@ mod tests {
         );
 
         assert_eq!(result.authors, ["Ada"]);
+    }
+
+    #[test]
+    fn ambiguous_structured_items_do_not_provide_content_hints() {
+        let dom = Dom::parse_document(
+            r#"<script type="application/ld+json">[
+                {"@context":"https://schema.org","@type":"Article","description":"First unrelated description","author":{"name":"First Author"},"articleBody":"First possible article body with enough useful words."},
+                {"@context":"https://schema.org","@type":"Article","description":"Second unrelated description","author":{"name":"Second Author"},"articleBody":"Second possible article body with enough useful words."}
+            ]</script>"#,
+        )
+        .unwrap();
+        let data = StructuredData::parse(&dom);
+
+        assert!(data.primary_texts("", None).next().is_none());
+        let resolved = discover(&dom, &data, "", None, None);
+        assert!(resolved.description.is_none());
+        assert!(resolved.authors.is_empty());
     }
 
     #[test]

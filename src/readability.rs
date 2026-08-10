@@ -1,6 +1,8 @@
 //! Readability-derived content extraction.
 #![allow(clippy::collapsible_if)]
-use crate::candidate::{CandidateSet, CandidateSource};
+use crate::candidate::{
+    CandidateSet, CandidateSource, RankedCandidate, RootSelectionReason, select_content_root,
+};
 use crate::cleaning::*;
 use crate::constants::{
     flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score, regexps,
@@ -24,6 +26,7 @@ pub(crate) struct Readability<'a> {
     flags: u32,
     node_data: NodeStateStore,
     article_title: String,
+    structured_title: String,
     article_byline: Option<String>,
     article_dir: Option<String>,
     article_lang: Option<String>,
@@ -78,6 +81,7 @@ impl<'a> Readability<'a> {
             flags: FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeStateStore::new(),
             article_title: String::new(),
+            structured_title: String::new(),
             article_byline: None,
             article_dir: None,
             article_lang: None,
@@ -127,6 +131,7 @@ impl<'a> Readability<'a> {
         // rewrites any nodes. Image preparation happens afterwards because it
         // can replace placeholder and noscript subtrees.
         let title = metadata::get_article_title(&self.dom);
+        self.structured_title = metadata::content_identity_title(&self.dom, &title);
         if self.options.structured_data {
             self.structured_data = StructuredData::parse(&self.dom);
         }
@@ -137,7 +142,12 @@ impl<'a> Readability<'a> {
             self.base_uri.as_ref(),
             self.source_uri.as_ref(),
         );
-        if self.structured_data.article_texts().next().is_some() {
+        if self
+            .structured_data
+            .primary_texts(&self.structured_title, self.source_uri.as_ref())
+            .next()
+            .is_some()
+        {
             debug_log!(self, "Structured data contains a content-location hint");
         }
         unwrap_noscript_images(&mut self.dom);
@@ -209,13 +219,22 @@ impl<'a> Readability<'a> {
                 &mut self.node_data,
                 self.flags,
             );
-            let top = self.rank_candidates(
+            let mut candidates = discovery.candidates;
+            let ranked = self.rank_candidates(
                 &ranking_dom,
-                discovery.candidates,
+                &mut candidates,
                 readability_scores,
                 &discovery.remove_after_scoring,
             );
-
+            let body = ranking_dom.body().ok_or(Error::NoBody)?;
+            let selection = select_content_root(
+                &ranking_dom,
+                &candidates,
+                &ranked,
+                body,
+                self.structured_data
+                    .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+            );
             // Apply the already-planned preparation and cleanup only after the
             // non-destructive discovery and scoring phase has selected a root.
             let semantic_candidates = CandidateSet::discover_semantic(&self.dom);
@@ -230,85 +249,103 @@ impl<'a> Readability<'a> {
                 }
             }
             let body = self.dom.body().ok_or(Error::NoBody)?;
-            let (top_id, synthetic) = if top.is_empty() || top[0].0 == body {
-                let c = self
+            let (top_id, synthetic) = if selection.node == body {
+                let container = self
                     .dom
                     .create_html_element(Tag::Div)
                     .map_err(|_| Error::NoContent)?;
                 let children: SmallVec<[NodeId; 16]> = self.dom.children(body).collect();
-                for x in children {
-                    self.dom.append_child(c, x)
+                for child in children {
+                    self.dom.append_child(container, child)
                 }
-                self.dom.append_child(body, c);
-                initialize_node(&self.dom, c, &mut self.node_data, self.flags);
-                (c, true)
+                self.dom.append_child(body, container);
+                initialize_node(&self.dom, container, &mut self.node_data, self.flags);
+                (container, true)
             } else {
-                let mut tc = top[0].0;
-                let top_score = top[0].1;
-                let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = top
-                    .iter()
-                    .skip(1)
-                    .filter(|(_, score, _)| *score / top_score >= 0.75)
-                    .map(|(id, _, _)| self.dom.ancestors(*id).collect())
-                    .collect();
-                if alternatives.len() >= 3 {
-                    let mut p = self.dom.parent(tc);
-                    while let Some(x) = p {
-                        if x == body {
+                let mut top_id = selection.node;
+                // Preserve Readability's useful boundary expansion when the
+                // structural selector accepts the raw ranking winner. Explicit
+                // child, parent, or schema choices are already final.
+                if selection.reason == RootSelectionReason::Ranked {
+                    let top_score = ranked[0].score;
+                    let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = ranked
+                        .iter()
+                        .skip(1)
+                        .filter(|candidate| candidate.score / top_score >= 0.75)
+                        .map(|candidate| self.dom.ancestors(candidate.node).collect())
+                        .collect();
+                    if alternatives.len() >= 3 {
+                        let mut parent = self.dom.parent(top_id);
+                        while let Some(node) = parent {
+                            if node == body {
+                                break;
+                            }
+                            if alternatives
+                                .iter()
+                                .filter(|ancestors| ancestors.contains(&node))
+                                .count()
+                                >= 3
+                            {
+                                top_id = node;
+                                break;
+                            }
+                            parent = self.dom.parent(node)
+                        }
+                    }
+                    if !self.node_data.has(top_id) {
+                        initialize_node(&self.dom, top_id, &mut self.node_data, self.flags)
+                    }
+                    let threshold = self.node_data.get_content_score(top_id) / 3.0;
+                    let mut last = self.node_data.get_content_score(top_id);
+                    let mut parent = self.dom.parent(top_id);
+                    while let Some(node) = parent {
+                        if node == body {
                             break;
                         }
-                        if alternatives.iter().filter(|a| a.contains(&x)).count() >= 3 {
-                            tc = x;
+                        if let Some(score) = self.node_data.get(node).map(|data| data.content_score)
+                        {
+                            if score < threshold {
+                                break;
+                            }
+                            if score > last {
+                                top_id = node;
+                                break;
+                            }
+                            last = score;
+                        }
+                        parent = self.dom.parent(node)
+                    }
+                    while let Some(parent) = self.dom.parent(top_id) {
+                        if parent == body {
                             break;
                         }
-                        p = self.dom.parent(x)
-                    }
-                }
-                if !self.node_data.has(tc) {
-                    initialize_node(&self.dom, tc, &mut self.node_data, self.flags)
-                }
-                let mut p = self.dom.parent(tc);
-                let threshold = self.node_data.get_content_score(tc) / 3.;
-                let mut last = self.node_data.get_content_score(tc);
-                while let Some(x) = p {
-                    if x == body {
-                        break;
-                    }
-                    if let Some(s) = self.node_data.get(x).map(|e| e.content_score) {
-                        if s < threshold {
+                        let mut children = self.dom.element_children(parent);
+                        if children.next().is_some() && children.next().is_none() {
+                            top_id = parent;
+                        } else {
                             break;
                         }
-                        if s > last {
-                            tc = x;
-                            break;
-                        }
-                        last = s
-                    }
-                    p = self.dom.parent(x)
-                }
-                while let Some(p) = self.dom.parent(tc) {
-                    if p == body {
-                        break;
-                    }
-                    let mut ec = self.dom.element_children(p);
-                    if ec.next().is_some() && ec.next().is_none() {
-                        tc = p
-                    } else {
-                        break;
                     }
                 }
-                (tc, false)
+                if !self.node_data.has(top_id) {
+                    initialize_node(&self.dom, top_id, &mut self.node_data, self.flags)
+                }
+                (top_id, false)
             };
             let article_id = if synthetic {
                 top_id
             } else {
-                let sib = Self::gather_siblings(
-                    &self.dom,
-                    top_id,
-                    &mut self.node_data,
-                    self.options.debug,
-                );
-                self.create_container(top_id, &sib).unwrap_or(top_id)
+                let siblings = if selection.reason == RootSelectionReason::Ranked {
+                    Self::gather_siblings(
+                        &self.dom,
+                        top_id,
+                        &mut self.node_data,
+                        self.options.debug,
+                    )
+                } else {
+                    SmallVec::from_slice(&[top_id])
+                };
+                self.create_container(top_id, &siblings).unwrap_or(top_id)
             };
             let video = regexps::VIDEOS.clone();
             self.prep_article(
@@ -526,10 +563,10 @@ impl<'a> Readability<'a> {
     fn rank_candidates(
         &mut self,
         dom: &Dom,
-        mut candidates: CandidateSet,
+        candidates: &mut CandidateSet,
         readability_scores: SmallVec<[ReadabilityScore; 64]>,
         excluded: &[NodeId],
-    ) -> SmallVec<[(NodeId, f64, usize); 64]> {
+    ) -> SmallVec<[RankedCandidate; 64]> {
         for readability in readability_scores {
             candidates.add_readability(readability.node, readability.score);
         }
@@ -547,7 +584,7 @@ impl<'a> Readability<'a> {
         }
 
         let context = candidates.ranking_context(dom);
-        let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
+        let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
             .iter()
             .enumerate()
             .filter_map(|(order, candidate)| {
@@ -594,22 +631,28 @@ impl<'a> Readability<'a> {
                     + short_semantic_bonus
                     + sibling_content_bonus;
                 self.node_data.set_score(candidate.node, final_score);
-                Some((candidate.node, final_score, order))
+                Some(RankedCandidate {
+                    node: candidate.node,
+                    score: final_score,
+                    order,
+                })
             })
             .collect();
         let top_count = self.options.top_candidates.min(scored.len());
         if top_count < scored.len() {
             scored.select_nth_unstable_by(top_count, |a, b| {
-                b.1.partial_cmp(&a.1)
+                b.score
+                    .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.order.cmp(&b.order))
             });
             scored.truncate(top_count);
         }
         scored.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1)
+            b.score
+                .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.order.cmp(&b.order))
         });
         scored
     }
@@ -1020,14 +1063,15 @@ mod tests {
             &mut readability.node_data,
             readability.flags,
         );
+        let mut candidates = discovery.candidates;
         let ranked = readability.rank_candidates(
             &ranking_dom,
-            discovery.candidates,
+            &mut candidates,
             scores,
             &discovery.remove_after_scoring,
         );
         ranking_dom
-            .attr(ranked[0].0, AttrName::Id)
+            .attr(ranked[0].node, AttrName::Id)
             .expect("winner must have a test ID")
             .to_owned()
     }
@@ -1197,13 +1241,14 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         );
         assert!(scores.iter().any(|score| score.node == content));
 
+        let mut candidates = discovery.candidates;
         let ranked = readability.rank_candidates(
             &ranking_dom,
-            discovery.candidates,
+            &mut candidates,
             scores,
             &discovery.remove_after_scoring,
         );
-        assert_eq!(ranked[0].0, content);
+        assert_eq!(ranked[0].node, content);
     }
 
     #[test]
@@ -1254,13 +1299,14 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .max_by(|left, right| left.score.total_cmp(&right.score))
             .unwrap();
         assert_eq!(raw_winner.node, blockquote);
+        let mut candidates = discovery.candidates;
         let ranked = readability.rank_candidates(
             &ranking_dom,
-            discovery.candidates,
+            &mut candidates,
             scores,
             &discovery.remove_after_scoring,
         );
-        assert_eq!(ranked[0].0, main);
+        assert_eq!(ranked[0].node, main);
     }
 
     #[test]
@@ -1283,8 +1329,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
 
         let mut ranking_dom = source;
         ranking_dom.detach(excluded);
-        let candidates = CandidateSet::discover_semantic(&ranking_dom);
-        readability.rank_candidates(&ranking_dom, candidates, SmallVec::new(), &[]);
+        let mut candidates = CandidateSet::discover_semantic(&ranking_dom);
+        readability.rank_candidates(&ranking_dom, &mut candidates, SmallVec::new(), &[]);
 
         let fresh = get_or_compute_stats(&ranking_dom, main, &mut readability.node_data);
         assert_eq!(fresh.text_length, 15);
@@ -1346,9 +1392,10 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             &mut readability.node_data,
             readability.flags,
         );
+        let mut candidates = discovery.candidates;
         let _ = readability.rank_candidates(
             &ranking_dom,
-            discovery.candidates,
+            &mut candidates,
             scores,
             &discovery.remove_after_scoring,
         );

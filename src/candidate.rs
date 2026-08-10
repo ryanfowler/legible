@@ -1,6 +1,9 @@
 //! Internal content-root candidates.
 
+use crate::constants::split_word_tokens;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use smallvec::SmallVec;
+use std::collections::HashSet;
 
 const STRONG_IDS: &[&str] = &["post", "content", "article-content"];
 const ARTICLE_TAG_PRIOR: f64 = 0.003;
@@ -76,6 +79,14 @@ pub(crate) struct Candidate {
     pub(crate) semantic_prior: f64,
     pub(crate) readability_score: f64,
     pub(crate) features: CandidateFeatures,
+}
+
+/// One candidate after general feature ranking.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RankedCandidate {
+    pub(crate) node: NodeId,
+    pub(crate) score: f64,
+    pub(crate) order: usize,
 }
 
 impl Candidate {
@@ -263,7 +274,7 @@ impl CandidateSet {
         }
     }
 
-    fn get(&self, node: NodeId) -> Option<&Candidate> {
+    pub(crate) fn get(&self, node: NodeId) -> Option<&Candidate> {
         let position = self.positions.get(node.index()).copied()?;
         (position != usize::MAX).then(|| &self.candidates[position])
     }
@@ -320,6 +331,292 @@ fn matches_role(roles: &str, expected: &str) -> bool {
     roles
         .split_whitespace()
         .any(|role| role.eq_ignore_ascii_case(expected))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RootSelectionReason {
+    Ranked,
+    SpecificChild,
+    SharedParent,
+    StructuredData,
+    BodyFallback,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RootSelection {
+    pub(crate) node: NodeId,
+    pub(crate) reason: RootSelectionReason,
+}
+
+/// Selects the content boundary after feature ranking.
+///
+/// Ranking identifies strong individual nodes. This pass handles tree
+/// relationships that are difficult to express as independent scores. It can
+/// narrow a broad winner, promote a shared semantic parent, and use schema
+/// text to resolve close results.
+pub(crate) fn select_content_root<'a>(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    body: NodeId,
+    structured_texts: impl IntoIterator<Item = &'a str>,
+) -> RootSelection {
+    let Some(first) = ranked.first() else {
+        return RootSelection {
+            node: body,
+            reason: RootSelectionReason::BodyFallback,
+        };
+    };
+    let mut selected = first.node;
+    let mut reason = RootSelectionReason::Ranked;
+
+    let hints: Vec<_> = structured_texts
+        .into_iter()
+        .filter_map(StructuredHint::new)
+        .take(MAX_STRUCTURED_HINTS)
+        .collect();
+    if !hints.is_empty() {
+        let selected_agreement = structured_agreement(dom, selected, &hints);
+        if let Some((node, agreement)) = ranked
+            .iter()
+            .filter(|candidate| {
+                candidate.node != body && structured_tie_score(candidate.score, first.score)
+            })
+            .map(|candidate| {
+                (
+                    candidate.node,
+                    structured_agreement(dom, candidate.node, &hints),
+                )
+            })
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            && agreement >= 0.6
+            && agreement > selected_agreement + 0.1
+        {
+            selected = node;
+            reason = RootSelectionReason::StructuredData;
+        }
+    }
+
+    // A semantic parent is the correct boundary when several strong branches
+    // together form the useful page, such as article cards in a main element.
+    // A schema match is already a high-confidence boundary, so do not broaden
+    // it with unrelated peer candidates.
+    if reason != RootSelectionReason::StructuredData {
+        if let Some(parent) = shared_semantic_parent(dom, candidates, ranked, selected, first.score)
+        {
+            selected = parent;
+            reason = RootSelectionReason::SharedParent;
+        } else if let Some(child) =
+            more_specific_candidate(dom, candidates, ranked, selected, first.score)
+        {
+            selected = child;
+            reason = RootSelectionReason::SpecificChild;
+        }
+    }
+
+    RootSelection {
+        node: selected,
+        reason,
+    }
+}
+
+fn competitive_score(score: f64, top_score: f64) -> bool {
+    score >= top_score - (top_score.abs() * 0.25).max(5.0)
+}
+
+fn structured_tie_score(score: f64, top_score: f64) -> bool {
+    score >= top_score - (top_score.abs() * 0.03).max(1.0)
+}
+
+fn is_descendant_of(dom: &Dom, node: NodeId, ancestor: NodeId) -> bool {
+    dom.ancestors(node).any(|parent| parent == ancestor)
+}
+
+fn direct_branch(dom: &Dom, node: NodeId, ancestor: NodeId) -> Option<NodeId> {
+    if node == ancestor {
+        return None;
+    }
+    let mut branch = node;
+    for parent in dom.ancestors(node) {
+        if parent == ancestor {
+            return Some(branch);
+        }
+        branch = parent;
+    }
+    None
+}
+
+fn shared_semantic_parent(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    selected: NodeId,
+    top_score: f64,
+) -> Option<NodeId> {
+    dom.ancestors(selected).find(|&parent| {
+        parent != dom.body().unwrap_or(parent)
+            && candidates.is_authoritative_semantic(dom, parent)
+            && ranked.iter().any(|candidate| {
+                candidate.node == parent && competitive_score(candidate.score, top_score)
+            })
+            && {
+                let mut branches = SmallBranchSet::default();
+                for candidate in ranked.iter().filter(|candidate| {
+                    competitive_score(candidate.score, top_score)
+                        && (candidate.node == selected
+                            || is_descendant_of(dom, candidate.node, parent))
+                }) {
+                    if let Some(branch) = direct_branch(dom, candidate.node, parent) {
+                        branches.insert(branch);
+                    }
+                }
+                branches.len() >= 2
+            }
+    })
+}
+
+#[derive(Default)]
+struct SmallBranchSet(SmallVec<[NodeId; 4]>);
+
+impl SmallBranchSet {
+    fn insert(&mut self, node: NodeId) {
+        if !self.0.contains(&node) {
+            self.0.push(node);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+fn more_specific_candidate(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    selected: NodeId,
+    top_score: f64,
+) -> Option<NodeId> {
+    let selected_chars = candidates.get(selected)?.features.text_chars.max(1);
+    ranked
+        .iter()
+        .filter(|candidate| {
+            candidate.node != selected
+                && competitive_score(candidate.score, top_score)
+                && is_descendant_of(dom, candidate.node, selected)
+                && candidates
+                    .get(candidate.node)
+                    .is_some_and(|value| value.has_source(CandidateSource::Semantic))
+        })
+        .filter_map(|candidate| {
+            let features = candidates.get(candidate.node)?.features;
+            let coverage = f64::from(features.text_chars) / f64::from(selected_chars);
+            (coverage >= 0.8).then_some((candidate.node, features.text_chars))
+        })
+        .min_by_key(|(_, chars)| *chars)
+        .map(|(node, _)| node)
+}
+
+const MAX_STRUCTURED_HINTS: usize = 8;
+const MAX_STRUCTURED_HINT_CHARS: usize = 4_096;
+const MAX_CANDIDATE_MATCH_CHARS: usize = 16_384;
+
+struct StructuredHint {
+    tokens: Vec<String>,
+    token_set: HashSet<String>,
+    text_chars: usize,
+}
+
+impl StructuredHint {
+    fn new(text: &str) -> Option<Self> {
+        let prefix = char_prefix(text, MAX_STRUCTURED_HINT_CHARS).to_lowercase();
+        let tokens: Vec<_> = split_word_tokens(&prefix).map(str::to_owned).collect();
+        if tokens.len() < 5 {
+            return None;
+        }
+        let text_chars = tokens
+            .iter()
+            .map(|token| token.chars().count())
+            .sum::<usize>()
+            + tokens.len().saturating_sub(1);
+        let token_set = tokens.iter().cloned().collect();
+        Some(Self {
+            tokens,
+            token_set,
+            text_chars,
+        })
+    }
+}
+
+fn char_prefix(text: &str, limit: usize) -> &str {
+    text.char_indices()
+        .nth(limit)
+        .map_or(text, |(end, _)| &text[..end])
+}
+
+fn structured_agreement(dom: &Dom, node: NodeId, hints: &[StructuredHint]) -> f64 {
+    let candidate_text =
+        bounded_normalized_text(dom, node, MAX_CANDIDATE_MATCH_CHARS).to_lowercase();
+    let candidate_tokens: Vec<_> = split_word_tokens(&candidate_text).collect();
+    if candidate_tokens.is_empty() {
+        return 0.0;
+    }
+    let candidate_set: HashSet<_> = candidate_tokens.iter().copied().collect();
+    hints
+        .iter()
+        .map(|hint| {
+            let (unique_count, unique_chars) = hint
+                .tokens
+                .iter()
+                .filter(|token| !candidate_set.contains(token.as_str()))
+                .fold((0_usize, 0_usize), |(count, chars), token| {
+                    (count + 1, chars + token.chars().count())
+                });
+            let unique_chars = unique_chars + unique_count.saturating_sub(1);
+            let coverage = 1.0 - unique_chars as f64 / hint.text_chars as f64;
+            let precision = candidate_tokens
+                .iter()
+                .filter(|token| hint.token_set.contains(**token))
+                .count() as f64
+                / candidate_tokens.len() as f64;
+            if coverage + precision == 0.0 {
+                0.0
+            } else {
+                2.0 * coverage * precision / (coverage + precision)
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+fn bounded_normalized_text(dom: &Dom, root: NodeId, limit: usize) -> String {
+    let mut out = String::with_capacity(limit.min(1_024));
+    let mut character_count = 0;
+    let mut pending_whitespace = false;
+    'nodes: for node in std::iter::once(root).chain(dom.descendants(root)) {
+        let Some(text) = dom.text_node(node) else {
+            continue;
+        };
+        for character in text.chars() {
+            if character.is_whitespace() {
+                pending_whitespace |= !out.is_empty();
+                continue;
+            }
+            if pending_whitespace {
+                if character_count == limit {
+                    break 'nodes;
+                }
+                out.push(' ');
+                character_count += 1;
+                pending_whitespace = false;
+            }
+            if character_count == limit {
+                break 'nodes;
+            }
+            out.push(character);
+            character_count += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -498,5 +795,144 @@ mod tests {
                 "{weak}: {markdown}"
             );
         }
+    }
+
+    fn select_test_root<'a>(
+        html: &str,
+        ranking: &[(&str, f64)],
+        hints: impl IntoIterator<Item = &'a str>,
+    ) -> String {
+        let dom = Dom::parse_document(html).unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        let mut ranked = SmallVec::<[RankedCandidate; 8]>::new();
+        for (order, &(id, score)) in ranking.iter().enumerate() {
+            let node = dom
+                .descendants(dom.root())
+                .find(|&node| dom.attr(node, AttrName::Id) == Some(id))
+                .unwrap();
+            candidates.add_readability(node, score);
+            ranked.push(RankedCandidate { node, score, order });
+        }
+        for candidate in candidates.iter_mut() {
+            candidate.features.text_chars = dom
+                .normalized_char_count(candidate.node)
+                .min(u32::MAX as usize) as u32;
+        }
+        let body = dom.body().unwrap();
+        let selected = select_content_root(&dom, &candidates, &ranked, body, hints);
+        dom.attr(selected.node, AttrName::Id)
+            .unwrap_or("body")
+            .to_owned()
+    }
+
+    #[test]
+    fn root_selection_prefers_a_specific_equivalent_child() {
+        let html = r#"<body><main id="broad"><article id="specific"><p>The same substantial content appears inside this precise semantic child, with enough text to represent almost all of its parent.</p></article></main></body>"#;
+
+        assert_eq!(
+            select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
+            "specific"
+        );
+    }
+
+    #[test]
+    fn root_selection_rejects_a_tiny_nested_candidate() {
+        let html = r#"<body><main id="broad"><p>The broad document contains a long useful introduction and several important facts that belong in the result.</p><article id="tiny">Tiny card.</article><p>It also contains a useful conclusion outside the card.</p></main></body>"#;
+
+        assert_eq!(
+            select_test_root(html, &[("broad", 100.0), ("tiny", 99.0)], []),
+            "broad"
+        );
+    }
+
+    #[test]
+    fn root_selection_promotes_the_parent_of_strong_siblings() {
+        let html = r#"<body><main id="listing"><article id="first">First useful card with a complete summary.</article><article id="second">Second useful card with another complete summary.</article></main></body>"#;
+
+        assert_eq!(
+            select_test_root(
+                html,
+                &[("first", 100.0), ("second", 90.0), ("listing", 85.0)],
+                [],
+            ),
+            "listing"
+        );
+    }
+
+    #[test]
+    fn root_selection_keeps_a_structured_content_winner() {
+        let html = r#"<body><div id="prose"><p>A prose summary competes with the reference.</p></div><main id="reference"><h1>Commands</h1><pre><code>cargo test --all-features</code></pre><table><tr><th>Flag</th><th>Meaning</th></tr></table></main></body>"#;
+
+        assert_eq!(
+            select_test_root(html, &[("reference", 100.0), ("prose", 98.0)], [],),
+            "reference"
+        );
+    }
+
+    #[test]
+    fn root_selection_uses_structured_text_to_break_a_close_result() {
+        let html = r#"<body><div id="other"><p>An unrelated candidate has polished prose and enough detail to rank first.</p></div><article id="matching"><p>The schema text identifies this exact article body and its important conclusion.</p></article></body>"#;
+        let hint =
+            "The schema text identifies this exact article body and its important conclusion.";
+
+        assert_eq!(
+            select_test_root(html, &[("other", 100.0), ("matching", 98.0)], [hint]),
+            "matching"
+        );
+    }
+
+    #[test]
+    fn structured_text_does_not_select_the_broad_body() {
+        let html = r#"<body id="body"><aside>Unrelated navigation, promotions, account controls, and other page furniture.</aside><article id="matching"><p>The schema text identifies this exact article body and its important conclusion.</p></article></body>"#;
+        let hint =
+            "The schema text identifies this exact article body and its important conclusion.";
+
+        assert_eq!(
+            select_test_root(html, &[("body", 100.0), ("matching", 99.0)], [hint]),
+            "matching"
+        );
+    }
+
+    #[test]
+    fn root_selection_falls_back_to_body() {
+        assert_eq!(
+            select_test_root("<body id=body><p>Visible fallback.</p></body>", &[], []),
+            "body"
+        );
+    }
+
+    #[test]
+    fn structured_root_selection_excludes_unrelated_siblings_end_to_end() {
+        let html = r#"<body>
+            <script type="application/ld+json">{
+                "@context":"https://schema.org",
+                "@type":"Article",
+                "articleBody":"The schema-selected report explains the exact result with several specific details and a final conclusion."
+            }</script>
+            <article><p>An unrelated report explains a different result with several polished details and a separate conclusion.</p></article>
+            <article><p>The schema-selected report explains the exact result with several specific details and a final conclusion.</p></article>
+        </body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("schema-selected report"), "{markdown}");
+        assert!(!markdown.contains("unrelated report"), "{markdown}");
+    }
+
+    #[test]
+    fn structured_root_selection_ignores_related_json_ld_items() {
+        let html = r#"<body><h1>Primary report</h1>
+            <script type="application/ld+json">[
+                {"@context":"https://schema.org","@type":"Article","headline":"Related report","articleBody":"The related card contains a separate schema body with enough words to look plausible."},
+                {"@context":"https://schema.org","@type":"Article","headline":"Primary report","articleBody":"The primary report contains the selected schema body with exact useful details."}
+            ]</script>
+            <article><p>The related card contains a separate schema body with enough words to look plausible.</p></article>
+            <article><p>The primary report contains the selected schema body with exact useful details.</p></article>
+        </body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("primary report"), "{markdown}");
+        assert!(!markdown.contains("related card"), "{markdown}");
     }
 }
