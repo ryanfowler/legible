@@ -9,7 +9,7 @@ use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string}
 use crate::error::{Error, Result};
 use crate::extractor::ExtractorConfig;
 use crate::logging::debug_log;
-use crate::metadata::{self, Metadata};
+use crate::metadata::{self, Metadata, StructuredData};
 use crate::page::ExtractedPage;
 use crate::scoring::*;
 use html5ever::ns;
@@ -28,6 +28,8 @@ pub(crate) struct Readability<'a> {
     article_dir: Option<String>,
     article_lang: Option<String>,
     metadata: Metadata,
+    structured_data: StructuredData,
+    source_uri: Option<Url>,
     base_uri: Option<Url>,
     resolve_fragment_links: bool,
     url_error: Option<url::ParseError>,
@@ -73,6 +75,8 @@ impl<'a> Readability<'a> {
             article_dir: None,
             article_lang: None,
             metadata: Metadata::default(),
+            structured_data: StructuredData::default(),
+            source_uri: base_uri.clone(),
             base_uri,
             resolve_fragment_links: false,
             url_error,
@@ -93,33 +97,42 @@ impl<'a> Readability<'a> {
                 return Err(Error::TooManyElements(n, self.options.max_elements));
             }
         }
-        if let Some(document_uri) = self.base_uri.as_ref()
-            && let Some(base) = self.dom.descendants(self.dom.root()).find(|&id| {
-                self.dom
-                    .qual_name(id)
-                    .is_some_and(|name| name.ns == ns!(html) && name.local.as_ref() == "base")
-                    && self.dom.attr(id, AttrName::Href).is_some()
-            })
-            && let Some(href) = self.dom.attr(base, AttrName::Href)
-            && let Ok(base_uri) = document_uri.join(href)
+        if let Some(base) = self.dom.descendants(self.dom.root()).find(|&id| {
+            self.dom
+                .qual_name(id)
+                .is_some_and(|name| name.ns == ns!(html) && name.local.as_ref() == "base")
+                && self.dom.attr(id, AttrName::Href).is_some()
+        }) && let Some(href) = self.dom.attr(base, AttrName::Href)
         {
-            self.resolve_fragment_links = base_uri != *document_uri;
-            self.base_uri = Some(base_uri);
+            let base_uri = self
+                .base_uri
+                .as_ref()
+                .map_or_else(|| Url::parse(href), |document_uri| document_uri.join(href));
+            if let Ok(base_uri) = base_uri {
+                self.resolve_fragment_links = self
+                    .source_uri
+                    .as_ref()
+                    .is_some_and(|document_uri| base_uri != *document_uri);
+                self.base_uri = Some(base_uri);
+            }
         }
         unwrap_noscript_images(&mut self.dom);
         let title = metadata::get_article_title(&self.dom);
-        let json = if self.options.structured_data {
-            metadata::get_json_ld(&self.dom, &title)
-        } else {
-            Metadata::default()
-        };
-        prep_document(&mut self.dom);
-        self.article_title = title;
-        self.metadata =
-            metadata::get_article_metadata(&self.dom, &json, &self.article_title, 0b1111);
-        if let Some(t) = self.metadata.title.take() {
-            self.article_title = t
+        if self.options.structured_data {
+            self.structured_data = StructuredData::parse(&self.dom);
         }
+        self.metadata = metadata::discover(
+            &self.dom,
+            &self.structured_data,
+            &title,
+            self.base_uri.as_ref(),
+            self.source_uri.as_ref(),
+        );
+        if self.structured_data.article_texts().next().is_some() {
+            debug_log!(self, "Structured data contains a content-location hint");
+        }
+        prep_document(&mut self.dom);
+        self.article_title = self.metadata.title.take().unwrap_or(title);
         let content = self.grab_article()?;
         self.metadata.title = (!self.article_title.is_empty()).then_some(self.article_title);
         if self.metadata.authors.is_empty()
@@ -128,8 +141,8 @@ impl<'a> Readability<'a> {
             self.metadata.authors.push(byline);
         }
         self.metadata.description = self.metadata.description.or(content.excerpt);
-        self.metadata.direction = self.article_dir;
-        self.metadata.language = self.article_lang;
+        self.metadata.direction = self.metadata.direction.or(self.article_dir);
+        self.metadata.language = self.metadata.language.or(self.article_lang);
         let extracted_dom = self
             .dom
             .copy_children_as_fragment(content.article_root)
@@ -198,7 +211,7 @@ impl<'a> Readability<'a> {
                     removed_depth = Some(depth);
                     continue;
                 }
-                if self.article_byline.is_none() && self.metadata.authors.is_empty() {
+                if self.article_byline.is_none() && !self.metadata.has_source_author {
                     build_match_string(&self.dom, id, &mut match_buffer);
                     if is_valid_byline(&self.dom, id, &match_buffer, &mut text_buffer) {
                         let mut names = Vec::new();

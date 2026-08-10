@@ -32,7 +32,7 @@ The extraction pipeline flows through these stages:
 
 1. **Document Parsing** - HTML parsed by `html5ever` into the internal stable-ID arena DOM
 2. **Preparation** (`cleaning.rs`) - Script removal, BR/font normalization, lazy image fixing
-3. **Metadata Extraction** (`metadata.rs`) - Title, byline, excerpt from JSON-LD, OpenGraph, meta tags
+3. **Metadata Extraction** (`metadata.rs`) - Candidate resolution from JSON-LD, OpenGraph, meta tags, and HTML elements
 4. **Content Extraction** (`readability.rs`) - Main algorithm in `grab_article()`
 5. **Content Cleaning** (`cleaning.rs`) - Conditional removal of low-scoring elements
 
@@ -45,7 +45,7 @@ The extraction pipeline flows through these stages:
 | `readability.rs` | Candidate selection, scoring, content consolidation |
 | `scoring.rs` | Tag/class/link-density scoring, cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation, post-extraction cleanup |
-| `metadata.rs` | JSON-LD, OpenGraph, meta-tag extraction |
+| `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |

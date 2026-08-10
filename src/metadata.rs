@@ -1,17 +1,17 @@
-//! Metadata extraction from HTML documents.
-#![allow(clippy::collapsible_if, clippy::field_reassign_with_default)]
+//! Metadata discovery and structured-data parsing.
+
 use crate::constants::{
     find_last_title_separator_start, has_hierarchical_title_separator, has_title_separator,
     is_json_ld_article_type, is_schema_org_url, normalize_whitespace, remove_title_first_part,
     remove_title_separators, split_word_tokens,
 };
-use crate::dom::{AttrName, Dom, Tag};
+use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_text};
-use regex::Regex;
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::sync::LazyLock;
+use url::Url;
+
 /// Metadata discovered in the source page.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
@@ -42,446 +42,1392 @@ pub struct Metadata {
     pub section: Option<String>,
     /// Page tags in source order.
     pub tags: Vec<String>,
+    pub(crate) has_source_author: bool,
 }
-pub fn unescape_html_entities<'a>(s: &'a str) -> Cow<'a, str> {
-    if s.is_empty() || !s.contains('&') {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        let rest = &s[i..];
-        let Some(a) = rest.find('&') else {
-            out.push_str(rest);
-            break;
-        };
-        out.push_str(&rest[..a]);
-        i += a;
-        if let Some(semi) = s[i..].find(';') {
-            let c = &s[i + 1..i + semi];
-            let r = match c {
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "amp" => Some('&'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                _ => parse_numeric(c),
-            };
-            if let Some(ch) = r {
-                out.push(ch);
-                i += semi + 1;
+
+/// Parsed schema.org data. It remains available after metadata discovery so a
+/// later extraction stage can use `articleBody` and `text` as location hints.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StructuredData {
+    items: Vec<Value>,
+}
+
+impl StructuredData {
+    pub(crate) fn parse(dom: &Dom) -> Self {
+        let scripts: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&id| {
+                dom.tag(id) == Some(Tag::Script)
+                    && dom.attr(id, AttrName::Type).is_some_and(|value| {
+                        value.split(';').next().is_some_and(|mime| {
+                            mime.trim().eq_ignore_ascii_case("application/ld+json")
+                        })
+                    })
+            })
+            .collect();
+        let mut items = Vec::new();
+        let mut buffer = String::new();
+        for id in scripts {
+            let content = script_text(dom, id, &mut buffer)
+                .trim()
+                .trim_start_matches("<![CDATA[")
+                .trim_end_matches("]]>")
+                .trim();
+            let Ok(value) = serde_json::from_str::<Value>(content) else {
                 continue;
+            };
+            collect_structured_items(&value, false, &mut items);
+        }
+        Self { items }
+    }
+
+    pub(crate) fn article_texts(&self) -> impl Iterator<Item = &str> {
+        self.items
+            .iter()
+            .filter(|item| {
+                item.get("@type").is_some_and(|kind| {
+                    json_types(kind)
+                        .any(|kind| is_article_type(kind) || is_general_content_type(kind))
+                })
+            })
+            .flat_map(|item| {
+                ["articleBody", "text"]
+                    .into_iter()
+                    .filter_map(move |key| item.get(key).and_then(Value::as_str))
+            })
+    }
+
+    fn article_items(&self) -> impl Iterator<Item = &Value> {
+        self.items.iter().filter(|item| {
+            item.get("@type")
+                .is_some_and(|kind| json_types(kind).any(is_article_type))
+        })
+    }
+
+    fn typed_items<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
+        self.items.iter().filter(move |item| {
+            item.get("@type")
+                .is_some_and(|value| json_types(value).any(|value| schema_type(value, kind)))
+        })
+    }
+}
+
+fn script_text<'a>(dom: &'a Dom, id: NodeId, buffer: &'a mut String) -> &'a str {
+    let mut children = dom.children(id);
+    let first = children.next();
+    if let Some(node) = first
+        && children.next().is_none()
+        && let Some(text) = dom.text_node(node)
+    {
+        return text;
+    }
+    buffer.clear();
+    dom.append_text(id, buffer);
+    buffer
+}
+
+fn collect_structured_items(value: &Value, inherited_schema: bool, out: &mut Vec<Value>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_structured_items(value, inherited_schema, out);
             }
         }
-        out.push('&');
-        i += 1
-    }
-    Cow::Owned(out)
-}
-fn parse_numeric(s: &str) -> Option<char> {
-    if !s.starts_with('#') {
-        return None;
-    }
-    let n = if s[1..].starts_with(['x', 'X']) {
-        u32::from_str_radix(&s[2..], 16).ok()?
-    } else {
-        s[1..].parse().ok()?
-    };
-    if n == 0 || n > 0x10ffff || (0xd800..=0xdfff).contains(&n) {
-        Some('\u{fffd}')
-    } else {
-        char::from_u32(n).or(Some('\u{fffd}'))
-    }
-}
-pub fn get_json_ld(dom: &Dom, title: &str) -> Metadata {
-    let mut out = Metadata::default();
-    let mut scripts = Vec::new();
-    dom.collect_tag_attr_eq(
-        dom.root(),
-        Tag::Script,
-        AttrName::Type,
-        "application/ld+json",
-        false,
-        &mut scripts,
-    );
-    let mut content_buffer = String::new();
-    for id in scripts {
-        let mut children = dom.children(id);
-        let first = children.next();
-        let content = match first {
-            Some(node) if children.next().is_none() => match dom.text_node(node) {
-                Some(text) => text,
-                None => {
-                    content_buffer.clear();
-                    dom.append_text(id, &mut content_buffer);
-                    &content_buffer
+        Value::Object(object) => {
+            let schema = inherited_schema
+                || object.get("@context").is_some_and(is_schema_context)
+                || object
+                    .get("@type")
+                    .is_some_and(|kind| json_types(kind).any(is_absolute_schema_type));
+            if !schema {
+                return;
+            }
+            if object.get("@type").is_some() {
+                out.push(value.clone());
+            }
+            if let Some(graph) = object.get("@graph") {
+                collect_structured_items(graph, true, out);
+            }
+            for (key, nested) in object {
+                if !matches!(key.as_str(), "@context" | "@graph" | "@type") {
+                    collect_structured_items(nested, true, out);
                 }
-            },
-            _ => {
-                content_buffer.clear();
-                dom.append_text(id, &mut content_buffer);
-                &content_buffer
-            }
-        };
-        let content = content
-            .trim()
-            .trim_start_matches("<![CDATA[")
-            .trim_end_matches("]]>")
-            .trim();
-        let Ok(mut parsed) = serde_json::from_str::<Value>(content) else {
-            continue;
-        };
-        if let Value::Array(a) = parsed {
-            parsed = match a.into_iter().find(|v| {
-                v.get("@type")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_json_ld_article_type)
-            }) {
-                Some(v) => v,
-                None => continue,
             }
         }
-        let Some(obj) = parsed.as_object() else {
-            continue;
-        };
-        let schema = match obj.get("@context") {
-            Some(Value::String(s)) => is_schema_org_url(s),
-            Some(Value::Object(o)) => o
+        _ => {}
+    }
+}
+
+fn is_schema_context(value: &Value) -> bool {
+    match value {
+        Value::String(value) => is_schema_url(value),
+        Value::Array(values) => values.iter().any(is_schema_context),
+        Value::Object(values) => {
+            values
                 .get("@vocab")
                 .and_then(Value::as_str)
-                .is_some_and(is_schema_org_url),
-            _ => false,
-        };
-        if !schema {
-            continue;
+                .is_some_and(is_schema_url)
+                || values.values().filter_map(Value::as_str).any(is_schema_url)
         }
-        let mut value = parsed;
-        if value.get("@type").is_none() {
-            if let Some(g) = value.get_mut("@graph").and_then(|v| v.as_array_mut()) {
-                if let Some(v) = g.iter().find(|v| {
-                    v.get("@type")
-                        .and_then(Value::as_str)
-                        .is_some_and(is_json_ld_article_type)
-                }) {
-                    value = v.clone()
-                } else {
-                    continue;
-                }
-            }
-        }
-        let Some(o) = value.as_object() else { continue };
-        if !o
-            .get("@type")
-            .and_then(Value::as_str)
-            .is_some_and(is_json_ld_article_type)
-        {
-            continue;
-        }
-        let name = o.get("name").and_then(Value::as_str);
-        let headline = o.get("headline").and_then(Value::as_str);
-        out.title = match (name, headline) {
-            (Some(n), Some(h)) if n != h => {
-                if text_similarity(h, title) > 0.75 && text_similarity(n, title) <= 0.75 {
-                    Some(h.trim().into())
-                } else {
-                    Some(n.trim().into())
-                }
-            }
-            (Some(n), _) => Some(n.trim().into()),
-            (_, Some(h)) => Some(h.trim().into()),
-            _ => None,
-        };
-        if let Some(author) = o.get("author") {
-            let mut authors = Vec::new();
-            let allow_string_author = o
-                .get("@type")
-                .and_then(Value::as_str)
-                .map(|kind| !kind.ends_with("SocialMediaPosting"))
-                .unwrap_or(true);
-            collect_json_authors(author, &mut authors, allow_string_author);
-            if !authors.is_empty() {
-                out.authors = authors;
-            }
-        }
-        out.description = o
-            .get("description")
-            .and_then(Value::as_str)
-            .map(|s| s.trim().into());
-        out.site_name = o.get("publisher").and_then(json_name).map(str::to_owned);
-        out.published_time = o
-            .get("datePublished")
-            .and_then(Value::as_str)
-            .map(|s| s.trim().into());
-        break;
+        _ => false,
     }
-    out
 }
+
+fn is_schema_url(value: &str) -> bool {
+    is_schema_org_url(value) || value.trim_end_matches('/') == "schema.org"
+}
+
+fn json_types(value: &Value) -> impl Iterator<Item = &str> {
+    value.as_str().into_iter().chain(
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str),
+    )
+}
+
+fn schema_type(value: &str, expected: &str) -> bool {
+    value
+        .rsplit(['/', ':'])
+        .next()
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+fn is_absolute_schema_type(value: &str) -> bool {
+    value.starts_with("https://schema.org/") || value.starts_with("http://schema.org/")
+}
+
+fn is_article_type(value: &str) -> bool {
+    is_json_ld_article_type(value)
+}
+
+fn is_general_content_type(value: &str) -> bool {
+    [
+        "WebPage",
+        "AboutPage",
+        "CollectionPage",
+        "ContactPage",
+        "FAQPage",
+        "HowTo",
+        "ProfilePage",
+        "QAPage",
+        "Recipe",
+    ]
+    .iter()
+    .any(|kind| schema_type(value, kind))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataSource {
+    JsonLd,
+    OpenGraph,
+    Twitter,
+    DublinCore,
+    Citation,
+    HtmlMeta,
+    HtmlElement,
+    LinkElement,
+    Inferred,
+}
+
+#[derive(Debug, Clone)]
+struct MetadataCandidate {
+    value: String,
+    source: MetadataSource,
+    confidence: u8,
+    order: usize,
+}
+
+#[derive(Default)]
+struct CandidateSet {
+    title: Vec<MetadataCandidate>,
+    description: Vec<MetadataCandidate>,
+    authors: Vec<MetadataCandidate>,
+    site_name: Vec<MetadataCandidate>,
+    canonical_url: Vec<MetadataCandidate>,
+    image: Vec<MetadataCandidate>,
+    favicon: Vec<MetadataCandidate>,
+    published_time: Vec<MetadataCandidate>,
+    modified_time: Vec<MetadataCandidate>,
+    language: Vec<MetadataCandidate>,
+    direction: Vec<MetadataCandidate>,
+    section: Vec<MetadataCandidate>,
+    tags: Vec<MetadataCandidate>,
+    next_order: usize,
+}
+
+impl CandidateSet {
+    fn add(
+        &mut self,
+        field: fn(&mut Self) -> &mut Vec<MetadataCandidate>,
+        value: impl Into<String>,
+        source: MetadataSource,
+        confidence: u8,
+    ) {
+        let order = self.next_order;
+        self.next_order += 1;
+        field(self).push(MetadataCandidate {
+            value: value.into(),
+            source,
+            confidence,
+            order,
+        });
+    }
+}
+
+/// Discovers metadata without changing the source DOM.
+pub(crate) fn discover(
+    dom: &Dom,
+    structured: &StructuredData,
+    document_title: &str,
+    base_url: Option<&Url>,
+    source_url: Option<&Url>,
+) -> Metadata {
+    let mut candidates = CandidateSet::default();
+    collect_structured_candidates(structured, document_title, source_url, &mut candidates);
+    collect_meta_candidates(dom, &mut candidates);
+    collect_link_candidates(dom, &mut candidates);
+    collect_element_candidates(dom, document_title, &mut candidates);
+
+    if let Some(url) = source_url {
+        candidates.add(
+            |set| &mut set.canonical_url,
+            url.as_str(),
+            MetadataSource::Inferred,
+            10,
+        );
+        if let Some(host) = url.host_str().filter(|host| host.contains('.')) {
+            candidates.add(
+                |set| &mut set.site_name,
+                host.strip_prefix("www.").unwrap_or(host),
+                MetadataSource::Inferred,
+                10,
+            );
+        }
+    }
+
+    resolve_candidates(candidates, base_url)
+}
+
+fn collect_structured_candidates(
+    data: &StructuredData,
+    document_title: &str,
+    source_url: Option<&Url>,
+    out: &mut CandidateSet,
+) {
+    let primary_article = data
+        .article_items()
+        .max_by_key(|item| structured_item_score(item, document_title, source_url));
+    let primary_general = data
+        .items
+        .iter()
+        .filter(|item| {
+            item.get("@type")
+                .is_some_and(|kind| json_types(kind).any(is_general_content_type))
+        })
+        .max_by_key(|item| structured_item_score(item, document_title, source_url));
+    let use_article = match (primary_article, primary_general) {
+        (Some(article), Some(general)) => {
+            structured_item_score(article, document_title, source_url)
+                >= structured_item_score(general, document_title, source_url)
+        }
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if let Some(item) = primary_article.filter(|_| use_article) {
+        let headline = item.get("headline").and_then(Value::as_str);
+        let name = item.get("name").and_then(Value::as_str);
+        match (name, headline) {
+            (Some(name), Some(headline)) if name != headline => {
+                let headline_matches = text_similarity(headline, document_title) > 0.75;
+                let name_matches = text_similarity(name, document_title) > 0.75;
+                if name_matches && !headline_matches {
+                    out.add(|set| &mut set.title, name, MetadataSource::JsonLd, 98);
+                    out.add(|set| &mut set.title, headline, MetadataSource::JsonLd, 91);
+                } else {
+                    out.add(|set| &mut set.title, headline, MetadataSource::JsonLd, 98);
+                    out.add(|set| &mut set.title, name, MetadataSource::JsonLd, 91);
+                }
+            }
+            (Some(name), _) => out.add(|set| &mut set.title, name, MetadataSource::JsonLd, 98),
+            (_, Some(headline)) => {
+                out.add(|set| &mut set.title, headline, MetadataSource::JsonLd, 98)
+            }
+            _ => {}
+        }
+        add_json_string(out, |set| &mut set.description, item.get("description"), 92);
+        if let Some(authors) = item.get("author") {
+            collect_json_names(authors, &mut |name| {
+                out.add(|set| &mut set.authors, name, MetadataSource::JsonLd, 96)
+            });
+        }
+        add_json_names(out, |set| &mut set.site_name, item.get("publisher"), 94);
+        add_json_names(
+            out,
+            |set| &mut set.site_name,
+            item.get("sourceOrganization"),
+            90,
+        );
+        add_json_names(out, |set| &mut set.site_name, item.get("isPartOf"), 88);
+        add_json_string(
+            out,
+            |set| &mut set.published_time,
+            item.get("datePublished"),
+            98,
+        );
+        add_json_string(
+            out,
+            |set| &mut set.modified_time,
+            item.get("dateModified"),
+            98,
+        );
+        add_json_string(out, |set| &mut set.language, item.get("inLanguage"), 90);
+        add_json_string(out, |set| &mut set.section, item.get("articleSection"), 92);
+        collect_json_keywords(item.get("keywords"), out);
+        add_json_url(out, |set| &mut set.image, item.get("image"), 88);
+        add_json_url(out, |set| &mut set.canonical_url, item.get("url"), 82);
+        add_json_url(
+            out,
+            |set| &mut set.canonical_url,
+            item.get("mainEntityOfPage"),
+            90,
+        );
+    }
+    if let Some(item) = primary_general.filter(|_| !use_article) {
+        add_json_string(out, |set| &mut set.title, item.get("name"), 90);
+        add_json_string(out, |set| &mut set.description, item.get("description"), 88);
+        if let Some(authors) = item.get("author") {
+            collect_json_names(authors, &mut |name| {
+                out.add(|set| &mut set.authors, name, MetadataSource::JsonLd, 90)
+            });
+        }
+        add_json_names(out, |set| &mut set.site_name, item.get("publisher"), 88);
+        add_json_names(
+            out,
+            |set| &mut set.site_name,
+            item.get("sourceOrganization"),
+            86,
+        );
+        add_json_names(out, |set| &mut set.site_name, item.get("isPartOf"), 84);
+        add_json_url(out, |set| &mut set.image, item.get("image"), 84);
+        add_json_url(out, |set| &mut set.canonical_url, item.get("url"), 80);
+        add_json_string(
+            out,
+            |set| &mut set.published_time,
+            item.get("datePublished"),
+            92,
+        );
+        add_json_string(
+            out,
+            |set| &mut set.modified_time,
+            item.get("dateModified"),
+            92,
+        );
+        add_json_string(out, |set| &mut set.language, item.get("inLanguage"), 86);
+        collect_json_keywords(item.get("keywords"), out);
+    }
+    for item in data.typed_items("WebSite") {
+        add_json_string(out, |set| &mut set.site_name, item.get("name"), 86);
+    }
+}
+
+fn structured_item_score(item: &Value, document_title: &str, source_url: Option<&Url>) -> u16 {
+    let title = item
+        .get("headline")
+        .or_else(|| item.get("name"))
+        .and_then(Value::as_str);
+    let title_score = title
+        .map(|title| (text_similarity(title, document_title) * 100.0) as u16)
+        .unwrap_or(0);
+    let url_score = json_url(item)
+        .and_then(|value| Url::parse(value).ok())
+        .zip(source_url)
+        .filter(|(candidate, source)| {
+            candidate.as_str().trim_end_matches('/') == source.as_str().trim_end_matches('/')
+        })
+        .map_or(0, |_| 150);
+    title_score + url_score
+}
+
+fn add_json_string(
+    out: &mut CandidateSet,
+    field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    value: Option<&Value>,
+    confidence: u8,
+) {
+    if let Some(value) = value.and_then(Value::as_str) {
+        out.add(field, value, MetadataSource::JsonLd, confidence);
+    }
+}
+
+fn add_json_names(
+    out: &mut CandidateSet,
+    field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    value: Option<&Value>,
+    confidence: u8,
+) {
+    if let Some(value) = value {
+        collect_json_names(value, &mut |name| {
+            out.add(field, name, MetadataSource::JsonLd, confidence)
+        });
+    }
+}
+
+fn add_json_url(
+    out: &mut CandidateSet,
+    field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    value: Option<&Value>,
+    confidence: u8,
+) {
+    let Some(value) = value else { return };
+    if let Some(value) = value.as_str() {
+        out.add(field, value, MetadataSource::JsonLd, confidence);
+    } else if let Some(values) = value.as_array() {
+        if let Some(value) = values.iter().find_map(json_url) {
+            out.add(field, value, MetadataSource::JsonLd, confidence);
+        }
+    } else if let Some(value) = json_url(value) {
+        out.add(field, value, MetadataSource::JsonLd, confidence);
+    }
+}
+
+fn json_url(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("url").and_then(Value::as_str))
+        .or_else(|| value.get("@id").and_then(Value::as_str))
+        .or_else(|| value.get("contentUrl").and_then(Value::as_str))
+}
+
 fn json_name(value: &Value) -> Option<&str> {
     value
         .as_str()
         .or_else(|| value.get("name").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
 }
-fn collect_json_authors(value: &Value, out: &mut Vec<String>, allow_string: bool) {
+
+fn collect_json_names(value: &Value, add: &mut impl FnMut(&str)) {
     if let Some(values) = value.as_array() {
         for value in values {
-            collect_json_authors(value, out, allow_string)
+            collect_json_names(value, add);
         }
-        return;
-    }
-    let name = if allow_string {
-        json_name(value)
-    } else {
-        value
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-    };
-    let Some(name) = name else { return };
-    if !out
-        .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(name))
-    {
-        out.push(name.into())
+    } else if let Some(name) = json_name(value) {
+        add(name);
     }
 }
-pub fn get_article_title(dom: &Dom) -> String {
+
+fn collect_json_keywords(value: Option<&Value>, out: &mut CandidateSet) {
+    let Some(value) = value else { return };
+    if let Some(values) = value.as_array() {
+        for value in values {
+            collect_json_keywords(Some(value), out);
+        }
+    } else if let Some(value) = value.as_str() {
+        for tag in value.split(',') {
+            out.add(|set| &mut set.tags, tag, MetadataSource::JsonLd, 88);
+        }
+    }
+}
+
+fn collect_meta_candidates(dom: &Dom, out: &mut CandidateSet) {
+    for id in dom
+        .descendants(dom.root())
+        .filter(|&id| dom.tag(id) == Some(Tag::Meta))
+    {
+        let Some(content) = dom
+            .attr(id, AttrName::Content)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let property = dom.attr(id, AttrName::Property);
+        let Some(raw_name) = property
+            .or_else(|| dom.attr(id, AttrName::Name))
+            .or_else(|| dom.attr_by_local_name(id, "http-equiv"))
+        else {
+            continue;
+        };
+        for raw_key in raw_name.split_ascii_whitespace() {
+            collect_meta_value(out, &normalize_key(raw_key), content, property.is_some());
+        }
+    }
+}
+
+fn collect_meta_value(out: &mut CandidateSet, name: &str, content: &str, is_property: bool) {
+    if is_property && !name.contains(':') {
+        return;
+    }
+    let (source, confidence) = metadata_source(name);
+    let add = |out: &mut CandidateSet,
+               field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+               confidence: u8| {
+        out.add(field, content, source, confidence);
+    };
+    match name {
+        "og:title" => add(out, |set| &mut set.title, if is_property { 95 } else { 94 }),
+        "twitter:title" => add(out, |set| &mut set.title, 86),
+        "dc:title" | "dcterm:title" | "dcterms:title" => add(
+            out,
+            |set| &mut set.title,
+            if is_property { 100 } else { 98 },
+        ),
+        "citation_title" => add(out, |set| &mut set.title, 90),
+        "parsely-title" => add(out, |set| &mut set.title, 92),
+        "title" => add(out, |set| &mut set.title, confidence),
+        "og:description" => add(
+            out,
+            |set| &mut set.description,
+            if is_property { 95 } else { 94 },
+        ),
+        "twitter:description" => add(out, |set| &mut set.description, 86),
+        "dc:description" | "dcterm:description" | "dcterms:description" => add(
+            out,
+            |set| &mut set.description,
+            if is_property { 100 } else { 98 },
+        ),
+        "description" => add(out, |set| &mut set.description, confidence),
+        "author" | "dc:creator" | "dcterm:creator" | "dcterms:creator" | "sailthru:author"
+        | "parsely-author" | "citation_author" => add(out, |set| &mut set.authors, confidence),
+        "article:author" | "og:article:author" if Url::parse(content).is_err() => {
+            add(out, |set| &mut set.authors, 82)
+        }
+        "og:site_name" | "application-name" => add(out, |set| &mut set.site_name, confidence),
+        "og:url" => add(out, |set| &mut set.canonical_url, 88),
+        "og:image" | "og:image:url" | "twitter:image" | "twitter:image:src" => {
+            add(out, |set| &mut set.image, confidence)
+        }
+        "article:published_time"
+        | "citation_publication_date"
+        | "parsely-pub-date"
+        | "publishdate"
+        | "publish_date"
+        | "datepublished" => add(out, |set| &mut set.published_time, confidence),
+        "article:modified_time" | "datemodified" | "last-modified" => {
+            add(out, |set| &mut set.modified_time, confidence)
+        }
+        "content-language" | "og:locale" => add(out, |set| &mut set.language, confidence),
+        "article:section" => add(out, |set| &mut set.section, confidence),
+        "article:tag" => add(out, |set| &mut set.tags, confidence),
+        "keywords" | "news_keywords" => {
+            for tag in content.split(',') {
+                out.add(|set| &mut set.tags, tag, source, confidence);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_key(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| if character == '.' { ':' } else { character })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn metadata_source(name: &str) -> (MetadataSource, u8) {
+    if name.starts_with("og:") || name.starts_with("article:") {
+        (MetadataSource::OpenGraph, 90)
+    } else if name.starts_with("twitter:") {
+        (MetadataSource::Twitter, 82)
+    } else if name.starts_with("dc:") || name.starts_with("dcterm:") || name.starts_with("dcterms:")
+    {
+        (MetadataSource::DublinCore, 96)
+    } else if name.starts_with("citation_") || name.starts_with("parsely-") {
+        (MetadataSource::Citation, 88)
+    } else {
+        (MetadataSource::HtmlMeta, 76)
+    }
+}
+
+fn collect_link_candidates(dom: &Dom, out: &mut CandidateSet) {
+    for id in dom
+        .descendants(dom.root())
+        .filter(|&id| dom.tag(id) == Some(Tag::Link))
+    {
+        let Some(rel) = dom.attr(id, AttrName::Rel) else {
+            continue;
+        };
+        let Some(href) = dom.attr(id, AttrName::Href) else {
+            continue;
+        };
+        if rel
+            .split_ascii_whitespace()
+            .any(|part| part.eq_ignore_ascii_case("canonical"))
+        {
+            out.add(
+                |set| &mut set.canonical_url,
+                href,
+                MetadataSource::LinkElement,
+                100,
+            );
+        }
+        if rel.split_ascii_whitespace().any(|part| {
+            matches!(
+                part.to_ascii_lowercase().as_str(),
+                "icon" | "shortcut" | "apple-touch-icon"
+            )
+        }) {
+            out.add(
+                |set| &mut set.favicon,
+                href,
+                MetadataSource::LinkElement,
+                90,
+            );
+        }
+    }
+}
+
+fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut CandidateSet) {
+    if !document_title.is_empty() {
+        out.add(
+            |set| &mut set.title,
+            document_title,
+            MetadataSource::HtmlElement,
+            84,
+        );
+    }
+    let elements: Vec<_> = dom
+        .descendants(dom.root())
+        .filter(|&id| dom.is_element(id))
+        .collect();
+    let primary_heading = elements
+        .iter()
+        .copied()
+        .find(|&id| dom.tag(id) == Some(Tag::H1));
+    let mut text_buffer = String::new();
+    for id in elements {
+        if dom.tag(id) == Some(Tag::Html) {
+            if let Some(language) = dom.attr(id, AttrName::Lang) {
+                out.add(
+                    |set| &mut set.language,
+                    language,
+                    MetadataSource::HtmlElement,
+                    100,
+                );
+            }
+            if let Some(direction) = dom.attr(id, AttrName::Dir) {
+                out.add(
+                    |set| &mut set.direction,
+                    direction,
+                    MetadataSource::HtmlElement,
+                    100,
+                );
+            }
+        }
+        if dom.tag(id) == Some(Tag::H1) {
+            let text = get_inner_text(dom, id, &mut text_buffer);
+            out.add(|set| &mut set.title, text, MetadataSource::HtmlElement, 78);
+        }
+        let itemprop = dom.attr(id, AttrName::ItemProp).unwrap_or("");
+        let itemprop_is_page_metadata = dom.tag(id) == Some(Tag::Meta)
+            || primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading));
+        if itemprop_is_page_metadata
+            && itemprop
+                .split_ascii_whitespace()
+                .any(|part| part.eq_ignore_ascii_case("author"))
+        {
+            let name_node = dom.descendants(id).find(|&child| {
+                dom.attr(child, AttrName::ItemProp).is_some_and(|value| {
+                    value
+                        .split_ascii_whitespace()
+                        .any(|part| part.eq_ignore_ascii_case("name"))
+                })
+            });
+            let value = dom
+                .attr(id, AttrName::Content)
+                .or_else(|| name_node.and_then(|node| dom.attr(node, AttrName::Content)))
+                .unwrap_or_else(|| get_inner_text(dom, name_node.unwrap_or(id), &mut text_buffer));
+            out.add(
+                |set| &mut set.authors,
+                value,
+                MetadataSource::HtmlElement,
+                84,
+            );
+        }
+        if itemprop_is_page_metadata
+            && itemprop
+                .split_ascii_whitespace()
+                .any(|part| part.eq_ignore_ascii_case("datePublished"))
+        {
+            let value = dom
+                .attr_by_local_name(id, "datetime")
+                .or_else(|| dom.attr(id, AttrName::Content))
+                .unwrap_or_else(|| get_inner_text(dom, id, &mut text_buffer));
+            out.add(
+                |set| &mut set.published_time,
+                value,
+                MetadataSource::HtmlElement,
+                82,
+            );
+        } else if dom.tag(id) == Some(Tag::Time)
+            && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading))
+        {
+            let value = dom
+                .attr_by_local_name(id, "datetime")
+                .unwrap_or_else(|| get_inner_text(dom, id, &mut text_buffer));
+            out.add(
+                |set| &mut set.published_time,
+                value,
+                MetadataSource::Inferred,
+                48,
+            );
+        }
+        if dom.tag(id) == Some(Tag::A) {
+            let rel_author = dom.attr(id, AttrName::Rel).is_some_and(|rel| {
+                rel.split_ascii_whitespace()
+                    .any(|part| part.eq_ignore_ascii_case("author"))
+            });
+            let profile_author = dom
+                .attr(id, AttrName::Href)
+                .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"));
+            if rel_author
+                || (profile_author
+                    && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading)))
+            {
+                let value = get_inner_text(dom, id, &mut text_buffer);
+                out.add(
+                    |set| &mut set.authors,
+                    value,
+                    MetadataSource::LinkElement,
+                    if rel_author { 82 } else { 68 },
+                );
+            }
+        }
+        let author_element = [dom.attr(id, AttrName::Class), dom.attr(id, AttrName::Id)]
+            .into_iter()
+            .flatten()
+            .flat_map(|value| value.split_ascii_whitespace())
+            .any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "author" | "byline" | "p-author"
+                )
+            });
+        if author_element
+            && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading))
+        {
+            let value = get_inner_text(dom, id, &mut text_buffer);
+            if value.chars().count() <= 120 {
+                out.add(|set| &mut set.authors, value, MetadataSource::Inferred, 62);
+            }
+        }
+    }
+}
+
+fn is_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
+    if dom.parent(node) == dom.parent(heading) && sibling_element_distance(dom, node, heading) <= 6
+    {
+        return true;
+    }
+    nearest_ancestor_with_tag(dom, node, Tag::Header)
+        .zip(nearest_ancestor_with_tag(dom, heading, Tag::Header))
+        .is_some_and(|(node_header, heading_header)| node_header == heading_header)
+}
+
+fn sibling_element_distance(dom: &Dom, first: NodeId, second: NodeId) -> usize {
+    let Some(parent) = dom.parent(first) else {
+        return usize::MAX;
+    };
+    let mut first_position = None;
+    let mut second_position = None;
+    for (position, child) in dom.element_children(parent).enumerate() {
+        if child == first {
+            first_position = Some(position);
+        }
+        if child == second {
+            second_position = Some(position);
+        }
+    }
+    first_position
+        .zip(second_position)
+        .map_or(usize::MAX, |(first, second)| first.abs_diff(second))
+}
+
+fn nearest_ancestor_with_tag(dom: &Dom, node: NodeId, tag: Tag) -> Option<NodeId> {
+    let mut current = dom.parent(node);
+    while let Some(id) = current {
+        if dom.tag(id) == Some(tag) {
+            return Some(id);
+        }
+        current = dom.parent(id);
+    }
+    None
+}
+
+fn resolve_candidates(mut candidates: CandidateSet, base_url: Option<&Url>) -> Metadata {
+    normalize_all(&mut candidates.title, normalize_text);
+    normalize_all(&mut candidates.description, normalize_text);
+    normalize_all(&mut candidates.authors, normalize_person);
+    normalize_all(&mut candidates.site_name, normalize_text);
+    normalize_all(&mut candidates.published_time, normalize_text);
+    normalize_all(&mut candidates.modified_time, normalize_text);
+    normalize_all(&mut candidates.language, normalize_language);
+    normalize_all(&mut candidates.direction, normalize_direction);
+    normalize_all(&mut candidates.section, normalize_text);
+    normalize_all(&mut candidates.tags, normalize_text);
+    normalize_urls(&mut candidates.canonical_url, base_url);
+    normalize_urls(&mut candidates.image, base_url);
+    normalize_urls(&mut candidates.favicon, base_url);
+
+    let has_source_author = candidates.authors.iter().any(|candidate| {
+        !matches!(
+            candidate.source,
+            MetadataSource::HtmlElement | MetadataSource::LinkElement | MetadataSource::Inferred
+        )
+    });
+    let site_name = resolve_one(&candidates.site_name);
+    let selected_title = resolve_best(&candidates.title);
+    let mut title = selected_title.map(|candidate| candidate.value.clone());
+    if let (Some(title_value), Some(site)) = (&title, &site_name) {
+        if title_value.eq_ignore_ascii_case(site) {
+            title = resolve_one_excluding(&candidates.title, title_value);
+        } else if let Some(stripped) = strip_site_affix(title_value, site) {
+            title = Some(stripped);
+        }
+    }
+
+    Metadata {
+        title,
+        description: resolve_one(&candidates.description),
+        authors: resolve_authors(&candidates.authors),
+        site_name,
+        canonical_url: resolve_one(&candidates.canonical_url),
+        image: resolve_one(&candidates.image),
+        favicon: resolve_one(&candidates.favicon),
+        published_time: resolve_one(&candidates.published_time),
+        modified_time: resolve_one(&candidates.modified_time),
+        language: resolve_one(&candidates.language),
+        direction: resolve_one(&candidates.direction),
+        section: resolve_one(&candidates.section),
+        tags: resolve_many(&candidates.tags),
+        has_source_author,
+    }
+}
+
+fn normalize_all(candidates: &mut Vec<MetadataCandidate>, normalize: fn(&str) -> Option<String>) {
+    candidates.retain_mut(|candidate| {
+        if let Some(value) = normalize(&candidate.value) {
+            candidate.value = value;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn normalize_urls(candidates: &mut Vec<MetadataCandidate>, base_url: Option<&Url>) {
+    candidates.retain_mut(|candidate| {
+        let Some(value) = normalize_text(&candidate.value) else {
+            return false;
+        };
+        let Some(resolved) = Url::parse(&value)
+            .ok()
+            .or_else(|| base_url.and_then(|base| base.join(&value).ok()))
+        else {
+            return false;
+        };
+        if !matches!(resolved.scheme(), "http" | "https") {
+            return false;
+        }
+        candidate.value = resolved.into();
+        true
+    });
+}
+
+fn normalize_text(value: &str) -> Option<String> {
+    let unescaped = unescape_html_entities(value);
+    let value = normalize_whitespace(unescaped.trim());
+    if value.is_empty() || is_placeholder(&value) || !value.chars().any(char::is_alphanumeric) {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn normalize_person(value: &str) -> Option<String> {
+    let value = normalize_text(value)?;
+    if value.eq_ignore_ascii_case("author")
+        || value.eq_ignore_ascii_case("authors")
+        || Url::parse(&value).is_ok()
+        || value.chars().count() > 120
+    {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn normalize_language(value: &str) -> Option<String> {
+    let value = normalize_text(value)?;
+    Some(value.replace('_', "-"))
+}
+
+fn normalize_direction(value: &str) -> Option<String> {
+    let value = normalize_text(value)?.to_ascii_lowercase();
+    matches!(value.as_str(), "ltr" | "rtl" | "auto").then_some(value)
+}
+
+fn is_placeholder(value: &str) -> bool {
+    (value.contains("{{") && value.contains("}}"))
+        || (value.contains("${") && value.contains('}'))
+        || (value.contains("<%") && value.contains("%>"))
+}
+
+fn resolve_one(candidates: &[MetadataCandidate]) -> Option<String> {
+    resolve_best(candidates).map(|candidate| candidate.value.clone())
+}
+
+fn resolve_best(candidates: &[MetadataCandidate]) -> Option<&MetadataCandidate> {
+    let mut best: Option<(&MetadataCandidate, u16)> = None;
+    for candidate in candidates {
+        let agreements = candidates
+            .iter()
+            .filter(|other| {
+                other.source != candidate.source
+                    && other.value.eq_ignore_ascii_case(&candidate.value)
+            })
+            .count() as u16;
+        let score = u16::from(candidate.confidence) + agreements.min(3) * 5;
+        if best.is_none_or(|(current, current_score)| {
+            score > current_score || (score == current_score && candidate.order < current.order)
+        }) {
+            best = Some((candidate, score));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Option<String> {
+    let filtered: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| !candidate.value.eq_ignore_ascii_case(excluded))
+        .cloned()
+        .collect();
+    resolve_one(&filtered)
+}
+
+fn resolve_authors(candidates: &[MetadataCandidate]) -> Vec<String> {
+    let Some(maximum) = candidates
+        .iter()
+        .map(|candidate| candidate.confidence)
+        .max()
+    else {
+        return Vec::new();
+    };
+    let mut selected: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.confidence.saturating_add(8) >= maximum)
+        .cloned()
+        .collect();
+    for candidate in &mut selected {
+        if let Some(first) = candidates
+            .iter()
+            .find(|value| value.value.eq_ignore_ascii_case(&candidate.value))
+        {
+            candidate.value.clone_from(&first.value);
+            candidate.order = first.order;
+        }
+    }
+    resolve_many(&selected).into_iter().take(10).collect()
+}
+
+fn resolve_many(candidates: &[MetadataCandidate]) -> Vec<String> {
+    let mut candidates = candidates.to_vec();
+    candidates.sort_by_key(|candidate| candidate.order);
+    let mut values = Vec::new();
+    for candidate in candidates {
+        if !values
+            .iter()
+            .any(|value: &String| value.eq_ignore_ascii_case(&candidate.value))
+        {
+            values.push(candidate.value);
+        }
+    }
+    values
+}
+
+fn strip_site_affix(title: &str, site: &str) -> Option<String> {
+    for separator in [" | ", " - ", " — ", " – ", " :: ", " · "] {
+        if let Some(value) = title.strip_suffix(&format!("{separator}{site}")) {
+            return normalize_text(value);
+        }
+        if let Some(value) = title.strip_prefix(&format!("{site}{separator}")) {
+            return normalize_text(value);
+        }
+    }
+    None
+}
+
+pub fn unescape_html_entities<'a>(value: &'a str) -> Cow<'a, str> {
+    if value.is_empty() || !value.contains('&') {
+        return Cow::Borrowed(value);
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        let rest = &value[index..];
+        let Some(ampersand) = rest.find('&') else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..ampersand]);
+        index += ampersand;
+        if let Some(semicolon) = value[index..].find(';') {
+            let entity = &value[index + 1..index + semicolon];
+            if let Some(character) = parse_numeric(entity) {
+                output.push(character);
+                index += semicolon + 1;
+                continue;
+            }
+            let name = &value[index + 1..index + semicolon + 1];
+            if let Some(&(first, second)) = html5ever::data::NAMED_ENTITIES.get(name) {
+                if let Some(character) = char::from_u32(first) {
+                    output.push(character);
+                }
+                if second != 0
+                    && let Some(character) = char::from_u32(second)
+                {
+                    output.push(character);
+                }
+                index += semicolon + 1;
+                continue;
+            }
+        }
+        output.push('&');
+        index += 1;
+    }
+    Cow::Owned(output)
+}
+
+fn parse_numeric(value: &str) -> Option<char> {
+    if !value.starts_with('#') {
+        return None;
+    }
+    let number = if value[1..].starts_with(['x', 'X']) {
+        u32::from_str_radix(&value[2..], 16).ok()?
+    } else {
+        value[1..].parse().ok()?
+    };
+    if number == 0 || number > 0x10ffff || (0xd800..=0xdfff).contains(&number) {
+        Some('\u{fffd}')
+    } else {
+        char::from_u32(number).or(Some('\u{fffd}'))
+    }
+}
+
+pub(crate) fn get_article_title(dom: &Dom) -> String {
     let Some(id) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
         return String::new();
     };
-    let orig = get_inner_text_owned(dom, id);
-    if orig.is_empty() {
-        return orig;
+    let original = get_inner_text_owned(dom, id);
+    if original.is_empty() {
+        return original;
     }
-    let mut cur = Cow::Borrowed(orig.as_str());
+    let mut current = Cow::Borrowed(original.as_str());
     let mut hierarchical = false;
-    fn wc(s: &str) -> usize {
-        s.split_whitespace().count()
+    fn word_count(value: &str) -> usize {
+        value.split_whitespace().count()
     }
-    if has_title_separator(&orig) {
-        hierarchical = has_hierarchical_title_separator(&orig);
-        if let Some(start) = find_last_title_separator_start(&orig) {
-            cur = Cow::Borrowed(&orig[..start])
+    if has_title_separator(&original) {
+        hierarchical = has_hierarchical_title_separator(&original);
+        if let Some(start) = find_last_title_separator_start(&original) {
+            current = Cow::Borrowed(&original[..start]);
         }
-        if wc(&cur) < 3 {
-            cur = Cow::Owned(remove_title_first_part(&orig))
+        if word_count(&current) < 3 {
+            current = Cow::Owned(remove_title_first_part(&original));
         }
-    } else if orig.contains(": ") {
+    } else if original.contains(": ") {
         let mut text_buffer = String::new();
-        let has = dom
+        let has_matching_heading = dom
             .descendants(dom.root())
-            .filter(|&x| matches!(dom.tag(x), Some(Tag::H1 | Tag::H2)))
-            .any(|x| get_inner_text(dom, x, &mut text_buffer) == orig.trim());
-        if !has {
-            if let Some(p) = orig.rfind(": ") {
-                cur = Cow::Borrowed(&orig[p + 2..]);
-                if wc(&cur) < 3
-                    && let Some(q) = orig.find(": ")
-                {
-                    cur = if wc(&orig[..q]) <= 5 {
-                        Cow::Borrowed(&orig[q + 2..])
-                    } else {
-                        Cow::Borrowed(&orig)
-                    }
-                }
+            .filter(|&id| matches!(dom.tag(id), Some(Tag::H1 | Tag::H2)))
+            .any(|id| get_inner_text(dom, id, &mut text_buffer) == original.trim());
+        if !has_matching_heading && let Some(position) = original.rfind(": ") {
+            current = Cow::Borrowed(&original[position + 2..]);
+            if word_count(&current) < 3
+                && let Some(first) = original.find(": ")
+            {
+                current = if word_count(&original[..first]) <= 5 {
+                    Cow::Borrowed(&original[first + 2..])
+                } else {
+                    Cow::Borrowed(&original)
+                };
             }
         }
-    } else if !(15..=150).contains(&orig.chars().count()) {
-        let hs: Vec<_> = dom
+    } else if !(15..=150).contains(&original.chars().count()) {
+        let headings: Vec<_> = dom
             .descendants(dom.root())
-            .filter(|&x| dom.tag(x) == Some(Tag::H1))
+            .filter(|&id| dom.tag(id) == Some(Tag::H1))
             .collect();
-        if hs.len() == 1 {
+        if headings.len() == 1 {
             let mut normalized = String::new();
-            get_normalized_inner_text(dom, hs[0], &mut normalized);
-            cur = Cow::Owned(normalized)
+            get_normalized_inner_text(dom, headings[0], &mut normalized);
+            current = Cow::Owned(normalized);
         }
     }
-    let mut cur = normalize_whitespace(cur.trim());
-    if wc(&cur) <= 4 {
-        let without = remove_title_separators(&orig);
-        if !hierarchical || wc(&cur) != wc(&without).saturating_sub(1) {
-            cur = orig
-        }
-    }
-    cur
-}
-pub fn get_article_metadata(dom: &Dom, json: &Metadata, title: &str, sources: u8) -> Metadata {
-    static PP: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)\s*(article|dc|dcterm|og|twitter)\s*:\s*(author|creator|description|published_time|title|site_name)\s*").unwrap()
-    });
-    static NP: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)^\s*(?:(dc|dcterm|og|twitter|parsely|weibo:(article|webpage))\s*[-\.:]?\s*)?(author|creator|pub-date|description|title|site_name)\s*$").unwrap()
-    });
-    // Metadata uses a small, fixed set of keys. A short linear table avoids a
-    // hash allocation for the common case while preserving last-value-wins.
-    let mut vals: SmallVec<[(String, String); 8]> = SmallVec::new();
-    for id in dom
-        .descendants(dom.root())
-        .filter(|&x| dom.tag(x) == Some(Tag::Meta))
-    {
-        let Some(c) = dom.attr(id, AttrName::Content).filter(|x| !x.is_empty()) else {
-            continue;
-        };
-        if let Some(p) = dom
-            .attr(id, AttrName::Property)
-            .filter(|name| metadata_source_enabled(name, sources))
-            .and_then(|p| PP.captures(p))
+    let mut current = normalize_whitespace(current.trim());
+    if word_count(&current) <= 4 {
+        let without_separator = remove_title_separators(&original);
+        if !hierarchical || word_count(&current) != word_count(&without_separator).saturating_sub(1)
         {
-            let n = p
-                .get(0)
-                .unwrap()
-                .as_str()
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .flat_map(char::to_lowercase)
-                .collect::<String>();
-            insert_metadata_value(&mut vals, n, c.trim().into());
-        } else if let Some(n) = dom
-            .attr(id, AttrName::Name)
-            .filter(|name| metadata_source_enabled(name, sources))
-            .filter(|n| NP.is_match(n))
-        {
-            let n = n
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .map(|c| if c == '.' { ':' } else { c })
-                .flat_map(char::to_lowercase)
-                .collect::<String>();
-            insert_metadata_value(&mut vals, n, c.trim().into());
+            current = original;
         }
     }
-    let pick = |keys: &[&str]| {
-        keys.iter().find_map(|key| {
-            vals.iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.clone())
-        })
-    };
-    let mut m = Metadata::default();
-    m.title = json
-        .title
-        .clone()
-        .or_else(|| {
-            pick(&[
-                "dc:title",
-                "dcterm:title",
-                "og:title",
-                "weibo:article:title",
-                "weibo:webpage:title",
-                "title",
-                "twitter:title",
-                "parsely-title",
-            ])
-        })
-        .or_else(|| (!title.is_empty()).then(|| title.into()));
-    let author = vals
-        .iter()
-        .find(|(name, _)| name == "article:author")
-        .map(|(_, value)| value)
-        .filter(|v| url::Url::parse(v).is_err())
-        .cloned();
-    if !json.authors.is_empty() {
-        m.authors.clone_from(&json.authors);
-    } else if let Some(author) =
-        pick(&["dc:creator", "dcterm:creator", "author", "parsely-author"]).or(author)
-    {
-        m.authors.push(author);
-    }
-    m.description = json.description.clone().or_else(|| {
-        pick(&[
-            "dc:description",
-            "dcterm:description",
-            "og:description",
-            "weibo:article:description",
-            "weibo:webpage:description",
-            "description",
-            "twitter:description",
-        ])
-    });
-    m.site_name = json.site_name.clone().or_else(|| pick(&["og:site_name"]));
-    m.published_time = json
-        .published_time
-        .clone()
-        .or_else(|| pick(&["article:published_time", "parsely-pub-date"]));
-    m.title = m.title.map(unescape_owned);
-    for author in &mut m.authors {
-        *author = unescape_owned(std::mem::take(author));
-    }
-    m.description = m.description.map(unescape_owned);
-    m.site_name = m.site_name.map(unescape_owned);
-    m.published_time = m.published_time.map(unescape_owned);
-    m
-}
-fn metadata_source_enabled(name: &str, sources: u8) -> bool {
-    let name = name.trim();
-    let has_prefix = |prefix: &str| {
-        name.get(..prefix.len())
-            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
-    };
-    if has_prefix("og:") || has_prefix("article:") {
-        sources & 0b0010 != 0
-    } else if has_prefix("twitter:") {
-        sources & 0b0100 != 0
-    } else {
-        sources & 0b1000 != 0
-    }
+    current
 }
 
-fn unescape_owned(s: String) -> String {
-    match unescape_html_entities(&s) {
-        Cow::Borrowed(_) => s,
-        Cow::Owned(x) => x,
-    }
-}
-fn insert_metadata_value(
-    values: &mut SmallVec<[(String, String); 8]>,
-    name: String,
-    value: String,
-) {
-    if let Some((_, existing)) = values.iter_mut().find(|(key, _)| key == &name) {
-        *existing = value;
-    } else {
-        values.push((name, value));
-    }
-}
-
-pub fn text_similarity(a: &str, b: &str) -> f64 {
-    let aa = a.to_lowercase();
-    let bb = b.to_lowercase();
-    let set: SmallVec<[&str; 16]> = split_word_tokens(&aa).collect();
-    let tokens: SmallVec<[&str; 16]> = split_word_tokens(&bb).collect();
+pub(crate) fn text_similarity(first: &str, second: &str) -> f64 {
+    let first = first.to_lowercase();
+    let second = second.to_lowercase();
+    let set: SmallVec<[&str; 16]> = split_word_tokens(&first).collect();
+    let tokens: SmallVec<[&str; 16]> = split_word_tokens(&second).collect();
     if set.is_empty() || tokens.is_empty() {
-        return 0.;
+        return 0.0;
     }
-    let total =
-        tokens.iter().map(|s| s.chars().count()).sum::<usize>() + tokens.len().saturating_sub(1);
-    let unique = tokens
+    let total = tokens
         .iter()
-        .filter(|s| !set.contains(*s))
-        .map(|s| s.chars().count())
+        .map(|value| value.chars().count())
         .sum::<usize>()
-        + tokens
-            .iter()
-            .filter(|s| !set.contains(*s))
-            .count()
-            .saturating_sub(1);
-    1. - unique as f64 / total as f64
+        + tokens.len().saturating_sub(1);
+    let unique_tokens: SmallVec<[&&str; 16]> = tokens
+        .iter()
+        .filter(|value| !set.contains(*value))
+        .collect();
+    let unique = unique_tokens
+        .iter()
+        .map(|value| value.chars().count())
+        .sum::<usize>()
+        + unique_tokens.len().saturating_sub(1);
+    1.0 - unique as f64 / total as f64
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn metadata(html: &str, url: Option<&str>, structured: bool) -> Metadata {
+        let dom = Dom::parse_document(html).unwrap();
+        let data = if structured {
+            StructuredData::parse(&dom)
+        } else {
+            StructuredData::default()
+        };
+        let base = url.map(Url::parse).transpose().unwrap();
+        let title = get_article_title(&dom);
+        discover(&dom, &data, &title, base.as_ref(), base.as_ref())
+    }
+
     #[test]
-    fn extracts_string_json_ld_authors() {
+    fn structured_data_parses_arrays_graphs_and_later_valid_blocks() {
         let dom = Dom::parse_document(
-            r#"<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","author":"Jane Doe"}</script>"#,
+            r#"<script type="application/ld+json">not json</script>
+            <script type="application/ld+json">[
+              {"@context":"https://schema.org","@type":"WebSite","name":"Example"},
+              {"@context":"https://schema.org","@graph":[
+                {"@type":"Article","headline":"Graph title","author":[{"name":"Ada"},{"name":"Grace"}],"articleBody":"Full article body","text":"Alternate article text"}
+              ]}
+            ]</script>"#,
         )
         .unwrap();
+        let data = StructuredData::parse(&dom);
 
-        assert_eq!(get_json_ld(&dom, "").authors, ["Jane Doe"]);
+        assert_eq!(data.items.len(), 2);
+        assert_eq!(
+            data.article_texts().collect::<Vec<_>>(),
+            ["Full article body", "Alternate article text"]
+        );
+        let result = discover(&dom, &data, "", None, None);
+        assert_eq!(result.title.as_deref(), Some("Graph title"));
+        assert_eq!(result.site_name.as_deref(), Some("Example"));
+        assert_eq!(result.authors, ["Ada", "Grace"]);
+    }
+
+    #[test]
+    fn resolves_metadata_candidates_and_relative_urls() {
+        let result = metadata(
+            r#"<html lang="en_US"><head><title>Post | Example</title>
+            <meta property="og:title" content="Post | Example">
+            <meta property="og:site_name" content="Example">
+            <meta name="citation_author" content="Ada Lovelace">
+            <meta name="citation_author" content="Grace Hopper">
+            <meta property="article:tag" content="Rust">
+            <meta name="keywords" content="rust, HTML">
+            <link rel="canonical" href="/post"><link rel="icon" href="icons/site.png">
+            </head><body><h1>Post</h1></body></html>"#,
+            Some("https://example.com/docs/page"),
+            true,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Post"));
+        let cleaned_title = metadata(
+            r#"<title>Post | Example</title><meta property="og:site_name" content="Example"><main>Text</main>"#,
+            None,
+            false,
+        );
+        assert_eq!(cleaned_title.title.as_deref(), Some("Post"));
+        assert_eq!(result.authors, ["Ada Lovelace", "Grace Hopper"]);
+        assert_eq!(result.tags, ["Rust", "HTML"]);
+        assert_eq!(result.language.as_deref(), Some("en-US"));
+        assert_eq!(
+            result.canonical_url.as_deref(),
+            Some("https://example.com/post")
+        );
+        assert_eq!(
+            result.favicon.as_deref(),
+            Some("https://example.com/docs/icons/site.png")
+        );
+    }
+
+    #[test]
+    fn rejects_placeholders_and_deduplicates_values() {
+        let result = metadata(
+            r#"<head><meta property="og:title" content="{{title}}">
+            <meta name="title" content="Real title">
+            <meta name="author" content="Ada"><meta name="citation_author" content="ada">
+            <meta name="keywords" content="Rust, rust, --"></head><body><p>Text</p></body>"#,
+            None,
+            true,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Real title"));
+        assert_eq!(result.authors, ["Ada"]);
+        assert_eq!(result.tags, ["Rust"]);
+    }
+
+    #[test]
+    fn uses_agreement_and_conservative_dom_fallbacks() {
+        let result = metadata(
+            r#"<html><head><title>Fallback title</title>
+            <meta property="og:title" content="Agreed title">
+            <meta property="og:image" content="/hero.jpg">
+            <script type="application/ld+json; charset=utf-8">[
+              {"@context":"https://schema.org","@type":"Article","headline":"Agreed title","sourceOrganization":{"name":"Source Site"}},
+              {"@type":"WebPage","name":"Other object"}
+            ]</script></head><body>
+            <header><h1>Agreed title</h1><time datetime="2025-02-03">Today</time><p class="byline">By Jane Doe</p></header>
+            <aside class="related"><time datetime="1999-01-01">Old card</time></aside>
+            </body></html>"#,
+            Some("https://example.com/page"),
+            true,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Agreed title"));
+        assert_eq!(result.site_name.as_deref(), Some("Source Site"));
+        assert_eq!(
+            result.image.as_deref(),
+            Some("https://example.com/hero.jpg")
+        );
+        assert_eq!(result.published_time.as_deref(), Some("2025-02-03"));
+    }
+
+    #[test]
+    fn ignores_a_related_card_date_without_a_nearby_primary_heading() {
+        let result = metadata(
+            r#"<main><h1>Page</h1><p>Body</p>
+            <aside><h2>Related</h2><time datetime="1999-01-01">Old</time></aside></main>"#,
+            None,
+            false,
+        );
+
+        assert!(result.published_time.is_none());
+
+        let result = metadata(
+            r#"<main><h1>Page</h1><p>1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><time datetime="1999-01-01">Related card</time></main>"#,
+            None,
+            false,
+        );
+        assert!(result.published_time.is_none());
+    }
+
+    #[test]
+    fn collects_dublin_core_itemprop_and_author_links() {
+        let result = metadata(
+            r#"<html><head>
+            <meta name="DCTERMS.title" content="Dublin title">
+            <meta itemprop="datePublished" content="2025-03-04">
+            </head><body><header><h1>Heading</h1>
+            <span itemprop="author"><meta itemprop="name" content="Item Author"></span>
+            <a rel="author" href="/people/rel">Rel Author</a>
+            </header><main>Text</main></body></html>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Dublin title"));
+        assert_eq!(result.authors, ["Item Author", "Rel Author"]);
+        assert_eq!(result.published_time.as_deref(), Some("2025-03-04"));
+    }
+
+    #[test]
+    fn collects_a_nearby_author_profile_link() {
+        let result = metadata(
+            r#"<header><h1>Heading</h1><div><span><a href="/author/ada">Ada</a></span></div></header><main>Text</main>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Ada"]);
+    }
+
+    #[test]
+    fn selects_the_structured_object_that_matches_the_page() {
+        let result = metadata(
+            r#"<title>Primary page</title>
+            <script type="application/ld+json">{"@context":{"schema":"https://schema.org/"},"@graph":[
+              {"@type":"schema:Article","headline":"Related story","url":"https://example.com/related"},
+              {"@type":"schema:WebPage","mainEntity":{"@type":"schema:Article","headline":"Primary page","url":"https://example.com/current","author":{"name":"Primary Author"},"publisher":[{"name":"Primary Site"},{"name":"Secondary Publisher"}]}},
+              {"@type":"schema:Organization","name":"Unrelated Sponsor"}
+            ]}</script><main>Text</main>"#,
+            Some("https://example.com/current"),
+            true,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Primary page"));
+        assert_eq!(result.authors, ["Primary Author"]);
+        assert_eq!(result.site_name.as_deref(), Some("Primary Site"));
+    }
+
+    #[test]
+    fn collects_general_schema_pages_and_decodes_named_entities() {
+        let result = metadata(
+            r#"<title>Crème — soup</title><script type="application/ld+json">[
+              {"@context":"https://schema.org","@type":"Article","headline":"Unrelated story"},
+              {"@context":"https://schema.org","@type":"Recipe","name":"Crème &mdash; soup","description":"Easy&nbsp;recipe","author":{"name":"Cook"},"image":{"url":"/soup.jpg"}}
+            ]</script><main>Text</main>"#,
+            Some("https://example.com/recipes/page"),
+            true,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Crème — soup"));
+        assert_eq!(result.description.as_deref(), Some("Easy\u{a0}recipe"));
+        assert_eq!(result.authors, ["Cook"]);
+        assert_eq!(
+            result.image.as_deref(),
+            Some("https://example.com/soup.jpg")
+        );
+    }
+
+    #[test]
+    fn ignores_json_ld_from_an_unrelated_vocabulary() {
+        let result = metadata(
+            r#"<script type="application/ld+json">{"@context":"https://example.org/vocab","@type":"Article","headline":"Wrong title"}</script><main>Text</main>"#,
+            None,
+            true,
+        );
+
+        assert!(result.title.is_none());
+    }
+
+    #[test]
+    fn structured_data_can_be_omitted() {
+        let html = r#"<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Schema title"}</script><main>Text</main>"#;
+        assert_eq!(
+            metadata(html, None, true).title.as_deref(),
+            Some("Schema title")
+        );
+        assert!(metadata(html, None, false).title.is_none());
     }
 }
