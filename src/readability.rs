@@ -1,9 +1,11 @@
 //! Readability-derived content extraction.
 #![allow(clippy::collapsible_if)]
+use crate::candidate::{
+    CandidateSet, CandidateSource, RankedCandidate, RootSelectionReason, select_content_root,
+};
 use crate::cleaning::*;
 use crate::constants::{
-    flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score,
-    is_unlikely_role, regexps,
+    flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score, regexps,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
@@ -19,11 +21,11 @@ use url::Url;
 
 pub(crate) struct Readability<'a> {
     dom: Dom,
-    original_html: &'a str,
     options: &'a ExtractorConfig,
     flags: u32,
     node_data: NodeStateStore,
     article_title: String,
+    structured_title: String,
     article_byline: Option<String>,
     article_dir: Option<String>,
     article_lang: Option<String>,
@@ -39,6 +41,7 @@ struct BestAttempt {
     content: FrozenContent,
     text_len_chars: usize,
     excerpt: Option<String>,
+    direction: Option<String>,
 }
 struct FrozenContent {
     dom: Dom,
@@ -50,13 +53,15 @@ struct ArticleContent {
     article_root: NodeId,
 }
 
+struct CandidateDiscovery {
+    candidates: CandidateSet,
+    to_score: SmallVec<[NodeId; 256]>,
+    divs_to_prepare: SmallVec<[NodeId; 128]>,
+    remove_after_scoring: SmallVec<[NodeId; 64]>,
+}
+
 impl<'a> Readability<'a> {
-    pub(crate) fn from_document(
-        dom: Dom,
-        original_html: &'a str,
-        url: Option<&str>,
-        options: &'a ExtractorConfig,
-    ) -> Self {
+    pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let (base_uri, url_error) = match url {
             Some(x) => match Url::parse(x) {
                 Ok(u) => (Some(u), None),
@@ -66,11 +71,11 @@ impl<'a> Readability<'a> {
         };
         Self {
             dom,
-            original_html,
             options,
-            flags: FLAG_STRIP_UNLIKELYS | FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
+            flags: FLAG_WEIGHT_CLASSES | FLAG_CLEAN_CONDITIONALLY,
             node_data: NodeStateStore::new(),
             article_title: String::new(),
+            structured_title: String::new(),
             article_byline: None,
             article_dir: None,
             article_lang: None,
@@ -116,8 +121,11 @@ impl<'a> Readability<'a> {
                 self.base_uri = Some(base_uri);
             }
         }
-        unwrap_noscript_images(&mut self.dom);
+        // Metadata must inspect the parsed source before preparation removes or
+        // rewrites any nodes. Image preparation happens afterwards because it
+        // can replace placeholder and noscript subtrees.
         let title = metadata::get_article_title(&self.dom);
+        self.structured_title = metadata::content_identity_title(&self.dom, &title);
         if self.options.structured_data {
             self.structured_data = StructuredData::parse(&self.dom);
         }
@@ -128,9 +136,15 @@ impl<'a> Readability<'a> {
             self.base_uri.as_ref(),
             self.source_uri.as_ref(),
         );
-        if self.structured_data.article_texts().next().is_some() {
+        if self
+            .structured_data
+            .primary_texts(&self.structured_title, self.source_uri.as_ref())
+            .next()
+            .is_some()
+        {
             debug_log!(self, "Structured data contains a content-location hint");
         }
+        unwrap_noscript_images(&mut self.dom);
         prep_document(&mut self.dom);
         self.article_title = self.metadata.title.take().unwrap_or(title);
         let content = self.grab_article()?;
@@ -163,297 +177,187 @@ impl<'a> Readability<'a> {
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
         loop {
-            let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
-            let mut to_score = SmallVec::<[NodeId; 256]>::new();
-            if let Some(html) = self.dom.html_element() {
-                if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
-                    self.article_lang = Some(lang.into())
-                }
-                if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
-                    self.article_dir = Some(dir.into())
-                }
-            }
-            let mut remove = SmallVec::<[NodeId; 64]>::new();
-            // Allocate dense state once. Scoring IDs follow document order and
-            // would otherwise grow this vector several times during the pass.
-            self.node_data.sync_len(self.dom.len());
-            // Tree repair can make arena order differ from document order. Record
-            // only attached elements in preorder before this pass starts mutating.
-            // Snapshot depths identify removed subtrees without ancestor walks.
-            let initial_nodes = self
-                .dom
-                .element_descendants_snapshot_with_depth(self.dom.root());
-            let mut removed_depth = None;
-            let mut remove_title = true;
-            for (id, depth) in initial_nodes {
-                if let Some(root_depth) = removed_depth {
-                    if depth > root_depth {
-                        continue;
-                    }
-                    removed_depth = None
-                }
-                let tag = self
-                    .dom
-                    .tag(id)
-                    .expect("element snapshot must contain only elements");
-                if tag == Tag::A {
-                    self.node_data.enable_link_lengths();
-                }
-                if !is_probably_visible(&self.dom, id) {
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if self.dom.attr(id, AttrName::AriaModal) == Some("true")
-                    && self.dom.attr(id, AttrName::Role) == Some("dialog")
-                {
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if self.article_byline.is_none() && !self.metadata.has_source_author {
-                    build_match_string(&self.dom, id, &mut match_buffer);
-                    if is_valid_byline(&self.dom, id, &match_buffer, &mut text_buffer) {
-                        let mut names = Vec::new();
-                        self.dom
-                            .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
-                        let n = names.first().copied().unwrap_or(id);
-                        self.article_byline =
-                            Some(get_inner_text(&self.dom, n, &mut text_buffer).to_owned());
-                        remove.push(id);
-                        removed_depth = Some(depth);
-                        continue;
-                    }
-                }
-                let duplicates_title = if remove_title && matches!(tag, Tag::H1 | Tag::H2) {
-                    let heading = get_inner_text(&self.dom, id, &mut text_buffer);
-                    heading_matches_article_title(&self.article_title, heading)
-                } else {
-                    false
-                };
-                if duplicates_title {
-                    remove_title = false;
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if strip && tag != Tag::Body && tag != Tag::A {
-                    build_match_string(&self.dom, id, &mut match_buffer);
-                    let m = regexps::CANDIDATE_FILTER_SET.matches(&match_buffer);
-                    if m.matched(0)
-                        && !m.matched(1)
-                        && !has_ancestor_tags_any(&self.dom, id, &[Tag::Table, Tag::Code], 3)
-                    {
-                        remove.push(id);
-                        removed_depth = Some(depth);
-                        continue;
-                    }
-                    if self
-                        .dom
-                        .attr(id, AttrName::Role)
-                        .is_some_and(is_unlikely_role)
-                    {
-                        remove.push(id);
-                        removed_depth = Some(depth);
-                        continue;
-                    }
-                }
-                if matches!(
-                    tag,
-                    Tag::Div
-                        | Tag::Section
-                        | Tag::Header
-                        | Tag::H1
-                        | Tag::H2
-                        | Tag::H3
-                        | Tag::H4
-                        | Tag::H5
-                        | Tag::H6
-                ) && is_element_without_content(&self.dom, id)
-                {
-                    remove.push(id);
-                    removed_depth = Some(depth);
-                    continue;
-                }
-                if is_default_tag_to_score(tag) && self.node_data.mark_score_seen(id) {
+            // Discovery only records nodes. It does not mutate the source DOM.
+            // Deferred removals stay attached until all candidate scores and
+            // link-density values have been calculated.
+            let discovery = self.discover_candidates(&mut match_buffer, &mut text_buffer);
+
+            // Prepare and score one working copy. Score propagation runs before
+            // deferred clutter is detached. The prepared source stays intact
+            // for retries.
+            let mut working_dom = self.dom.clone();
+            let mut to_score = discovery.to_score;
+            let prepared = prepare_readability_structure(
+                &mut working_dom,
+                &discovery.divs_to_prepare,
+                &discovery.candidates,
+            );
+            self.node_data.sync_len(working_dom.len());
+            for id in prepared {
+                if self.node_data.mark_score_seen(id) {
                     to_score.push(id)
                 }
-                if tag == Tag::Div {
-                    wrap_phrasing_content_in_p(&mut self.dom, id);
-                    if has_single_tag_inside_element(&self.dom, id, Tag::P)
-                        && get_link_density(&self.dom, id) < 0.25
-                    {
-                        if let Some(p) = self.dom.element_children(id).next() {
-                            let pid = p;
-                            self.dom.replace_with(id, pid);
-                            if self.node_data.mark_score_seen(pid) {
-                                to_score.push(pid)
-                            }
-                        }
-                    } else if !has_child_block_element(&self.dom, id) {
-                        self.dom.rename_html(id, Tag::P);
-                        if self.node_data.mark_score_seen(id) {
-                            to_score.push(id)
-                        }
-                    } else {
-                        for p in self
-                            .dom
-                            .element_children(id)
-                            .filter(|&x| self.dom.tag(x) == Some(Tag::P))
-                        {
-                            if self.node_data.mark_score_seen(p) {
-                                to_score.push(p)
-                            }
-                        }
-                    }
-                }
             }
-            for id in remove {
-                if self.dom.parent(id).is_some() {
-                    self.dom.detach(id)
-                }
-            }
-            self.node_data.sync_len(self.dom.len());
-            let mut candidates = SmallVec::<[NodeId; 256]>::new();
-            for id in to_score {
-                let Some(parent) = self.dom.parent(id).filter(|&x| self.dom.is_element(x)) else {
-                    continue;
-                };
-                let stats = get_or_compute_stats(&self.dom, id, &mut self.node_data);
-                if stats.text_length < 25 {
-                    continue;
-                }
-                let cs = 2.0
-                    + f64::from(stats.comma_count)
-                    + f64::from((stats.text_length / 100).min(3));
-                let mut a = Some(parent);
-                for level in 0..5 {
-                    let Some(x) = a else { break };
-                    a = self.dom.parent(x);
-                    if !self.dom.is_element(x) || !a.is_some_and(|z| self.dom.is_element(z)) {
-                        continue;
-                    }
-                    if Self::initialize_node_once(&self.dom, x, &mut self.node_data, self.flags) {
-                        candidates.push(x)
-                    }
-                    let div = if level == 0 {
-                        1.0
-                    } else if level == 1 {
-                        2.0
-                    } else {
-                        (level * 3) as f64
-                    };
-                    self.node_data.add_content_score(x, cs / div)
-                }
-            }
-            let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
-                .iter()
-                .enumerate()
-                .map(|(order, &id)| {
-                    let s = self.node_data.get_content_score(id);
-                    let len = get_or_compute_stats(&self.dom, id, &mut self.node_data).text_length;
-                    let d = get_link_density_cached(&self.dom, id, len, &mut self.node_data);
-                    let f = s * (1.0 - d);
-                    self.node_data.set_score(id, f);
-                    (id, f, order)
-                })
-                .collect();
-            let top_count = self.options.top_candidates.min(scored.len());
-            if top_count < scored.len() {
-                scored.select_nth_unstable_by(top_count, |a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.2.cmp(&b.2))
-                });
-                scored.truncate(top_count);
-            }
-            scored.sort_unstable_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.2.cmp(&b.2))
-            });
-            let top = scored;
+            let readability_scores = compute_readability_scores(
+                &mut working_dom,
+                to_score,
+                &discovery.remove_after_scoring,
+                &mut self.node_data,
+                self.flags,
+            );
+            let mut candidates = discovery.candidates;
+            let ranked = self.rank_candidates(
+                &working_dom,
+                &mut candidates,
+                readability_scores,
+                &discovery.remove_after_scoring,
+            );
+            let body = working_dom.body().ok_or(Error::NoBody)?;
+            let selection = select_content_root(
+                &working_dom,
+                &candidates,
+                &ranked,
+                body,
+                self.structured_data
+                    .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+            );
+
+            // Move the selected working tree into the extraction path. Keep the
+            // prepared source as the immutable input for a possible retry.
+            let source_dom = std::mem::replace(&mut self.dom, working_dom);
             let body = self.dom.body().ok_or(Error::NoBody)?;
-            let (top_id, synthetic) = if top.is_empty() || top[0].0 == body {
-                let c = self
+            let (top_id, synthetic) = if !selection.branches.is_empty() {
+                let container = self
+                    .create_container(selection.branches[0], &selection.branches)
+                    .ok_or(Error::NoContent)?;
+                initialize_node(&self.dom, container, &mut self.node_data, self.flags);
+                (container, true)
+            } else if selection.node == body {
+                let container = self
                     .dom
                     .create_html_element(Tag::Div)
                     .map_err(|_| Error::NoContent)?;
                 let children: SmallVec<[NodeId; 16]> = self.dom.children(body).collect();
-                for x in children {
-                    self.dom.append_child(c, x)
+                for child in children {
+                    self.dom.append_child(container, child)
                 }
-                self.dom.append_child(body, c);
-                initialize_node(&self.dom, c, &mut self.node_data, self.flags);
-                (c, true)
+                self.dom.append_child(body, container);
+                initialize_node(&self.dom, container, &mut self.node_data, self.flags);
+                (container, true)
             } else {
-                let mut tc = top[0].0;
-                let top_score = top[0].1;
-                let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = top
-                    .iter()
-                    .skip(1)
-                    .filter(|(_, score, _)| *score / top_score >= 0.75)
-                    .map(|(id, _, _)| self.dom.ancestors(*id).collect())
-                    .collect();
-                if alternatives.len() >= 3 {
-                    let mut p = self.dom.parent(tc);
-                    while let Some(x) = p {
-                        if x == body {
+                let mut top_id = selection.node;
+                // Preserve Readability's useful boundary expansion when the
+                // structural selector accepts the raw ranking winner. Explicit
+                // child, parent, or schema choices are already final.
+                if selection.reason == RootSelectionReason::Ranked {
+                    let top_score = ranked[0].score;
+                    let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = ranked
+                        .iter()
+                        .skip(1)
+                        .filter(|candidate| candidate.score / top_score >= 0.75)
+                        .filter(|candidate| {
+                            candidates.get(candidate.node).is_some_and(|candidate| {
+                                candidate.has_source(CandidateSource::Readability)
+                                    || candidate.has_source(CandidateSource::Semantic)
+                            })
+                        })
+                        .map(|candidate| self.dom.ancestors(candidate.node).collect())
+                        .collect();
+                    if alternatives.len() >= 3 {
+                        let mut parent = self.dom.parent(top_id);
+                        while let Some(node) = parent {
+                            if node == body {
+                                break;
+                            }
+                            if alternatives
+                                .iter()
+                                .filter(|ancestors| ancestors.contains(&node))
+                                .count()
+                                >= 3
+                            {
+                                top_id = node;
+                                break;
+                            }
+                            parent = self.dom.parent(node)
+                        }
+                    }
+                    if !self.node_data.has(top_id) {
+                        initialize_node(&self.dom, top_id, &mut self.node_data, self.flags)
+                    }
+                    let threshold = self.node_data.get_content_score(top_id) / 3.0;
+                    let mut last = self.node_data.get_content_score(top_id);
+                    let mut parent = self.dom.parent(top_id);
+                    while let Some(node) = parent {
+                        if node == body {
                             break;
                         }
-                        if alternatives.iter().filter(|a| a.contains(&x)).count() >= 3 {
-                            tc = x;
+                        if let Some(score) = self.node_data.get(node).map(|data| data.content_score)
+                        {
+                            if score < threshold {
+                                break;
+                            }
+                            if score > last {
+                                top_id = node;
+                                break;
+                            }
+                            last = score;
+                        }
+                        parent = self.dom.parent(node)
+                    }
+                    while let Some(parent) = self.dom.parent(top_id) {
+                        if parent == body {
                             break;
                         }
-                        p = self.dom.parent(x)
-                    }
-                }
-                if !self.node_data.has(tc) {
-                    initialize_node(&self.dom, tc, &mut self.node_data, self.flags)
-                }
-                let mut p = self.dom.parent(tc);
-                let threshold = self.node_data.get_content_score(tc) / 3.;
-                let mut last = self.node_data.get_content_score(tc);
-                while let Some(x) = p {
-                    if x == body {
-                        break;
-                    }
-                    if let Some(s) = self.node_data.get(x).map(|e| e.content_score) {
-                        if s < threshold {
+                        let mut children = self.dom.element_children(parent);
+                        if children.next().is_some() && children.next().is_none() {
+                            top_id = parent;
+                        } else {
                             break;
                         }
-                        if s > last {
-                            tc = x;
-                            break;
-                        }
-                        last = s
-                    }
-                    p = self.dom.parent(x)
-                }
-                while let Some(p) = self.dom.parent(tc) {
-                    if p == body {
-                        break;
-                    }
-                    let mut ec = self.dom.element_children(p);
-                    if ec.next().is_some() && ec.next().is_none() {
-                        tc = p
-                    } else {
-                        break;
                     }
                 }
-                (tc, false)
+                if !self.node_data.has(top_id) {
+                    initialize_node(&self.dom, top_id, &mut self.node_data, self.flags)
+                }
+                (top_id, false)
             };
             let article_id = if synthetic {
                 top_id
             } else {
-                let sib = Self::gather_siblings(
-                    &self.dom,
-                    top_id,
-                    &mut self.node_data,
-                    self.options.debug,
-                );
-                self.create_container(top_id, &sib).unwrap_or(top_id)
+                let siblings = if selection.reason == RootSelectionReason::Ranked {
+                    Self::gather_siblings(
+                        &self.dom,
+                        top_id,
+                        &mut self.node_data,
+                        self.options.debug,
+                    )
+                } else {
+                    SmallVec::from_slice(&[top_id])
+                };
+                self.create_container(top_id, &siblings).unwrap_or(top_id)
             };
+
+            if let Some(direction) = std::iter::once(top_id)
+                .chain(self.dom.ancestors(top_id))
+                .find_map(|node| self.dom.attr(node, AttrName::Dir))
+            {
+                self.article_dir = Some(direction.to_owned());
+            }
+
+            // Cleanup owns a compact copy of the selected region. The source
+            // DOM remains available for a retry and is never affected by an
+            // earlier attempt's mutations.
+            let fragment = self
+                .dom
+                .copy_subtree_as_fragment(article_id)
+                .map_err(|_| Error::NoContent)?;
+            let article_id = fragment
+                .first_child(fragment.root())
+                .ok_or(Error::NoContent)?;
+            self.dom = fragment;
+            self.node_data.clear();
+            self.node_data.enable_link_lengths();
+
             let video = regexps::VIDEOS.clone();
             self.prep_article(
                 article_id,
@@ -500,12 +404,10 @@ impl<'a> Readability<'a> {
                         content: FrozenContent { dom },
                         text_len_chars: len,
                         excerpt,
+                        direction: self.article_dir.clone(),
                     });
                 }
-                let retry = if self.flags & FLAG_STRIP_UNLIKELYS != 0 {
-                    self.flags &= !FLAG_STRIP_UNLIKELYS;
-                    true
-                } else if self.flags & FLAG_WEIGHT_CLASSES != 0 {
+                let retry = if self.flags & FLAG_WEIGHT_CLASSES != 0 {
                     self.flags &= !FLAG_WEIGHT_CLASSES;
                     true
                 } else if self.flags & FLAG_CLEAN_CONDITIONALLY != 0 {
@@ -515,7 +417,7 @@ impl<'a> Readability<'a> {
                     false
                 };
                 if retry {
-                    self.reparse_prepare()?;
+                    self.restore_source(source_dom);
                     continue;
                 }
                 let best = self.best_attempt.take().ok_or(Error::NoContent)?;
@@ -523,20 +425,13 @@ impl<'a> Readability<'a> {
                     return Err(Error::NoContent);
                 }
                 self.dom = best.content.dom;
+                self.article_dir = best.direction;
                 let root = self.dom.root();
                 return Ok(ArticleContent {
                     text_length: best.text_len_chars,
                     excerpt: best.excerpt,
                     article_root: root,
                 });
-            }
-            let mut p = Some(top_id);
-            while let Some(x) = p {
-                if let Some(d) = self.dom.attr(x, AttrName::Dir) {
-                    self.article_dir = Some(d.into());
-                    break;
-                }
-                p = self.dom.parent(x)
             }
             let excerpt = self.article_excerpt(article_id);
             self.post_process(article_id, &mut cleaning_nodes);
@@ -552,10 +447,261 @@ impl<'a> Readability<'a> {
             });
         }
     }
-    fn initialize_node_once(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) -> bool {
-        let score = compute_initial_readability_data(dom, id, flags);
-        store.initialize_if_absent(id, score)
+    fn discover_candidates(
+        &mut self,
+        match_buffer: &mut String,
+        text_buffer: &mut String,
+    ) -> CandidateDiscovery {
+        let candidates = CandidateSet::discover_semantic(&self.dom);
+        let mut to_score = SmallVec::<[NodeId; 256]>::new();
+        let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
+        let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
+        if let Some(html) = self.dom.html_element() {
+            if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
+                self.article_lang = Some(lang.into())
+            }
+            if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
+                self.article_dir = Some(dir.into())
+            }
+        }
+        self.node_data.sync_len(self.dom.len());
+        let initial_nodes = self
+            .dom
+            .element_descendants_snapshot_with_depth(self.dom.root());
+        let mut excluded_depth = None;
+        let mut remove_title = true;
+        for (id, depth) in initial_nodes {
+            if let Some(root_depth) = excluded_depth {
+                if depth > root_depth {
+                    continue;
+                }
+                excluded_depth = None
+            }
+            let tag = self
+                .dom
+                .tag(id)
+                .expect("element snapshot must contain only elements");
+            if tag == Tag::A {
+                self.node_data.enable_link_lengths();
+            }
+            if !is_probably_visible(&self.dom, id)
+                || self.dom.attr(id, AttrName::AriaModal) == Some("true")
+                    && self.dom.attr(id, AttrName::Role) == Some("dialog")
+            {
+                remove_after_scoring.push(id);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if self.article_byline.is_none() && !self.metadata.has_source_author {
+                build_match_string(&self.dom, id, match_buffer);
+                if is_valid_byline(&self.dom, id, match_buffer, text_buffer) {
+                    let mut names = Vec::new();
+                    self.dom
+                        .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
+                    let name = names.first().copied().or_else(|| {
+                        let has_timestamp_separator = self
+                            .dom
+                            .descendants(id)
+                            .filter_map(|node| self.dom.text_node(node))
+                            .any(|text| text.split_whitespace().any(|token| token == "@"));
+                        if !has_timestamp_separator {
+                            return None;
+                        }
+                        let mut links = self
+                            .dom
+                            .descendants(id)
+                            .filter(|&node| dom_text_candidate(&self.dom, node));
+                        let link = links.next()?;
+                        links.next().is_none().then_some(link)
+                    });
+                    self.article_byline =
+                        Some(get_inner_text(&self.dom, name.unwrap_or(id), text_buffer).to_owned());
+                    remove_after_scoring.push(id);
+                    excluded_depth = Some(depth);
+                    continue;
+                }
+            }
+            let duplicates_title = if remove_title && matches!(tag, Tag::H1 | Tag::H2) {
+                let heading = get_inner_text(&self.dom, id, text_buffer);
+                heading_matches_article_title(&self.article_title, heading)
+            } else {
+                false
+            };
+            if duplicates_title {
+                remove_title = false;
+                remove_after_scoring.push(id);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if matches!(
+                tag,
+                Tag::Div
+                    | Tag::Section
+                    | Tag::Header
+                    | Tag::H1
+                    | Tag::H2
+                    | Tag::H3
+                    | Tag::H4
+                    | Tag::H5
+                    | Tag::H6
+            ) && is_element_without_content(&self.dom, id)
+            {
+                remove_after_scoring.push(id);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if is_default_tag_to_score(tag) && self.node_data.mark_score_seen(id) {
+                to_score.push(id)
+            }
+            if tag == Tag::Div {
+                divs_to_prepare.push(id)
+            }
+        }
+        CandidateDiscovery {
+            candidates,
+            to_score,
+            divs_to_prepare,
+            remove_after_scoring,
+        }
     }
+
+    fn rank_candidates(
+        &mut self,
+        dom: &Dom,
+        candidates: &mut CandidateSet,
+        readability_scores: SmallVec<[ReadabilityScore; 64]>,
+        excluded: &[NodeId],
+    ) -> SmallVec<[RankedCandidate; 64]> {
+        for readability in readability_scores {
+            candidates.add_readability(readability.node, readability.score);
+        }
+
+        // Ranking can receive a tree with deferred clutter detached. Do not
+        // reuse text or link totals from an earlier view of the same node IDs.
+        self.node_data.clear_stats();
+        let mut table_nodes = Vec::new();
+        mark_data_tables(dom, dom.root(), &mut self.node_data, &mut table_nodes);
+        let feature_index = CandidateFeatureIndex::new(dom, &self.node_data);
+        feature_index.prepare_text_cache(&mut self.node_data);
+        for candidate in candidates.iter_mut() {
+            candidate.features =
+                feature_index.features(dom, *candidate, &mut self.node_data, self.flags);
+        }
+
+        let context = candidates.ranking_context(dom);
+        let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(order, candidate)| {
+                if Self::is_excluded_candidate(dom, candidate.node, excluded) {
+                    return None;
+                }
+                let length =
+                    get_or_compute_stats(dom, candidate.node, &mut self.node_data).text_length;
+                if length == 0 && Some(candidate.node) != dom.body() {
+                    return None;
+                }
+                let is_semantic = candidate.has_source(CandidateSource::Semantic);
+                let is_authoritative = candidates.is_authoritative_semantic(dom, candidate.node);
+                let has_readability = context.has_readability(candidate.node);
+                let has_meaningful_content = has_readability
+                    || candidate.features.code_block_count > 0
+                    || candidate.features.table_count > 0
+                    || candidate.features.list_item_count >= 3
+                    || candidate.features.figure_count > 0
+                    || candidate.features.paragraph_count > 0
+                        && candidate.features.word_count >= 3
+                        && candidate.features.sentence_end_count > 0;
+                if is_semantic && !is_authoritative && !has_readability && !has_meaningful_content {
+                    return None;
+                }
+                let is_generic_only = candidate.has_source(CandidateSource::Generic)
+                    && !is_semantic
+                    && !candidate.has_source(CandidateSource::Readability);
+                let has_distinct_structural_content = candidate.features.code_block_count > 0
+                    || candidate.features.table_count > 0
+                    || candidate.features.list_item_count >= 3
+                    || candidate.features.figure_count > 0
+                    || dom.tag(candidate.node) == Some(Tag::Td) && has_meaningful_content;
+                if is_generic_only && !has_distinct_structural_content {
+                    return None;
+                }
+                let short_semantic_bonus = if is_authoritative
+                    && has_meaningful_content
+                    && !context.has_authoritative_ancestor(candidate.node)
+                    && !context.has_authoritative_descendant(candidate.node, is_authoritative)
+                {
+                    25.0 * (1.0 - (f64::from(length.min(100)) / 100.0))
+                } else {
+                    0.0
+                };
+                let is_main = dom.tag(candidate.node) == Some(Tag::Main)
+                    || dom
+                        .attr(candidate.node, AttrName::Role)
+                        .is_some_and(|role| {
+                            role.split_whitespace()
+                                .any(|value| value.eq_ignore_ascii_case("main"))
+                        });
+                let (article_peer_count, article_peer_score) = if is_main {
+                    context.article_peer_summary(candidate.node)
+                } else {
+                    (0, 0.0)
+                };
+                let sibling_content_bonus = if length <= 1_000 && article_peer_count >= 2 {
+                    article_peer_score + 0.1
+                } else {
+                    0.0
+                };
+                // A small boundary bonus lets a focused generic container beat
+                // a broad ancestor with the same structural evidence. It is too
+                // small to override a Readability prose score.
+                let generic_boundary_bonus = if candidate.node
+                    != dom.body().unwrap_or(candidate.node)
+                    && is_generic_only
+                    && has_distinct_structural_content
+                {
+                    0.01
+                } else {
+                    0.0
+                };
+                let final_score = candidate.features.ranking_score()
+                    + short_semantic_bonus
+                    + sibling_content_bonus
+                    + generic_boundary_bonus;
+                self.node_data.set_score(candidate.node, final_score);
+                Some(RankedCandidate {
+                    node: candidate.node,
+                    score: final_score,
+                    order,
+                })
+            })
+            .collect();
+        let top_count = self.options.top_candidates.min(scored.len());
+        if top_count < scored.len() {
+            scored.select_nth_unstable_by(top_count, |a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.order.cmp(&b.order))
+            });
+            scored.truncate(top_count);
+        }
+        scored.sort_unstable_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.order.cmp(&b.order))
+        });
+        scored
+    }
+
+    fn is_excluded_candidate(dom: &Dom, id: NodeId, excluded: &[NodeId]) -> bool {
+        excluded.contains(&id)
+            || dom
+                .ancestors(id)
+                .any(|ancestor| excluded.contains(&ancestor))
+    }
+
     fn gather_siblings(
         dom: &Dom,
         top: NodeId,
@@ -647,6 +793,7 @@ impl<'a> Readability<'a> {
             nodes,
             self.options.link_density_modifier,
         );
+        clean_breadcrumb_navigation(&mut self.dom, root, nodes);
         clean_tags(
             &mut self.dom,
             root,
@@ -674,7 +821,6 @@ impl<'a> Readability<'a> {
             video,
             nodes,
         );
-        clean_headers(&mut self.dom, root, self.flags, nodes);
         clean_conditionally(
             &mut self.dom,
             root,
@@ -885,21 +1031,20 @@ impl<'a> Readability<'a> {
         }
         simplify_nested_elements(&mut self.dom, root, nodes);
     }
-    fn reparse_prepare(&mut self) -> Result<()> {
-        self.dom = Dom::parse_document(self.original_html).map_err(|_| Error::NoContent)?;
-        unwrap_noscript_images(&mut self.dom);
-        prep_document(&mut self.dom);
+    fn restore_source(&mut self, source: Dom) {
+        self.dom = source;
         self.article_byline = None;
         self.article_dir = None;
         self.article_lang = None;
         self.node_data.clear();
-        if self.dom.body().is_none() {
-            Err(Error::NoBody)
-        } else {
-            Ok(())
-        }
     }
 }
+fn dom_text_candidate(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::A)
+        && dom.has_non_whitespace_text(node)
+        && dom.normalized_char_count(node) < 100
+}
+
 fn heading_matches_article_title(article_title: &str, heading: &str) -> bool {
     metadata::text_similarity(article_title, heading) > 0.75
         || article_title.strip_prefix(heading).is_some_and(|suffix| {
@@ -911,15 +1056,190 @@ fn heading_matches_article_title(article_title: &str, heading: &str) -> bool {
         })
 }
 
-fn has_ancestor_tags_any(dom: &Dom, id: NodeId, tags: &[Tag], max: usize) -> bool {
-    dom.ancestors(id)
-        .take(max)
-        .any(|x| dom.tag(x).is_some_and(|t| tags.contains(&t)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ranked_winner_id(html: &str) -> String {
+        let dom = Dom::parse_document(html).unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(dom, None, &config);
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let mut scoring_dom = readability.dom.clone();
+        let mut to_score = discovery.to_score;
+        let prepared = prepare_readability_structure(
+            &mut scoring_dom,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+        );
+        readability.node_data.sync_len(scoring_dom.len());
+        for node in prepared {
+            if readability.node_data.mark_score_seen(node) {
+                to_score.push(node);
+            }
+        }
+        let scores = compute_readability_scores(
+            &mut scoring_dom,
+            to_score,
+            &discovery.remove_after_scoring,
+            &mut readability.node_data,
+            readability.flags,
+        );
+        let mut candidates = discovery.candidates;
+        let ranked = readability.rank_candidates(
+            &scoring_dom,
+            &mut candidates,
+            scores,
+            &discovery.remove_after_scoring,
+        );
+        scoring_dom
+            .attr(ranked[0].node, AttrName::Id)
+            .expect("winner must have a test ID")
+            .to_owned()
+    }
+
+    #[test]
+    fn ranks_article_and_non_article_content() {
+        let fixtures = [
+            (
+                r#"<body><aside><p>Brief promotion with ordinary prose.</p></aside><article id="wanted"><p>A normal article has complete sentences, useful detail, commas, and enough text for paragraph scoring.</p></article></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="summary"><p>A misleading prose summary has many words, clauses, and punctuation.</p></div><main id="wanted"><h1>Build reference</h1><pre><code>cargo build --release
+cargo test</code></pre><p>Run these commands.</p></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="summary"><p>A competing prose summary has complete sentences, commas, and article-like words.</p></div><main id="wanted"><h1>Status codes</h1><table><tr><th>Code</th><th>Meaning</th></tr><tr><td>200</td><td>Success</td></tr></table></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="post-content sidebar"><p>This sidebar has polished prose, but describes an unrelated promotion.</p></div><main id="wanted"><h1>API index</h1><ul><li><a href="/a">Alpha reference</a></li><li><a href="/b">Beta reference</a></li><li><a href="/c">Gamma reference</a></li><li><a href="/d">Delta reference</a></li></ul></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="post-content sidebar"><p>Misleading positive text in a sidebar with several ordinary words.</p></div><article id="wanted"><p>The actual article has useful prose, multiple clauses, commas, and stronger content evidence for ranking.</p><p>Its second paragraph adds relevant facts and a complete explanation.</p><p>Its third paragraph continues the primary discussion with useful detail.</p><p>Its final paragraph gives a clear conclusion for the reader.</p></article></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><div id="other" class="post-content"><p>Short teaser.</p></div><main id="wanted" class="sidebar article-content"><p>This substantial guide remains useful although one class token is negative. It has complete sentences and enough detail.</p><p>A second paragraph confirms the content evidence.</p></main></body>"#,
+                "wanted",
+            ),
+            (
+                r#"<body><main id="wanted"><article><h2>First card</h2><p>First useful summary.</p></article><article><h2>Second card</h2><p>Second useful summary.</p></article><article><h2>Third card</h2><p>Third useful summary.</p></article></main></body>"#,
+                "wanted",
+            ),
+        ];
+
+        for (html, expected) in fixtures {
+            assert_eq!(ranked_winner_id(html), expected, "{html}");
+        }
+    }
+
+    #[test]
+    fn tiny_semantic_placeholder_does_not_override_substantive_content() {
+        let html = r#"<body><main id="placeholder">Loading...</main><section id="wanted"><p>The substantive section contains complete article prose, useful details, commas, and enough text for normal paragraph scoring.</p></section></body>"#;
+
+        let text = crate::extract(html, None).unwrap().text();
+
+        assert!(text.contains("substantive section"), "{text}");
+    }
+
+    #[test]
+    fn conflicting_class_tokens_do_not_delete_substantial_content() {
+        let html = r#"<body>
+            <div class="sidebar article-content">
+                <h1>Retained guide</h1>
+                <p>This substantial article explains the subject with complete sentences and useful detail.</p>
+                <pre><code>cargo test</code></pre>
+                <table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td>test</td><td>Validate changes</td></tr></tbody></table>
+                <figure><img src="diagram.png" alt="Flow"><figcaption>Extraction flow</figcaption></figure>
+            </div>
+            <div class="article-content"><p>Short competing teaser.</p></div>
+        </body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("substantial article"), "{markdown}");
+        assert!(markdown.contains("cargo test"), "{markdown}");
+        assert!(markdown.contains("Command"), "{markdown}");
+        assert!(markdown.contains("Extraction flow"), "{markdown}");
+        assert!(!markdown.contains("competing teaser"), "{markdown}");
+    }
+
+    #[test]
+    fn cleanup_protects_semantic_content_inside_negative_wrappers() {
+        let html = r#"<body><main>
+            <div class="sidebar">
+                <h2 class="related">Unrelated recommendations</h2>
+                <ul>
+                    <li><a href="/one">Unrelated linked item one</a></li>
+                    <li><a href="/two">Unrelated linked item two</a></li>
+                    <li><a href="/three">Unrelated linked item three</a></li>
+                </ul>
+                <pre><code>cargo test --all-features</code></pre>
+                <figure><img src="flow.png" alt="Flow"><figcaption>Validation flow</figcaption></figure>
+            </div>
+            <div><p>This sibling has enough prose to keep the main root selected while cleanup inspects the negative wrapper. It explains the primary topic in detail, provides careful context, describes the expected behavior, and gives readers a complete answer. The next part adds implementation constraints, practical examples, validation steps, and recovery guidance. Another part documents the inputs, outputs, edge cases, compatibility requirements, and important tradeoffs. The final part summarizes the recommended approach, explains why it works, and identifies the checks that confirm a correct result.</p></div>
+        </main></body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("cargo test --all-features"), "{markdown}");
+        assert!(markdown.contains("Validation flow"), "{markdown}");
+        assert!(!markdown.contains("Unrelated linked item"), "{markdown}");
+    }
+
+    #[test]
+    fn unlikely_roles_are_evidence_instead_of_deletion_rules() {
+        let html = r#"<body><div role="complementary" class="article-content">
+            <p>This complete guide remains available despite its conflicting semantic role.</p>
+            <p>Strong content evidence keeps the useful extraction candidate.</p>
+        </div></body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("complete guide"), "{markdown}");
+        assert!(markdown.contains("Strong content evidence"), "{markdown}");
+    }
+
+    #[test]
+    fn retries_restore_the_source_before_relaxed_cleanup() {
+        let html = r#"<body><main dir="rtl">
+            <p>A short stable introduction.</p>
+            <div class="sidebar"><p><a href="/recovered">Useful linked reference recovered by the relaxed attempt.</a></p></div>
+        </main></body>"#;
+
+        let page = crate::extract(html, Some("https://example.com/docs/page")).unwrap();
+        let output = page.html();
+
+        // The normal conditional pass removes the link-heavy negative wrapper.
+        // The final retry disables that pass and must start from the source.
+        assert!(output.contains("Useful linked reference"), "{output}");
+        assert!(
+            output.contains("href=\"https://example.com/recovered\""),
+            "{output}"
+        );
+        assert_eq!(page.metadata().direction.as_deref(), Some("rtl"));
+    }
+
+    #[test]
+    fn email_addresses_are_not_treated_as_byline_timestamp_separators() {
+        let html = r#"<body><main>
+            <div class="byline">Contact editor@example.com <a href="/team">Editorial team</a></div>
+            <p>This article has enough complete prose to produce useful extracted content for the test.</p>
+        </main></body>"#;
+
+        let page = crate::extract(html, None).unwrap();
+
+        assert_eq!(
+            page.metadata().authors,
+            ["Contact editor@example.com Editorial team"]
+        );
+    }
 
     #[test]
     fn recognizes_title_prefix_with_whitespace_before_separator() {
@@ -928,5 +1248,202 @@ mod tests {
             "Article"
         ));
         assert!(!heading_matches_article_title("Different title", "Article"));
+    }
+
+    #[test]
+    fn readability_discovery_adds_and_selects_a_non_semantic_candidate() {
+        let html = r#"<body><blockquote><p>
+            Traditional article prose has enough detail, punctuation, and length to identify this container.
+        </p></blockquote><footer>Page footer</footer></body>"#;
+        let dom = Dom::parse_document(html).unwrap();
+        let content = dom
+            .first_descendant_by_tag(dom.root(), Tag::Blockquote)
+            .unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(dom, None, &config);
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        assert!(!discovery.candidates.is_semantic(content));
+        let mut scoring_dom = readability.dom.clone();
+        let mut to_score = discovery.to_score;
+        let prepared = prepare_readability_structure(
+            &mut scoring_dom,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+        );
+        readability.node_data.sync_len(scoring_dom.len());
+        for node in prepared {
+            if readability.node_data.mark_score_seen(node) {
+                to_score.push(node);
+            }
+        }
+        let scores = compute_readability_scores(
+            &mut scoring_dom,
+            to_score,
+            &discovery.remove_after_scoring,
+            &mut readability.node_data,
+            readability.flags,
+        );
+        assert!(scores.iter().any(|score| score.node == content));
+
+        let mut candidates = discovery.candidates;
+        let ranked = readability.rank_candidates(
+            &scoring_dom,
+            &mut candidates,
+            scores,
+            &discovery.remove_after_scoring,
+        );
+        assert_eq!(ranked[0].node, content);
+    }
+
+    #[test]
+    fn semantic_ranking_can_override_the_readability_winner() {
+        let html = r#"<body><main><h2>Semantic context</h2><blockquote>
+            <p>Focused sentence has enough text.</p>
+        </blockquote></main></body>"#;
+        let dom = Dom::parse_document(html).unwrap();
+        let main = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+        let blockquote = dom
+            .first_descendant_by_tag(dom.root(), Tag::Blockquote)
+            .unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(dom, None, &config);
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let mut scoring_dom = readability.dom.clone();
+        let mut to_score = discovery.to_score;
+        let prepared = prepare_readability_structure(
+            &mut scoring_dom,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+        );
+        readability.node_data.sync_len(scoring_dom.len());
+        for node in prepared {
+            if readability.node_data.mark_score_seen(node) {
+                to_score.push(node);
+            }
+        }
+        let scores = compute_readability_scores(
+            &mut scoring_dom,
+            to_score,
+            &discovery.remove_after_scoring,
+            &mut readability.node_data,
+            readability.flags,
+        );
+
+        let raw_winner = scores
+            .iter()
+            .max_by(|left, right| left.score.total_cmp(&right.score))
+            .unwrap();
+        assert_eq!(raw_winner.node, blockquote);
+        let mut candidates = discovery.candidates;
+        let ranked = readability.rank_candidates(
+            &scoring_dom,
+            &mut candidates,
+            scores,
+            &discovery.remove_after_scoring,
+        );
+        assert_eq!(ranked[0].node, main);
+    }
+
+    #[test]
+    fn ranking_invalidates_statistics_from_an_earlier_tree_view() {
+        let html = r#"<body><main id="wanted"><p>Visible answer.</p><div id="excluded"><a href="/ad">Excluded linked promotion with many extra words.</a></div></main></body>"#;
+        let source = Dom::parse_document(html).unwrap();
+        let main = source
+            .first_descendant_by_tag(source.root(), Tag::Main)
+            .unwrap();
+        let excluded = source
+            .descendants(source.root())
+            .find(|&node| source.attr(node, AttrName::Id) == Some("excluded"))
+            .unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(source.clone(), None, &config);
+        readability.node_data.enable_link_lengths();
+        let stale = get_or_compute_stats(&source, main, &mut readability.node_data);
+        assert!(stale.text_length > 50);
+        assert!(readability.node_data.link_length(main) > 0.0);
+
+        let mut ranking_dom = source;
+        ranking_dom.detach(excluded);
+        let mut candidates = CandidateSet::discover_semantic(&ranking_dom);
+        readability.rank_candidates(&ranking_dom, &mut candidates, SmallVec::new(), &[]);
+
+        let fresh = get_or_compute_stats(&ranking_dom, main, &mut readability.node_data);
+        assert_eq!(fresh.text_length, 15);
+        assert_eq!(readability.node_data.link_length(main), 0.0);
+    }
+
+    #[test]
+    fn discovery_preserves_unlikely_subtrees_for_scoring() {
+        let html = r#"<body>
+            <div class="sidebar" id="unlikely"><p>This sidebar text is long enough to inspect.</p></div>
+            <main><p>This primary content is long enough to score as a candidate.</p></main>
+        </body>"#;
+        let dom = Dom::parse_document(html).unwrap();
+        let config = ExtractorConfig::default();
+        let mut readability = Readability::from_document(dom, None, &config);
+        let unlikely = readability
+            .dom
+            .descendants(readability.dom.root())
+            .find(|&id| readability.dom.attr(id, AttrName::Id) == Some("unlikely"))
+            .unwrap();
+        let parent = readability.dom.parent(unlikely);
+        let dom_len = readability.dom.len();
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+
+        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let normal = readability
+            .dom
+            .descendants(readability.dom.root())
+            .find(|&id| readability.dom.tag(id) == Some(Tag::Main))
+            .unwrap();
+        let normal_parent = readability.dom.parent(normal);
+        let normal_tag = readability.dom.tag(normal);
+        let normal_attrs = readability.dom.attrs(normal).to_vec();
+        let mut scoring_dom = readability.dom.clone();
+        let prepared = prepare_readability_structure(
+            &mut scoring_dom,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+        );
+        let mut to_score = discovery.to_score.clone();
+        readability.node_data.sync_len(scoring_dom.len());
+        for id in prepared {
+            if readability.node_data.mark_score_seen(id) {
+                to_score.push(id)
+            }
+        }
+        let scores = compute_readability_scores(
+            &mut scoring_dom,
+            to_score,
+            &discovery.remove_after_scoring,
+            &mut readability.node_data,
+            readability.flags,
+        );
+        let mut candidates = discovery.candidates;
+        let _ = readability.rank_candidates(
+            &scoring_dom,
+            &mut candidates,
+            scores,
+            &discovery.remove_after_scoring,
+        );
+
+        // Scoring can replace simple wrappers in its private copy. The source
+        // subtree remains intact and contributes the same visible text.
+        assert!(
+            scoring_dom
+                .text(scoring_dom.root())
+                .contains("sidebar text")
+        );
+        assert_eq!(readability.dom.parent(unlikely), parent);
+        assert_eq!(readability.dom.parent(normal), normal_parent);
+        assert_eq!(readability.dom.tag(normal), normal_tag);
+        assert_eq!(readability.dom.attrs(normal), normal_attrs);
+        assert_eq!(readability.dom.len(), dom_len);
+        assert!(!discovery.remove_after_scoring.contains(&unlikely));
     }
 }

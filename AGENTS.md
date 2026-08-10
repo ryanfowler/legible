@@ -42,8 +42,9 @@ The extraction pipeline flows through these stages:
 |---|---|
 | `extractor.rs` | Public builder, extraction config |
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
+| `candidate.rs` | Internal candidate model and structural root selection |
 | `readability.rs` | Candidate selection, scoring, content consolidation |
-| `scoring.rs` | Tag/class/link-density scoring, cached text statistics |
+| `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation, post-extraction cleanup |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
@@ -61,9 +62,11 @@ These invariants are costly to violate:
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
 - **Lazy rendering.** `ExtractedPage` owns the cleaned DOM. Render HTML, Markdown, and text lazily. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
-- **Preparation order:** remove scripts and styles, normalise body BR runs, then rename font elements. One linear traversal per stage.
+- **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
+- **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
+- **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
-- **Reuse across retries.** Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
+- **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
 
 ### Common Pitfalls
 
@@ -74,15 +77,14 @@ These invariants are costly to violate:
 
 ### Scoring System
 
-Initial scores by tag: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, ADDRESS/OL/UL/DL/FORM -3. Class/ID patterns matching positive/negative regexes add ±25.
+Candidate ranking combines Readability propagation with text, structure, link-density, and class/ID features. It gives extra weight to code, data tables, and meaningful link lists. A separate structural pass selects a precise child, a common semantic parent, or a close schema-text match. Readability initial scores remain: DIV +5, PRE/TD/BLOCKQUOTE +3, H1-H6/TH -5, and ADDRESS/OL/UL/DL/FORM -3. Class/ID patterns matching positive/negative regexes add ±25 to the Readability feature.
 
 ### Algorithm Flags
 
-- `FLAG_STRIP_UNLIKELYS` (0x1) - Remove non-content-like elements
 - `FLAG_WEIGHT_CLASSES` (0x2) - Score based on class/id patterns
 - `FLAG_CLEAN_CONDITIONALLY` (0x4) - Conditional cleanup pass
 
-The algorithm retries with progressively fewer flags if initial extraction fails.
+Unlikely class, ID, and role values are negative ranking evidence. They do not remove candidates during discovery. The algorithm retries with progressively fewer flags if initial extraction fails.
 
 ## Documentation
 

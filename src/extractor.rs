@@ -58,7 +58,7 @@ impl Extractor {
     /// relative links and media URLs.
     pub fn extract(&self, html: &str, url: Option<&str>) -> Result<ExtractedPage> {
         let dom = Dom::parse_document(html).expect("HTML DOM node limit exceeded");
-        Readability::from_document(dom, html, url, &self.config).extract()
+        Readability::from_document(dom, url, &self.config).extract()
     }
 }
 
