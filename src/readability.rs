@@ -1,5 +1,6 @@
 //! Readability-derived content extraction.
 #![allow(clippy::collapsible_if)]
+use crate::candidate::{CandidateSet, CandidateSource};
 use crate::cleaning::*;
 use crate::constants::{
     flags::*, has_share_element, is_alter_to_div_exception, is_default_tag_to_score,
@@ -51,6 +52,7 @@ struct ArticleContent {
 }
 
 struct CandidateDiscovery {
+    candidates: CandidateSet,
     to_score: SmallVec<[NodeId; 256]>,
     divs_to_prepare: SmallVec<[NodeId; 128]>,
     remove_after_scoring: SmallVec<[NodeId; 64]>,
@@ -181,21 +183,33 @@ impl<'a> Readability<'a> {
             // discovery, score propagation, and final ranking are complete.
             let mut scoring_dom = self.dom.clone();
             let mut to_score = discovery.to_score;
-            let prepared =
-                Self::prepare_scoring_structure(&mut scoring_dom, &discovery.divs_to_prepare);
+            let prepared = Self::prepare_scoring_structure(
+                &mut scoring_dom,
+                &discovery.divs_to_prepare,
+                &discovery.candidates,
+            );
             self.node_data.sync_len(scoring_dom.len());
             for id in prepared {
                 if self.node_data.mark_score_seen(id) {
                     to_score.push(id)
                 }
             }
-            let candidates = self.propagate_candidate_scores(&scoring_dom, to_score);
-            let top =
-                self.rank_candidates(&scoring_dom, candidates, &discovery.remove_after_scoring);
+            let readability_candidates = self.propagate_candidate_scores(&scoring_dom, to_score);
+            let top = self.rank_candidates(
+                &scoring_dom,
+                discovery.candidates,
+                readability_candidates,
+                &discovery.remove_after_scoring,
+            );
 
             // Apply the already-planned preparation and cleanup only after the
             // non-destructive discovery and scoring phase has selected a root.
-            Self::prepare_scoring_structure(&mut self.dom, &discovery.divs_to_prepare);
+            let semantic_candidates = CandidateSet::discover_semantic(&self.dom);
+            Self::prepare_scoring_structure(
+                &mut self.dom,
+                &discovery.divs_to_prepare,
+                &semantic_candidates,
+            );
             for id in discovery.remove_after_scoring {
                 if self.dom.parent(id).is_some() {
                     self.dom.detach(id)
@@ -386,6 +400,7 @@ impl<'a> Readability<'a> {
         text_buffer: &mut String,
     ) -> CandidateDiscovery {
         let strip = self.flags & FLAG_STRIP_UNLIKELYS != 0;
+        let candidates = CandidateSet::discover_semantic(&self.dom);
         let mut to_score = SmallVec::<[NodeId; 256]>::new();
         let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
         let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
@@ -492,20 +507,32 @@ impl<'a> Readability<'a> {
             }
         }
         CandidateDiscovery {
+            candidates,
             to_score,
             divs_to_prepare,
             remove_after_scoring,
         }
     }
 
-    fn prepare_scoring_structure(dom: &mut Dom, divs: &[NodeId]) -> SmallVec<[NodeId; 256]> {
+    fn prepare_scoring_structure(
+        dom: &mut Dom,
+        divs: &[NodeId],
+        candidates: &CandidateSet,
+    ) -> SmallVec<[NodeId; 256]> {
         let mut to_score = SmallVec::new();
         for &id in divs {
             if dom.parent(id).is_none() {
                 continue;
             }
             wrap_phrasing_content_in_p(dom, id);
-            if has_single_tag_inside_element(dom, id, Tag::P) && get_link_density(dom, id) < 0.25 {
+            if candidates.is_semantic(id) {
+                to_score.extend(
+                    dom.element_children(id)
+                        .filter(|&child| dom.tag(child) == Some(Tag::P)),
+                );
+            } else if has_single_tag_inside_element(dom, id, Tag::P)
+                && get_link_density(dom, id) < 0.25
+            {
                 if let Some(paragraph) = dom.element_children(id).next() {
                     dom.replace_with(id, paragraph);
                     to_score.push(paragraph)
@@ -566,7 +593,8 @@ impl<'a> Readability<'a> {
     fn rank_candidates(
         &mut self,
         dom: &Dom,
-        candidates: SmallVec<[NodeId; 256]>,
+        mut candidates: CandidateSet,
+        readability_candidates: SmallVec<[NodeId; 256]>,
         excluded: &[NodeId],
     ) -> SmallVec<[(NodeId, f64, usize); 64]> {
         // Keep the scoring DOM intact through ranking. Calculate final density
@@ -580,16 +608,73 @@ impl<'a> Readability<'a> {
         }
         let dom = &ranking_dom;
         self.node_data.clear_stats();
+
+        for id in readability_candidates {
+            if Self::is_excluded_candidate(dom, id, excluded) {
+                continue;
+            }
+            let score = self.node_data.get_content_score(id);
+            let length = get_or_compute_stats(dom, id, &mut self.node_data).text_length;
+            let density = get_link_density_cached(dom, id, length, &mut self.node_data);
+            candidates.add_readability(id, score * (1.0 - density));
+        }
+
+        let context = candidates.ranking_context(dom);
         let mut scored: SmallVec<[(NodeId, f64, usize); 64]> = candidates
             .iter()
             .enumerate()
-            .map(|(order, &id)| {
-                let score = self.node_data.get_content_score(id);
-                let length = get_or_compute_stats(dom, id, &mut self.node_data).text_length;
-                let density = get_link_density_cached(dom, id, length, &mut self.node_data);
-                let final_score = score * (1.0 - density);
-                self.node_data.set_score(id, final_score);
-                (id, final_score, order)
+            .filter_map(|(order, candidate)| {
+                if Self::is_excluded_candidate(dom, candidate.node, excluded) {
+                    return None;
+                }
+                let length =
+                    get_or_compute_stats(dom, candidate.node, &mut self.node_data).text_length;
+                if length == 0 && !candidate.has_source(CandidateSource::Generic) {
+                    return None;
+                }
+                let is_semantic = candidate.has_source(CandidateSource::Semantic);
+                let is_authoritative = candidates.is_authoritative_semantic(dom, candidate.node);
+                let has_readability = context.has_readability(candidate.node);
+                if is_semantic && !is_authoritative && !has_readability {
+                    return None;
+                }
+                let semantic_content_score = if is_semantic {
+                    (f64::from(length) / 1_000_000.0).min(0.001)
+                } else {
+                    0.0
+                };
+                let short_semantic_bonus = if is_authoritative
+                    && !context.has_authoritative_ancestor(candidate.node)
+                    && !context.has_authoritative_descendant(candidate.node, is_authoritative)
+                {
+                    25.0 * (1.0 - (f64::from(length.min(100)) / 100.0))
+                } else {
+                    0.0
+                };
+                let is_main = dom.tag(candidate.node) == Some(Tag::Main)
+                    || dom
+                        .attr(candidate.node, AttrName::Role)
+                        .is_some_and(|role| {
+                            role.split_whitespace()
+                                .any(|value| value.eq_ignore_ascii_case("main"))
+                        });
+                let (article_peer_count, article_peer_score) = if is_main {
+                    context.article_peer_summary(candidate.node)
+                } else {
+                    (0, 0.0)
+                };
+                let sibling_content_bonus = if length <= 1_000 && article_peer_count >= 2 {
+                    article_peer_score + 0.1
+                } else {
+                    0.0
+                };
+                let final_score = candidate.score
+                    + candidate.semantic_prior
+                    + semantic_content_score
+                    + short_semantic_bonus
+                    + sibling_content_bonus;
+                self.node_data.set_score(candidate.node, final_score);
+                Some((candidate.node, final_score, order))
             })
             .collect();
         let top_count = self.options.top_candidates.min(scored.len());
@@ -607,6 +692,13 @@ impl<'a> Readability<'a> {
                 .then_with(|| a.2.cmp(&b.2))
         });
         scored
+    }
+
+    fn is_excluded_candidate(dom: &Dom, id: NodeId, excluded: &[NodeId]) -> bool {
+        excluded.contains(&id)
+            || dom
+                .ancestors(id)
+                .any(|ancestor| excluded.contains(&ancestor))
     }
 
     fn initialize_node_once(dom: &Dom, id: NodeId, store: &mut NodeStateStore, flags: u32) -> bool {
@@ -1016,8 +1108,11 @@ mod tests {
         let normal_tag = readability.dom.tag(normal);
         let normal_attrs = readability.dom.attrs(normal).to_vec();
         let mut scoring_dom = readability.dom.clone();
-        let prepared =
-            Readability::prepare_scoring_structure(&mut scoring_dom, &discovery.divs_to_prepare);
+        let prepared = Readability::prepare_scoring_structure(
+            &mut scoring_dom,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+        );
         let mut to_score = discovery.to_score.clone();
         readability.node_data.sync_len(scoring_dom.len());
         for id in prepared {
@@ -1026,8 +1121,12 @@ mod tests {
             }
         }
         let candidates = readability.propagate_candidate_scores(&scoring_dom, to_score);
-        let _ =
-            readability.rank_candidates(&scoring_dom, candidates, &discovery.remove_after_scoring);
+        let _ = readability.rank_candidates(
+            &scoring_dom,
+            discovery.candidates,
+            candidates,
+            &discovery.remove_after_scoring,
+        );
 
         assert!(scoring_dom.parent(unlikely).is_some());
         assert_eq!(readability.dom.parent(unlikely), parent);

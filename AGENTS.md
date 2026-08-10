@@ -42,6 +42,7 @@ The extraction pipeline flows through these stages:
 |---|---|
 | `extractor.rs` | Public builder, extraction config |
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
+| `candidate.rs` | Internal semantic and Readability candidate model |
 | `readability.rs` | Candidate selection, scoring, content consolidation |
 | `scoring.rs` | Tag/class/link-density scoring, cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation, post-extraction cleanup |

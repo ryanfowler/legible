@@ -49,6 +49,7 @@
 //! security policy before you insert the HTML into an untrusted page. Markdown output
 //! contains no raw HTML and omits destinations with unsupported URI schemes.
 
+mod candidate;
 mod cleaning;
 mod constants;
 mod dom;
