@@ -1,4 +1,4 @@
-//! Article extraction and its result type.
+//! Readability-derived content extraction.
 #![allow(clippy::collapsible_if)]
 use crate::cleaning::*;
 use crate::constants::{
@@ -7,98 +7,20 @@ use crate::constants::{
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
+use crate::extractor::ExtractorConfig;
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata};
-use crate::options::Options;
+use crate::page::ExtractedPage;
 use crate::scoring::*;
 use html5ever::ns;
 use regex::Regex;
 use smallvec::SmallVec;
 use url::Url;
 
-/// Extracted article content and metadata.
-///
-/// Legible returns content in HTML, CommonMark, and normalized plain-text formats.
-/// Metadata fields are `None` when Legible cannot find the applicable value.
-///
-/// # Example
-///
-/// ```rust
-/// use legible::parse;
-///
-/// let html = "<html><body><article><h1>Title</h1><p>Article content.</p></article></body></html>";
-///
-/// if let Ok(article) = parse(html, None, None) {
-///     println!("Title: {}", article.title);
-///     println!("Author: {:?}", article.byline);
-///     println!("HTML length: {} bytes", article.content.len());
-///     println!("Text length: {} characters", article.length);
-/// }
-/// ```
-///
-/// # Security
-///
-/// **Do not render [`content`](Article::content) without sanitizing it.** Legible
-/// cleans article content, but it is not an HTML security sanitizer.
-///
-/// [`markdown_content`](Article::markdown_content) does not contain raw HTML. It removes
-/// destinations that have unsupported URI schemes. If you convert the Markdown to HTML,
-/// sanitize that HTML according to your application's security policy.
-///
-/// ```rust,ignore
-/// let safe_html = ammonia::clean(&article.content);
-/// ```
-#[derive(Debug, Clone)]
-pub struct Article {
-    /// Article title.
-    ///
-    /// This value can come from the `<title>` element, a heading, or page metadata.
-    pub title: String,
-
-    /// Author byline, if found.
-    pub byline: Option<String>,
-
-    /// Text direction from the source, such as `"ltr"` or `"rtl"`.
-    pub dir: Option<String>,
-
-    /// Document language from the source, such as `"en"` or `"fr"`.
-    pub lang: Option<String>,
-
-    /// Extracted article content as an HTML fragment.
-    ///
-    /// This HTML is not sanitized. It can contain unsafe attributes, URLs, or other
-    /// source markup. Apply an HTML sanitizer before you render it.
-    pub content: String,
-
-    /// Extracted article content as normalized plain text.
-    pub text_content: String,
-
-    /// Extracted article content as CommonMark.
-    ///
-    /// Legible creates this value from the same document tree as
-    /// [`content`](Article::content). It escapes source text and does not include raw
-    /// HTML. Links can use HTTP, HTTPS, email, telephone, fragment, and relative
-    /// destinations. Images can use HTTP, HTTPS, and relative destinations.
-    pub markdown_content: String,
-
-    /// Number of characters in [`text_content`](Article::text_content).
-    pub length: usize,
-
-    /// Short article excerpt, if found.
-    pub excerpt: Option<String>,
-
-    /// Site name, if found.
-    pub site_name: Option<String>,
-
-    /// Publication time from page metadata, if found.
-    ///
-    /// Legible does not validate or change the source format.
-    pub published_time: Option<String>,
-}
 pub(crate) struct Readability<'a> {
     dom: Dom,
     original_html: &'a str,
-    options: &'a Options,
+    options: &'a ExtractorConfig,
     flags: u32,
     node_data: NodeStateStore,
     article_title: String,
@@ -126,24 +48,12 @@ struct ArticleContent {
     article_root: NodeId,
 }
 
-struct ExtractedArticle {
-    dom: Dom,
-    root: NodeId,
-    title: String,
-    byline: Option<String>,
-    direction: Option<String>,
-    language: Option<String>,
-    excerpt: Option<String>,
-    site_name: Option<String>,
-    published_time: Option<String>,
-    text_char_count: usize,
-}
 impl<'a> Readability<'a> {
     pub(crate) fn from_document(
         dom: Dom,
         original_html: &'a str,
         url: Option<&str>,
-        options: &'a Options,
+        options: &'a ExtractorConfig,
     ) -> Self {
         let (base_uri, url_error) = match url {
             Some(x) => match Url::parse(x) {
@@ -169,50 +79,18 @@ impl<'a> Readability<'a> {
             best_attempt: None,
         }
     }
-    pub(crate) fn parse(self) -> Result<Article> {
-        let extracted = self.extract_source()?;
-        let content =
-            crate::dom::render_html(&extracted.dom, extracted.root, extracted.text_char_count);
-        let markdown_content = crate::markdown::render_markdown(
-            &extracted.dom,
-            extracted.root,
-            extracted.text_char_count,
-            true,
-            true,
-        );
-        let text_content = crate::text::render_text(
-            &extracted.dom,
-            extracted.root,
-            extracted.text_char_count,
-            &crate::text::TextOptions::default(),
-        );
-        Ok(Article {
-            title: extracted.title,
-            byline: extracted.byline,
-            dir: extracted.direction,
-            lang: extracted.language,
-            content,
-            text_content,
-            markdown_content,
-            length: extracted.text_char_count,
-            excerpt: extracted.excerpt,
-            site_name: extracted.site_name,
-            published_time: extracted.published_time,
-        })
-    }
-
-    fn extract_source(mut self) -> Result<ExtractedArticle> {
+    pub(crate) fn extract(mut self) -> Result<ExtractedPage> {
         if let Some(e) = self.url_error {
             return Err(Error::InvalidUrl(e));
         }
-        if self.options.max_elems_to_parse > 0 {
+        if self.options.max_elements > 0 {
             let n = self
                 .dom
                 .descendants(self.dom.root())
                 .filter(|&x| self.dom.is_element(x))
                 .count();
-            if n > self.options.max_elems_to_parse {
-                return Err(Error::TooManyElements(n, self.options.max_elems_to_parse));
+            if n > self.options.max_elements {
+                return Err(Error::TooManyElements(n, self.options.max_elements));
             }
         }
         if let Some(document_uri) = self.base_uri.as_ref()
@@ -230,10 +108,10 @@ impl<'a> Readability<'a> {
         }
         unwrap_noscript_images(&mut self.dom);
         let title = metadata::get_article_title(&self.dom);
-        let json = if self.options.disable_json_ld {
-            Metadata::default()
-        } else {
+        let json = if self.options.structured_data {
             metadata::get_json_ld(&self.dom, &title)
+        } else {
+            Metadata::default()
         };
         prep_document(&mut self.dom);
         self.article_title = title;
@@ -243,18 +121,26 @@ impl<'a> Readability<'a> {
             self.article_title = t
         }
         let content = self.grab_article()?;
-        Ok(ExtractedArticle {
-            dom: self.dom,
-            root: content.article_root,
-            title: self.article_title,
-            byline: self.metadata.byline.or(self.article_byline),
-            direction: self.article_dir,
-            language: self.article_lang,
-            excerpt: self.metadata.excerpt.or(content.excerpt),
-            site_name: self.metadata.site_name,
-            published_time: self.metadata.published_time,
-            text_char_count: content.text_length,
-        })
+        self.metadata.title = (!self.article_title.is_empty()).then_some(self.article_title);
+        if self.metadata.authors.is_empty()
+            && let Some(byline) = self.article_byline
+        {
+            self.metadata.authors.push(byline);
+        }
+        self.metadata.description = self.metadata.description.or(content.excerpt);
+        self.metadata.direction = self.article_dir;
+        self.metadata.language = self.article_lang;
+        let extracted_dom = self
+            .dom
+            .copy_children_as_fragment(content.article_root)
+            .map_err(|_| Error::NoContent)?;
+        let extracted_root = extracted_dom.root();
+        Ok(ExtractedPage::new(
+            extracted_dom,
+            extracted_root,
+            self.metadata,
+            content.text_length,
+        ))
     }
     fn grab_article(&mut self) -> Result<ArticleContent> {
         if self.dom.body().is_none() {
@@ -312,7 +198,7 @@ impl<'a> Readability<'a> {
                     removed_depth = Some(depth);
                     continue;
                 }
-                if self.article_byline.is_none() && self.metadata.byline.is_none() {
+                if self.article_byline.is_none() && self.metadata.authors.is_empty() {
                     build_match_string(&self.dom, id, &mut match_buffer);
                     if is_valid_byline(&self.dom, id, &match_buffer, &mut text_buffer) {
                         let mut names = Vec::new();
@@ -459,7 +345,7 @@ impl<'a> Readability<'a> {
                     (id, f, order)
                 })
                 .collect();
-            let top_count = self.options.nb_top_candidates.min(scored.len());
+            let top_count = self.options.top_candidates.min(scored.len());
             if top_count < scored.len() {
                 scored.select_nth_unstable_by(top_count, |a, b| {
                     b.1.partial_cmp(&a.1)
@@ -555,11 +441,7 @@ impl<'a> Readability<'a> {
                 );
                 self.create_container(top_id, &sib).unwrap_or(top_id)
             };
-            let video = self
-                .options
-                .allowed_video_regex
-                .clone()
-                .unwrap_or_else(|| regexps::VIDEOS.clone());
+            let video = regexps::VIDEOS.clone();
             self.prep_article(
                 article_id,
                 &video,

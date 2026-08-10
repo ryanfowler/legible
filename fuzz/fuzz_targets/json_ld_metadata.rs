@@ -18,13 +18,14 @@ fuzz_target!(|data: &[u8]| {
 
     // The script is intentionally not escaped. This also fuzzes malformed JSON,
     // premature script terminators, and HTML/JSON boundary handling.
-    let Some(article) = parse_article(&html) else {
+    let Some(page) = parse_article(&html) else {
         return;
     };
-    let _ = article.title.as_str();
-    let _ = article.byline.as_deref();
-    let _ = article.excerpt.as_deref();
-    let _ = article.site_name.as_deref();
-    let _ = article.published_time.as_deref();
-    reparse_serialized(&article.content);
+    let metadata = page.metadata();
+    let _ = metadata.title.as_deref();
+    let _ = metadata.authors.as_slice();
+    let _ = metadata.description.as_deref();
+    let _ = metadata.site_name.as_deref();
+    let _ = metadata.published_time.as_deref();
+    reparse_serialized(&page.html());
 });

@@ -3,11 +3,11 @@ name = "legible"
 version = "0.5.1"
 edition = "2024"
 authors = ["Ryan Fowler"]
-description = "A Rust port of Mozilla's Readability.js for extracting readable content from web pages"
+description = "Extract relevant content and metadata from HTML and render high-quality Markdown"
 license = "Apache-2.0"
 repository = "https://github.com/ryanfowler/legible"
 documentation = "https://docs.rs/legible"
-keywords = ["readability", "article", "extraction", "html", "parser"]
+keywords = ["markdown", "content", "extraction", "html", "parser"]
 categories = ["parsing", "text-processing", "web-programming"]
 exclude = [".github/", "examples/", "tests/", "fuzz/"]
 

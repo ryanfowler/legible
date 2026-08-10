@@ -11,7 +11,7 @@ cargo +nightly fuzz run document_parse
 
 Available targets:
 
-- `document_parse` checks `Document::new`, the readerable check, and `parse`.
+- `document_parse` checks the public `extract` entry point.
 - `dom_mutation_serialization` exercises extraction mutations and reparses HTML output.
 - `render_markdown_text` exercises Markdown and normalized text rendering.
 - `json_ld_metadata` exercises valid and malformed JSON-LD metadata.
@@ -20,5 +20,5 @@ Available targets:
 
 Each target skips inputs larger than 256 KiB. Cargo-fuzz currently uses nightly
 Rust because it enables unstable sanitizer compiler options. The targets treat extraction errors as
-valid results. A panic, stack overflow, or failure to reparse serialized article HTML
+valid results. A panic, stack overflow, or failure to reparse serialized extracted HTML
 is a fuzzing failure.

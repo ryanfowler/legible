@@ -10,12 +10,11 @@ fuzz_target!(|data: &[u8]| {
     let Some(body) = input(data) else { return };
     let html = article_document(body.as_ref());
 
-    // parse renders Markdown and normalized text from the final cleaned DOM.
-    // Reading both fields here keeps this target focused on both serializers.
-    let Some(article) = parse_article(&html) else {
+    // Render Markdown and normalized text from the final cleaned DOM.
+    let Some(page) = parse_article(&html) else {
         return;
     };
-    let _markdown = &article.markdown_content;
-    let _text = &article.text_content;
-    reparse_serialized(&article.content);
+    let _markdown = page.markdown();
+    let _text = page.text();
+    reparse_serialized(&page.html());
 });

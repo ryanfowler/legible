@@ -7,7 +7,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use legible::parse;
+use legible::extract;
 use serde::Deserialize;
 
 mod ssrf;
@@ -132,9 +132,8 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
         }
     };
 
-    // Parse with Readability
-    let article = match parse(&html, Some(url), None) {
-        Ok(a) => a,
+    let extracted = match extract(&html, Some(url)) {
+        Ok(page) => page,
         Err(_) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -146,16 +145,20 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
     };
 
     // Sanitize the HTML content
-    let sanitized_content = sanitize_html(&article.content);
+    let sanitized_content = sanitize_html(&extracted.html());
+    let metadata = extracted.metadata();
 
     // Build the article page
-    let byline_html = article
-        .byline
-        .as_ref()
-        .map(|b| format!(r#"<p class="byline">{}</p>"#, html_escape(b)))
+    let byline_html = (!metadata.authors.is_empty())
+        .then(|| {
+            format!(
+                r#"<p class="byline">{}</p>"#,
+                html_escape(&metadata.authors.join(", "))
+            )
+        })
         .unwrap_or_default();
 
-    let published_html = article
+    let published_html = metadata
         .published_time
         .as_ref()
         .map(|p| format!(r#"<p class="published">{}</p>"#, html_escape(p)))
@@ -321,7 +324,7 @@ async fn article(Query(query): Query<ArticleQuery>) -> impl IntoResponse {
     </article>
 </body>
 </html>"#,
-        title = html_escape(&article.title),
+        title = html_escape(metadata.title.as_deref().unwrap_or("Extracted page")),
         byline = byline_html,
         published = published_html,
         content = sanitized_content,

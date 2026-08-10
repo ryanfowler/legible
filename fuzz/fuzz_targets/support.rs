@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use legible::{Document, Options, parse};
+use legible::extract;
 
 /// Keep one fuzz case small enough to avoid turning an input-size mutation into an
 /// allocation test. The fuzzer can still find large structural cases by nesting
@@ -22,20 +22,14 @@ pub fn article_document(body: &str) -> String {
     )
 }
 
-pub fn parse_article(html: &str) -> Option<legible::Article> {
-    parse(
-        html,
-        Some("https://example.com/articles/index.html"),
-        Some(Options::new().char_threshold(0)),
-    )
-    .ok()
+pub fn parse_article(html: &str) -> Option<legible::ExtractedPage> {
+    extract(html, Some("https://example.com/articles/index.html")).ok()
 }
 
-/// Exercise the public serialization boundary. Article HTML is a fragment, so a
+/// Exercise the public serialization boundary. Extracted HTML is a fragment, so a
 /// successful parse is the reparsing invariant for the final serializer.
 pub fn reparse_serialized(content: &str) {
-    let document = Document::new(content);
-    let _ = document.is_probably_readerable(None);
+    let _ = extract(content, None);
 }
 
 pub fn escape_attribute(value: &str) -> String {
