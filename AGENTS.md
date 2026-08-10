@@ -48,6 +48,7 @@ The extraction pipeline flows through these stages:
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup |
 | `normalize.rs` | Semantic normalization before lazy serialization |
+| `quality.rs` | Source-relative extraction quality and best-attempt scoring |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
@@ -88,7 +89,7 @@ Candidate ranking combines Readability propagation with text, structure, link-de
 - `FLAG_WEIGHT_CLASSES` (0x2) - Score based on class/id patterns
 - `FLAG_CLEAN_CONDITIONALLY` (0x4) - Conditional cleanup pass
 
-Unlikely class, ID, and role values are negative ranking evidence. They do not remove candidates during discovery. The algorithm retries with progressively fewer flags if initial extraction fails.
+Unlikely class, ID, and role values are negative ranking evidence. They do not remove candidates during discovery. The algorithm retries with normal, relaxed-cleanup, broad-content, structured-data, and body-fallback strategies when extraction quality is weak.
 
 ## Documentation
 

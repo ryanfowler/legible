@@ -626,7 +626,10 @@ pub(crate) fn hard_cleanup(
             && is_tracking_image(dom, node)
             && !has_lazy_image_candidate(dom, node)
             && !picture_has_lazy_source(dom, node);
-        let executable = matches!(tag, Tag::Script | Tag::Style | Tag::Template | Tag::Link);
+        let executable = matches!(
+            tag,
+            Tag::Script | Tag::Style | Tag::Template | Tag::Link | Tag::Meta
+        );
         let control = matches!(
             tag,
             Tag::Input | Tag::Textarea | Tag::Select | Tag::Button | Tag::Datalist | Tag::Option

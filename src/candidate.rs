@@ -27,6 +27,7 @@ const STRONG_CLASSES: &[&str] = &[
 pub(crate) enum CandidateSource {
     Semantic,
     Readability,
+    StructuredData,
     Generic,
 }
 
@@ -38,7 +39,8 @@ impl CandidateSources {
         self.0 |= match source {
             CandidateSource::Semantic => 1 << 0,
             CandidateSource::Readability => 1 << 1,
-            CandidateSource::Generic => 1 << 2,
+            CandidateSource::StructuredData => 1 << 2,
+            CandidateSource::Generic => 1 << 3,
         };
     }
 
@@ -204,6 +206,10 @@ impl CandidateSet {
         self.add(node, CandidateSource::Readability, score);
     }
 
+    pub(crate) fn add_structured_data(&mut self, node: NodeId) {
+        self.add(node, CandidateSource::StructuredData, 40.0);
+    }
+
     pub(crate) fn is_semantic(&self, node: NodeId) -> bool {
         self.get(node)
             .is_some_and(|candidate| candidate.has_source(CandidateSource::Semantic))
@@ -308,7 +314,10 @@ impl CandidateSet {
             self.candidates.push(Candidate {
                 node,
                 sources,
-                semantic_prior: if source == CandidateSource::Semantic {
+                semantic_prior: if matches!(
+                    source,
+                    CandidateSource::Semantic | CandidateSource::StructuredData
+                ) {
                     value
                 } else {
                     0.0
@@ -338,6 +347,9 @@ impl CandidateSet {
             }
             CandidateSource::Readability => {
                 candidate.readability_score = candidate.readability_score.max(value)
+            }
+            CandidateSource::StructuredData => {
+                candidate.semantic_prior = candidate.semantic_prior.max(value)
             }
             CandidateSource::Generic => {}
         }
@@ -694,6 +706,218 @@ fn structured_agreement(dom: &Dom, node: NodeId, hints: &[StructuredHint]) -> f6
             }
         })
         .fold(0.0, f64::max)
+}
+
+/// Finds a compact DOM root that agrees with schema `articleBody` or `text`.
+///
+/// The phrase scan limits expensive subtree comparisons to ancestors of
+/// visible text that contains the start of a schema value. It can match text
+/// split across inline elements.
+pub(crate) fn locate_structured_content<'a>(
+    dom: &Dom,
+    texts: impl IntoIterator<Item = &'a str>,
+) -> Option<NodeId> {
+    let hints: Vec<_> = texts
+        .into_iter()
+        .filter_map(StructuredHint::new)
+        .take(MAX_STRUCTURED_HINTS)
+        .collect();
+    if hints.is_empty() {
+        return None;
+    }
+
+    let scan_context = PhraseScanContext::new(dom);
+    let mut possible = SmallVec::<[NodeId; 32]>::new();
+    for hint in &hints {
+        let phrase_len = hint.tokens.len().min(6);
+        if phrase_len < 5 {
+            continue;
+        }
+        for matched_root in visible_phrase_matches(dom, &scan_context, &hint.tokens[..phrase_len]) {
+            if is_navigation_region(dom, matched_root) {
+                continue;
+            }
+            for ancestor in std::iter::once(matched_root).chain(dom.ancestors(matched_root)) {
+                if dom.is_element(ancestor) && !possible.contains(&ancestor) {
+                    possible.push(ancestor);
+                }
+            }
+        }
+    }
+
+    possible
+        .into_iter()
+        .filter(|&node| !is_navigation_region(dom, node))
+        .filter_map(|node| {
+            let agreement = structured_agreement(dom, node, &hints);
+            (agreement >= 0.55).then(|| {
+                (
+                    node,
+                    dom.normalized_char_count_below(node, MAX_CANDIDATE_MATCH_CHARS)
+                        .unwrap_or(MAX_CANDIDATE_MATCH_CHARS),
+                    agreement,
+                )
+            })
+        })
+        .min_by(|left, right| {
+            // Prefer the smallest root among similarly strong matches. If one
+            // match is substantially better, preserve the better coverage.
+            if (left.2 - right.2).abs() <= 0.08 {
+                left.1.cmp(&right.1)
+            } else {
+                right.2.total_cmp(&left.2)
+            }
+        })
+        .map(|(node, _, _)| node)
+}
+
+struct PhraseScanContext {
+    blocked: Vec<bool>,
+    flow_root: Vec<Option<NodeId>>,
+}
+
+impl PhraseScanContext {
+    fn new(dom: &Dom) -> Self {
+        let mut blocked = vec![false; dom.len()];
+        let mut flow_root = vec![None; dom.len()];
+        for (node, _) in dom.element_descendants_snapshot_with_depth(dom.root()) {
+            let parent = dom.parent(node);
+            let parent_blocked = parent.is_some_and(|parent| blocked[parent.index()]);
+            blocked[node.index()] = parent_blocked || is_blocked_structured_region(dom, node);
+            flow_root[node.index()] = if is_text_flow_boundary(dom.tag(node)) {
+                Some(node)
+            } else {
+                parent.and_then(|parent| flow_root[parent.index()])
+            };
+        }
+        Self { blocked, flow_root }
+    }
+}
+
+fn visible_phrase_matches(
+    dom: &Dom,
+    context: &PhraseScanContext,
+    phrase: &[String],
+) -> SmallVec<[NodeId; 4]> {
+    const MAX_MATCHES: usize = 32;
+    let mut roots = SmallVec::new();
+    let mut matched = 0;
+    let mut start = None;
+    let mut flow_root = None;
+    for node in dom
+        .descendants(dom.root())
+        .filter(|&node| dom.is_text(node))
+    {
+        let parent = dom.parent(node);
+        let current_flow_root = parent.and_then(|parent| context.flow_root[parent.index()]);
+        if flow_root.is_some() && current_flow_root != flow_root {
+            matched = 0;
+            start = None;
+        }
+        flow_root = current_flow_root;
+        if parent.is_some_and(|parent| context.blocked[parent.index()]) {
+            matched = 0;
+            start = None;
+            continue;
+        }
+
+        let text = dom.text_node(node).unwrap_or_default().to_lowercase();
+        for token in split_word_tokens(&text) {
+            if token == phrase[matched] {
+                if matched == 0 {
+                    start = Some(node);
+                }
+                matched += 1;
+                if matched == phrase.len() {
+                    if let Some(start) = start {
+                        let end_ancestors: HashSet<_> = dom.ancestors(node).collect();
+                        if let Some(root) = dom
+                            .ancestors(start)
+                            .find(|ancestor| end_ancestors.contains(ancestor))
+                            && !roots.contains(&root)
+                        {
+                            roots.push(root);
+                            if roots.len() == MAX_MATCHES {
+                                return roots;
+                            }
+                        }
+                    }
+                    matched = 0;
+                    start = None;
+                }
+            } else if token == phrase[0] {
+                matched = 1;
+                start = Some(node);
+            } else {
+                matched = 0;
+                start = None;
+            }
+        }
+    }
+    roots
+}
+
+fn is_blocked_structured_region(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::Script | Tag::Style | Tag::Template | Tag::Meta | Tag::Link)
+    ) || dom.has_attr(node, AttrName::Hidden)
+        || dom.attr(node, AttrName::AriaHidden) == Some("true")
+        || dom.attr(node, AttrName::Style).is_some_and(|style| {
+            let compact = style
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .map(char::from)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            compact.contains("display:none") || compact.contains("visibility:hidden")
+        })
+}
+
+fn is_text_flow_boundary(tag: Option<Tag>) -> bool {
+    matches!(
+        tag,
+        Some(
+            Tag::Address
+                | Tag::Article
+                | Tag::Blockquote
+                | Tag::Body
+                | Tag::Details
+                | Tag::Div
+                | Tag::Figcaption
+                | Tag::Figure
+                | Tag::Footer
+                | Tag::H1
+                | Tag::H2
+                | Tag::H3
+                | Tag::H4
+                | Tag::H5
+                | Tag::H6
+                | Tag::Header
+                | Tag::Li
+                | Tag::Main
+                | Tag::Nav
+                | Tag::P
+                | Tag::Pre
+                | Tag::Section
+                | Tag::Summary
+                | Tag::Td
+                | Tag::Th
+        )
+    )
+}
+
+fn is_navigation_region(dom: &Dom, node: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .any(|ancestor| {
+            matches!(dom.tag(ancestor), Some(Tag::A | Tag::Nav))
+                || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
+                    roles
+                        .split_whitespace()
+                        .any(|role| role.eq_ignore_ascii_case("navigation"))
+                })
+        })
 }
 
 fn bounded_normalized_text(dom: &Dom, root: NodeId, limit: usize) -> String {
@@ -1148,6 +1372,45 @@ mod tests {
 
         assert!(markdown.contains("schema-selected report"), "{markdown}");
         assert!(!markdown.contains("unrelated report"), "{markdown}");
+    }
+
+    #[test]
+    fn structured_location_ignores_json_ld_script_text_and_matches_inline_content() {
+        let html = r#"<body>
+            <nav><a href="/article">The split article contains exact useful words across inline elements.</a></nav>
+            <script type="application/ld+json">{
+                "@context":"https://schema.org",
+                "@type":"Article",
+                "articleBody":"The split article contains exact useful words across inline elements."
+            }</script>
+            <article id="wanted"><p>The split <strong>article contains</strong> exact useful words <a href="/more">across inline elements.</a></p></article>
+        </body>"#;
+        let dom = Dom::parse_document(html).unwrap();
+        let article = dom
+            .first_descendant_by_tag(dom.root(), Tag::Article)
+            .unwrap();
+        let root = locate_structured_content(
+            &dom,
+            ["The split article contains exact useful words across inline elements."],
+        )
+        .unwrap();
+
+        assert!(root == article || dom.ancestors(root).any(|ancestor| ancestor == article));
+        assert_ne!(dom.tag(root), Some(Tag::Script));
+
+        let page = crate::extract(html, Some("https://example.com/page")).unwrap();
+        assert!(page.text().contains("split article contains"));
+        assert!(!page.html().contains("application/ld+json"));
+        assert!(!page.html().contains("<script"));
+    }
+
+    #[test]
+    fn structured_location_does_not_join_unrelated_blocks() {
+        let dom = Dom::parse_document(
+            "<body><header>alpha beta gamma</header><article><p>delta epsilon zeta</p></article></body>",
+        )
+        .unwrap();
+        assert!(locate_structured_content(&dom, ["alpha beta gamma delta epsilon zeta"]).is_none());
     }
 
     #[test]
