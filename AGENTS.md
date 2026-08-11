@@ -47,7 +47,7 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup |
-| `normalize.rs` | Semantic normalization before lazy serialization |
+| `normalize.rs` | Semantic normalization, including repeated table listings, before lazy serialization |
 | `quality.rs` | Source-relative extraction quality and best-attempt scoring |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
@@ -69,6 +69,7 @@ These invariants are costly to violate:
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
 - **Separate cleanup and normalization.** Cleanup decides what to remove. Normalization makes retained markup predictable for serializers.
+- **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.

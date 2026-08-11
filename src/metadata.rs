@@ -299,6 +299,7 @@ pub(crate) fn discover(
     collect_meta_candidates(dom, &mut candidates);
     collect_link_candidates(dom, &mut candidates);
     collect_element_candidates(dom, document_title, &mut candidates);
+    collect_visible_brand_candidate(dom, document_title, source_url, &mut candidates);
 
     if let Some(url) = source_url {
         candidates.add(
@@ -318,6 +319,53 @@ pub(crate) fn discover(
     }
 
     resolve_candidates(candidates, base_url)
+}
+
+fn collect_visible_brand_candidate(
+    dom: &Dom,
+    document_title: &str,
+    source_url: Option<&Url>,
+    out: &mut CandidateSet,
+) {
+    let Some(body) = dom.body() else { return };
+    let normalized_title = normalize_text(document_title);
+    let mut buffer = String::new();
+    for node in dom
+        .descendants(body)
+        .filter(|&node| dom.is_element(node))
+        .take(40)
+    {
+        if dom.tag(node) != Some(Tag::A) {
+            continue;
+        }
+        let href_is_home = dom
+            .attr(node, AttrName::Href)
+            .zip(source_url)
+            .and_then(|(href, source)| source.join(href).ok().map(|target| (source, target)))
+            .is_some_and(|(source, target)| {
+                source.scheme() == target.scheme()
+                    && source.host_str() == target.host_str()
+                    && source.port_or_known_default() == target.port_or_known_default()
+                    && target.path() == "/"
+                    && target.query().is_none()
+                    && target.fragment().is_none()
+            });
+        // Exact agreement with the document title prevents a generic header
+        // link or personal greeting from becoming the publication name.
+        let value = get_inner_text(dom, node, &mut buffer);
+        if !href_is_home || normalized_title.as_deref() != normalize_text(value).as_deref() {
+            continue;
+        }
+        if value.chars().count() <= 60 {
+            out.add(
+                |set| &mut set.site_name,
+                value,
+                MetadataSource::Inferred,
+                20,
+            );
+            break;
+        }
+    }
 }
 
 fn collect_structured_candidates(
@@ -1066,7 +1114,9 @@ fn resolve_candidates(mut candidates: CandidateSet, base_url: Option<&Url>) -> M
     let mut title = selected_title.map(|candidate| candidate.value.clone());
     if let (Some(title_value), Some(site)) = (&title, &site_name) {
         if title_value.eq_ignore_ascii_case(site) {
-            title = resolve_one_excluding(&candidates.title, title_value);
+            if let Some(alternative) = resolve_one_excluding(&candidates.title, title_value) {
+                title = Some(alternative);
+            }
         } else if let Some(stripped) = strip_site_affix(title_value, site) {
             title = Some(stripped);
         }
@@ -1410,6 +1460,33 @@ mod tests {
         let base = url.map(Url::parse).transpose().unwrap();
         let title = get_page_title(&dom);
         discover(&dom, &data, &title, base.as_ref(), base.as_ref())
+    }
+
+    #[test]
+    fn visible_brand_precedes_the_hostname_but_not_explicit_metadata() {
+        let result = metadata(
+            r#"<title>Example Journal</title><body><header><a href='/' class='brand'>Example Journal</a></header><main>Content</main></body>"#,
+            Some("https://news.example.test/"),
+            false,
+        );
+        assert_eq!(result.title.as_deref(), Some("Example Journal"));
+        assert_eq!(result.site_name.as_deref(), Some("Example Journal"));
+
+        let explicit = metadata(
+            r#"<title>Visible Brand</title><meta property='og:site_name' content='Explicit Publisher'><body><header><a href='/' class='brand'>Visible Brand</a></header></body>"#,
+            Some("https://example.test/article"),
+            false,
+        );
+        assert_eq!(explicit.site_name.as_deref(), Some("Explicit Publisher"));
+
+        for url in ["https://example.test/article", "https://example.test/"] {
+            let article = metadata(
+                r#"<title>Article title</title><body><header><a href='/article'>Article title</a></header></body>"#,
+                Some(url),
+                false,
+            );
+            assert_eq!(article.site_name.as_deref(), Some("example.test"));
+        }
     }
 
     #[test]

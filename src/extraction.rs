@@ -950,17 +950,103 @@ impl<'a> ContentExtractor<'a> {
     }
     fn create_container(&mut self, _top: NodeId, siblings: &[NodeId]) -> Option<NodeId> {
         let first = *siblings.first()?;
-        let c = self.dom.create_html_element(Tag::Div).ok()?;
-        self.dom.insert_before(first, c);
-        for &x in siblings {
-            if let Some(t) = self.dom.tag(x) {
-                if !is_alter_to_div_exception(t) {
-                    self.dom.rename_html(x, Tag::Div)
+        let container = self.dom.create_html_element(Tag::Div).ok()?;
+        self.dom.insert_before(first, container);
+
+        // A synthetic content boundary must not break the HTML table content
+        // model. Keep one common wrapper when the selected siblings are rows,
+        // cells, or table sections. This also prevents a row from being
+        // renamed to a div while it still contains cells.
+        let tags: SmallVec<[Tag; 8]> = siblings
+            .iter()
+            .filter_map(|&node| self.dom.tag(node))
+            .collect();
+        let table_parent = if tags.len() == siblings.len() && tags.iter().all(|tag| *tag == Tag::Tr)
+        {
+            let table = self.dom.create_html_element(Tag::Table).ok()?;
+            let body = self.dom.create_html_element(Tag::Tbody).ok()?;
+            self.dom.append_child(container, table);
+            self.dom.append_child(table, body);
+            Some(body)
+        } else if tags.len() == siblings.len()
+            && tags.iter().all(|tag| matches!(tag, Tag::Td | Tag::Th))
+        {
+            let table = self.dom.create_html_element(Tag::Table).ok()?;
+            let body = self.dom.create_html_element(Tag::Tbody).ok()?;
+            let row = self.dom.create_html_element(Tag::Tr).ok()?;
+            self.dom.append_child(container, table);
+            self.dom.append_child(table, body);
+            self.dom.append_child(body, row);
+            Some(row)
+        } else if tags.len() == siblings.len()
+            && tags.iter().all(|tag| {
+                matches!(
+                    tag,
+                    Tag::Caption | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead
+                )
+            })
+        {
+            let table = self.dom.create_html_element(Tag::Table).ok()?;
+            self.dom.append_child(container, table);
+            Some(table)
+        } else if tags.len() == siblings.len() && tags.iter().all(|tag| *tag == Tag::Col) {
+            let table = self.dom.create_html_element(Tag::Table).ok()?;
+            let group = self.dom.create_html_element(Tag::Colgroup).ok()?;
+            self.dom.append_child(container, table);
+            self.dom.append_child(table, group);
+            Some(group)
+        } else {
+            None
+        };
+
+        for &node in siblings {
+            if let Some(parent) = table_parent {
+                self.dom.append_child(parent, node);
+                continue;
+            }
+            if let Some(tag) = self.dom.tag(node) {
+                let wrapper = match tag {
+                    Tag::Tr => {
+                        let table = self.dom.create_html_element(Tag::Table).ok()?;
+                        let body = self.dom.create_html_element(Tag::Tbody).ok()?;
+                        self.dom.append_child(container, table);
+                        self.dom.append_child(table, body);
+                        Some(body)
+                    }
+                    Tag::Td | Tag::Th => {
+                        let table = self.dom.create_html_element(Tag::Table).ok()?;
+                        let body = self.dom.create_html_element(Tag::Tbody).ok()?;
+                        let row = self.dom.create_html_element(Tag::Tr).ok()?;
+                        self.dom.append_child(container, table);
+                        self.dom.append_child(table, body);
+                        self.dom.append_child(body, row);
+                        Some(row)
+                    }
+                    Tag::Caption | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead => {
+                        let table = self.dom.create_html_element(Tag::Table).ok()?;
+                        self.dom.append_child(container, table);
+                        Some(table)
+                    }
+                    Tag::Col => {
+                        let table = self.dom.create_html_element(Tag::Table).ok()?;
+                        let group = self.dom.create_html_element(Tag::Colgroup).ok()?;
+                        self.dom.append_child(container, table);
+                        self.dom.append_child(table, group);
+                        Some(group)
+                    }
+                    _ => None,
+                };
+                if let Some(wrapper) = wrapper {
+                    self.dom.append_child(wrapper, node);
+                    continue;
+                }
+                if !is_alter_to_div_exception(tag) && tag != Tag::Table {
+                    self.dom.rename_html(node, Tag::Div)
                 }
             }
-            self.dom.append_child(c, x)
+            self.dom.append_child(container, node)
         }
-        Some(c)
+        Some(container)
     }
     fn prep_article(
         &mut self,
@@ -1206,6 +1292,44 @@ mod tests {
             .attr(ranked[0].node, AttrName::Id)
             .expect("winner must have a test ID")
             .to_owned()
+    }
+
+    #[test]
+    fn synthetic_container_preserves_table_ancestry() {
+        let dom = Dom::parse_document(
+            "<body><table><tr><td>First</td><td>Second</td></tr></table></body>",
+        )
+        .unwrap();
+        let row = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Tr))
+            .unwrap();
+        let config = ExtractorConfig::default();
+        let mut extractor = ContentExtractor::from_document(dom, None, &config);
+        let container = extractor.create_container(row, &[row]).unwrap();
+
+        for cell in extractor
+            .dom
+            .descendants(container)
+            .filter(|&node| matches!(extractor.dom.tag(node), Some(Tag::Td | Tag::Th)))
+        {
+            assert_eq!(
+                extractor
+                    .dom
+                    .ancestors(cell)
+                    .find_map(|node| match extractor.dom.tag(node) {
+                        Some(Tag::Tr | Tag::Table) => extractor.dom.tag(node),
+                        _ => None,
+                    }),
+                Some(Tag::Tr)
+            );
+            assert!(
+                extractor
+                    .dom
+                    .ancestors(cell)
+                    .any(|node| extractor.dom.tag(node) == Some(Tag::Table))
+            );
+        }
     }
 
     #[test]

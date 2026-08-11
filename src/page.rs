@@ -21,8 +21,8 @@ pub struct ExtractedPage {
 }
 
 impl ExtractedPage {
-    pub(crate) fn new(dom: Dom, root: NodeId, metadata: Metadata, text_length: usize) -> Self {
-        let word_count = crate::text::count_words(&dom, root);
+    pub(crate) fn new(dom: Dom, root: NodeId, metadata: Metadata, _text_length: usize) -> Self {
+        let (text_length, word_count) = crate::text::measure_text(&dom, root);
         Self {
             metadata,
             dom,
@@ -133,6 +133,19 @@ mod tests {
         assert_eq!(page.html(), page.html());
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
+    }
+
+    #[test]
+    fn text_statistics_include_structural_boundaries() {
+        let page = extract(
+            "<main><p>Hello</p><p>world</p><table><tr><td>one</td><td>two</td></tr></table><p>before<br>after</p></main>",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(page.text(), "Hello world one two before after");
+        assert_eq!(page.text_length(), page.text().chars().count());
+        assert_eq!(page.word_count(), 6);
     }
 
     #[test]
