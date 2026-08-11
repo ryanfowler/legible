@@ -1,1 +1,1 @@
-{"must_contain":["energy relation","standard units"]}
+{"must_contain":["energy relation","$E=mc^2$","standard units"],"must_not_contain":["duplicate"]}

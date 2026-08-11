@@ -1,8 +1,12 @@
 //! Semantic normalization for retained content.
 
+mod callouts;
+mod footnotes;
 mod headings;
 mod images;
 mod lists;
+mod math;
+mod media;
 
 use crate::cleaning::{repeated_listing_start, simplify_nested_elements};
 use crate::dom::{AttrName, Dom, NodeId, Tag};
@@ -17,14 +21,37 @@ use smallvec::SmallVec;
 /// detection run while source classes are still available. Table normalization
 /// runs last because it can replace complete structural subtrees.
 pub(crate) fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    math::normalize(dom, root);
+    media::normalize(dom, root);
+    callouts::normalize(dom, root);
     images::normalize(dom, root, nodes);
     headings::normalize(dom, root);
     lists::normalize(dom, root);
     normalize_code_blocks(dom, root);
     normalize_figures(dom, root);
-    normalize_footnotes(dom, root);
+    footnotes::normalize(dom, root);
     normalize_repeated_table_listings(dom, root);
     normalize_layout_tables(dom, root);
+}
+
+/// Captures semantic source data that hard cleanup would otherwise remove.
+pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
+    math::normalize(dom, root);
+    media::normalize(dom, root);
+    callouts::normalize(dom, root);
+    footnotes::normalize(dom, root);
+}
+
+pub(crate) fn adopt_external_footnotes(
+    definitions: &footnotes::Definitions,
+    fragment: &mut Dom,
+    fragment_root: NodeId,
+) {
+    footnotes::adopt_external(definitions, fragment, fragment_root);
+}
+
+pub(crate) fn collect_external_footnotes(dom: &Dom) -> footnotes::Definitions {
+    footnotes::collect_external(dom)
 }
 
 /// Preserves explicit ARIA document structure in the scoring-only DOM.
@@ -40,6 +67,8 @@ pub(crate) fn normalize_scoring_structure(dom: &mut Dom, root: NodeId) {
 pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
     matches!(dom.tag(node), Some(Tag::H1 | Tag::H2)) || headings::has_primary_role(dom, node)
 }
+
+pub(crate) use math::is_accessible_math;
 
 /// Finishes normalization after URL and attribute cleanup.
 ///
@@ -259,21 +288,6 @@ fn normalize_figures(dom: &mut Dom, root: NodeId) {
         if let Some(caption) = caption {
             dom.rename_html(wrapper, Tag::Figure);
             dom.rename_html(caption, Tag::Figcaption);
-        }
-    }
-}
-
-fn normalize_footnotes(dom: &mut Dom, root: NodeId) {
-    let nodes = dom.element_descendants_snapshot_with_depth(root);
-    for (node, _) in nodes {
-        if dom.parent(node).is_some()
-            && dom.attr(node, AttrName::Role).is_some_and(|role| {
-                role.split_whitespace()
-                    .any(|value| value.eq_ignore_ascii_case("doc-footnote"))
-            })
-            && matches!(dom.tag(node), Some(Tag::Div | Tag::Aside))
-        {
-            dom.rename_html(node, Tag::Section);
         }
     }
 }
@@ -505,6 +519,7 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.extend(dom.descendants(root));
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_some()
+            && dom.attr(node, AttrName::DataMath).is_none()
             && matches!(
                 dom.tag(node),
                 Some(
@@ -759,7 +774,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         );
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
-            "# Guide\n\nText[\\[1\\]](#note)\n\nA reference.\n"
+            "# Guide\n\nText[^note]\n\n[^note]: A reference.\n"
         );
     }
 }

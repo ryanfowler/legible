@@ -1,0 +1,1 @@
+{"must_contain":["$$\nx=1\n$$","$y=2$","$z=3$","![x=y](https://example.test/docs/photo.png)"],"must_not_contain":["duplicate rendering"]}

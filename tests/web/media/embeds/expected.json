@@ -1,0 +1,1 @@
+{"must_contain":["[YouTube video](https://www.youtube.com/watch?v=abc123)","[Video](https://example.test/docs/walkthrough.mp4)","[Audio](https://example.test/docs/instructions.mp3)","[Embedded content](https://example.test/interactive/example)"],"must_not_contain":["javascript","obsolete.swf","srcdoc","unsafe"]}

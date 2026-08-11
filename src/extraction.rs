@@ -16,8 +16,9 @@ use crate::extractor::ExtractorConfig;
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, StructuredData};
 use crate::normalize::{
-    finish_normalization, has_primary_heading_semantics, normalize_scoring_structure,
-    normalize_semantics,
+    adopt_external_footnotes, collect_external_footnotes, finish_normalization,
+    has_primary_heading_semantics, is_accessible_math, normalize_scoring_structure,
+    normalize_semantics, preserve_semantics_before_cleanup,
 };
 use crate::page::ExtractedPage;
 use crate::quality::{
@@ -252,6 +253,7 @@ impl<'a> ContentExtractor<'a> {
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let body = self.dom.body().ok_or(Error::NoBody)?;
+        let footnote_definitions = collect_external_footnotes(&self.dom);
         let source_metrics = ContentMetrics::measure_source(&self.dom, body);
         let has_relaxable_hidden_content = self.has_relaxable_hidden_content(body);
         let relaxed_source_metrics = if has_relaxable_hidden_content {
@@ -525,13 +527,14 @@ impl<'a> ContentExtractor<'a> {
             // Cleanup owns a compact copy of the selected region. The source
             // DOM remains available for a retry and is never affected by an
             // earlier attempt's mutations.
-            let fragment = self
+            let mut fragment = self
                 .dom
                 .copy_subtree_as_fragment(content_id)
                 .map_err(|_| Error::NoContent)?;
             let content_id = fragment
                 .first_child(fragment.root())
                 .ok_or(Error::NoContent)?;
+            adopt_external_footnotes(&footnote_definitions, &mut fragment, content_id);
             self.dom = fragment;
             self.node_data.clear();
             self.node_data.enable_link_lengths();
@@ -1037,6 +1040,9 @@ impl<'a> ContentExtractor<'a> {
     }
 
     fn is_visible_for_strategy(&self, node: NodeId) -> bool {
+        if is_accessible_math(&self.dom, node) {
+            return true;
+        }
         let utility_hidden = self.has_hidden_utility_class(node);
         if self.strategy == ExtractionStrategy::RelaxedVisibility {
             self.dom.attr(node, AttrName::AriaHidden) != Some("true")
@@ -1502,6 +1508,7 @@ impl<'a> ContentExtractor<'a> {
         // Cleanup mutates only the compact selected fragment. Hard cleanup
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
+        preserve_semantics_before_cleanup(&mut self.dom, root);
         clean_styles(&mut self.dom, root, nodes);
         hard_cleanup(
             &mut self.dom,
@@ -1528,7 +1535,7 @@ impl<'a> ContentExtractor<'a> {
                 matches!(
                     self.dom.tag(node),
                     Some(Tag::Img | Tag::Embed | Tag::Object | Tag::Iframe)
-                )
+                ) || self.dom.attr(node, AttrName::DataMath).is_some()
             });
             if !media && !has_non_empty_inner_text(&self.dom, paragraph) {
                 self.dom.detach(paragraph);
