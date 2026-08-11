@@ -1,7 +1,9 @@
 //! Extraction quality metrics and best-attempt comparison.
 
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
-use crate::scoring::{get_link_density_cached, get_or_compute_stats};
+use crate::scoring::{
+    get_link_density_cached, get_or_compute_stats, get_or_compute_stats_excluding,
+};
 
 /// Text and structure measured for one DOM region.
 #[derive(Clone, Copy, Debug, Default)]
@@ -20,80 +22,73 @@ impl ContentMetrics {
     /// chrome. Semantic headers inside a main/article region remain source
     /// content.
     pub(crate) fn measure_source(dom: &Dom, root: NodeId) -> Self {
-        let mut view = dom.clone();
-        let elements = view.element_descendants_snapshot_with_depth(root);
+        let elements = dom.element_descendants_snapshot_with_depth(root);
         let has_primary_region = elements.iter().any(|&(node, _)| {
-            matches!(view.tag(node), Some(Tag::Main | Tag::Article))
-                || view.attr(node, AttrName::Role).is_some_and(is_primary_role)
+            matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
+                || dom.attr(node, AttrName::Role).is_some_and(is_primary_role)
         });
-        let mut in_primary_region = vec![false; view.len()];
+        let mut in_primary_region = vec![false; dom.len()];
         for &(node, _) in &elements {
-            let parent_is_primary = view
+            let parent_is_primary = dom
                 .parent(node)
                 .is_some_and(|parent| in_primary_region[parent.index()]);
             in_primary_region[node.index()] = parent_is_primary
-                || matches!(view.tag(node), Some(Tag::Main | Tag::Article))
-                || view.attr(node, AttrName::Role).is_some_and(is_primary_role);
+                || matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
+                || dom.attr(node, AttrName::Role).is_some_and(is_primary_role);
         }
-        let clutter: Vec<_> = elements
-            .into_iter()
-            .map(|(node, _)| node)
-            .filter(|&node| {
-                let tag = view.tag(node);
-                let hidden = view.has_attr(node, AttrName::Hidden)
-                    || view.attr(node, AttrName::AriaHidden) == Some("true")
-                    || view.attr(node, AttrName::Style).is_some_and(|style| {
-                        let compact = style
-                            .bytes()
-                            .filter(|byte| !byte.is_ascii_whitespace())
-                            .map(char::from)
-                            .collect::<String>()
-                            .to_ascii_lowercase();
-                        compact.contains("display:none") || compact.contains("visibility:hidden")
-                    });
-                let hard_non_content = hidden
-                    || matches!(
-                        tag,
-                        Some(
-                            Tag::Script
-                                | Tag::Style
-                                | Tag::Template
-                                | Tag::Meta
-                                | Tag::Link
-                                | Tag::Input
-                                | Tag::Textarea
-                                | Tag::Select
-                                | Tag::Button
-                                | Tag::Datalist
-                                | Tag::Option
-                                | Tag::Iframe
-                                | Tag::Embed
-                                | Tag::Object
-                        )
-                    );
-                let role = view.attr(node, AttrName::Role);
-                let document_chrome = matches!(tag, Some(Tag::Header | Tag::Footer | Tag::Nav))
-                    || role.is_some_and(|roles| {
-                        roles.split_whitespace().any(|role| {
-                            role.eq_ignore_ascii_case("banner")
-                                || role.eq_ignore_ascii_case("navigation")
-                        })
-                    });
-                let contextual_sidebar = tag == Some(Tag::Aside)
-                    || role.is_some_and(|roles| {
-                        roles
-                            .split_whitespace()
-                            .any(|role| role.eq_ignore_ascii_case("complementary"))
-                    });
-                hard_non_content
-                    || document_chrome && !in_primary_region[node.index()]
-                    || contextual_sidebar && has_primary_region && !in_primary_region[node.index()]
-            })
-            .collect();
-        for node in clutter {
-            view.detach(node);
+        let mut excluded = vec![false; dom.len()];
+        for &(node, _) in &elements {
+            let tag = dom.tag(node);
+            let hidden = dom.has_attr(node, AttrName::Hidden)
+                || dom.attr(node, AttrName::AriaHidden) == Some("true")
+                || dom.attr(node, AttrName::Style).is_some_and(|style| {
+                    let compact = style
+                        .bytes()
+                        .filter(|byte| !byte.is_ascii_whitespace())
+                        .map(char::from)
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    compact.contains("display:none") || compact.contains("visibility:hidden")
+                });
+            let hard_non_content = hidden
+                || matches!(
+                    tag,
+                    Some(
+                        Tag::Script
+                            | Tag::Style
+                            | Tag::Template
+                            | Tag::Meta
+                            | Tag::Link
+                            | Tag::Input
+                            | Tag::Textarea
+                            | Tag::Select
+                            | Tag::Button
+                            | Tag::Datalist
+                            | Tag::Option
+                            | Tag::Iframe
+                            | Tag::Embed
+                            | Tag::Object
+                    )
+                );
+            let role = dom.attr(node, AttrName::Role);
+            let document_chrome = matches!(tag, Some(Tag::Header | Tag::Footer | Tag::Nav))
+                || role.is_some_and(|roles| {
+                    roles.split_whitespace().any(|role| {
+                        role.eq_ignore_ascii_case("banner")
+                            || role.eq_ignore_ascii_case("navigation")
+                    })
+                });
+            let contextual_sidebar = tag == Some(Tag::Aside)
+                || role.is_some_and(|roles| {
+                    roles
+                        .split_whitespace()
+                        .any(|role| role.eq_ignore_ascii_case("complementary"))
+                });
+            excluded[node.index()] = hard_non_content
+                || document_chrome && !in_primary_region[node.index()]
+                || contextual_sidebar && has_primary_region && !in_primary_region[node.index()];
         }
-        Self::measure(&view, root)
+        Self::measure_filtered(dom, root, &elements, &excluded)
     }
 
     pub(crate) fn measure(dom: &Dom, root: NodeId) -> Self {
@@ -101,39 +96,91 @@ impl ContentMetrics {
         store.enable_link_lengths();
         let text = get_or_compute_stats(dom, root, &mut store);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut metrics = Self {
+        let mut metrics = Self::from_text_stats(text, link_density, false);
+        for node in std::iter::once(root).chain(dom.descendants(root)) {
+            metrics.has_alphanumeric_text |= dom
+                .text_node(node)
+                .is_some_and(|text| text.chars().any(char::is_alphanumeric));
+            metrics.count_structure(dom.tag(node));
+        }
+        metrics
+    }
+
+    fn measure_filtered(
+        dom: &Dom,
+        root: NodeId,
+        elements: &[(NodeId, u32)],
+        excluded: &[bool],
+    ) -> Self {
+        let mut store = NodeStateStore::new();
+        store.enable_link_lengths();
+        let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
+        let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
+        let mut inside_excluded = vec![false; dom.len()];
+        let has_alphanumeric_text =
+            std::iter::once(root)
+                .chain(dom.descendants(root))
+                .any(|node| {
+                    let parent_is_excluded = dom
+                        .parent(node)
+                        .is_some_and(|parent| inside_excluded[parent.index()]);
+                    inside_excluded[node.index()] = excluded[node.index()] || parent_is_excluded;
+                    !inside_excluded[node.index()]
+                        && dom
+                            .text_node(node)
+                            .is_some_and(|text| text.chars().any(char::is_alphanumeric))
+                });
+        let mut metrics = Self::from_text_stats(text, link_density, has_alphanumeric_text);
+        let mut excluded_depth = None;
+        for &(node, depth) in elements {
+            if let Some(boundary) = excluded_depth {
+                if depth > boundary {
+                    continue;
+                }
+                excluded_depth = None;
+            }
+            if excluded[node.index()] {
+                excluded_depth = Some(depth);
+                continue;
+            }
+            metrics.count_structure(dom.tag(node));
+        }
+        metrics
+    }
+
+    fn from_text_stats(
+        text: crate::dom::NodeStats,
+        link_density: f64,
+        has_alphanumeric_text: bool,
+    ) -> Self {
+        Self {
             word_count: text.word_count as usize,
             text_chars: text.text_length as usize,
             link_density,
+            has_alphanumeric_text,
             ..Self::default()
-        };
-        for node in std::iter::once(root).chain(dom.descendants(root)) {
-            if dom
-                .text_node(node)
-                .is_some_and(|text| text.chars().any(char::is_alphanumeric))
-            {
-                metrics.has_alphanumeric_text = true;
-            }
-            match dom.tag(node) {
-                Some(Tag::P) => metrics.paragraph_count += 1,
-                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
-                    metrics.heading_count += 1
-                }
-                Some(
-                    Tag::Pre
-                    | Tag::Table
-                    | Tag::Figure
-                    | Tag::Blockquote
-                    | Tag::Details
-                    | Tag::Dl
-                    | Tag::Math
-                    | Tag::Ol
-                    | Tag::Ul,
-                ) => metrics.structured_block_count += 1,
-                _ => {}
-            }
         }
-        metrics
+    }
+
+    fn count_structure(&mut self, tag: Option<Tag>) {
+        match tag {
+            Some(Tag::P) => self.paragraph_count += 1,
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
+                self.heading_count += 1
+            }
+            Some(
+                Tag::Pre
+                | Tag::Table
+                | Tag::Figure
+                | Tag::Blockquote
+                | Tag::Details
+                | Tag::Dl
+                | Tag::Math
+                | Tag::Ol
+                | Tag::Ul,
+            ) => self.structured_block_count += 1,
+            _ => {}
+        }
     }
 
     pub(crate) fn has_meaningful_text(self) -> bool {
@@ -249,6 +296,35 @@ mod tests {
             has_alphanumeric_text: true,
             ..ContentMetrics::default()
         }
+    }
+
+    #[test]
+    fn source_metrics_filter_nested_hidden_and_chrome_regions() {
+        let source = Dom::parse_document(
+            r#"<body><header><a href="/home">Home nav words</a></header><main><header><h1>Article title</h1></header><p>First visible paragraph.</p><div hidden><p>Hidden outer <span>nested words.</span></p><div><a href="/hidden">Hidden link words</a></div></div><p>Second <a href="/guide">visible guide</a>.</p><footer><p>Article footer note.</p></footer></main><aside role="complementary"><p>Outside sidebar content.</p></aside><footer><p>Global footer content.</p></footer></body>"#,
+        )
+        .unwrap();
+        let expected = Dom::parse_document(
+            r#"<body><main><header><h1>Article title</h1></header><p>First visible paragraph.</p><p>Second <a href="/guide">visible guide</a>.</p><footer><p>Article footer note.</p></footer></main></body>"#,
+        )
+        .unwrap();
+        let source_body = source.body().unwrap();
+        let expected_main = expected
+            .first_descendant_by_tag(expected.root(), Tag::Main)
+            .unwrap();
+        let actual = ContentMetrics::measure_source(&source, source_body);
+        let expected = ContentMetrics::measure(&expected, expected_main);
+
+        assert_eq!(actual.word_count, expected.word_count);
+        assert_eq!(actual.text_chars, expected.text_chars);
+        assert_eq!(actual.paragraph_count, expected.paragraph_count);
+        assert_eq!(actual.heading_count, expected.heading_count);
+        assert_eq!(
+            actual.structured_block_count,
+            expected.structured_block_count
+        );
+        assert_eq!(actual.link_density, expected.link_density);
+        assert_eq!(actual.has_alphanumeric_text, expected.has_alphanumeric_text);
     }
 
     #[test]

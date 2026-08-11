@@ -127,6 +127,18 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     a.has_sentence_end = a.has_sentence_break || a.ends_with_dot
 }
 pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
+    get_or_compute_stats_excluding(dom, id, store, &[])
+}
+
+/// Computes text statistics while omitting the roots marked in `excluded`.
+///
+/// The cache must be empty because its entries describe this filtered tree view.
+pub(crate) fn get_or_compute_stats_excluding(
+    dom: &Dom,
+    id: NodeId,
+    store: &mut NodeStateStore,
+    excluded: &[bool],
+) -> NodeStats {
     if let Some(s) = store.get_stats(id) {
         return *s;
     }
@@ -140,7 +152,9 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
         if !expanded {
             stack.push((n, true));
             for c in dom.children_rev(n) {
-                if store.get_stats(c).is_none() {
+                if !excluded.get(c.index()).copied().unwrap_or(false)
+                    && store.get_stats(c).is_none()
+                {
                     stack.push((c, false))
                 }
             }
@@ -153,6 +167,9 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
         let cache_links = store.link_lengths_enabled();
         let mut link_length = 0.0;
         for c in dom.children(n) {
+            if excluded.get(c.index()).copied().unwrap_or(false) {
+                continue;
+            }
             if let Some(cs) = store.get_stats(c) {
                 append_stats(&mut s, cs)
             }
