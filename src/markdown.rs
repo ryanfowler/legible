@@ -128,6 +128,7 @@ enum Task<N> {
     ListItems(N, i32, u32),
     ListItem(N, ListMarker),
     ItemParagraph(N),
+    FootnoteChildren(N, bool),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -163,6 +164,7 @@ enum Close<N> {
     Quote,
     List,
     ListItem,
+    Footnote,
 }
 
 struct MarkdownSerializer<'a, T: MarkdownTree> {
@@ -214,6 +216,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 Task::ListItems(id, start, index) => self.list_items(id, start, index),
                 Task::ListItem(id, marker) => self.list_item(id, marker),
                 Task::ItemParagraph(id) => self.item_paragraph(id),
+                Task::FootnoteChildren(id, first) => self.footnote_children(id, first),
             }
         }
         self.out.finish()
@@ -265,6 +268,23 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         let Some(tag) = self.dom.tag(id) else {
             return;
         };
+
+        if let Some(latex) = self.dom.attr(id, AttrName::DataLatex)
+            && let Some(kind) = self.dom.attr(id, AttrName::DataMath)
+        {
+            self.math(latex, kind == "block");
+            return;
+        }
+        if let Some(label) = self.dom.attr(id, AttrName::DataFootnoteRef) {
+            self.out.markup("[^");
+            self.out.footnote_label(label);
+            self.out.markup("]");
+            return;
+        }
+        if let Some(label) = self.dom.attr(id, AttrName::DataFootnote) {
+            self.footnote_definition(id, label);
+            return;
+        }
 
         match tag {
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
@@ -374,6 +394,48 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         }
     }
 
+    fn math(&mut self, latex: &str, block: bool) {
+        if block {
+            self.out.ensure_blank_line();
+            self.out.markup("$$");
+            self.out.newline();
+            self.out.verbatim(latex.trim());
+            self.out.newline();
+            self.out.markup("$$");
+            self.out.newline();
+        } else {
+            self.out.markup("$");
+            self.out.verbatim(latex.trim());
+            self.out.markup("$");
+        }
+    }
+
+    fn footnote_definition(&mut self, id: T::Node, label: &str) {
+        self.out.ensure_blank_line();
+        self.out.markup("[^");
+        self.out.footnote_label(label);
+        self.out.markup("]: ");
+        self.out.prefixes.push(Prefix::Indent(4));
+        self.tasks.push(Task::Close(Close::Footnote));
+        if let Some(child) = self.dom.first_child(id) {
+            self.tasks.push(Task::FootnoteChildren(child, true));
+        }
+    }
+
+    fn footnote_children(&mut self, id: T::Node, first: bool) {
+        if let Some(sibling) = self.dom.next_sibling(id) {
+            self.tasks.push(Task::FootnoteChildren(sibling, false));
+        }
+        self.tasks.push(Task::Node(
+            id,
+            if first && self.dom.tag(id) == Some(Tag::P) {
+                Mode::Inline
+            } else {
+                Mode::Block
+            },
+        ));
+    }
+
     fn format_children(&mut self, id: T::Node, kind: RunKind) {
         if let Some(sibling) = self.dom.next_sibling(id) {
             self.tasks.push(Task::FormatChildren(sibling, kind));
@@ -451,11 +513,17 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
 
     fn list_items(&mut self, id: T::Node, start: i32, index: u32) {
         let is_item = self.dom.tag(id) == Some(Tag::Li);
+        let is_footnote = is_item && self.dom.attr(id, AttrName::DataFootnote).is_some();
         if let Some(sibling) = self.dom.next_sibling(id) {
-            self.tasks
-                .push(Task::ListItems(sibling, start, index + u32::from(is_item)));
+            self.tasks.push(Task::ListItems(
+                sibling,
+                start,
+                index + u32::from(is_item && !is_footnote),
+            ));
         }
-        if is_item {
+        if is_footnote {
+            self.tasks.push(Task::Node(id, Mode::Block));
+        } else if is_item {
             let marker = if start == i32::MIN {
                 ListMarker::Bullet
             } else if index == 0 && start != 1 {
@@ -788,6 +856,13 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 ));
                 self.out.prefixes.pop();
             }
+            Close::Footnote => {
+                if self.out.has_current_line_content() {
+                    self.out.newline();
+                }
+                debug_assert!(matches!(self.out.prefixes.last(), Some(Prefix::Indent(4))));
+                self.out.prefixes.pop();
+            }
         }
     }
 }
@@ -812,6 +887,7 @@ enum LineTextState {
 #[derive(Clone, Copy)]
 enum Prefix {
     Quote,
+    Indent(usize),
     ListItem { width: usize, has_content: bool },
 }
 
@@ -853,6 +929,7 @@ impl Output {
         for prefix in &self.prefixes {
             match prefix {
                 Prefix::Quote => self.value.push_str("> "),
+                Prefix::Indent(width) => self.value.extend(std::iter::repeat_n(' ', *width)),
                 Prefix::ListItem { width, .. } => {
                     self.value.extend(std::iter::repeat_n(' ', *width));
                 }
@@ -1008,6 +1085,21 @@ impl Output {
         }
     }
 
+    fn footnote_label(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                if !self.value.ends_with(' ') {
+                    self.value.push(' ');
+                }
+            } else {
+                if matches!(ch, '\\' | ']') {
+                    self.value.push('\\');
+                }
+                self.value.push(ch);
+            }
+        }
+    }
+
     fn destination(&mut self, value: &str) {
         for ch in value.chars() {
             match ch {
@@ -1117,6 +1209,7 @@ impl Output {
             for prefix in &self.prefixes {
                 match prefix {
                     Prefix::Quote => self.value.push_str("> "),
+                    Prefix::Indent(width) => self.value.extend(std::iter::repeat_n(' ', *width)),
                     Prefix::ListItem { width, .. } => {
                         self.value.extend(std::iter::repeat_n(' ', *width));
                     }
@@ -1148,6 +1241,7 @@ impl Output {
         self.prefixes.iter().rev().find_map(|prefix| match prefix {
             Prefix::ListItem { has_content, .. } => Some(!has_content),
             Prefix::Quote => None,
+            Prefix::Indent(_) => None,
         }) == Some(true)
     }
 

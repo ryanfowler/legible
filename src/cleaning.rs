@@ -18,7 +18,14 @@ pub fn prep_document(dom: &mut Dom) {
     // normalize BR runs, and only then rename deprecated font elements.
     let mut ids: Vec<_> = dom
         .descendants(dom.root())
-        .filter(|&id| matches!(dom.tag(id), Some(Tag::Script | Tag::Noscript | Tag::Style)))
+        .filter(|&id| {
+            matches!(dom.tag(id), Some(Tag::Noscript | Tag::Style))
+                || dom.tag(id) == Some(Tag::Script)
+                    && !dom.attr(id, AttrName::Type).is_some_and(|value| {
+                        let value = value.trim().to_ascii_lowercase();
+                        value == "math/tex" || value.starts_with("math/tex;") || value == "text/tex"
+                    })
+        })
         .collect();
     for &id in &ids {
         dom.detach(id);
@@ -140,19 +147,24 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     }
 }
 fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
-    matches!(
-        dom.tag(id),
-        Some(
-            Tag::Pre
-                | Tag::Code
-                | Tag::Figure
-                | Tag::Picture
-                | Tag::Blockquote
-                | Tag::Details
-                | Tag::Math
-                | Tag::Dl
+    std::iter::once(id).chain(dom.ancestors(id)).any(|node| {
+        dom.attr(node, AttrName::DataFootnote).is_some()
+            || dom.attr(node, AttrName::DataFootnotes).is_some()
+    }) || dom.attr(id, AttrName::DataMath).is_some()
+        || matches!(
+            dom.tag(id),
+            Some(
+                Tag::Pre
+                    | Tag::Code
+                    | Tag::Figure
+                    | Tag::Picture
+                    | Tag::Blockquote
+                    | Tag::Details
+                    | Tag::Math
+                    | Tag::Dl
+            )
         )
-    ) || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
+        || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
 }
 
 pub fn mark_data_tables(
@@ -684,7 +696,7 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
         {
             continue;
         }
-        if is_element_without_content(dom, id) {
+        if is_element_without_content(dom, id) && dom.attr(id, AttrName::DataMath).is_none() {
             dom.detach(id);
             continue;
         }

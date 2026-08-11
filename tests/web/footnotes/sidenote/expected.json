@@ -1,1 +1,1 @@
-{"must_contain":["explanatory note","historical context","discussion continues"]}
+{"must_contain":["explanatory note.[^sn1]","[^sn1]: The sidenote gives useful historical context","discussion continues"]}

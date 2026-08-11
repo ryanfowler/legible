@@ -1,1 +1,1 @@
-{"must_contain":["supporting evidence","supporting study"]}
+{"must_contain":["supporting evidence.[^fn1]","[^fn1]: The supporting study"]}
