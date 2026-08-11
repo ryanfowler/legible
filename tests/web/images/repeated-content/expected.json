@@ -1,0 +1,7 @@
+{
+  "must_contain": [
+    "Diagram before the explanation",
+    "Diagram after the explanation"
+  ],
+  "images_min": 2
+}

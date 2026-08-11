@@ -1,13 +1,25 @@
 //! Semantic normalization for retained content.
 
-use crate::cleaning::{fix_lazy_images, repeated_listing_start, simplify_nested_elements};
+mod headings;
+mod images;
+mod lists;
+
+use crate::cleaning::{repeated_listing_start, simplify_nested_elements};
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::{has_single_tag_inside_element, is_element_without_content};
 use smallvec::SmallVec;
 
 /// Normalizes retained markup into a predictable tree for all serializers.
+///
+/// The order preserves information that later, more general passes can hide.
+/// Images resolve lazy and responsive sources before figure processing. Heading
+/// and list roles become native HTML before wrapper cleanup. Code and figure
+/// detection run while source classes are still available. Table normalization
+/// runs last because it can replace complete structural subtrees.
 pub(crate) fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    normalize_images(dom, root, nodes);
+    images::normalize(dom, root, nodes);
+    headings::normalize(dom, root);
+    lists::normalize(dom, root);
     normalize_code_blocks(dom, root);
     normalize_figures(dom, root);
     normalize_footnotes(dom, root);
@@ -15,268 +27,27 @@ pub(crate) fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<N
     normalize_layout_tables(dom, root);
 }
 
+/// Preserves explicit ARIA document structure in the scoring-only DOM.
+///
+/// Readability preparation can turn leaf `div` elements into paragraphs. Run
+/// the same heading and list passes first so that operation cannot erase
+/// author-provided semantics. The retained fragment runs the full pipeline.
+pub(crate) fn normalize_scoring_structure(dom: &mut Dom, root: NodeId) {
+    headings::normalize_roles(dom, root);
+    lists::normalize(dom, root);
+}
+
+pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
+    matches!(dom.tag(node), Some(Tag::H1 | Tag::H2)) || headings::has_primary_role(dom, node)
+}
+
 /// Finishes normalization after URL and attribute cleanup.
+///
+/// These passes are intentionally last. They discard empty presentation
+/// wrappers after all semantic passes have consumed their source evidence.
 pub(crate) fn finish_normalization(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     simplify_nested_elements(dom, root, nodes);
     remove_empty_nodes(dom, root, nodes);
-}
-
-fn normalize_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    fix_lazy_images(dom, root, nodes);
-
-    // Markdown needs one concrete image URL. Use the first srcset candidate
-    // when an image has no src. Keep the complete srcset for HTML output.
-    nodes.clear();
-    nodes.extend(
-        dom.descendants(root)
-            .filter(|&node| dom.tag(node) == Some(Tag::Img)),
-    );
-    for &image in nodes.iter() {
-        let replace_placeholder =
-            dom.attr(image, AttrName::Src).is_none() || image_has_placeholder_source(dom, image);
-        if replace_placeholder
-            && let Some((value, is_srcset)) =
-                picture_source(dom, image).map(|(value, is_srcset)| (value.to_owned(), is_srcset))
-        {
-            if is_srcset {
-                dom.set_attr(image, AttrName::Srcset, &value);
-                if let Some(src) = first_srcset_candidate(&value) {
-                    dom.set_attr(image, AttrName::Src, src);
-                }
-            } else {
-                dom.set_attr(image, AttrName::Src, &value);
-            }
-        }
-        if dom.attr(image, AttrName::Src).is_none()
-            && let Some(src) = dom
-                .attr(image, AttrName::Srcset)
-                .and_then(first_srcset_candidate)
-                .map(str::to_owned)
-        {
-            dom.set_attr(image, AttrName::Src, &src);
-        }
-    }
-
-    // Remove only adjacent hydration variants. Repeated images separated by
-    // text or another element remain distinct content.
-    let images: SmallVec<[NodeId; 32]> = nodes.iter().copied().collect();
-    for image in images {
-        if dom.parent(image).is_none() {
-            continue;
-        }
-        let Some(previous) = previous_element_sibling(dom, image) else {
-            continue;
-        };
-        let Some(previous_image) = single_image(dom, previous) else {
-            continue;
-        };
-        let previous_source_placeholder = image_has_orphan_placeholder_source(dom, previous_image);
-        let source_placeholder = image_has_orphan_placeholder_source(dom, image);
-        let hydration_pair = same_image_url(dom, previous_image, image)
-            && (is_hydration_placeholder(dom, previous_image)
-                || is_hydration_placeholder(dom, image));
-        let disposable_previous =
-            previous_source_placeholder && !has_meaningful_image_description(dom, previous_image);
-        let disposable_current =
-            source_placeholder && !has_meaningful_image_description(dom, image);
-        if hydration_pair || disposable_previous != disposable_current {
-            let remove = if disposable_previous {
-                previous
-            } else if disposable_current {
-                image
-            } else if is_hydration_placeholder(dom, previous_image) {
-                previous
-            } else {
-                image
-            };
-            dom.detach(remove);
-        }
-    }
-
-    // A placeholder with no usable lazy source has no visual content. Keep it
-    // only when its accessible text or figure caption conveys useful meaning.
-    for &image in nodes.iter() {
-        if dom.parent(image).is_some()
-            && image_has_orphan_placeholder_source(dom, image)
-            && !has_meaningful_image_description(dom, image)
-        {
-            dom.detach(image);
-        }
-    }
-}
-
-fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
-    let meaningful = |value: &str| {
-        let value = value.trim().to_lowercase();
-        !value.is_empty()
-            && ![
-                "image unavailable",
-                "unavailable image",
-                "placeholder",
-                "loading",
-                "blank image",
-            ]
-            .iter()
-            .any(|label| value == *label)
-    };
-    if ["alt", "aria-label", "title"]
-        .into_iter()
-        .filter_map(|name| dom.attr_by_local_name(image, name))
-        .any(meaningful)
-    {
-        return true;
-    }
-    dom.ancestors(image)
-        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))
-        .is_some_and(|figure| {
-            let sole_image = dom
-                .descendants(figure)
-                .filter(|&node| dom.tag(node) == Some(Tag::Img))
-                .take(2)
-                .count()
-                == 1;
-            sole_image
-                && dom.descendants(figure).any(|node| {
-                    dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node)
-                })
-        })
-}
-
-fn picture_source(dom: &Dom, image: NodeId) -> Option<(&str, bool)> {
-    let picture = dom
-        .ancestors(image)
-        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))?;
-    if let Some(value) = valid_image_attribute(dom.attr(picture, AttrName::DataSrcset)) {
-        return Some((value, true));
-    }
-    if let Some(value) = valid_image_attribute(dom.attr(picture, AttrName::DataSrc)) {
-        return Some((value, false));
-    }
-    for source in dom
-        .descendants(picture)
-        .filter(|&node| dom.tag(node) == Some(Tag::Source))
-    {
-        if let Some(value) = valid_image_attribute(
-            dom.attr(source, AttrName::DataSrcset)
-                .or_else(|| dom.attr(source, AttrName::Srcset)),
-        ) {
-            return Some((value, true));
-        }
-        if let Some(value) = valid_image_attribute(
-            dom.attr(source, AttrName::DataSrc)
-                .or_else(|| dom.attr(source, AttrName::Src)),
-        ) {
-            return Some((value, false));
-        }
-    }
-    None
-}
-
-fn valid_image_attribute(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null"))
-}
-
-fn image_has_placeholder_source(dom: &Dom, image: NodeId) -> bool {
-    dom.attr(image, AttrName::Src).is_some_and(|source| {
-        let source = source.to_ascii_lowercase();
-        source.contains("placeholder")
-            || source.contains("blank.gif")
-            || source.contains("spacer.gif")
-            || source.contains("transparent.gif")
-            || crate::constants::parse_b64_data_url(&source)
-                .is_some_and(|(end, _)| source.len().saturating_sub(end) < 133)
-    })
-}
-
-fn image_has_orphan_placeholder_source(dom: &Dom, image: NodeId) -> bool {
-    dom.attr(image, AttrName::Src).is_some_and(|source| {
-        let path = source
-            .split(['?', '#'])
-            .next()
-            .unwrap_or(source)
-            .trim_end_matches('/');
-        let basename = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-        let stem = basename
-            .rsplit_once('.')
-            .map_or(basename.as_str(), |(stem, _)| stem);
-        matches!(
-            basename.as_str(),
-            "blank.gif" | "spacer.gif" | "transparent.gif"
-        ) || matches!(
-            stem,
-            "placeholder" | "grey-placeholder" | "image-placeholder" | "photo-placeholder"
-        )
-    })
-}
-
-fn first_srcset_candidate(srcset: &str) -> Option<&str> {
-    srcset
-        .split(',')
-        .next()?
-        .split_ascii_whitespace()
-        .next()
-        .filter(|value| !value.is_empty())
-}
-
-fn previous_element_sibling(dom: &Dom, node: NodeId) -> Option<NodeId> {
-    let mut previous = dom.prev_sibling(node);
-    while let Some(candidate) = previous {
-        if dom.is_element(candidate) {
-            return Some(candidate);
-        }
-        if dom
-            .text_node(candidate)
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            return None;
-        }
-        previous = dom.prev_sibling(candidate);
-    }
-    None
-}
-
-fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
-    if dom.tag(node) == Some(Tag::Img) {
-        return Some(node);
-    }
-    if dom.has_non_whitespace_text(node) {
-        return None;
-    }
-    let mut images = dom
-        .descendants(node)
-        .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img));
-    let image = images.next()?;
-    images.next().is_none().then_some(image)
-}
-
-fn same_image_url(dom: &Dom, first: NodeId, second: NodeId) -> bool {
-    [
-        AttrName::Src,
-        AttrName::Srcset,
-        AttrName::DataSrc,
-        AttrName::DataSrcset,
-    ]
-    .into_iter()
-    .any(|attribute| {
-        dom.attr(first, attribute)
-            .filter(|value| !value.is_empty())
-            .is_some_and(|value| dom.attr(second, attribute) == Some(value))
-    })
-}
-
-fn is_hydration_placeholder(dom: &Dom, image: NodeId) -> bool {
-    let name = [AttrName::Class, AttrName::Id]
-        .into_iter()
-        .filter_map(|attribute| dom.attr(image, attribute))
-        .any(|value| {
-            let value = value.to_ascii_lowercase();
-            value.contains("placeholder") || value.contains("lazy") || value.contains("hydration")
-        });
-    name || dom.attr(image, AttrName::Src).is_none()
-        || [AttrName::Width, AttrName::Height]
-            .into_iter()
-            .filter_map(|attribute| dom.attr(image, attribute)?.parse::<u32>().ok())
-            .any(|size| size <= 1)
 }
 
 fn normalize_code_blocks(dom: &mut Dom, root: NodeId) {
@@ -919,7 +690,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
     #[test]
     fn uses_srcset_when_src_is_missing() {
         let (dom, root) = normalized(r#"<img srcset="small.jpg 1x, large.jpg 2x" alt="Photo">"#);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![Photo](small.jpg)\n");
+        assert_eq!(dom_to_markdown(&dom, root, 0), "![Photo](large.jpg)\n");
     }
 
     #[test]
@@ -927,7 +698,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         let (dom, root) = normalized(
             r#"<picture><source><source data-srcset="hero.webp 1x, hero-large.webp 2x"><img src="blank.gif" alt="Hero"></picture>"#,
         );
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![Hero](hero.webp)\n");
+        assert_eq!(dom_to_markdown(&dom, root, 0), "![Hero](hero-large.webp)\n");
 
         let (dom, root) = normalized(
             r#"<picture><source data-src="null"><source data-src="hero.jpg"><img src="placeholder.gif" alt="Hero"></picture>"#,

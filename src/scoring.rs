@@ -434,7 +434,7 @@ pub(crate) fn prepare_readability_structure(
 ) -> SmallVec<[NodeId; 256]> {
     let mut to_score = SmallVec::new();
     for &id in divs {
-        if dom.parent(id).is_none() {
+        if dom.parent(id).is_none() || dom.tag(id) != Some(Tag::Div) {
             continue;
         }
         wrap_phrasing_content_in_p(dom, id);

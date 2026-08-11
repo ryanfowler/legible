@@ -15,7 +15,10 @@ use crate::error::{Error, Result};
 use crate::extractor::ExtractorConfig;
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, StructuredData};
-use crate::normalize::{finish_normalization, normalize_semantics};
+use crate::normalize::{
+    finish_normalization, has_primary_heading_semantics, normalize_scoring_structure,
+    normalize_semantics,
+};
 use crate::page::ExtractedPage;
 use crate::quality::{
     ContentMetrics, ExtractionQuality, is_access_barrier, is_incoherent_short_result,
@@ -296,6 +299,8 @@ impl<'a> ContentExtractor<'a> {
             // deferred clutter is detached. The prepared source stays intact
             // for retries.
             let mut working_dom = self.dom.clone();
+            let working_root = working_dom.root();
+            normalize_scoring_structure(&mut working_dom, working_root);
             let mut to_score = discovery.to_score;
             let prepared = prepare_readability_structure(
                 &mut working_dom,
@@ -1139,7 +1144,7 @@ impl<'a> ContentExtractor<'a> {
                     continue;
                 }
             }
-            let duplicates_title = if remove_title && matches!(tag, Tag::H1 | Tag::H2) {
+            let duplicates_title = if remove_title && has_primary_heading_semantics(&self.dom, id) {
                 let heading = get_inner_text(&self.dom, id, text_buffer);
                 heading_matches_page_title(&self.page_title, heading)
             } else {
@@ -2271,6 +2276,19 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     fn recognizes_title_prefix_with_whitespace_before_separator() {
         assert!(heading_matches_page_title("Article | Example", "Article"));
         assert!(!heading_matches_page_title("Different title", "Article"));
+    }
+
+    #[test]
+    fn removes_a_duplicate_aria_page_title_heading() {
+        let page = crate::extract(
+            r#"<html><head><title>Article title</title></head><body><main><div role="heading" aria-level="1">Article title</div><p>The article contains enough useful text to select this main region and retain its complete explanation.</p><p>A second paragraph confirms that the semantic heading does not duplicate the resolved page title.</p></main></body></html>"#,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(page.metadata().title.as_deref(), Some("Article title"));
+        assert!(!page.text().contains("Article title"));
+        assert!(page.text().contains("complete explanation"));
     }
 
     #[test]
