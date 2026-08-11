@@ -46,9 +46,10 @@
 //!
 //! # Security
 //!
-//! [`ExtractedPage::html`] is not sanitized. Apply a sanitizer that matches your
-//! security policy before you insert the HTML into an untrusted page. Markdown output
-//! contains no raw HTML and omits destinations with unsupported URI schemes.
+//! Use [`ExtractedPage::safe_html`] for normal downstream display.
+//! [`ExtractedPage::html`] is not sanitized and remains available when a caller needs
+//! raw extracted markup. Markdown output contains no raw HTML and omits destinations
+//! with unsupported URI schemes.
 
 mod candidate;
 mod cleaning;
@@ -58,6 +59,7 @@ mod dom;
 mod error;
 mod extraction;
 mod extractor;
+mod html;
 mod logging;
 mod markdown;
 mod metadata;
@@ -72,9 +74,12 @@ pub use diagnostics::{
     ExtractionDiagnostics, ExtractionStrategyInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
 };
 pub use error::{Error, Result};
-pub use extractor::{Extractor, ExtractorBuilder};
-pub use metadata::Metadata;
-pub use page::{ExtractedPage, MarkdownBuilder};
+pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};
+pub use metadata::{
+    Metadata, MetadataDiagnostics, MetadataFieldDiagnostics, MetadataListFieldDiagnostics,
+    MetadataSource, MetadataValue,
+};
+pub use page::{ExtractedPage, HtmlBuilder, MarkdownBuilder};
 
 /// Extracts relevant content and metadata from an HTML document.
 ///

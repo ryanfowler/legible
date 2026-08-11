@@ -119,6 +119,10 @@ impl StructuredData {
                 .is_some_and(|value| json_types(value).any(|value| schema_type(value, kind)))
         })
     }
+
+    pub(crate) fn retained_items(&self) -> Vec<Value> {
+        self.items.clone()
+    }
 }
 
 fn script_text<'a>(dom: &'a Dom, id: NodeId, buffer: &'a mut String) -> &'a str {
@@ -227,17 +231,126 @@ fn is_general_content_type(value: &str) -> bool {
     .any(|kind| schema_type(value, kind))
 }
 
+/// The source of a discovered metadata value.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MetadataSource {
+pub enum MetadataSource {
+    /// Schema.org JSON-LD.
     JsonLd,
+    /// Open Graph metadata.
     OpenGraph,
+    /// Twitter card metadata.
     Twitter,
+    /// Dublin Core metadata.
     DublinCore,
+    /// Citation or publishing-system metadata.
     Citation,
+    /// A general HTML `meta` element.
     HtmlMeta,
+    /// Visible or semantic HTML content.
     HtmlElement,
+    /// An HTML `link` or `a` element.
     LinkElement,
+    /// A value inferred from page context.
     Inferred,
+}
+
+/// One discovered metadata value and its source confidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataValue<T> {
+    /// The normalized value.
+    pub value: T,
+    /// The source that supplied the value.
+    pub source: MetadataSource,
+    /// The source confidence from `0` through `100`.
+    pub confidence: u8,
+}
+
+/// Selection details for a metadata field that has one value.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataFieldDiagnostics<T> {
+    /// The selected value.
+    pub selected: Option<MetadataValue<T>>,
+    /// The normalized values that were not selected.
+    pub alternatives: Vec<MetadataValue<T>>,
+}
+
+/// Selection details for a metadata field that can have many values.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataListFieldDiagnostics<T> {
+    /// The selected values in source order.
+    pub selected: Vec<MetadataValue<T>>,
+    /// The normalized values that were not selected.
+    pub alternatives: Vec<MetadataValue<T>>,
+}
+
+/// Optional provenance for all public metadata fields.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataDiagnostics {
+    /// Title selection details.
+    pub title: MetadataFieldDiagnostics<String>,
+    /// Description selection details.
+    pub description: MetadataFieldDiagnostics<String>,
+    /// Author selection details.
+    pub authors: MetadataListFieldDiagnostics<String>,
+    /// Site-name selection details.
+    pub site_name: MetadataFieldDiagnostics<String>,
+    /// Canonical-URL selection details.
+    pub canonical_url: MetadataFieldDiagnostics<String>,
+    /// Representative-image selection details.
+    pub image: MetadataFieldDiagnostics<String>,
+    /// Favicon selection details.
+    pub favicon: MetadataFieldDiagnostics<String>,
+    /// Publication-time selection details.
+    pub published_time: MetadataFieldDiagnostics<String>,
+    /// Modification-time selection details.
+    pub modified_time: MetadataFieldDiagnostics<String>,
+    /// Language selection details.
+    pub language: MetadataFieldDiagnostics<String>,
+    /// Text-direction selection details.
+    pub direction: MetadataFieldDiagnostics<String>,
+    /// Section selection details.
+    pub section: MetadataFieldDiagnostics<String>,
+    /// Tag selection details.
+    pub tags: MetadataListFieldDiagnostics<String>,
+}
+
+impl MetadataDiagnostics {
+    pub(crate) fn complete_with_fallbacks(&mut self, metadata: &Metadata) {
+        complete_scalar(&mut self.title, metadata.title.as_deref());
+        complete_scalar(&mut self.description, metadata.description.as_deref());
+        complete_list(&mut self.authors, &metadata.authors);
+        complete_scalar(&mut self.language, metadata.language.as_deref());
+        complete_scalar(&mut self.direction, metadata.direction.as_deref());
+    }
+}
+
+fn inferred_value(value: &str) -> MetadataValue<String> {
+    MetadataValue {
+        value: value.to_owned(),
+        source: MetadataSource::Inferred,
+        confidence: 40,
+    }
+}
+
+fn complete_scalar(field: &mut MetadataFieldDiagnostics<String>, value: Option<&str>) {
+    if field.selected.is_none()
+        && let Some(value) = value
+    {
+        field.selected = Some(inferred_value(value));
+    }
+}
+
+fn complete_list(field: &mut MetadataListFieldDiagnostics<String>, values: &[String]) {
+    for value in values {
+        if !field
+            .selected
+            .iter()
+            .any(|selected| selected.value.eq_ignore_ascii_case(value))
+        {
+            field.selected.push(inferred_value(value));
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -286,13 +399,14 @@ impl CandidateSet {
 }
 
 /// Discovers metadata without changing the source DOM.
-pub(crate) fn discover(
+pub(crate) fn discover_with_diagnostics(
     dom: &Dom,
     structured: &StructuredData,
     document_title: &str,
     base_url: Option<&Url>,
     source_url: Option<&Url>,
-) -> Metadata {
+    retain_diagnostics: bool,
+) -> (Metadata, Option<MetadataDiagnostics>) {
     let mut candidates = CandidateSet::default();
     let identity_title = content_identity_title(dom, document_title);
     collect_structured_candidates(structured, &identity_title, source_url, &mut candidates);
@@ -318,7 +432,18 @@ pub(crate) fn discover(
         }
     }
 
-    resolve_candidates(candidates, base_url)
+    resolve_candidates(candidates, base_url, retain_diagnostics)
+}
+
+#[cfg(test)]
+fn discover(
+    dom: &Dom,
+    structured: &StructuredData,
+    document_title: &str,
+    base_url: Option<&Url>,
+    source_url: Option<&Url>,
+) -> Metadata {
+    discover_with_diagnostics(dom, structured, document_title, base_url, source_url, false).0
 }
 
 fn collect_visible_brand_candidate(
@@ -1088,7 +1213,11 @@ fn nearest_ancestor_with_tag(dom: &Dom, node: NodeId, tag: Tag) -> Option<NodeId
     None
 }
 
-fn resolve_candidates(mut candidates: CandidateSet, base_url: Option<&Url>) -> Metadata {
+fn resolve_candidates(
+    mut candidates: CandidateSet,
+    base_url: Option<&Url>,
+    retain_diagnostics: bool,
+) -> (Metadata, Option<MetadataDiagnostics>) {
     normalize_all(&mut candidates.title, normalize_text);
     normalize_all(&mut candidates.description, normalize_text);
     normalize_all(&mut candidates.authors, normalize_person);
@@ -1122,7 +1251,7 @@ fn resolve_candidates(mut candidates: CandidateSet, base_url: Option<&Url>) -> M
         }
     }
 
-    Metadata {
+    let metadata = Metadata {
         title,
         description: resolve_one(&candidates.description),
         authors: resolve_authors(&candidates.authors),
@@ -1137,6 +1266,85 @@ fn resolve_candidates(mut candidates: CandidateSet, base_url: Option<&Url>) -> M
         section: resolve_one(&candidates.section),
         tags: resolve_many(&candidates.tags),
         has_source_author,
+    };
+    let diagnostics = retain_diagnostics.then(|| MetadataDiagnostics {
+        title: scalar_diagnostics(&candidates.title, metadata.title.as_deref()),
+        description: scalar_diagnostics(&candidates.description, metadata.description.as_deref()),
+        authors: list_diagnostics(&candidates.authors, &metadata.authors),
+        site_name: scalar_diagnostics(&candidates.site_name, metadata.site_name.as_deref()),
+        canonical_url: scalar_diagnostics(
+            &candidates.canonical_url,
+            metadata.canonical_url.as_deref(),
+        ),
+        image: scalar_diagnostics(&candidates.image, metadata.image.as_deref()),
+        favicon: scalar_diagnostics(&candidates.favicon, metadata.favicon.as_deref()),
+        published_time: scalar_diagnostics(
+            &candidates.published_time,
+            metadata.published_time.as_deref(),
+        ),
+        modified_time: scalar_diagnostics(
+            &candidates.modified_time,
+            metadata.modified_time.as_deref(),
+        ),
+        language: scalar_diagnostics(&candidates.language, metadata.language.as_deref()),
+        direction: scalar_diagnostics(&candidates.direction, metadata.direction.as_deref()),
+        section: scalar_diagnostics(&candidates.section, metadata.section.as_deref()),
+        tags: list_diagnostics(&candidates.tags, &metadata.tags),
+    });
+    (metadata, diagnostics)
+}
+
+fn public_value(candidate: &MetadataCandidate, value: String) -> MetadataValue<String> {
+    MetadataValue {
+        value,
+        source: candidate.source,
+        confidence: candidate.confidence,
+    }
+}
+
+fn scalar_diagnostics(
+    candidates: &[MetadataCandidate],
+    selected: Option<&str>,
+) -> MetadataFieldDiagnostics<String> {
+    let selected_candidate = selected.and_then(|value| {
+        resolve_best_matching(candidates, value, &[])
+            .or_else(|| resolve_best(candidates))
+            .map(|candidate| (candidate, value))
+    });
+    MetadataFieldDiagnostics {
+        selected: selected_candidate
+            .map(|(candidate, value)| public_value(candidate, value.to_owned())),
+        alternatives: candidates
+            .iter()
+            .filter(|candidate| {
+                selected_candidate.is_none_or(|(selected, _)| candidate.order != selected.order)
+            })
+            .map(|candidate| public_value(candidate, candidate.value.clone()))
+            .collect(),
+    }
+}
+
+fn list_diagnostics(
+    candidates: &[MetadataCandidate],
+    selected: &[String],
+) -> MetadataListFieldDiagnostics<String> {
+    let mut selected_orders = Vec::new();
+    let selected = selected
+        .iter()
+        .filter_map(|value| {
+            let candidate = resolve_best_matching(candidates, value, &selected_orders)?;
+            selected_orders.push(candidate.order);
+            Some(public_value(candidate, value.clone()))
+        })
+        .collect();
+    let alternatives = candidates
+        .iter()
+        .filter(|candidate| !selected_orders.contains(&candidate.order))
+        .map(|candidate| public_value(candidate, candidate.value.clone()))
+        .collect();
+    MetadataListFieldDiagnostics {
+        selected,
+        alternatives,
     }
 }
 
@@ -1225,14 +1433,7 @@ fn resolve_one(candidates: &[MetadataCandidate]) -> Option<String> {
 fn resolve_best(candidates: &[MetadataCandidate]) -> Option<&MetadataCandidate> {
     let mut best: Option<(&MetadataCandidate, u16)> = None;
     for candidate in candidates {
-        let agreements = candidates
-            .iter()
-            .filter(|other| {
-                other.source != candidate.source
-                    && other.value.eq_ignore_ascii_case(&candidate.value)
-            })
-            .count() as u16;
-        let score = u16::from(candidate.confidence) + agreements.min(3) * 5;
+        let score = candidate_resolution_score(candidate, candidates);
         if best.is_none_or(|(current, current_score)| {
             score > current_score || (score == current_score && candidate.order < current.order)
         }) {
@@ -1240,6 +1441,38 @@ fn resolve_best(candidates: &[MetadataCandidate]) -> Option<&MetadataCandidate> 
         }
     }
     best.map(|(candidate, _)| candidate)
+}
+
+fn resolve_best_matching<'a>(
+    candidates: &'a [MetadataCandidate],
+    value: &str,
+    excluded_orders: &[usize],
+) -> Option<&'a MetadataCandidate> {
+    let mut best: Option<(&MetadataCandidate, u16)> = None;
+    for candidate in candidates.iter().filter(|candidate| {
+        candidate.value.eq_ignore_ascii_case(value) && !excluded_orders.contains(&candidate.order)
+    }) {
+        let score = candidate_resolution_score(candidate, candidates);
+        if best.is_none_or(|(current, current_score)| {
+            score > current_score || (score == current_score && candidate.order < current.order)
+        }) {
+            best = Some((candidate, score));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+fn candidate_resolution_score(
+    candidate: &MetadataCandidate,
+    candidates: &[MetadataCandidate],
+) -> u16 {
+    let agreements = candidates
+        .iter()
+        .filter(|other| {
+            other.source != candidate.source && other.value.eq_ignore_ascii_case(&candidate.value)
+        })
+        .count() as u16;
+    u16::from(candidate.confidence) + agreements.min(3) * 5
 }
 
 fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Option<String> {

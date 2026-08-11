@@ -42,6 +42,10 @@ pub enum Error {
     /// [`Extractor::extract`](crate::Extractor::extract) caused this error.
     #[error("Invalid URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
+
+    /// The configured exact content root does not match an element.
+    #[error("The requested content root was not found")]
+    ContentRootNotFound,
 }
 
 /// A result from content extraction.

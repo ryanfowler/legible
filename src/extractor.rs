@@ -5,6 +5,32 @@ use crate::error::Result;
 use crate::extraction::ContentExtractor;
 use crate::page::ExtractedPage;
 
+/// A Rust-native content root selector.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentHint {
+    /// Matches one element by its exact `id` value.
+    Id(String),
+    /// Matches elements that contain this class token.
+    Class(String),
+    /// Matches elements by a common content tag.
+    Tag(ContentTag),
+}
+
+/// An HTML tag that can identify a content root.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTag {
+    /// The `article` element.
+    Article,
+    /// The `main` element.
+    Main,
+    /// The `section` element.
+    Section,
+    /// The `div` element.
+    Div,
+}
+
 /// A reusable HTML content extractor.
 #[derive(Debug, Clone)]
 pub struct Extractor {
@@ -26,6 +52,10 @@ pub(crate) struct ExtractorConfig {
     pub(crate) keep_classes: bool,
     pub(crate) debug: bool,
     pub(crate) diagnostics: bool,
+    pub(crate) metadata_diagnostics: bool,
+    pub(crate) retain_structured_data: bool,
+    pub(crate) content_hint: Option<ContentHint>,
+    pub(crate) content_root: Option<ContentHint>,
 }
 
 impl Default for ExtractorConfig {
@@ -38,6 +68,10 @@ impl Default for ExtractorConfig {
             keep_classes: false,
             debug: false,
             diagnostics: false,
+            metadata_diagnostics: false,
+            retain_structured_data: false,
+            content_hint: None,
+            content_root: None,
         }
     }
 }
@@ -88,6 +122,35 @@ impl ExtractorBuilder {
         self
     }
 
+    /// Retains metadata candidate provenance on each extracted page.
+    pub fn metadata_diagnostics(mut self, enabled: bool) -> Self {
+        self.config.metadata_diagnostics = enabled;
+        self
+    }
+
+    /// Retains parsed JSON-LD values on each extracted page.
+    ///
+    /// Structured data is not retained by default because it can be large.
+    pub fn retain_structured_data(mut self, enabled: bool) -> Self {
+        self.config.retain_structured_data = enabled;
+        self
+    }
+
+    /// Adds strong root-selection evidence while keeping quality validation.
+    pub fn content_hint(mut self, hint: ContentHint) -> Self {
+        self.config.content_hint = Some(hint);
+        self
+    }
+
+    /// Extracts only the first subtree that matches `root`.
+    ///
+    /// Extraction returns [`Error::ContentRootNotFound`](crate::Error::ContentRootNotFound)
+    /// when no element matches.
+    pub fn content_root(mut self, root: ContentHint) -> Self {
+        self.config.content_root = Some(root);
+        self
+    }
+
     /// Builds the extractor.
     pub fn build(self) -> Extractor {
         Extractor {
@@ -122,6 +185,168 @@ mod tests {
         assert_eq!(extractor.config.max_elements, 123);
         assert!(!extractor.config.structured_data);
         assert!(extractor.config.diagnostics);
+    }
+
+    #[test]
+    fn exact_content_root_is_required_and_limits_output() {
+        let html = "<main><article id='first'><p>First selected content.</p></article><article id='second'><p>Second excluded content.</p></article></main>";
+        let page = Extractor::builder()
+            .content_root(ContentHint::Id("first".into()))
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(page.text().contains("First selected"));
+        assert!(!page.text().contains("Second excluded"));
+
+        let error = Extractor::builder()
+            .content_root(ContentHint::Id("missing".into()))
+            .build()
+            .extract(html, None);
+        assert!(matches!(error, Err(Error::ContentRootNotFound)));
+
+        let chrome = Extractor::builder()
+            .content_root(ContentHint::Id("chosen-nav".into()))
+            .build()
+            .extract(
+                "<nav id='chosen-nav'><p>Requested navigation details.</p></nav><main><p>Automatic main content.</p></main>",
+                None,
+            )
+            .unwrap();
+        assert!(chrome.text().contains("Requested navigation details"));
+        assert!(!chrome.text().contains("Automatic main content"));
+    }
+
+    #[test]
+    fn duplicate_class_hints_keep_automatic_quality_selection() {
+        let html = "<main><div class='entry'><p>Short note.</p></div><div class='entry'><p>This is the substantial article. It contains enough useful detail to make the preferred content clear. The second paragraph continues the explanation with practical context.</p><p>More relevant details complete the article.</p></div></main>";
+        let page = Extractor::builder()
+            .content_hint(ContentHint::Class("entry".into()))
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(page.text().contains("substantial article"));
+    }
+
+    #[test]
+    fn diagnostics_report_caller_hint_evidence() {
+        let html = "<main><div id='preferred'><p>The caller identified this useful content. It has enough detail for extraction and a clear sentence.</p><p>A second paragraph provides more useful context.</p></div></main>";
+        let page = Extractor::builder()
+            .content_hint(ContentHint::Id("preferred".into()))
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let accepted = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        assert!(
+            accepted
+                .selected_root
+                .candidate_sources
+                .contains(&crate::diagnostics::CandidateSourceInfo::CallerHint)
+        );
+    }
+
+    #[test]
+    fn poor_hint_does_not_override_better_automatic_content() {
+        let html = "<body><aside id='poor-hint'><p>Brief sidebar note.</p></aside><article id='article'><h1>Substantial article</h1><p>This article explains the main subject in detail. It gives readers the context that they need to understand the result, and it contains several complete sentences.</p><p>The second paragraph adds practical evidence, examples, and a clear conclusion. This is the useful page content that automatic extraction should retain.</p></article></body>";
+        let page = Extractor::builder()
+            .content_hint(ContentHint::Id("poor-hint".into()))
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(page.text().contains("article explains the main subject"));
+        assert!(!page.text().contains("Brief sidebar note"));
+        let accepted = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        assert!(
+            !accepted
+                .selected_root
+                .candidate_sources
+                .contains(&crate::diagnostics::CandidateSourceInfo::CallerHint)
+        );
+    }
+
+    #[test]
+    fn exact_root_does_not_adopt_external_footnotes() {
+        let html = "<main><article id='chosen'><p>Selected text.<sup><a href='#note-1' role='doc-noteref'>1</a></sup></p></article><section class='footnotes'><ol><li id='note-1' role='doc-footnote'>Outside definition must stay outside.</li></ol></section></main>";
+        let page = Extractor::builder()
+            .content_root(ContentHint::Id("chosen".into()))
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(page.text().contains("Selected text"));
+        assert!(!page.text().contains("Outside definition"));
+    }
+
+    #[test]
+    fn metadata_retention_is_opt_in() {
+        let html = r#"<html><head><title>HTML title</title><meta property="og:title" content="OpenGraph title"><script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Schema title"}</script></head><body><main><p>Useful content for this page.</p></main></body></html>"#;
+        let default = Extractor::default().extract(html, None).unwrap();
+        assert!(default.metadata_diagnostics().is_none());
+        assert!(default.structured_data().is_none());
+
+        let retained = Extractor::builder()
+            .metadata_diagnostics(true)
+            .retain_structured_data(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let title = &retained.metadata_diagnostics().unwrap().title;
+        assert!(title.selected.is_some());
+        assert!(!title.alternatives.is_empty());
+        assert!(
+            retained
+                .structured_data()
+                .is_some_and(|items| !items.is_empty())
+        );
+
+        let disabled = Extractor::builder()
+            .structured_data(false)
+            .metadata_diagnostics(true)
+            .retain_structured_data(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(
+            disabled
+                .metadata_diagnostics()
+                .unwrap()
+                .title
+                .selected
+                .as_ref()
+                .is_none_or(|value| value.source != crate::metadata::MetadataSource::JsonLd)
+        );
+        assert!(disabled.structured_data().unwrap().is_empty());
+    }
+
+    #[test]
+    fn metadata_diagnostics_report_the_highest_confidence_duplicate() {
+        let html = r#"<html><head><meta property="og:title" content="Shared title"><meta name="dc:title" content="Shared title"><meta name="author" content="Ada"><meta name="dc:creator" content="Ada"></head><body><main><p>Useful page content for metadata selection.</p></main></body></html>"#;
+        let page = Extractor::builder()
+            .metadata_diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let diagnostics = page.metadata_diagnostics().unwrap();
+        assert_eq!(
+            diagnostics.title.selected.as_ref().unwrap().source,
+            crate::metadata::MetadataSource::DublinCore
+        );
+        assert_eq!(
+            diagnostics.authors.selected[0].source,
+            crate::metadata::MetadataSource::DublinCore
+        );
     }
 
     #[test]

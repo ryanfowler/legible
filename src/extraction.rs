@@ -12,9 +12,9 @@ use crate::diagnostics::{
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
-use crate::extractor::ExtractorConfig;
+use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::logging::debug_log;
-use crate::metadata::{self, Metadata, StructuredData};
+use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
     adopt_external_footnotes, collect_external_footnotes, finish_normalization,
     has_primary_heading_semantics, is_accessible_math, normalize_scoring_structure,
@@ -42,6 +42,7 @@ pub(crate) struct ContentExtractor<'a> {
     page_direction: Option<String>,
     page_language: Option<String>,
     metadata: Metadata,
+    metadata_diagnostics: Option<MetadataDiagnostics>,
     structured_data: StructuredData,
     source_uri: Option<Url>,
     base_uri: Option<Url>,
@@ -133,6 +134,35 @@ struct CandidateDiscovery {
     remove_after_scoring: SmallVec<[NodeId; 64]>,
 }
 
+fn find_content_targets(dom: &Dom, target: &ContentHint) -> Vec<NodeId> {
+    if matches!(target, ContentHint::Id(value) | ContentHint::Class(value) if value.trim().is_empty())
+    {
+        return Vec::new();
+    }
+    dom.descendants(dom.root())
+        .filter(|&node| {
+            if !dom.is_element(node) {
+                return false;
+            }
+            match target {
+                ContentHint::Id(value) => dom.attr(node, AttrName::Id) == Some(value.as_str()),
+                ContentHint::Class(value) => dom
+                    .attr(node, AttrName::Class)
+                    .is_some_and(|classes| classes.split_whitespace().any(|class| class == value)),
+                ContentHint::Tag(tag) => {
+                    let expected = match tag {
+                        ContentTag::Article => Tag::Article,
+                        ContentTag::Main => Tag::Main,
+                        ContentTag::Section => Tag::Section,
+                        ContentTag::Div => Tag::Div,
+                    };
+                    dom.tag(node) == Some(expected)
+                }
+            }
+        })
+        .collect()
+}
+
 impl<'a> ContentExtractor<'a> {
     pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let (base_uri, url_error) = match url {
@@ -153,6 +183,7 @@ impl<'a> ContentExtractor<'a> {
             page_direction: None,
             page_language: None,
             metadata: Metadata::default(),
+            metadata_diagnostics: None,
             structured_data: StructuredData::default(),
             source_uri: base_uri.clone(),
             base_uri,
@@ -203,12 +234,13 @@ impl<'a> ContentExtractor<'a> {
         if self.options.structured_data {
             self.structured_data = StructuredData::parse(&self.dom);
         }
-        self.metadata = metadata::discover(
+        (self.metadata, self.metadata_diagnostics) = metadata::discover_with_diagnostics(
             &self.dom,
             &self.structured_data,
             &title,
             self.base_uri.as_ref(),
             self.source_uri.as_ref(),
+            self.options.metadata_diagnostics,
         );
         if self
             .structured_data
@@ -231,6 +263,9 @@ impl<'a> ContentExtractor<'a> {
         self.metadata.description = self.metadata.description.or(content.excerpt);
         self.metadata.direction = self.metadata.direction.or(self.page_direction);
         self.metadata.language = self.metadata.language.or(self.page_language);
+        if let Some(diagnostics) = &mut self.metadata_diagnostics {
+            diagnostics.complete_with_fallbacks(&self.metadata);
+        }
         let extracted_dom = self
             .dom
             .copy_children_as_fragment(content.content_root)
@@ -243,18 +278,37 @@ impl<'a> ContentExtractor<'a> {
                 selected_strategy: self.strategy.into(),
                 attempts,
             });
+        let retained_structured_data = self
+            .options
+            .retain_structured_data
+            .then(|| self.structured_data.retained_items());
         Ok(ExtractedPage::new(
             extracted_dom,
             extracted_root,
             self.metadata,
             content.text_length,
             diagnostics,
+            self.metadata_diagnostics,
+            retained_structured_data,
         ))
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let body = self.dom.body().ok_or(Error::NoBody)?;
+        let exact_root = if let Some(target) = &self.options.content_root {
+            Some(
+                find_content_targets(&self.dom, target)
+                    .into_iter()
+                    .next()
+                    .ok_or(Error::ContentRootNotFound)?,
+            )
+        } else {
+            None
+        };
         let footnote_definitions = collect_external_footnotes(&self.dom);
-        let source_metrics = ContentMetrics::measure_source(&self.dom, body);
+        let source_metrics = exact_root.map_or_else(
+            || ContentMetrics::measure_source(&self.dom, body),
+            |root| ContentMetrics::measure(&self.dom, root),
+        );
         let has_relaxable_hidden_content = self.has_relaxable_hidden_content(body);
         let relaxed_source_metrics = if has_relaxable_hidden_content {
             ContentMetrics::measure_source_relaxed_visibility(&self.dom, body)
@@ -323,6 +377,11 @@ impl<'a> ContentExtractor<'a> {
                 self.strategy.weight_classes(),
             );
             let mut candidates = discovery.candidates;
+            if let Some(hint) = &self.options.content_hint {
+                for node in find_content_targets(&working_dom, hint) {
+                    candidates.add_caller_hint(node);
+                }
+            }
             if let Some(root) = structured_root {
                 candidates.add_structured_data(root);
             }
@@ -360,13 +419,25 @@ impl<'a> ContentExtractor<'a> {
                     branches: SmallVec::new(),
                 };
             }
+            if let Some(node) = exact_root {
+                selection = RootSelection {
+                    node,
+                    reason: RootSelectionReason::SpecificChild,
+                    branches: SmallVec::new(),
+                };
+            }
             let visibility_root_semantic = matches!(
                 working_dom.tag(selection.node),
                 Some(Tag::Article | Tag::Main)
             ) || working_dom
                 .attr(selection.node, AttrName::Role)
                 .is_some_and(Self::has_primary_role);
-            let root_info = self.root_info(&working_dom, &candidates, &selection);
+            let root_info = self.root_info(
+                &working_dom,
+                &candidates,
+                &selection,
+                ranked.first().map(|candidate| candidate.node),
+            );
             let root_in_document_chrome =
                 Self::is_document_chrome_root(&working_dom, selection.node, body);
             if selection.node == body {
@@ -534,7 +605,9 @@ impl<'a> ContentExtractor<'a> {
             let content_id = fragment
                 .first_child(fragment.root())
                 .ok_or(Error::NoContent)?;
-            adopt_external_footnotes(&footnote_definitions, &mut fragment, content_id);
+            if exact_root.is_none() {
+                adopt_external_footnotes(&footnote_definitions, &mut fragment, content_id);
+            }
             self.dom = fragment;
             self.node_data.clear();
             self.node_data.enable_link_lengths();
@@ -601,11 +674,15 @@ impl<'a> ContentExtractor<'a> {
                 && (quality.coverage >= 0.2 || quality.text_chars >= 500);
             let ignores_visible_source_barrier =
                 strategy == ExtractionStrategy::RelaxedVisibility && has_relaxable_hidden_content;
-            let valid_result = !root_in_document_chrome
-                && !access_barrier
-                && !(short_source_access_barrier && !ignores_visible_source_barrier)
-                && !interactive_shell
-                && !incoherent_short;
+            let valid_result = if exact_root.is_some() {
+                result_metrics.has_meaningful_text()
+            } else {
+                !root_in_document_chrome
+                    && !access_barrier
+                    && !(short_source_access_barrier && !ignores_visible_source_barrier)
+                    && !interactive_shell
+                    && !incoherent_short
+            };
             let visibility_candidate_coherent = strategy != ExtractionStrategy::RelaxedVisibility
                 || result_metrics.paragraph_count >= 2
                 || visibility_root_semantic && result_metrics.structured_block_count > 0;
@@ -619,9 +696,10 @@ impl<'a> ContentExtractor<'a> {
             let deferred_for_visibility =
                 visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
             let accepted = valid_result
-                && visibility_improves
-                && !deferred_for_visibility
-                && (quality.is_good() || schema_match);
+                && (exact_root.is_some()
+                    || visibility_improves
+                        && !deferred_for_visibility
+                        && (quality.is_good() || schema_match));
             if accepted {
                 self.record_attempt(
                     strategy,
@@ -710,6 +788,7 @@ impl<'a> ContentExtractor<'a> {
         dom: &Dom,
         candidates: &CandidateSet,
         selection: &RootSelection,
+        ranking_winner: Option<NodeId>,
     ) -> Option<RootInfo> {
         self.diagnostic_attempts.as_ref()?;
         let candidate = candidates.get(selection.node);
@@ -725,8 +804,26 @@ impl<'a> ContentExtractor<'a> {
                 CandidateSourceInfo::StructuredData,
             ),
             (CandidateSource::Generic, CandidateSourceInfo::Generic),
+            (CandidateSource::CallerHint, CandidateSourceInfo::CallerHint),
         ] {
-            if candidate.is_some_and(|candidate| candidate.has_source(internal)) {
+            let present = if internal == CandidateSource::CallerHint {
+                self.options.content_root.is_none()
+                    && ranking_winner.is_some_and(|winner| {
+                        candidates
+                            .get(winner)
+                            .is_some_and(|candidate| candidate.has_source(internal))
+                            && (winner == selection.node
+                                || dom
+                                    .ancestors(winner)
+                                    .any(|ancestor| ancestor == selection.node)
+                                || dom
+                                    .ancestors(selection.node)
+                                    .any(|ancestor| ancestor == winner))
+                    })
+            } else {
+                candidate.is_some_and(|candidate| candidate.has_source(internal))
+            };
+            if present {
                 candidate_sources.push(public);
             }
         }

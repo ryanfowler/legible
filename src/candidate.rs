@@ -29,6 +29,7 @@ pub(crate) enum CandidateSource {
     Readability,
     StructuredData,
     Generic,
+    CallerHint,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -41,6 +42,7 @@ impl CandidateSources {
             CandidateSource::Readability => 1 << 1,
             CandidateSource::StructuredData => 1 << 2,
             CandidateSource::Generic => 1 << 3,
+            CandidateSource::CallerHint => 1 << 4,
         };
     }
 
@@ -210,6 +212,10 @@ impl CandidateSet {
         self.add(node, CandidateSource::StructuredData, 40.0);
     }
 
+    pub(crate) fn add_caller_hint(&mut self, node: NodeId) {
+        self.add(node, CandidateSource::CallerHint, 2.0);
+    }
+
     pub(crate) fn is_semantic(&self, node: NodeId) -> bool {
         self.get(node)
             .is_some_and(|candidate| candidate.has_source(CandidateSource::Semantic))
@@ -316,7 +322,9 @@ impl CandidateSet {
                 sources,
                 semantic_prior: if matches!(
                     source,
-                    CandidateSource::Semantic | CandidateSource::StructuredData
+                    CandidateSource::Semantic
+                        | CandidateSource::StructuredData
+                        | CandidateSource::CallerHint
                 ) {
                     value
                 } else {
@@ -349,6 +357,9 @@ impl CandidateSet {
                 candidate.readability_score = candidate.readability_score.max(value)
             }
             CandidateSource::StructuredData => {
+                candidate.semantic_prior = candidate.semantic_prior.max(value)
+            }
+            CandidateSource::CallerHint => {
                 candidate.semantic_prior = candidate.semantic_prior.max(value)
             }
             CandidateSource::Generic => {}
