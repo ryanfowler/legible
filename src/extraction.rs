@@ -776,9 +776,9 @@ impl<'a> ContentExtractor<'a> {
             candidates.add_readability(readability.node, readability.score);
         }
 
-        // Ranking can receive a tree with deferred clutter detached. Do not
-        // reuse text or link totals from an earlier view of the same node IDs.
-        self.node_data.clear_stats();
+        // Readability scoring clears the text cache after it detaches deferred
+        // clutter. Reuse that cache here. Feature calculation uses the same
+        // tree and would otherwise repeat a full postorder text scan.
         let mut table_nodes = Vec::new();
         mark_data_tables(dom, dom.root(), &mut self.node_data, &mut table_nodes);
         let feature_index = CandidateFeatureIndex::new(dom, &self.node_data);
@@ -1583,7 +1583,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     }
 
     #[test]
-    fn ranking_invalidates_statistics_from_an_earlier_tree_view() {
+    fn ranking_uses_statistics_from_the_current_tree_view() {
         let html = r#"<body><main id="wanted"><p>Visible answer.</p><div id="excluded"><a href="/ad">Excluded linked promotion with many extra words.</a></div></main></body>"#;
         let source = Dom::parse_document(html).unwrap();
         let main = source
@@ -1602,6 +1602,9 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
 
         let mut ranking_dom = source;
         ranking_dom.detach(excluded);
+        // The extraction pipeline invalidates cached statistics immediately
+        // after it mutates the scoring tree. Ranking can then reuse them.
+        readability.node_data.clear_stats();
         let mut candidates = CandidateSet::discover_semantic(&ranking_dom);
         readability.rank_candidates(&ranking_dom, &mut candidates, SmallVec::new(), &[]);
 

@@ -9,9 +9,6 @@ pub(crate) struct Dom {
     pub(crate) quirks_mode: html5ever::tree_builder::QuirksMode,
 }
 impl Dom {
-    pub(crate) fn new(data: NodeData) -> Self {
-        Self::with_capacity(data, 1)
-    }
     pub(crate) fn with_capacity(data: NodeData, capacity: usize) -> Self {
         let mut nodes = Vec::with_capacity(capacity.max(1));
         nodes.push(Node::new(data));

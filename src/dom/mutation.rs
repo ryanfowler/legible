@@ -161,13 +161,17 @@ impl Dom {
         Ok(())
     }
     pub(crate) fn copy_subtree_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
-        let mut fragment = Dom::new(NodeData::Fragment);
+        // Reserve the attached subtree in one allocation. Template contents can
+        // add a small number of extra nodes, but ordinary fragments stay exact.
+        let capacity = 2 + self.descendants(source_root).count();
+        let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
         let copied = fragment.import_subtree(self, source_root)?;
         fragment.append_child(fragment.root(), copied);
         Ok(fragment)
     }
     pub(crate) fn copy_children_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
-        let mut fragment = Dom::new(NodeData::Fragment);
+        let capacity = 1 + self.descendants(source_root).count();
+        let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
         for child in self.children(source_root) {
             let copied = fragment.import_subtree(self, child)?;
             fragment.append_child(fragment.root(), copied);
