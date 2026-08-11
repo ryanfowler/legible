@@ -17,8 +17,9 @@ use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
     adopt_external_footnotes, collect_external_footnotes, finish_normalization,
-    has_primary_heading_semantics, is_accessible_math, normalize_scoring_structure,
-    normalize_semantics, preserve_semantics_before_cleanup, remove_decorative_media_before_cleanup,
+    has_primary_heading_semantics, is_accessible_math, normalize_after_cleanup,
+    normalize_scoring_structure, preserve_semantics_before_cleanup,
+    remove_decorative_media_before_cleanup,
 };
 use crate::page::ExtractedPage;
 use crate::quality::{
@@ -1621,7 +1622,7 @@ impl<'a> ContentExtractor<'a> {
 
         // Normalization is separate from relevance cleanup. Serializers receive
         // stable code, figure, image, footnote, and table structures.
-        normalize_semantics(&mut self.dom, root, nodes);
+        normalize_after_cleanup(&mut self.dom, root, nodes);
 
         let paragraphs: SmallVec<[NodeId; 64]> = self
             .dom

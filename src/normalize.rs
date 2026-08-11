@@ -20,16 +20,23 @@ use smallvec::SmallVec;
 /// and list roles become native HTML before wrapper cleanup. Code and figure
 /// detection run while source classes are still available. Table normalization
 /// runs last because it can replace complete structural subtrees.
-pub(crate) fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    math::normalize(dom, root);
-    media::normalize(dom, root);
-    callouts::normalize(dom, root);
+#[cfg(test)]
+fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    preserve_semantics_before_cleanup(dom, root);
+    normalize_after_cleanup(dom, root, nodes);
+}
+
+/// Normalizes semantic structures that hard cleanup does not remove.
+///
+/// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
+/// already converted math, media, callouts, and footnotes. Cleanup does not
+/// create new source structures for those types.
+pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     images::normalize(dom, root, nodes);
     headings::normalize(dom, root);
     lists::normalize(dom, root);
     normalize_code_blocks(dom, root);
     normalize_figures(dom, root);
-    footnotes::normalize(dom, root);
     normalize_repeated_table_listings(dom, root);
     normalize_layout_tables(dom, root);
 }
