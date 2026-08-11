@@ -48,6 +48,8 @@ pub enum CandidateSourceInfo {
     StructuredData,
     /// Generic structural content identified the root.
     Generic,
+    /// A caller-supplied content hint identified the root.
+    CallerHint,
 }
 
 /// A stable description of a selected root.

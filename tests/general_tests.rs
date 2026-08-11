@@ -79,6 +79,7 @@ fn error_name(error: &Error) -> &'static str {
         Error::NoContent => "NoContent",
         Error::NoBody => "NoBody",
         Error::InvalidUrl(_) => "InvalidUrl",
+        Error::ContentRootNotFound => "ContentRootNotFound",
     }
 }
 

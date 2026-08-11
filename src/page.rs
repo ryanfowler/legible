@@ -2,7 +2,8 @@
 
 use crate::diagnostics::ExtractionDiagnostics;
 use crate::dom::{Dom, NodeId};
-use crate::metadata::Metadata;
+use crate::metadata::{Metadata, MetadataDiagnostics};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy)]
 struct ContentStats {
@@ -20,6 +21,8 @@ pub struct ExtractedPage {
     root: NodeId,
     stats: ContentStats,
     diagnostics: Option<ExtractionDiagnostics>,
+    metadata_diagnostics: Option<MetadataDiagnostics>,
+    structured_data: Option<Vec<Value>>,
 }
 
 impl ExtractedPage {
@@ -29,6 +32,8 @@ impl ExtractedPage {
         metadata: Metadata,
         _text_length: usize,
         diagnostics: Option<ExtractionDiagnostics>,
+        metadata_diagnostics: Option<MetadataDiagnostics>,
+        structured_data: Option<Vec<Value>>,
     ) -> Self {
         let (text_length, word_count) = crate::text::measure_text(&dom, root);
         Self {
@@ -40,6 +45,8 @@ impl ExtractedPage {
                 word_count,
             },
             diagnostics,
+            metadata_diagnostics,
+            structured_data,
         }
     }
 
@@ -51,6 +58,16 @@ impl ExtractedPage {
     /// Returns extraction diagnostics when the extractor enabled them.
     pub fn diagnostics(&self) -> Option<&ExtractionDiagnostics> {
         self.diagnostics.as_ref()
+    }
+
+    /// Returns metadata provenance when the extractor enabled it.
+    pub fn metadata_diagnostics(&self) -> Option<&MetadataDiagnostics> {
+        self.metadata_diagnostics.as_ref()
+    }
+
+    /// Returns parsed JSON-LD items when the extractor retained them.
+    pub fn structured_data(&self) -> Option<&[Value]> {
+        self.structured_data.as_deref()
     }
 
     /// Renders the extracted content as CommonMark.
@@ -82,7 +99,20 @@ impl ExtractedPage {
     /// This HTML is not sanitized. Apply a sanitizer before you insert it into
     /// an untrusted page.
     pub fn html(&self) -> String {
-        crate::dom::render_html(&self.dom, self.root, self.stats.text_length)
+        self.html_builder().render()
+    }
+
+    /// Renders a sanitized HTML fragment for normal downstream display.
+    pub fn safe_html(&self) -> String {
+        self.html_builder().sanitize(true).render()
+    }
+
+    /// Returns an HTML output builder.
+    pub fn html_builder(&self) -> HtmlBuilder<'_> {
+        HtmlBuilder {
+            page: self,
+            sanitize: false,
+        }
     }
 
     /// Returns the number of words in the normalized extracted text.
@@ -93,6 +123,33 @@ impl ExtractedPage {
     /// Returns the number of characters in the normalized extracted text.
     pub fn text_length(&self) -> usize {
         self.stats.text_length
+    }
+}
+
+/// Configures HTML rendering for an [`ExtractedPage`].
+pub struct HtmlBuilder<'a> {
+    page: &'a ExtractedPage,
+    sanitize: bool,
+}
+
+impl HtmlBuilder<'_> {
+    /// Controls whether unsafe elements, attributes, and URLs are removed.
+    pub fn sanitize(mut self, enabled: bool) -> Self {
+        self.sanitize = enabled;
+        self
+    }
+
+    /// Renders the configured HTML output.
+    pub fn render(self) -> String {
+        if self.sanitize {
+            crate::html::render_safe_html(
+                &self.page.dom,
+                self.page.root,
+                self.page.stats.text_length,
+            )
+        } else {
+            crate::dom::render_html(&self.page.dom, self.page.root, self.page.stats.text_length)
+        }
     }
 }
 
@@ -186,5 +243,37 @@ mod tests {
 
         assert!(page.dom.len() < 20, "retained {} DOM nodes", page.dom.len());
         assert!(page.text().contains("relevant page content"));
+    }
+
+    #[test]
+    fn safe_html_removes_active_content_without_changing_raw_html() {
+        let page = extract(
+            r##"<main><p onclick="alert(1)"><a href="java&#x0A;script:alert(1)" onfocus="x">bad</a>
+            <a href="/safe">safe</a><img src="data:text/html,bad" onerror="x">
+            <svg><script>alert(1)</script><circle onload="x"></circle></svg>
+            <svg><a id="target"><text>click</text></a><animate href="#target" attributeName="href" values="javascript:alert(1)" fill="freeze"></animate></svg>
+            <iframe srcdoc="<script>x</script>"></iframe></p></main>"##,
+            Some("https://example.com/page"),
+        )
+        .unwrap();
+
+        let raw = page.html();
+        let safe = page.safe_html();
+        assert!(raw.contains("onclick="));
+        assert!(!safe.to_ascii_lowercase().contains("javascript:"));
+        assert!(!safe.contains("onclick="));
+        assert!(!safe.contains("onfocus="));
+        assert!(!safe.contains("onerror="));
+        assert!(!safe.contains("onload="));
+        assert!(!safe.contains("<script"));
+        assert!(!safe.contains("<animate"));
+        assert!(!safe.contains("attributeName="));
+        assert!(!safe.contains("values="));
+        assert!(!safe.contains("<iframe"));
+        assert!(!safe.contains("srcdoc="));
+        assert!(!safe.contains("data:text/html"));
+        assert!(safe.contains("href=\"https://example.com/safe\""));
+        assert_eq!(raw, page.html());
+        assert_eq!(safe, page.html_builder().sanitize(true).render());
     }
 }

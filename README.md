@@ -84,6 +84,18 @@ if let Some(diagnostics) = page.diagnostics() {
 
 Legible does not retain attempt diagnostics by default.
 
+Use a content hint when you know a likely content container. The hint adds strong
+evidence, but Legible can select a better container. Use `content_root` when you
+must limit extraction to one matching subtree.
+
+```rust
+# use legible::{ContentHint, Extractor};
+let extractor = Extractor::builder()
+    .content_hint(ContentHint::Class("article-body".into()))
+    .build();
+# let _ = extractor;
+```
+
 ## Render Markdown
 
 `page.markdown()` includes links and images. Use the builder to change these settings.
@@ -118,10 +130,16 @@ when a page has useful content but no clear primary container.
 
 Missing values stay empty or `None`.
 
+Enable `metadata_diagnostics(true)` to retain the selected source, confidence, and
+alternatives. Enable `retain_structured_data(true)` to retain parsed JSON-LD items.
+Both options are disabled by default.
+
 ## Security
 
-`ExtractedPage::html()` is not sanitized. Do not insert its output into an untrusted
-page without a sanitizer that matches your security policy.
+`ExtractedPage::safe_html()` removes active elements, event handlers, inline styles,
+unsafe form actions, and unsupported URI schemes. Use it for normal downstream
+display. `ExtractedPage::html()` remains unsanitized for compatibility. Do not insert
+raw HTML into an untrusted page.
 
 Markdown output contains no raw HTML. It removes links and images that use unsupported
 URI schemes. Sanitize any HTML that you later create from the Markdown.
