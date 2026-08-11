@@ -752,10 +752,34 @@ pub(crate) fn hard_cleanup(
             tag,
             Tag::Script | Tag::Style | Tag::Template | Tag::Link | Tag::Meta
         );
+        let content_checkbox = tag == Tag::Input
+            && dom
+                .attr(node, AttrName::Type)
+                .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
+            && dom
+                .ancestors(node)
+                .find(|&ancestor| matches!(dom.tag(ancestor), Some(Tag::Form | Tag::Li)))
+                .is_some_and(|ancestor| dom.tag(ancestor) == Some(Tag::Li));
+        if content_checkbox {
+            // Keep only the semantic state. The retained control is disabled,
+            // so extracted HTML cannot change the source checklist.
+            dom.remove_attr(node, AttrName::Other);
+            dom.remove_attrs(
+                node,
+                &[
+                    AttrName::Class,
+                    AttrName::Id,
+                    AttrName::Name,
+                    AttrName::Style,
+                    AttrName::AriaHidden,
+                ],
+            );
+            dom.set_attr(node, AttrName::Disabled, "");
+        }
         let control = matches!(
             tag,
             Tag::Input | Tag::Textarea | Tag::Select | Tag::Button | Tag::Datalist | Tag::Option
-        );
+        ) && !content_checkbox;
         let disallowed_embed = matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe)
             && !has_allowed_media(dom, node, allowed_media);
         if hidden || tracking_image || executable || control || disallowed_embed {
@@ -933,6 +957,31 @@ pub(crate) fn heuristic_cleanup(
             && interaction_signals >= 2
             && near_content_end(dom, node, root);
 
+        let taxonomy_name = name
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| {
+                matches!(
+                    token,
+                    "taxonomy" | "tags" | "entities" | "entitylist" | "taglist"
+                )
+            })
+            || contains_any(
+                &name,
+                &[
+                    "company-portals",
+                    "company_portals",
+                    "entity-list",
+                    "entity_list",
+                    "tag-list",
+                    "tag_list",
+                ],
+            );
+        let terminal_taxonomy = taxonomy_name
+            && links >= 2
+            && stats.text_length < 300
+            && link_density >= 0.45
+            && near_content_end(dom, node, root);
+
         if related
             || social
             || signup
@@ -942,6 +991,7 @@ pub(crate) fn heuristic_cleanup(
             || consent
             || account
             || terminal_action
+            || terminal_taxonomy
         {
             if protected {
                 hoist_protected_children(dom, node, store);
@@ -1014,7 +1064,7 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
     }
     matches!(
         dom.tag(node),
-        Some(Tag::Div | Tag::Ol | Tag::Section | Tag::Ul)
+        Some(Tag::Div | Tag::Ol | Tag::P | Tag::Section | Tag::Ul)
     ) && contains_any(
         &node_name(dom, node),
         &[
@@ -1043,6 +1093,13 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "actions",
             "feedback",
             "comment",
+            "button-wrapper",
+            "taxonomy",
+            "company-portals",
+            "entity-list",
+            "entity_list",
+            "tag-list",
+            "tag_list",
         ],
     )
 }
@@ -1367,6 +1424,26 @@ mod tests {
     }
 
     #[test]
+    fn hard_cleanup_preserves_only_content_checkboxes() {
+        let mut dom = Dom::parse_fragment(
+            r#"<ul><li><label><input class="control" onclick="bad()" type="checkbox" checked> Done</label></li><li><form><input type="checkbox"> Option</form></li></ul><form><input type="checkbox"><button>Search</button></form>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        hard_cleanup(&mut dom, root, &Regex::new("$").unwrap(), &mut Vec::new());
+        let inputs: Vec<_> = dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Input))
+            .collect();
+        assert_eq!(inputs.len(), 1);
+        assert!(dom.has_attr(inputs[0], AttrName::Checked));
+        assert!(dom.has_attr(inputs[0], AttrName::Disabled));
+        assert_eq!(dom.attr(inputs[0], AttrName::Class), None);
+        assert_eq!(dom.attr_by_local_name(inputs[0], "onclick"), None);
+    }
+
+    #[test]
     fn hard_cleanup_removes_controls_and_keeps_form_text() {
         let text = clean_fragment(
             r#"<form><p>Configuration details remain useful.</p><label>Name<input></label><button>Submit</button></form><script>bad()</script>"#,
@@ -1396,6 +1473,28 @@ mod tests {
             "Sponsored",
         ] {
             assert!(!text.contains(clutter), "retained {clutter}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_terminal_action_paragraphs() {
+        let text = clean_fragment(
+            r#"<article><p>This substantive article paragraph explains the complete result and gives useful context to readers.</p><p class="button-wrapper"><a href="/story/comments">Leave a comment</a></p><p class="button-wrapper"><a href="/story?action=share">Share</a></p></article>"#,
+        );
+        assert!(text.contains("substantive article"), "{text}");
+        assert!(!text.contains("Leave a comment"), "{text}");
+        assert!(!text.contains("Share"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_terminal_taxonomy_name_variants() {
+        for class in ["entity-list", "entity_list", "tag-list", "tag_list"] {
+            let html = format!(
+                r#"<article><p>This substantive article paragraph explains the complete result and gives useful context to readers.</p><div class="{class}"><a href="/a">Alpha</a><a href="/b">Beta</a></div></article>"#
+            );
+            let text = clean_fragment(&html);
+            assert!(text.contains("substantive article"), "{class}: {text}");
+            assert!(!text.contains("Alpha"), "{class}: {text}");
         }
     }
 

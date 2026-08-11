@@ -968,6 +968,26 @@ impl<'a> ContentExtractor<'a> {
                             && d == 0.0
                             && s.has_sentence_end)
                 }
+                if !yes
+                    && is_near_preceding_sibling(dom, x, top)
+                    && matches!(dom.tag(x), Some(Tag::H2 | Tag::H3 | Tag::H4))
+                    && [AttrName::Class, AttrName::Id]
+                        .into_iter()
+                        .filter_map(|attribute| dom.attr(x, attribute))
+                        .flat_map(|value| {
+                            value.split(|character: char| !character.is_ascii_alphanumeric())
+                        })
+                        .any(|token| {
+                            matches!(
+                                token.to_ascii_lowercase().as_str(),
+                                "subtitle" | "dek" | "standfirst" | "summary"
+                            )
+                        })
+                {
+                    let stats = get_or_compute_stats(dom, x, store);
+                    yes = (30..=400).contains(&(stats.text_length as usize))
+                        && get_link_density_cached(dom, x, stats.text_length, store) == 0.0;
+                }
             }
             if yes {
                 debug_log!(@bool debug,"Appending sibling node: {:?}",x);
@@ -1261,6 +1281,29 @@ impl<'a> ContentExtractor<'a> {
         self.node_data.clear();
     }
 }
+fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bool {
+    let mut sibling = dom.next_sibling(candidate);
+    let mut intervening_elements = 0_u8;
+    while let Some(node) = sibling {
+        if node == target {
+            return true;
+        }
+        if dom.is_element(node) {
+            intervening_elements += 1;
+            if intervening_elements > 1 {
+                return false;
+            }
+        } else if dom
+            .text_node(node)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return false;
+        }
+        sibling = dom.next_sibling(node);
+    }
+    false
+}
+
 fn dom_text_candidate(dom: &Dom, node: NodeId) -> bool {
     dom.tag(node) == Some(Tag::A)
         && dom.has_non_whitespace_text(node)
@@ -1281,6 +1324,29 @@ fn heading_matches_page_title(page_title: &str, heading: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitle_context_must_precede_and_stay_close_to_content() {
+        let dom = Dom::parse_fragment(
+            r#"<h3 id="near" class="subtitle">A useful article summary with enough sentence-like text.</h3><div></div><article id="content"><p>Article text.</p></article><h3 id="footer" class="footer-banner__subtitle">An unrelated promotional summary with enough text.</h3>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let content = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("content"))
+            .unwrap();
+        let near = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("near"))
+            .unwrap();
+        let footer = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("footer"))
+            .unwrap();
+        assert!(is_near_preceding_sibling(&dom, near, content));
+        assert!(!is_near_preceding_sibling(&dom, footer, content));
+    }
 
     fn ranked_winner_id(html: &str) -> String {
         let dom = Dom::parse_document(html).unwrap();

@@ -123,6 +123,7 @@ enum Task<N> {
     Node(N, Mode),
     Siblings(N, Mode),
     InlineRun(N, RunKind),
+    FormatChildren(N, RunKind),
     Close(Close<N>),
     ListItems(N, i32, u32),
     ListItem(N, ListMarker),
@@ -208,6 +209,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                     }
                 }
                 Task::InlineRun(id, kind) => self.inline_run(id, kind),
+                Task::FormatChildren(id, kind) => self.format_children(id, kind),
                 Task::Close(close) => self.close(close),
                 Task::ListItems(id, start, index) => self.list_items(id, start, index),
                 Task::ListItem(id, marker) => self.list_item(id, marker),
@@ -367,7 +369,22 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         let marker = kind.marker().expect("formatting element has a marker");
         self.out.open_marker(marker);
         self.tasks.push(Task::Close(Close::Marker(kind)));
-        self.push_children(id, Mode::Inline);
+        if let Some(child) = self.dom.first_child(id) {
+            self.tasks.push(Task::FormatChildren(child, kind));
+        }
+    }
+
+    fn format_children(&mut self, id: T::Node, kind: RunKind) {
+        if let Some(sibling) = self.dom.next_sibling(id) {
+            self.tasks.push(Task::FormatChildren(sibling, kind));
+        }
+        if self.run_kind(id) == Some(kind) {
+            if let Some(child) = self.dom.first_child(id) {
+                self.tasks.push(Task::FormatChildren(child, kind));
+            }
+        } else {
+            self.tasks.push(Task::Node(id, Mode::Inline));
+        }
     }
 
     fn run_kind(&self, id: T::Node) -> Option<RunKind> {
@@ -401,7 +418,9 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             current = self.dom.next_sibling(id);
         }
         for id in nodes.into_iter().rev() {
-            self.push_children(id, Mode::Inline);
+            if let Some(child) = self.dom.first_child(id) {
+                self.tasks.push(Task::FormatChildren(child, kind));
+            }
         }
     }
 
@@ -455,7 +474,8 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
-        let indent = match marker {
+        let task_state = self.list_item_task_state(id);
+        let mut indent = match marker {
             ListMarker::Bullet => {
                 self.out.markup("- ");
                 2
@@ -471,6 +491,14 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 width
             }
         };
+        if let Some((checked, fallback_label)) = task_state {
+            self.out.markup(if checked { "[x]" } else { "[ ]" });
+            self.out.pending_space = true;
+            if let Some(label) = fallback_label {
+                self.out.text(&label);
+            }
+            indent += 4;
+        }
         self.out.prefixes.push(Prefix::ListItem {
             width: indent,
             has_content: false,
@@ -490,6 +518,75 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 self.tasks.push(Task::Node(child, Mode::Inline));
             }
         }
+    }
+
+    fn list_item_task_state(&self, item: T::Node) -> Option<(bool, Option<String>)> {
+        let has_visible_label = self.list_item_has_visible_label(item);
+        let mut nodes = SmallVec::<[T::Node; 8]>::new();
+        self.push_nodes_in_reverse(item, &mut nodes);
+        while let Some(node) = nodes.pop() {
+            if self
+                .dom
+                .text_node(node)
+                .is_some_and(has_visible_inline_text)
+            {
+                return None;
+            }
+            match self.dom.tag(node) {
+                Some(Tag::Input)
+                    if self
+                        .dom
+                        .attr(node, AttrName::Type)
+                        .is_some_and(|value| value.eq_ignore_ascii_case("checkbox")) =>
+                {
+                    let fallback_label = (!has_visible_label)
+                        .then(|| {
+                            self.dom
+                                .attr(node, AttrName::AriaLabel)
+                                .or_else(|| self.dom.attr(node, AttrName::Title))
+                        })
+                        .flatten()
+                        .filter(|label| has_visible_inline_text(label))
+                        .map(str::to_owned);
+                    return Some((
+                        self.dom.attr(node, AttrName::Checked).is_some(),
+                        fallback_label,
+                    ));
+                }
+                Some(Tag::Form | Tag::Input | Tag::Img | Tag::Ol | Tag::Ul) => return None,
+                _ => self.push_nodes_in_reverse(node, &mut nodes),
+            }
+        }
+        None
+    }
+
+    fn list_item_has_visible_label(&self, item: T::Node) -> bool {
+        let mut nodes = SmallVec::<[T::Node; 8]>::new();
+        self.push_nodes_in_reverse(item, &mut nodes);
+        while let Some(node) = nodes.pop() {
+            if self
+                .dom
+                .text_node(node)
+                .is_some_and(has_visible_inline_text)
+            {
+                return true;
+            }
+            if matches!(self.dom.tag(node), Some(Tag::Ol | Tag::Ul)) {
+                continue;
+            }
+            self.push_nodes_in_reverse(node, &mut nodes);
+        }
+        false
+    }
+
+    fn push_nodes_in_reverse(&self, parent: T::Node, nodes: &mut SmallVec<[T::Node; 8]>) {
+        let mut children = SmallVec::<[T::Node; 8]>::new();
+        let mut child = self.dom.first_child(parent);
+        while let Some(node) = child {
+            children.push(node);
+            child = self.dom.next_sibling(node);
+        }
+        nodes.extend(children.into_iter().rev());
     }
 
     fn item_paragraph(&mut self, id: T::Node) {
@@ -1218,6 +1315,32 @@ mod tests {
     fn markdown(html: &str) -> String {
         let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
         dom_to_markdown(&dom, dom.root(), 0)
+    }
+
+    #[test]
+    fn preserves_checkbox_state_in_list_items() {
+        assert_eq!(
+            markdown(
+                r#"<ul><li><label><input type="checkbox"> Unchecked</label></li><li><label><input type="checkbox" checked> Completed</label></li><li>Optional <input type="checkbox"></li><li><input type="checkbox" checked> First <input type="checkbox"> second</li><li><form><input type="checkbox"> Form option</form></li><li><input type="checkbox" aria-label="Deploy release"></li></ul>"#
+            ),
+            "- [ ] Unchecked\n- [x] Completed\n- Optional\n- [x] First second\n-  Form option\n- [ ] Deploy release\n"
+        );
+    }
+
+    #[test]
+    fn extraction_preserves_checklist_state_and_accessible_labels() {
+        let page = crate::extract(
+            r#"<article><h1>Release procedure</h1><p>This procedure explains each release step and provides enough context for the complete checklist.</p><ul><li><label><input type="checkbox"> Prepare build</label></li><li><input type="checkbox" checked aria-label="Deploy release" onclick="bad()"></li></ul><p>Verify the deployment after all required steps are complete.</p></article>"#,
+            None,
+        )
+        .unwrap();
+        let markdown = page.markdown();
+        assert!(markdown.contains("- [ ] Prepare build"), "{markdown}");
+        assert!(markdown.contains("- [x] Deploy release"), "{markdown}");
+        let html = page.html();
+        assert!(html.contains("aria-label=\"Deploy release\""), "{html}");
+        assert!(html.contains("disabled=\"\""), "{html}");
+        assert!(!html.contains("onclick"), "{html}");
     }
 
     #[test]
