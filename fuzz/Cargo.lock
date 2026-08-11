@@ -232,8 +232,12 @@ dependencies = [
 name = "legible-fuzz"
 version = "0.0.0"
 dependencies = [
+ "html5ever",
  "legible",
  "libfuzzer-sys",
+ "memchr",
+ "smallvec",
+ "tendril",
 ]
 
 [[package]]

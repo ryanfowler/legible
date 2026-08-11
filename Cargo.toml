@@ -16,6 +16,7 @@ bench = false
 
 [features]
 default = []
+fuzzing = []
 tracing = ["dep:tracing"]
 
 [dependencies]

@@ -1061,6 +1061,133 @@ pub(crate) fn heuristic_cleanup(
             dom.detach(node);
         }
     }
+
+    remove_contextual_boilerplate(dom, root, store, text_buffer, nodes);
+}
+
+/// Removes short textual controls that do not always have useful class names.
+///
+/// Phrase matches are deliberately narrow. A match also needs document-boundary
+/// or control evidence, except for labels that are complete conventional UI
+/// phrases. This keeps the same words when they occur in normal prose.
+fn remove_contextual_boilerplate(
+    dom: &mut Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    text_buffer: &mut String,
+    nodes: &mut Vec<NodeId>,
+) {
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    let mut has_nested_boundary = vec![false; dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        if (is_contextual_text_boundary(dom, node) || has_nested_boundary[node.index()])
+            && let Some(parent) = dom.parent(node)
+        {
+            has_nested_boundary[parent.index()] = true;
+        }
+    }
+    nodes.clear();
+    nodes.extend(snapshot.into_iter().map(|(node, _)| node).filter(|&node| {
+        is_contextual_text_boundary(dom, node) && !has_nested_boundary[node.index()]
+    }));
+
+    // Populate every current subtree statistic in one bottom-up traversal.
+    // The earlier structural pass can detach nodes, so do not reuse its cache.
+    store.clear_stats();
+    get_or_compute_stats(dom, root, store);
+
+    for &node in nodes.iter().rev() {
+        if dom.parent(node).is_none() || is_protected_content(dom, node, store) {
+            continue;
+        }
+        if store
+            .get_stats(node)
+            .is_none_or(|stats| stats.text_length > 140)
+        {
+            continue;
+        }
+        let text = get_inner_text(dom, node, text_buffer);
+        let text = text.trim().to_ascii_lowercase();
+        if text.is_empty() {
+            continue;
+        }
+        let name = node_name(dom, node);
+        let link_or_control = dom.tag(node) == Some(Tag::Form)
+            || dom.descendants(node).any(|descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(Tag::A | Tag::Button | Tag::Input | Tag::Select | Tag::Textarea)
+                )
+            });
+        let at_start = near_content_start(dom, node, root);
+        let at_end = near_content_end(dom, node, root);
+
+        let reading_time = is_reading_time_label(&text)
+            && (at_start
+                || contains_any(
+                    &name,
+                    &[
+                        "read-time",
+                        "read_time",
+                        "reading-time",
+                        "metadata",
+                        "byline",
+                    ],
+                ));
+        let advertisement = matches!(
+            text.as_str(),
+            "advertisement" | "advertisement continues below" | "sponsored" | "sponsored content"
+        ) && (at_start || at_end || strong_ad_name(&name));
+        let action = matches!(
+            text.as_str(),
+            "share"
+                | "share this"
+                | "share this article"
+                | "share this story"
+                | "read more"
+                | "leave a comment"
+        ) && link_or_control
+            && (at_end || contains_any(&name, &["share", "action", "button", "toolbar"]));
+        let subscription = (text.starts_with("sign up for our newsletter")
+            || text.starts_with("subscribe to our newsletter")
+            || text.starts_with("subscribe for updates"))
+            && link_or_control
+            && (at_start
+                || at_end
+                || contains_any(&name, &["newsletter", "subscribe", "signup", "sign-up"]));
+
+        if reading_time || advertisement || action || subscription {
+            dom.detach(node);
+        }
+    }
+}
+
+fn is_contextual_text_boundary(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::P | Tag::Section | Tag::Small)
+    )
+}
+
+fn is_reading_time_label(text: &str) -> bool {
+    let text = text
+        .strip_prefix("reading time:")
+        .map(str::trim)
+        .unwrap_or(text);
+    let mut words = text.split_ascii_whitespace();
+    let Some(amount) = words.next() else {
+        return false;
+    };
+    let Some(unit) = words.next() else {
+        return false;
+    };
+    let Some(read) = words.next() else {
+        return false;
+    };
+    amount.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(unit, "min" | "mins" | "minute" | "minutes")
+        && read == "read"
+        && words.next().is_none()
 }
 
 fn hoist_protected_children(dom: &mut Dom, wrapper: NodeId, store: &crate::dom::NodeStateStore) {
@@ -1182,6 +1309,33 @@ fn near_content_end(dom: &Dom, node: NodeId, root: NodeId) -> bool {
                 return false;
             }
             sibling = dom.next_sibling(next);
+        }
+        if current == root {
+            return true;
+        }
+        let Some(parent) = dom.parent(current) else {
+            return true;
+        };
+        current = parent;
+    }
+}
+
+fn near_content_start(dom: &Dom, node: NodeId, root: NodeId) -> bool {
+    let mut current = node;
+    let mut leading_chars = 0_usize;
+    let mut buffer = String::new();
+    loop {
+        let mut sibling = dom.prev_sibling(current);
+        while let Some(previous) = sibling {
+            leading_chars = leading_chars.saturating_add(
+                crate::scoring::get_normalized_inner_text(dom, previous, &mut buffer)
+                    .chars()
+                    .count(),
+            );
+            if leading_chars > 100 {
+                return false;
+            }
+            sibling = dom.prev_sibling(previous);
         }
         if current == root {
             return true;
@@ -1564,6 +1718,27 @@ mod tests {
             assert!(text.contains("substantive article"), "{class}: {text}");
             assert!(!text.contains("Alpha"), "{class}: {text}");
         }
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_contextual_text_boilerplate() {
+        let text = clean_fragment(
+            r#"<article><p class="reading-time">5 min read</p><p>This substantive article paragraph explains the complete result and gives useful context to readers.</p><p><a href="/more">Read more</a></p><p>Advertisement</p></article>"#,
+        );
+        assert!(text.contains("substantive article"), "{text}");
+        for clutter in ["5 min read", "Read more", "Advertisement"] {
+            assert!(!text.contains(clutter), "retained {clutter}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_boilerplate_words_in_prose() {
+        let text = clean_fragment(
+            r#"<article><p>The advertisement changed television forever.</p><p>This guide takes five minutes to read more carefully, and it explains why people share this article in class.</p></article>"#,
+        );
+        assert!(text.contains("advertisement changed television"), "{text}");
+        assert!(text.contains("read more carefully"), "{text}");
+        assert!(text.contains("share this article in class"), "{text}");
     }
 
     #[test]

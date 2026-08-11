@@ -14,6 +14,7 @@ struct Expected {
     must_contain: Option<Vec<String>>,
     must_not_contain: Option<Vec<String>>,
     must_occur_once: Option<Vec<String>>,
+    html_must_contain: Option<Vec<String>>,
     headings_min: Option<usize>,
     images_min: Option<usize>,
     code_blocks_min: Option<usize>,
@@ -71,6 +72,12 @@ fn run_fixture(source_path: &Path) -> datatest_stable::Result<()> {
             return Err(format!("expected {text:?} once, got {count}:\n{markdown}").into());
         }
     }
+    let html = page.html();
+    for text in expected.html_must_contain.unwrap_or_default() {
+        if !html.contains(&text) {
+            return Err(format!("HTML output does not contain {text:?}:\n{html}").into());
+        }
+    }
     for (minimum, actual, label) in [
         (
             expected.headings_min,
@@ -83,11 +90,7 @@ fn run_fixture(source_path: &Path) -> datatest_stable::Result<()> {
             occurrences(&markdown, "```") / 2,
             "code blocks",
         ),
-        (
-            expected.tables_min,
-            occurrences(&page.html(), "<table"),
-            "tables",
-        ),
+        (expected.tables_min, occurrences(&html, "<table"), "tables"),
     ] {
         if minimum.is_some_and(|minimum| actual < minimum) {
             return Err(format!(

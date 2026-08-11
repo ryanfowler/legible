@@ -29,7 +29,7 @@ pub fn parse_article(html: &str) -> Option<legible::ExtractedPage> {
 /// Exercise the public serialization boundary. Extracted HTML is a fragment, so a
 /// successful parse is the reparsing invariant for the final serializer.
 pub fn reparse_serialized(content: &str) {
-    let _ = extract(content, None);
+    assert!(extract(content, None).is_ok());
 }
 
 pub fn escape_attribute(value: &str) -> String {

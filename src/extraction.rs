@@ -18,7 +18,7 @@ use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
     adopt_external_footnotes, collect_external_footnotes, finish_normalization,
     has_primary_heading_semantics, is_accessible_math, normalize_scoring_structure,
-    normalize_semantics, preserve_semantics_before_cleanup,
+    normalize_semantics, preserve_semantics_before_cleanup, remove_decorative_media_before_cleanup,
 };
 use crate::page::ExtractedPage;
 use crate::quality::{
@@ -1606,6 +1606,7 @@ impl<'a> ContentExtractor<'a> {
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
         preserve_semantics_before_cleanup(&mut self.dom, root);
+        remove_decorative_media_before_cleanup(&mut self.dom, root);
         clean_styles(&mut self.dom, root, nodes);
         hard_cleanup(
             &mut self.dom,
