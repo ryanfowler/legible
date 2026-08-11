@@ -1,6 +1,6 @@
 //! Authoritative Markdown fixtures for general content extraction.
 
-use legible::{Metadata, extract};
+use legible::{Error, Metadata, extract};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -73,10 +73,41 @@ fn compare_metadata(expected: &ExpectedMetadata, actual: &Metadata) -> Result<()
     Ok(())
 }
 
+fn error_name(error: &Error) -> &'static str {
+    match error {
+        Error::TooManyElements(..) => "TooManyElements",
+        Error::NoContent => "NoContent",
+        Error::NoBody => "NoBody",
+        Error::InvalidUrl(_) => "InvalidUrl",
+    }
+}
+
 fn run_fixture(source_path: &Path) -> datatest_stable::Result<()> {
     let directory = source_path.parent().expect("fixture has no directory");
     let source = fs::read_to_string(source_path)?;
-    let page = extract(&source, Some("https://example.test/docs/page.html"))?;
+    let result = extract(&source, Some("https://example.test/docs/page.html"));
+    let error_path = directory.join("expected.error");
+    if error_path.exists() {
+        let expected = fs::read_to_string(error_path)?;
+        return match result {
+            Err(error) if error_name(&error) == expected.trim() => Ok(()),
+            Err(error) => Err(format!(
+                "error mismatch in {}: expected {}, got {}",
+                directory.display(),
+                expected.trim(),
+                error_name(&error)
+            )
+            .into()),
+            Ok(_) => Err(format!(
+                "error mismatch in {}: expected {}, extraction succeeded",
+                directory.display(),
+                expected.trim()
+            )
+            .into()),
+        };
+    }
+
+    let page = result?;
     let actual = normalize_newlines(&page.markdown());
     let expected_path = directory.join("expected.md");
 

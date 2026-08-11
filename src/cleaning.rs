@@ -733,9 +733,11 @@ pub(crate) fn heuristic_cleanup(
             &format!("{name} {text}"),
             &["newsletter", "subscribe", "sign-up", "signup", "sign up"],
         );
-        let signup = signup_terms
-            && (controls > 0 || links > 0 || dom.tag(node) == Some(Tag::Form))
-            && short;
+        let has_form = dom.tag(node) == Some(Tag::Form)
+            || dom
+                .descendants(node)
+                .any(|descendant| dom.tag(descendant) == Some(Tag::Form));
+        let signup = signup_terms && (controls > 0 || links > 0 || has_form) && short;
 
         let navigation_semantic = dom.tag(node) == Some(Tag::Nav)
             || dom.attr(node, AttrName::Role).is_some_and(|role| {
@@ -1178,7 +1180,7 @@ mod tests {
             <nav class="menu"><a href="/a">A</a><a href="/b">B</a><a href="/c">C</a></nav>
             <aside class="related"><h2>Related stories</h2><a href="/1">One story</a><a href="/2">Two story</a></aside>
             <div class="social-share"><a href="https://twitter.com/share">Twitter</a><a href="https://facebook.com/share">Facebook</a></div>
-            <form class="newsletter"><p>Subscribe to our newsletter</p><input><button>Join</button></form>
+            <aside class="newsletter"><p>Subscribe to our newsletter</p><form><input><button>Join</button></form></aside>
             <aside class="author-bio"><p>About the author</p><a href="/author">Profile</a><a href="https://x.com/a">Social</a></aside>
             <div class="advertisement"><a href="/buy">Sponsored</a></div></main>"#,
         );
