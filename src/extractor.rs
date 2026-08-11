@@ -25,6 +25,7 @@ pub(crate) struct ExtractorConfig {
     pub(crate) classes_to_preserve: Vec<String>,
     pub(crate) keep_classes: bool,
     pub(crate) debug: bool,
+    pub(crate) diagnostics: bool,
 }
 
 impl Default for ExtractorConfig {
@@ -36,6 +37,7 @@ impl Default for ExtractorConfig {
             classes_to_preserve: vec!["page".into(), "caption".into()],
             keep_classes: false,
             debug: false,
+            diagnostics: false,
         }
     }
 }
@@ -77,6 +79,15 @@ impl ExtractorBuilder {
         self
     }
 
+    /// Controls whether the extracted page retains decision diagnostics.
+    ///
+    /// Diagnostics are disabled by default. When disabled, extraction does not
+    /// build root descriptions or retain attempt records.
+    pub fn diagnostics(mut self, enabled: bool) -> Self {
+        self.config.diagnostics = enabled;
+        self
+    }
+
     /// Builds the extractor.
     pub fn build(self) -> Extractor {
         Extractor {
@@ -98,6 +109,7 @@ mod tests {
         assert_eq!(built.config.structured_data, default.config.structured_data);
         assert_eq!(built.config.max_elements, 0);
         assert!(built.config.structured_data);
+        assert!(!built.config.diagnostics);
     }
 
     #[test]
@@ -105,9 +117,11 @@ mod tests {
         let extractor = Extractor::builder()
             .max_elements(123)
             .structured_data(false)
+            .diagnostics(true)
             .build();
         assert_eq!(extractor.config.max_elements, 123);
         assert!(!extractor.config.structured_data);
+        assert!(extractor.config.diagnostics);
     }
 
     #[test]

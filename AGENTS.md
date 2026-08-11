@@ -95,7 +95,7 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 
 ## Testing
 
-`tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html` and `expected.md`. It can also have `metadata.json`. Use `expected.error` for a fixture that must fail with a named public error variant. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite.
+`tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html` and `expected.md`. It can also have `metadata.json`. Use `expected.error` for a fixture that must fail with a named public error variant. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. `tests/web/` contains capability fixtures with semantic assertions in `expected.json`. Add positive and negative capability cases without making every output an exact snapshot. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite. Use `node scripts/compare-defuddle/index.mjs` for optional local differential artifacts.
 
 Default extraction must return `Error::NoContent` for empty, head-only, and image-only documents.
 
@@ -118,7 +118,7 @@ let extractor = Extractor::builder().structured_data(true).build();
 let page = extractor.extract(html, None)?;
 ```
 
-`ExtractedPage` owns the cleaned extraction DOM. It provides lazy HTML, Markdown, and text methods plus page metadata.
+`ExtractedPage` owns the cleaned extraction DOM. It provides lazy HTML, Markdown, and text methods plus page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
 
 ## Fuzzing
 

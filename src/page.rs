@@ -1,5 +1,6 @@
 //! The extracted page and lazy output builders.
 
+use crate::diagnostics::ExtractionDiagnostics;
 use crate::dom::{Dom, NodeId};
 use crate::metadata::Metadata;
 
@@ -18,10 +19,17 @@ pub struct ExtractedPage {
     dom: Dom,
     root: NodeId,
     stats: ContentStats,
+    diagnostics: Option<ExtractionDiagnostics>,
 }
 
 impl ExtractedPage {
-    pub(crate) fn new(dom: Dom, root: NodeId, metadata: Metadata, _text_length: usize) -> Self {
+    pub(crate) fn new(
+        dom: Dom,
+        root: NodeId,
+        metadata: Metadata,
+        _text_length: usize,
+        diagnostics: Option<ExtractionDiagnostics>,
+    ) -> Self {
         let (text_length, word_count) = crate::text::measure_text(&dom, root);
         Self {
             metadata,
@@ -31,12 +39,18 @@ impl ExtractedPage {
                 text_length,
                 word_count,
             },
+            diagnostics,
         }
     }
 
     /// Returns discovered page metadata.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// Returns extraction diagnostics when the extractor enabled them.
+    pub fn diagnostics(&self) -> Option<&ExtractionDiagnostics> {
+        self.diagnostics.as_ref()
     }
 
     /// Renders the extracted content as CommonMark.

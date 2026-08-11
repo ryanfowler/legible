@@ -53,6 +53,7 @@
 mod candidate;
 mod cleaning;
 mod constants;
+mod diagnostics;
 mod dom;
 mod error;
 mod extraction;
@@ -66,6 +67,10 @@ mod quality;
 mod scoring;
 mod text;
 
+pub use diagnostics::{
+    AttemptRejectionReason, CandidateSourceInfo, ContentMetricsInfo, ExtractionAttempt,
+    ExtractionDiagnostics, ExtractionStrategyInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+};
 pub use error::{Error, Result};
 pub use extractor::{Extractor, ExtractorBuilder};
 pub use metadata::Metadata;

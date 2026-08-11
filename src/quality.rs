@@ -23,6 +23,20 @@ impl ContentMetrics {
     /// chrome. Semantic headers inside a main/article region remain source
     /// content.
     pub(crate) fn measure_source(dom: &Dom, root: NodeId) -> Self {
+        Self::measure_source_with_visibility(dom, root, false)
+    }
+
+    /// Measures source content while retaining static visibility markers.
+    /// ARIA-hidden content and document chrome remain excluded.
+    pub(crate) fn measure_source_relaxed_visibility(dom: &Dom, root: NodeId) -> Self {
+        Self::measure_source_with_visibility(dom, root, true)
+    }
+
+    fn measure_source_with_visibility(
+        dom: &Dom,
+        root: NodeId,
+        relax_static_visibility: bool,
+    ) -> Self {
         let elements = dom.element_descendants_snapshot_with_depth(root);
         let has_primary_region = elements.iter().any(|&(node, _)| {
             matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
@@ -40,8 +54,7 @@ impl ContentMetrics {
         let mut excluded = vec![false; dom.len()];
         for &(node, _) in &elements {
             let tag = dom.tag(node);
-            let hidden = dom.has_attr(node, AttrName::Hidden)
-                || dom.attr(node, AttrName::AriaHidden) == Some("true")
+            let statically_hidden = dom.has_attr(node, AttrName::Hidden)
                 || dom.attr(node, AttrName::Style).is_some_and(|style| {
                     let compact = style
                         .bytes()
@@ -51,6 +64,29 @@ impl ContentMetrics {
                         .to_ascii_lowercase();
                     compact.contains("display:none") || compact.contains("visibility:hidden")
                 });
+            let utility_hidden = dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                classes.split_whitespace().any(|class| {
+                    ["invisible", "d-none", "display-none", "u-hidden"]
+                        .iter()
+                        .any(|expected| class.eq_ignore_ascii_case(expected))
+                })
+            });
+            let modal_class = (statically_hidden || utility_hidden)
+                && dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                    classes.split_whitespace().any(|class| {
+                        class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
+                    })
+                });
+            let hidden = dom.attr(node, AttrName::AriaHidden) == Some("true")
+                || !relax_static_visibility && (statically_hidden || utility_hidden)
+                || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+                    roles.split_whitespace().any(|role| {
+                        role.eq_ignore_ascii_case("dialog")
+                            || role.eq_ignore_ascii_case("alertdialog")
+                    })
+                })
+                || dom.attr(node, AttrName::AriaModal) == Some("true")
+                || modal_class;
             let hard_non_content = hidden
                 || matches!(
                     tag,
