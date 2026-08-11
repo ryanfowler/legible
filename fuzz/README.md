@@ -17,8 +17,10 @@ Available targets:
 - `json_ld_metadata` exercises valid and malformed JSON-LD metadata.
 - `url_rewriting` exercises link, media, and `srcset` URL rewriting.
 - `nested_malformed_html` exercises deep nesting and HTML parser repair.
+- `semantic_normalization` exercises malformed semantic markup and all output renderers.
 
 Each target skips inputs larger than 256 KiB. Cargo-fuzz currently uses nightly
 Rust because it enables unstable sanitizer compiler options. The targets treat extraction errors as
 valid results. A panic, stack overflow, or failure to reparse serialized extracted HTML
-is a fuzzing failure.
+is a fuzzing failure. The semantic normalization target also checks text statistics and
+sanitized HTML output.

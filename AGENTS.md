@@ -34,7 +34,7 @@ The extraction pipeline flows through these stages:
 2. **Preparation** (`cleaning.rs`) - Script removal, BR/font normalization, lazy image fixing
 3. **Metadata Extraction** (`metadata.rs`) - Candidate resolution from JSON-LD, OpenGraph, meta tags, and HTML elements
 4. **Content Extraction** (`extraction.rs`) - Strategy retries, candidate selection, and content consolidation
-5. **Content Cleaning** (`cleaning.rs`) - Hard cleanup and multi-signal heuristic cleanup
+5. **Content Cleaning** (`cleaning.rs`) - Hard cleanup, contextual boilerplate cleanup, and multi-signal heuristic cleanup
 6. **Semantic Normalization** (`normalize.rs`) - Image, code, figure, footnote, table, and wrapper normalization
 
 ### Key Modules
@@ -46,7 +46,7 @@ The extraction pipeline flows through these stages:
 | `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
-| `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup |
+| `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
 | `normalize.rs` / `normalize/` | Ordered semantic passes for math, media, callouts, images, headings, lists, code, figures, footnotes, tables, and wrappers |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
@@ -69,6 +69,7 @@ These invariants are costly to violate:
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
 - **Separate cleanup and normalization.** Cleanup decides what to remove. Normalization makes retained markup predictable for serializers.
+- **Use static image evidence together.** Small dimensions are a signal. Protect described images, math, responsive sources, and captioned figures.
 - **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
@@ -123,3 +124,5 @@ let page = extractor.extract(html, None)?;
 ## Fuzzing
 
 Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.
+
+The internal `fuzzing` feature exposes retained-DOM validation only to fuzz targets. Do not use it in normal applications.

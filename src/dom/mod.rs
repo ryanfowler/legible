@@ -222,4 +222,26 @@ mod tests {
         assert_eq!(dom.descendants(dom.body().unwrap()).count(), DEPTH + 1);
         dom.validate().unwrap();
     }
+
+    #[test]
+    fn validation_rejects_parent_cycles_and_a_parented_root() {
+        let mut cycle = Dom::parse_fragment("<div><span></span></div>", Tag::Div).unwrap();
+        let root = cycle.root();
+        let div = cycle.first_descendant_by_tag(root, Tag::Div).unwrap();
+        let span = cycle.first_descendant_by_tag(div, Tag::Span).unwrap();
+        cycle.node_mut(root).first_child = NodeLink::NONE;
+        cycle.node_mut(root).last_child = NodeLink::NONE;
+        cycle.node_mut(div).parent = NodeLink::from_option(Some(span));
+        cycle.node_mut(span).first_child = NodeLink::from_option(Some(div));
+        cycle.node_mut(span).last_child = NodeLink::from_option(Some(div));
+        assert!(cycle.validate().is_err());
+
+        let mut parented_root = Dom::parse_fragment("<div></div>", Tag::Div).unwrap();
+        let root = parented_root.root();
+        let div = parented_root
+            .first_descendant_by_tag(root, Tag::Div)
+            .unwrap();
+        parented_root.node_mut(root).parent = NodeLink::from_option(Some(div));
+        assert!(parented_root.validate().is_err());
+    }
 }

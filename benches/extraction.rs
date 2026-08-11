@@ -10,7 +10,26 @@ mod dom;
 
 fn benchmark_page(kind: &str, target_bytes: usize) -> String {
     let mut html = String::with_capacity(target_bytes + 256);
-    html.push_str("<!doctype html><html><head><title>Benchmark page</title></head><body><nav><a href='/'>Home</a></nav><main><h1>Benchmark page</h1>");
+    html.push_str("<!doctype html><html><head><title>Benchmark page</title>");
+    if kind == "metadata" {
+        for index in 0..200 {
+            html.push_str(&format!(
+                "<meta property='article:tag' content='benchmark-{index}'><meta name='citation_author' content='Author {index}'>"
+            ));
+        }
+    } else if kind == "json-ld" {
+        html.push_str("<script type='application/ld+json'>[");
+        for index in 0..200 {
+            if index > 0 {
+                html.push(',');
+            }
+            html.push_str(&format!(
+                r#"{{"@type":"Article","headline":"Entry {index}","articleBody":"Representative structured article text {index}."}}"#
+            ));
+        }
+        html.push_str("]</script>");
+    }
+    html.push_str("</head><body><nav><a href='/'>Home</a></nav><main><h1>Benchmark page</h1>");
     let mut index = 0;
     while html.len() < target_bytes {
         match kind {
@@ -19,6 +38,9 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
             )),
             "listing" => html.push_str(&format!(
                 "<article><h2><a href='/entry/{index}'>Entry {index}</a></h2><p>This entry contains useful summary text and stable benchmark content.</p></article>"
+            )),
+            "malformed" => html.push_str(&format!(
+                "<section><h2>Broken {index}<p>Malformed markup still contains representative prose and useful extraction content.<table><tr><td>{index}<td>value</section>"
             )),
             _ => html.push_str(&format!(
                 "<section><h2>Section {index}</h2><p>This paragraph contains representative prose, punctuation, and enough detail for content candidate scoring.</p><p>A second paragraph measures extraction cleanup and source-relative quality.</p></section>"
@@ -82,12 +104,21 @@ fn bench_extract(c: &mut Criterion) {
 }
 
 fn bench_lazy_outputs(c: &mut Criterion) {
-    let html = benchmark_page("prose", 50_000);
-    let page = extract(&html, Some("https://example.com")).unwrap();
-    let mut group = c.benchmark_group("lazy_output/medium");
-    group.bench_function("markdown", |b| b.iter(|| page.markdown()));
-    group.bench_function("text", |b| b.iter(|| page.text()));
-    group.bench_function("html", |b| b.iter(|| page.html()));
+    let mut group = c.benchmark_group("lazy_output");
+    for (kind, bytes) in [("short", 4_000), ("long", 250_000), ("reference", 50_000)] {
+        let source_kind = if kind == "reference" {
+            "reference"
+        } else {
+            "prose"
+        };
+        let html = benchmark_page(source_kind, bytes);
+        let page = extract(&html, Some("https://example.com")).unwrap();
+        group.bench_function(BenchmarkId::new(kind, "markdown"), |b| {
+            b.iter(|| page.markdown())
+        });
+        group.bench_function(BenchmarkId::new(kind, "text"), |b| b.iter(|| page.text()));
+        group.bench_function(BenchmarkId::new(kind, "html"), |b| b.iter(|| page.html()));
+    }
     group.finish();
 }
 
@@ -97,6 +128,9 @@ fn bench_complex_pages(c: &mut Criterion) {
         ("prose", "prose", "https://example.com"),
         ("reference", "reference", "https://example.com"),
         ("listing", "listing", "https://example.com"),
+        ("malformed", "malformed", "https://example.com"),
+        ("metadata-heavy", "metadata", "https://example.com"),
+        ("json-ld-heavy", "json-ld", "https://example.com"),
     ] {
         let html = benchmark_page(kind, 250_000);
         group.throughput(Throughput::Bytes(html.len() as u64));

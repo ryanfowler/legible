@@ -1,0 +1,4 @@
+{
+  "must_contain": ["filter removes noise", "useful on its own"],
+  "must_not_contain": ["5 min read", "Read more", "Advertisement"]
+}

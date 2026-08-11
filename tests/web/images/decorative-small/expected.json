@@ -1,0 +1,6 @@
+{
+  "must_contain": ["Network topology", "x = y", "Service is available"],
+  "must_not_contain": ["pixel.gif", "avatar.jpg", "share-icon"],
+  "html_must_contain": ["Warning status"],
+  "images_min": 2
+}

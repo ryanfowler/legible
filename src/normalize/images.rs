@@ -15,6 +15,255 @@ struct SrcsetCandidate<'a> {
     descriptor: SrcsetDescriptor,
 }
 
+pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
+    let nodes = dom.element_descendants_snapshot_with_depth(root);
+    let mut caption_content = vec![false; dom.len()];
+    let mut responsive_content = vec![false; dom.len()];
+    let mut svg_description_content = vec![false; dom.len()];
+    for &(node, _) in nodes.iter().rev() {
+        caption_content[node.index()] |=
+            dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node);
+        responsive_content[node.index()] |= source_has_responsive_or_lazy_image(dom, node);
+        svg_description_content[node.index()] |=
+            is_svg_description_element(dom, node) && dom.has_non_whitespace_text(node);
+        if let Some(parent) = dom.parent(node) {
+            caption_content[parent.index()] |= caption_content[node.index()];
+            responsive_content[parent.index()] |= responsive_content[node.index()];
+            svg_description_content[parent.index()] |= svg_description_content[node.index()];
+        }
+    }
+
+    let mut protected_context = vec![false; dom.len()];
+    let mut responsive_picture_context = vec![false; dom.len()];
+    let mut contexts: Vec<(bool, bool)> = Vec::new();
+    let root_context = (
+        dom.attr(root, AttrName::DataMath).is_some()
+            || dom.tag(root) == Some(Tag::Figure) && caption_content[root.index()],
+        dom.tag(root) == Some(Tag::Picture) && responsive_content[root.index()],
+    );
+    for &(node, depth) in &nodes {
+        while contexts.len() >= depth as usize {
+            contexts.pop();
+        }
+        let (parent_protected, parent_responsive) =
+            contexts.last().copied().unwrap_or(root_context);
+        let protected = parent_protected
+            || dom.attr(node, AttrName::DataMath).is_some()
+            || dom.tag(node) == Some(Tag::Figure) && caption_content[node.index()];
+        let responsive = parent_responsive
+            || dom.tag(node) == Some(Tag::Picture) && responsive_content[node.index()];
+        protected_context[node.index()] = protected;
+        responsive_picture_context[node.index()] = responsive;
+        contexts.push((protected, responsive));
+    }
+
+    for &(node, _) in nodes.iter().rev() {
+        if dom.parent(node).is_none() || !matches!(dom.tag(node), Some(Tag::Img | Tag::Svg)) {
+            continue;
+        }
+        if has_direct_meaningful_description(dom, node)
+            || dom.tag(node) == Some(Tag::Svg) && svg_description_content[node.index()]
+            || protected_context[node.index()]
+            || responsive_picture_context[node.index()]
+            || has_responsive_candidate(dom, node)
+            || has_lazy_candidate(dom, node)
+        {
+            continue;
+        }
+
+        let dimensions = static_dimensions(dom, node);
+        let very_small = dimensions
+            .into_iter()
+            .flatten()
+            .any(|dimension| dimension <= 1);
+        let small = dimensions
+            .into_iter()
+            .flatten()
+            .any(|dimension| dimension <= 32);
+        let decorative_name = decorative_image_name(dom, node);
+        if very_small || small && decorative_name {
+            dom.detach(node);
+        }
+    }
+}
+
+fn static_dimensions(dom: &Dom, node: NodeId) -> [Option<u32>; 2] {
+    let mut dimensions = [
+        dom.attr(node, AttrName::Width)
+            .and_then(parse_css_dimension),
+        dom.attr(node, AttrName::Height)
+            .and_then(parse_css_dimension),
+    ];
+    if let Some(style) = dom.attr(node, AttrName::Style) {
+        for declaration in style.split(';') {
+            let Some((name, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            let target = if name.trim().eq_ignore_ascii_case("width") {
+                Some(0)
+            } else if name.trim().eq_ignore_ascii_case("height") {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(target) = target
+                && dimensions[target].is_none()
+            {
+                dimensions[target] = parse_css_dimension(value);
+            }
+        }
+    }
+    if dom.tag(node) == Some(Tag::Svg)
+        && dimensions.iter().all(Option::is_none)
+        && let Some(view_box) = dom
+            .attrs(node)
+            .iter()
+            .find(|attribute| {
+                attribute
+                    .name
+                    .local
+                    .as_ref()
+                    .eq_ignore_ascii_case("viewbox")
+            })
+            .map(|attribute| attribute.value.as_ref())
+    {
+        let values: Vec<_> = view_box
+            .split(|character: char| character.is_ascii_whitespace() || character == ',')
+            .filter(|value| !value.is_empty())
+            .collect();
+        if values.len() == 4 {
+            dimensions = [
+                parse_css_dimension(values[2]),
+                parse_css_dimension(values[3]),
+            ];
+        }
+    }
+    if dimensions.iter().all(Option::is_none)
+        && let Some(source) = dom.attr(node, AttrName::Src)
+    {
+        dimensions = dimensions_from_url(source);
+    }
+    dimensions
+}
+
+fn parse_css_dimension(value: &str) -> Option<u32> {
+    let value = value.trim();
+    let number = value.strip_suffix("px").map(str::trim).unwrap_or(value);
+    number.parse::<f32>().ok().and_then(|number| {
+        (number.is_finite() && number >= 0.0 && number <= u32::MAX as f32)
+            .then_some(number.round() as u32)
+    })
+}
+
+fn dimensions_from_url(source: &str) -> [Option<u32>; 2] {
+    let mut dimensions = [None, None];
+    let path = source.split(['?', '#']).next().unwrap_or(source);
+    for segment in path.split('/') {
+        if let Some((width, height)) = segment.split_once('x')
+            && width.bytes().all(|byte| byte.is_ascii_digit())
+            && height.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            dimensions = [parse_css_dimension(width), parse_css_dimension(height)];
+        }
+        let mut tokens = segment.split(['-', '_']);
+        while let Some(token) = tokens.next() {
+            let target = match token.to_ascii_lowercase().as_str() {
+                "w" | "width" => Some(0),
+                "h" | "height" => Some(1),
+                _ => None,
+            };
+            if let Some(target) = target
+                && let Some(value) = tokens.next()
+            {
+                dimensions[target] = parse_css_dimension(value);
+            }
+        }
+    }
+    if let Some(query) = source.split_once('?').map(|(_, query)| query) {
+        for pair in query.split('&') {
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let target = match name.to_ascii_lowercase().as_str() {
+                "w" | "width" => Some(0),
+                "h" | "height" => Some(1),
+                _ => None,
+            };
+            if let Some(target) = target {
+                dimensions[target] = parse_css_dimension(value);
+            }
+        }
+    }
+    dimensions
+}
+
+fn has_responsive_candidate(dom: &Dom, node: NodeId) -> bool {
+    dom.attr(node, AttrName::Srcset)
+        .or_else(|| dom.attr(node, AttrName::DataSrcset))
+        .is_some_and(|srcset| {
+            parse_srcset(srcset).into_iter().any(|candidate| {
+                matches!(candidate.descriptor, SrcsetDescriptor::Width(width) if width > 32)
+                    || matches!(candidate.descriptor, SrcsetDescriptor::Density(_))
+            })
+        })
+}
+
+fn source_has_responsive_or_lazy_image(dom: &Dom, node: NodeId) -> bool {
+    if !matches!(dom.tag(node), Some(Tag::Picture | Tag::Source)) {
+        return false;
+    }
+    [AttrName::Srcset, AttrName::DataSrcset]
+        .into_iter()
+        .filter_map(|attribute| valid_image_attribute(dom.attr(node, attribute)))
+        .any(|value| !parse_srcset(value).is_empty())
+        || [AttrName::Src, AttrName::DataSrc]
+            .into_iter()
+            .any(|attribute| valid_image_attribute(dom.attr(node, attribute)).is_some())
+}
+
+fn is_svg_description_element(dom: &Dom, node: NodeId) -> bool {
+    dom.qual_name(node).is_some_and(|name| {
+        matches!(
+            name.local.as_ref().to_ascii_lowercase().as_str(),
+            "title" | "desc"
+        )
+    })
+}
+
+fn has_lazy_candidate(dom: &Dom, node: NodeId) -> bool {
+    dom.attrs(node).iter().any(|attribute| {
+        attribute.name.local.as_ref().starts_with("data-")
+            && valid_image_attribute(Some(attribute.value.as_ref())).is_some()
+            && (crate::constants::has_image_src(attribute.value.as_ref())
+                || crate::constants::has_image_srcset(attribute.value.as_ref()))
+    })
+}
+
+fn decorative_image_name(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id, AttrName::Src]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(|value| {
+            value
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .filter(|token| !token.is_empty())
+        })
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "avatar"
+                    | "badge"
+                    | "bullet"
+                    | "icon"
+                    | "logo"
+                    | "pixel"
+                    | "spacer"
+                    | "sprite"
+                    | "tracking"
+            )
+        })
+}
+
 pub(super) fn normalize(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     fix_lazy_images(dom, root, nodes);
 
@@ -361,24 +610,7 @@ fn same_meaningful_alt(dom: &Dom, first: NodeId, second: NodeId) -> bool {
 }
 
 fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
-    let meaningful = |value: &str| {
-        let value = value.trim().to_lowercase();
-        !value.is_empty()
-            && ![
-                "image unavailable",
-                "unavailable image",
-                "placeholder",
-                "loading",
-                "blank image",
-            ]
-            .iter()
-            .any(|label| value == *label)
-    };
-    if ["alt", "aria-label", "title"]
-        .into_iter()
-        .filter_map(|name| dom.attr_by_local_name(image, name))
-        .any(meaningful)
-    {
+    if has_direct_meaningful_description(dom, image) {
         return true;
     }
     dom.ancestors(image)
@@ -392,6 +624,25 @@ fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
                 && dom.descendants(figure).any(|node| {
                     dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node)
                 })
+        })
+}
+
+fn has_direct_meaningful_description(dom: &Dom, image: NodeId) -> bool {
+    ["alt", "aria-label", "title"]
+        .into_iter()
+        .filter_map(|name| dom.attr_by_local_name(image, name))
+        .any(|value| {
+            let value = value.trim().to_lowercase();
+            !value.is_empty()
+                && ![
+                    "image unavailable",
+                    "unavailable image",
+                    "placeholder",
+                    "loading",
+                    "blank image",
+                ]
+                .iter()
+                .any(|label| value == *label)
         })
 }
 
@@ -659,5 +910,61 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn removes_small_decorative_images_from_static_evidence() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img src="pixel.gif" style="width: 1px; height: 1px"><img class="author-avatar" src="person.jpg" width="32" height="32"><img src="/cdn/w_24/action-icon.svg"><svg class="action-icon" viewBox="0 0 16 16"><path></path></svg></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Svg)))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn keeps_small_meaningful_and_responsive_images() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img class="icon" src="status.png" width="16" alt="Service is available"><img class="icon" src="small.jpg" width="16" srcset="small.jpg 16w, diagram.jpg 640w"><picture><source srcset="large.jpg 2x"><img class="icon" src="small.jpg" width="16"></picture><figure><img class="icon" src="diagram.svg?w=24" width="24"><figcaption>Network topology</figcaption></figure><img class="equation" src="equation.png" width="16" alt="x = y"><svg class="status-icon" width="16" height="16"><title>Warning status</title><path></path></svg></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            5
+        );
+        assert!(
+            dom.descendants(root)
+                .any(|node| dom.tag(node) == Some(Tag::Svg))
+        );
+    }
+
+    #[test]
+    fn root_semantics_protect_small_images() {
+        for html in [
+            r#"<figure><img class="icon" width="16" src="small"><figcaption>Result diagram</figcaption></figure>"#,
+            r#"<picture><source srcset="/media/asset/123 640w"><img class="icon" width="16" src="small"></picture>"#,
+            r#"<div data-legible-math="inline"><img class="icon" width="16" src="small"></div>"#,
+        ] {
+            let mut dom = Dom::parse_document(html).unwrap();
+            let root = dom
+                .descendants(dom.root())
+                .find(|&node| matches!(dom.tag(node), Some(Tag::Figure | Tag::Picture | Tag::Div)))
+                .unwrap();
+            remove_decorative_media(&mut dom, root);
+            assert!(
+                dom.first_descendant_by_tag(root, Tag::Img).is_some(),
+                "{html}"
+            );
+        }
     }
 }

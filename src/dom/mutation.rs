@@ -232,8 +232,38 @@ impl Dom {
         }
         Ok(root)
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn validate(&self) -> Result<(), DomError> {
+        if self.parent(self.root).is_some() {
+            return Err(DomError("root has a parent".into()));
+        }
+        let mut parent_state = vec![0_u8; self.nodes.len()];
+        for start in 0..self.nodes.len() {
+            if parent_state[start] != 0 {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut current = Some(NodeId(start as u32));
+            while let Some(node) = current {
+                if !self.contains(node) {
+                    return Err(DomError("invalid parent chain".into()));
+                }
+                match parent_state[node.index()] {
+                    0 => {
+                        parent_state[node.index()] = 1;
+                        path.push(node);
+                        current = self.parent(node);
+                    }
+                    1 => return Err(DomError("parent cycle".into())),
+                    _ => break,
+                }
+            }
+            for node in path {
+                parent_state[node.index()] = 2;
+            }
+        }
+
+        let mut listed_as_child = vec![false; self.nodes.len()];
         for (i, n) in self.nodes.iter().enumerate() {
             let id = NodeId(i as u32);
             if let Some(p) = n.parent.get() {
@@ -243,6 +273,22 @@ impl Dom {
                 if n.prev_sibling.get().is_none() && self.first_child(p) != Some(id) {
                     return Err(DomError("first child link".into()));
                 }
+            } else if n.prev_sibling.get().is_some() || n.next_sibling.get().is_some() {
+                return Err(DomError("detached sibling link".into()));
+            }
+            if let Some(previous) = n.prev_sibling.get()
+                && (!self.contains(previous)
+                    || self.next_sibling(previous) != Some(id)
+                    || self.parent(previous) != n.parent.get())
+            {
+                return Err(DomError("previous sibling link".into()));
+            }
+            if let Some(next) = n.next_sibling.get()
+                && (!self.contains(next)
+                    || self.prev_sibling(next) != Some(id)
+                    || self.parent(next) != n.parent.get())
+            {
+                return Err(DomError("next sibling link".into()));
             }
             if let Some(c) = n.first_child.get() {
                 if !self.contains(c) || self.parent(c) != Some(id) || self.prev_sibling(c).is_some()
@@ -258,14 +304,36 @@ impl Dom {
             }
             let mut seen = std::collections::HashSet::new();
             let mut cur = n.first_child.get();
+            let mut previous = None;
             while let Some(c) = cur {
                 if !seen.insert(c) {
                     return Err(DomError("duplicate child".into()));
                 }
+                if listed_as_child[c.index()] {
+                    return Err(DomError("child appears in multiple lists".into()));
+                }
+                listed_as_child[c.index()] = true;
                 if self.parent(c) != Some(id) {
                     return Err(DomError("child parent link".into()));
                 }
+                if self.prev_sibling(c) != previous {
+                    return Err(DomError("child previous link".into()));
+                }
+                if let Some(previous) = previous
+                    && self.next_sibling(previous) != Some(c)
+                {
+                    return Err(DomError("child next link".into()));
+                }
+                previous = Some(c);
                 cur = self.next_sibling(c)
+            }
+            if previous != n.last_child.get() {
+                return Err(DomError("last child chain".into()));
+            }
+        }
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node.parent.get().is_some() != listed_as_child[i] {
+                return Err(DomError("parented node is not in child list".into()));
             }
         }
         Ok(())

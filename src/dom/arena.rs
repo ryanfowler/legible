@@ -24,7 +24,7 @@ impl Dom {
     pub(crate) fn root(&self) -> NodeId {
         self.root
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn contains(&self, id: NodeId) -> bool {
         id.index() < self.nodes.len()
     }

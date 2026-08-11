@@ -42,6 +42,11 @@ pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
     footnotes::normalize(dom, root);
 }
 
+/// Removes decorative media while source sizing and naming evidence is intact.
+pub(crate) fn remove_decorative_media_before_cleanup(dom: &mut Dom, root: NodeId) {
+    images::remove_decorative_media(dom, root);
+}
+
 pub(crate) fn adopt_external_footnotes(
     definitions: &footnotes::Definitions,
     fragment: &mut Dom,

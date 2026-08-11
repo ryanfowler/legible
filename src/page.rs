@@ -124,6 +124,13 @@ impl ExtractedPage {
     pub fn text_length(&self) -> usize {
         self.stats.text_length
     }
+
+    /// Checks retained DOM links for fuzz testing.
+    #[doc(hidden)]
+    #[cfg(feature = "fuzzing")]
+    pub fn validate_dom(&self) -> bool {
+        self.dom.validate().is_ok()
+    }
 }
 
 /// Configures HTML rendering for an [`ExtractedPage`].
