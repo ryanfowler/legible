@@ -43,50 +43,22 @@ pub(crate) fn render_text(
     capacity: usize,
     options: &TextOptions,
 ) -> String {
-    if options.preserves_line_breaks() || options.block_newlines() {
-        render_block_text(dom, root, capacity, options)
-    } else {
-        render_normalized_text(dom, root, capacity)
-    }
+    render_block_text(dom, root, capacity, options)
 }
 
-pub(crate) fn count_words(dom: &Dom, root: NodeId) -> usize {
-    let mut count = 0;
-    let mut in_word = false;
-    let mut nodes = SmallVec::<[NodeId; 32]>::new();
-    nodes.extend(dom.children_rev(root));
-    while let Some(node) = nodes.pop() {
-        if let Some(text) = dom.text_node(node) {
-            for character in text.chars() {
-                if character.is_whitespace() {
-                    in_word = false;
-                } else if !in_word {
-                    count += 1;
-                    in_word = true;
-                }
-            }
-        } else if dom.tag(node) != Some(Tag::Template) {
-            nodes.extend(dom.children_rev(node));
-        }
-    }
-    count
-}
-
-fn render_normalized_text(dom: &Dom, root: NodeId, capacity: usize) -> String {
-    let mut output = NormalizedOutput::with_capacity(capacity);
-    let mut nodes = SmallVec::<[NodeId; 32]>::new();
-    nodes.extend(dom.children_rev(root));
-    while let Some(node) = nodes.pop() {
-        if let Some(text) = dom.text_node(node) {
-            output.text(text);
-        } else if dom.tag(node) != Some(Tag::Template) {
-            nodes.extend(dom.children_rev(node));
-        }
-    }
-    output.finish()
+pub(crate) fn measure_text(dom: &Dom, root: NodeId) -> (usize, usize) {
+    let mut output = NormalizedOutput::metrics();
+    walk_block_text(dom, root, &TextOptions::default(), &mut output);
+    output.measurements()
 }
 
 fn render_block_text(dom: &Dom, root: NodeId, capacity: usize, options: &TextOptions) -> String {
+    let mut output = NormalizedOutput::with_capacity(capacity);
+    walk_block_text(dom, root, options, &mut output);
+    output.finish()
+}
+
+fn walk_block_text(dom: &Dom, root: NodeId, options: &TextOptions, output: &mut NormalizedOutput) {
     enum Task {
         Node(NodeId),
         BlockEnd,
@@ -97,7 +69,6 @@ fn render_block_text(dom: &Dom, root: NodeId, capacity: usize, options: &TextOpt
     } else {
         Separator::Space
     };
-    let mut output = NormalizedOutput::with_capacity(capacity);
     let mut tasks = SmallVec::<[Task; 32]>::new();
     tasks.extend(dom.children_rev(root).map(Task::Node));
     while let Some(task) = tasks.pop() {
@@ -112,8 +83,12 @@ fn render_block_text(dom: &Dom, root: NodeId, capacity: usize, options: &TextOpt
                 if tag == Some(Tag::Template) {
                     continue;
                 }
-                if tag == Some(Tag::Br) && options.preserves_line_breaks() {
-                    output.separator(Separator::Newline);
+                if tag == Some(Tag::Br) {
+                    output.separator(if options.preserves_line_breaks() {
+                        Separator::Newline
+                    } else {
+                        Separator::Space
+                    });
                     continue;
                 }
                 if tag.is_some_and(is_text_block) {
@@ -124,7 +99,6 @@ fn render_block_text(dom: &Dom, root: NodeId, capacity: usize, options: &TextOpt
             }
         }
     }
-    output.finish()
 }
 
 fn is_text_block(tag: Tag) -> bool {
@@ -133,8 +107,29 @@ fn is_text_block(tag: Tag) -> bool {
         Tag::P
             | Tag::Div
             | Tag::Article
+            | Tag::Address
+            | Tag::Aside
+            | Tag::Body
+            | Tag::Caption
+            | Tag::Dd
+            | Tag::Details
+            | Tag::Dl
+            | Tag::Dt
+            | Tag::Fieldset
+            | Tag::Footer
+            | Tag::Form
+            | Tag::Header
+            | Tag::Main
+            | Tag::Nav
+            | Tag::Pre
             | Tag::Section
+            | Tag::Summary
+            | Tag::Figure
+            | Tag::Figcaption
             | Tag::Li
+            | Tag::Tr
+            | Tag::Td
+            | Tag::Th
             | Tag::Blockquote
             | Tag::H1
             | Tag::H2
@@ -155,16 +150,23 @@ enum Separator {
 
 #[derive(Default)]
 struct NormalizedOutput {
-    output: String,
+    output: Option<String>,
     pending: Separator,
+    character_count: usize,
+    word_count: usize,
+    in_word: bool,
 }
 
 impl NormalizedOutput {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            output: String::with_capacity(capacity),
-            pending: Separator::None,
+            output: Some(String::with_capacity(capacity)),
+            ..Self::default()
         }
+    }
+
+    fn metrics() -> Self {
+        Self::default()
     }
 
     fn text(&mut self, text: &str) {
@@ -173,7 +175,7 @@ impl NormalizedOutput {
             let mut index = 0;
             while index < bytes.len() {
                 if bytes[index].is_ascii_whitespace() {
-                    if !self.output.is_empty() && self.pending == Separator::None {
+                    if self.character_count > 0 && self.pending == Separator::None {
                         self.pending = Separator::Space;
                     }
                     index += 1;
@@ -184,25 +186,39 @@ impl NormalizedOutput {
                 while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
                     index += 1;
                 }
-                self.output.push_str(&text[start..index]);
+                if !self.in_word {
+                    self.word_count += 1;
+                }
+                self.in_word = true;
+                self.character_count += index - start;
+                if let Some(output) = &mut self.output {
+                    output.push_str(&text[start..index]);
+                }
             }
             return;
         }
 
         for character in text.chars() {
             if character.is_whitespace() {
-                if !self.output.is_empty() && self.pending == Separator::None {
+                if self.character_count > 0 && self.pending == Separator::None {
                     self.pending = Separator::Space;
                 }
             } else {
                 self.flush();
-                self.output.push(character);
+                if !self.in_word {
+                    self.word_count += 1;
+                }
+                self.in_word = true;
+                self.character_count += 1;
+                if let Some(output) = &mut self.output {
+                    output.push(character);
+                }
             }
         }
     }
 
     fn separator(&mut self, separator: Separator) {
-        if !self.output.is_empty()
+        if self.character_count > 0
             && (separator == Separator::Newline || self.pending == Separator::None)
         {
             self.pending = separator;
@@ -210,16 +226,27 @@ impl NormalizedOutput {
     }
 
     fn flush(&mut self) {
-        match self.pending {
-            Separator::None => {}
-            Separator::Space => self.output.push(' '),
-            Separator::Newline => self.output.push('\n'),
+        let separator = match self.pending {
+            Separator::None => None,
+            Separator::Space => Some(' '),
+            Separator::Newline => Some('\n'),
+        };
+        if let Some(separator) = separator {
+            self.character_count += 1;
+            self.in_word = false;
+            if let Some(output) = &mut self.output {
+                output.push(separator);
+            }
         }
         self.pending = Separator::None;
     }
 
     fn finish(self) -> String {
-        self.output
+        self.output.unwrap_or_default()
+    }
+
+    fn measurements(self) -> (usize, usize) {
+        (self.character_count, self.word_count)
     }
 }
 
@@ -230,13 +257,13 @@ mod tests {
     #[test]
     fn preserves_boundaries_breaks_blocks_and_templates() {
         let dom = Dom::parse_document(
-            "<body><div>A<p>Hello <em>world</em>!</p>C<br>D<template>hidden</template></div></body>",
+            "<body><div>A<p>Hello <em>world</em>!</p>C<br>D<template>hidden</template></div><dl><dt>Term</dt><dd>Definition</dd></dl><details><summary>More</summary><pre>fixed text</pre></details></body>",
         )
         .unwrap();
         let body = dom.body().unwrap();
         assert_eq!(
             render_text(&dom, body, 0, &TextOptions::default()),
-            "AHello world!CD"
+            "A Hello world! C D Term Definition More fixed text"
         );
         assert_eq!(
             render_text(
@@ -245,7 +272,7 @@ mod tests {
                 0,
                 &TextOptions::default().preserve_line_breaks(true),
             ),
-            "A Hello world! C\nD"
+            "A Hello world! C\nD Term Definition More fixed text"
         );
         assert_eq!(
             render_text(
@@ -254,7 +281,7 @@ mod tests {
                 0,
                 &TextOptions::default().block_separator(TextSeparator::Newline),
             ),
-            "A\nHello world!\nCD"
+            "A\nHello world!\nC D\nTerm\nDefinition\nMore\nfixed text"
         );
         assert_eq!(
             render_text(
@@ -265,7 +292,7 @@ mod tests {
                     .block_separator(TextSeparator::Newline)
                     .preserve_line_breaks(true),
             ),
-            "A\nHello world!\nC\nD"
+            "A\nHello world!\nC\nD\nTerm\nDefinition\nMore\nfixed text"
         );
     }
 }

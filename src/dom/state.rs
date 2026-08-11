@@ -19,6 +19,7 @@ pub(crate) enum DataTableState {
     #[default]
     Unknown,
     Layout,
+    Listing,
     Data,
 }
 #[derive(Debug, Clone, Copy, Default)]
@@ -151,7 +152,7 @@ impl NodeStateStore {
         let e = self.entries.get(id.index())?;
         match e.data_table {
             DataTableState::Data => Some(true),
-            DataTableState::Layout => Some(false),
+            DataTableState::Layout | DataTableState::Listing => Some(false),
             DataTableState::Unknown => None,
         }
     }

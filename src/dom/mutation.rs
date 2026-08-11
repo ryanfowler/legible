@@ -103,6 +103,11 @@ impl Dom {
             self.append_child(to, id)
         }
     }
+    pub(crate) fn set_text(&mut self, node: NodeId, text: &str) {
+        if let NodeData::Text(value) = &mut self.node_mut(node).data {
+            *value = StrTendril::from(text);
+        }
+    }
     pub(crate) fn rename_html(&mut self, node: NodeId, tag: Tag) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.tag = tag;

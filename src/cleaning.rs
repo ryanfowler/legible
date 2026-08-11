@@ -191,6 +191,10 @@ pub fn mark_data_tables(
             store.set_data_table(id, crate::dom::DataTableState::Layout);
             continue;
         }
+        if is_repeated_listing_table(dom, id) {
+            store.set_data_table(id, crate::dom::DataTableState::Listing);
+            continue;
+        }
         let mut rows = 0;
         let mut cols = 0;
         for tr in dom.descendants(id).filter(|&x| dom.tag(x) == Some(Tag::Tr)) {
@@ -219,6 +223,124 @@ pub fn mark_data_tables(
         );
     }
 }
+
+/// Returns true for a conservative, rank-based repeated-content table.
+///
+/// A rank alone is not sufficient. The table must have several similarly
+/// shaped linked rows and must not have explicit data-table semantics.
+pub(crate) fn is_repeated_listing_table(dom: &Dom, table: NodeId) -> bool {
+    repeated_listing_start(dom, table).is_some()
+}
+
+pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
+    if dom.tag(table) != Some(Tag::Table)
+        || dom.has_attr(table, AttrName::Summary)
+        || dom
+            .attr(table, AttrName::DataTable)
+            .is_some_and(|value| value != "0")
+        || dom.attr(table, AttrName::Role).is_some_and(|role| {
+            role.split_whitespace().any(|value| {
+                value.eq_ignore_ascii_case("table")
+                    || value.eq_ignore_ascii_case("grid")
+                    || value.eq_ignore_ascii_case("treegrid")
+            })
+        })
+        || dom.descendants(table).any(|node| {
+            matches!(
+                dom.tag(node),
+                Some(Tag::Caption | Tag::Th | Tag::Thead | Tag::Tfoot)
+            )
+        })
+    {
+        return None;
+    }
+
+    let rows: SmallVec<[NodeId; 32]> = dom
+        .descendants(table)
+        .filter(|&node| {
+            dom.tag(node) == Some(Tag::Tr)
+                && dom
+                    .ancestors(node)
+                    .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Table))
+                    == Some(table)
+        })
+        .collect();
+    if rows.len() < 6 {
+        return None;
+    }
+
+    let mut ranked_rows = 0usize;
+    let mut linked_ranked_rows = 0usize;
+    let mut metadata_rows = 0usize;
+    let mut expect_metadata = false;
+    let mut outside_text_after_rank = None;
+    let mut first_rank: Option<u32> = None;
+    let mut previous_rank: Option<u32> = None;
+    let mut common_columns = None;
+    let mut common_shape = 0usize;
+    let mut buffer = String::new();
+    for row in rows.iter().copied() {
+        let cells: SmallVec<[NodeId; 8]> = dom
+            .element_children(row)
+            .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
+            .collect();
+        let rank = cells.first().and_then(|&cell| {
+            let text = crate::scoring::get_normalized_inner_text(dom, cell, &mut buffer);
+            parse_rank_text(text)
+        });
+        let Some(rank) = rank else {
+            if dom.has_non_whitespace_text(row) {
+                if expect_metadata {
+                    metadata_rows += 1;
+                    expect_metadata = false;
+                } else if outside_text_after_rank.replace(ranked_rows).is_some() {
+                    return None;
+                }
+            }
+            continue;
+        };
+        if cells.len() < 2
+            || previous_rank.is_some_and(|previous| previous.checked_add(1) != Some(rank))
+        {
+            return None;
+        }
+        first_rank.get_or_insert(rank);
+        previous_rank = Some(rank);
+        ranked_rows += 1;
+        expect_metadata = true;
+        if dom
+            .descendants(row)
+            .any(|node| dom.tag(node) == Some(Tag::A) && dom.has_non_whitespace_text(node))
+        {
+            linked_ranked_rows += 1;
+        }
+        match common_columns {
+            Some(columns) if columns == cells.len() => common_shape += 1,
+            None => {
+                common_columns = Some(cells.len());
+                common_shape = 1;
+            }
+            _ => {}
+        }
+    }
+
+    (ranked_rows >= 3
+        && linked_ranked_rows == ranked_rows
+        && metadata_rows + 1 >= ranked_rows
+        && outside_text_after_rank.is_none_or(|position| position == ranked_rows)
+        && common_shape * 4 >= ranked_rows * 3
+        && ranked_rows * 4 >= rows.len())
+    .then_some(first_rank?)
+}
+
+fn parse_rank_text(text: &str) -> Option<u32> {
+    let text = text.trim();
+    let digits = text.strip_suffix('.').unwrap_or(text);
+    (!digits.is_empty() && digits.len() <= 6 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
 pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.clear();
     nodes.extend(
@@ -1161,6 +1283,18 @@ mod tests {
         hard_cleanup(&mut dom, root, &allowed, &mut nodes);
         heuristic_cleanup(&mut dom, root, &mut store, &mut text, &mut nodes);
         dom.text(root)
+    }
+
+    #[test]
+    fn explicit_data_table_semantics_prevent_listing_classification() {
+        for attribute in [r#"role="table""#, r#"datatable="1""#] {
+            let html = format!(
+                r#"<table {attribute}><tr><td>1.</td><td><a href='/a'>A</a></td></tr><tr><td></td><td>A details</td></tr><tr><td>2.</td><td><a href='/b'>B</a></td></tr><tr><td></td><td>B details</td></tr><tr><td>3.</td><td><a href='/c'>C</a></td></tr><tr><td></td><td>C details</td></tr></table>"#
+            );
+            let dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
+            let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+            assert!(repeated_listing_start(&dom, table).is_none());
+        }
     }
 
     #[test]
