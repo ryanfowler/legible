@@ -14,6 +14,10 @@ but article-style prose is not required.
 Legible has no browser engine. It does not execute JavaScript or make network
 requests. Extraction is deterministic for the same input and configuration.
 
+Reject unsuccessful HTTP status codes before you pass a response body to Legible.
+Legible does not receive the transport status. It rejects access barriers only when
+the HTML contains enough structural and textual evidence.
+
 ## Extract content
 
 ```rust

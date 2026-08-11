@@ -219,17 +219,35 @@ fn normalize_code_blocks(dom: &mut Dom, root: NodeId) {
                     Some(code)
                 };
                 if let Some(code) = code
-                    && let Some(language) =
-                        language_hint(dom, code).or_else(|| language_hint(dom, node))
+                    && let Some(language) = block_language_hint(dom, code, node)
                 {
                     dom.set_attr(code, AttrName::DataLanguage, &language);
                 }
             }
             Some(Tag::Code) if dom.tag(dom.parent(node).unwrap_or(root)) != Some(Tag::Pre) => {
-                let block = dom
-                    .text_node(dom.first_child(node).unwrap_or(node))
-                    .is_some_and(|text| text.contains('\n'))
-                    || language_hint(dom, node).is_some();
+                let parent = dom.parent(node).unwrap_or(root);
+                let phrasing_parent = matches!(
+                    dom.tag(parent),
+                    Some(
+                        Tag::P
+                            | Tag::H1
+                            | Tag::H2
+                            | Tag::H3
+                            | Tag::H4
+                            | Tag::H5
+                            | Tag::H6
+                            | Tag::A
+                            | Tag::Td
+                            | Tag::Th
+                    )
+                );
+                let block = !phrasing_parent
+                    && std::iter::once(node)
+                        .chain(dom.descendants(node))
+                        .any(|descendant| {
+                            dom.text_node(descendant)
+                                .is_some_and(|text| text.contains('\n'))
+                        });
                 if block {
                     let language = language_hint(dom, node);
                     let Ok(pre) = dom.create_html_element(Tag::Pre) else {
@@ -271,6 +289,41 @@ fn normalize_code_blocks(dom: &mut Dom, root: NodeId) {
             dom.replace_with(wrapper, pre);
         }
     }
+}
+
+fn block_language_hint(dom: &Dom, code: NodeId, pre: NodeId) -> Option<String> {
+    language_hint(dom, code)
+        .or_else(|| language_hint(dom, pre))
+        .or_else(|| {
+            // Syntax highlighters commonly store the language on one of two
+            // decorative wrappers around the pre element. Keep this lookup
+            // bounded and require code-wrapper structure.
+            let parent = dom.parent(pre)?;
+            is_code_wrapper(dom, parent).then(|| language_hint(dom, parent))?
+        })
+        .or_else(|| {
+            let parent = dom.parent(pre)?;
+            let grandparent = dom.parent(parent)?;
+            (is_code_wrapper(dom, parent) && is_code_wrapper(dom, grandparent))
+                .then(|| language_hint(dom, grandparent))?
+        })
+}
+
+fn is_code_wrapper(dom: &Dom, node: NodeId) -> bool {
+    if dom.tag(node) != Some(Tag::Div) {
+        return false;
+    }
+    language_hint(dom, node).is_some()
+        || [AttrName::Class, AttrName::Id]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(node, attribute))
+            .flat_map(str::split_whitespace)
+            .any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "highlight" | "codehilite" | "sourcecode"
+                )
+            })
 }
 
 fn language_hint(dom: &Dom, node: NodeId) -> Option<String> {
@@ -581,6 +634,22 @@ fn normalize_layout_tables(dom: &mut Dom, root: NodeId) {
     }
 }
 
+fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
+    std::iter::once(heading)
+        .chain(dom.descendants(heading))
+        .any(|node| {
+            dom.text_node(node)
+                .is_some_and(crate::markdown::has_visible_inline_text)
+                || dom.tag(node) == Some(Tag::Img)
+                    && (dom
+                        .attr_by_local_name(node, "alt")
+                        .is_some_and(crate::markdown::has_visible_inline_text)
+                        || dom
+                            .attr(node, AttrName::Src)
+                            .is_some_and(|source| !source.trim().is_empty()))
+        })
+}
+
 fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.clear();
     nodes.extend(dom.descendants(root));
@@ -596,9 +665,19 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
                         | Tag::Aside
                         | Tag::Footer
                         | Tag::Header
+                        | Tag::H1
+                        | Tag::H2
+                        | Tag::H3
+                        | Tag::H4
+                        | Tag::H5
+                        | Tag::H6
                 )
             )
-            && is_element_without_content(dom, node)
+            && (is_element_without_content(dom, node)
+                || matches!(
+                    dom.tag(node),
+                    Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+                ) && !has_visible_heading_content(dom, node))
         {
             dom.detach(node);
         }
@@ -628,6 +707,53 @@ mod tests {
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
             "```rust\nfn main() {\n}\n```\n"
+        );
+    }
+
+    #[test]
+    fn keeps_language_classes_on_inline_code_inline() {
+        let (dom, root) = normalized(
+            r#"<p>Use <code class="language-plaintext"><span>cargo test</span></code> now.</p><table><tr><th>Call</th></tr><tr><td><code class="language-rust">run()</code></td></tr></table>"#,
+        );
+        let markdown = dom_to_markdown(&dom, root, 0);
+        assert!(markdown.contains("Use `cargo test` now."));
+        assert!(markdown.contains("Call\n`run()`"), "{markdown}");
+        assert!(!markdown.contains("```plaintext"));
+    }
+
+    #[test]
+    fn promotes_multiline_orphan_code_and_finds_wrapper_language() {
+        let (dom, root) = normalized(
+            r#"<code><span>first
+second</span></code><div class="language-rust"><div class="highlight"><pre><code><span>fn main() {}</span></code></pre></div></div>"#,
+        );
+        let markdown = dom_to_markdown(&dom, root, 0);
+        assert!(markdown.contains("```\nfirst\nsecond\n```"));
+        assert!(markdown.contains("```rust\nfn main() {}\n```"));
+    }
+
+    #[test]
+    fn removes_headings_without_visible_content() {
+        let (dom, root) = normalized(
+            "<h2> </h2><h2>&nbsp;<br></h2><h2>\u{200b}\u{2060}\u{feff}</h2><h2>Visible\u{200b}</h2><h2><img src='x' alt='Diagram'></h2><p>Text.</p>",
+        );
+        let markdown = dom_to_markdown(&dom, root, 0);
+        assert_eq!(
+            markdown,
+            "## Visible\u{200b}\n\n## ![Diagram](x)\n\nText.\n"
+        );
+    }
+
+    #[test]
+    fn keeps_an_image_only_heading_without_alt_text() {
+        let (dom, root) = normalized(r#"<h2><img src="diagram.png"></h2><p>Text.</p>"#);
+        assert!(
+            dom.descendants(root)
+                .any(|node| dom.tag(node) == Some(Tag::H2))
+        );
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "![](diagram.png)\n\nText.\n"
         );
     }
 

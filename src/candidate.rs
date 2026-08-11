@@ -391,6 +391,7 @@ pub(crate) enum RootSelectionReason {
     Ranked,
     SpecificChild,
     SharedParent,
+    CompleteAncestor,
     StructuredData,
     BodyFallback,
 }
@@ -472,8 +473,48 @@ pub(crate) fn select_content_root<'a>(
         } else if let Some(child) =
             more_specific_candidate(dom, candidates, ranked, selected, first.score)
         {
-            selected = child;
-            reason = RootSelectionReason::SpecificChild;
+            if let Some((lead, content)) = lead_heading_branches(dom, selected, child)
+                && !has_later_content_branch(dom, selected, content)
+            {
+                branches.extend([lead, content]);
+                reason = RootSelectionReason::SharedParent;
+            } else {
+                selected = child;
+                reason = RootSelectionReason::SpecificChild;
+            }
+        }
+
+        if branches.is_empty()
+            && !candidates
+                .get(selected)
+                .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
+            && let Some((ancestor, lead, content)) = dom
+                .ancestors(selected)
+                .take(4)
+                .filter(|&ancestor| candidates.is_authoritative_semantic(dom, ancestor))
+                .filter_map(|ancestor| {
+                    lead_heading_branches(dom, ancestor, selected)
+                        .map(|(lead, content)| (ancestor, lead, content))
+                })
+                .find(|&(ancestor, _, content)| !has_later_content_branch(dom, ancestor, content))
+        {
+            selected = ancestor;
+            branches.extend([lead, content]);
+            reason = RootSelectionReason::SharedParent;
+        }
+
+        if branches.is_empty()
+            && !candidates
+                .get(selected)
+                .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
+            && let Some(boundary) = balanced_semantic_boundary(dom, candidates, selected)
+        {
+            reason = if is_descendant_of(dom, boundary, selected) {
+                RootSelectionReason::SpecificChild
+            } else {
+                RootSelectionReason::CompleteAncestor
+            };
+            selected = boundary;
         }
     }
 
@@ -635,6 +676,276 @@ fn more_specific_candidate(
         })
         .min_by_key(|(_, chars)| *chars)
         .map(|(node, _)| node)
+}
+
+/// Corrects local ranking when a semantic boundary has clear completeness or
+/// precision evidence. The thresholds are intentionally asymmetric: broadening
+/// requires substantial omitted content, while narrowing requires almost all
+/// useful text plus structural chrome outside the descendant.
+fn balanced_semantic_boundary(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    selected: NodeId,
+) -> Option<NodeId> {
+    let selected_features = candidates.get(selected)?.features;
+    if dom.attr(selected, AttrName::ItemProp).is_some_and(|value| {
+        value
+            .split_whitespace()
+            .any(|item| item.eq_ignore_ascii_case("articleBody"))
+    }) {
+        return None;
+    }
+
+    for ancestor in dom.ancestors(selected).take(4) {
+        if !candidates.is_authoritative_semantic(dom, ancestor)
+            || dom.attr(ancestor, AttrName::ItemProp).is_some_and(|value| {
+                value
+                    .split_whitespace()
+                    .any(|item| item.eq_ignore_ascii_case("articleBody"))
+            })
+        {
+            continue;
+        }
+        let independent_articles = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.node != ancestor
+                    && is_descendant_of(dom, candidate.node, ancestor)
+                    && (dom.tag(candidate.node) == Some(Tag::Article)
+                        || dom
+                            .attr(candidate.node, AttrName::Role)
+                            .is_some_and(|roles| {
+                                roles
+                                    .split_whitespace()
+                                    .any(|role| role.eq_ignore_ascii_case("article"))
+                            }))
+            })
+            .count();
+        if independent_articles >= 2 {
+            continue;
+        }
+        let ancestor_features = candidates.get(ancestor)?.features;
+        let substantially_broader =
+            ancestor_features.text_chars >= selected_features.text_chars.saturating_mul(3) / 2;
+        let heterogeneous_content = ancestor_features.structured_block_count()
+            >= selected_features.structured_block_count().saturating_add(2);
+        let omitted_sections = ancestor_features.paragraph_count
+            >= selected_features.paragraph_count.saturating_add(2)
+            || ancestor_features.heading_count >= selected_features.heading_count.saturating_add(2)
+            || heterogeneous_content;
+        let nested_in_branch = direct_branch(dom, selected, ancestor) != Some(selected);
+        let clean = ancestor_features.link_density <= 0.4
+            && ancestor_features.negative_name_score
+                <= selected_features.negative_name_score + 25.0;
+        if substantially_broader
+            && omitted_sections
+            && clean
+            && (nested_in_branch || heterogeneous_content)
+        {
+            return Some(ancestor);
+        }
+    }
+
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.node != selected
+                && candidates.is_authoritative_semantic(dom, candidate.node)
+                && is_descendant_of(dom, candidate.node, selected)
+        })
+        .filter_map(|candidate| {
+            let outside = selected_features
+                .text_chars
+                .saturating_sub(candidate.features.text_chars);
+            let preserves_content = candidate.features.text_chars.saturating_mul(100)
+                >= selected_features.text_chars.saturating_mul(70)
+                && outside <= 300;
+            (preserves_content
+                && has_chrome_outside_descendant(dom, selected, candidate.node)
+                && lead_heading_branches(dom, selected, candidate.node).is_none())
+            .then_some((candidate.node, candidate.features.text_chars))
+        })
+        .min_by_key(|(_, chars)| *chars)
+        .map(|(node, _)| node)
+}
+
+impl CandidateFeatures {
+    fn structured_block_count(self) -> u32 {
+        self.list_item_count
+            .min(1)
+            .saturating_add(self.code_block_count)
+            .saturating_add(self.table_count)
+            .saturating_add(self.figure_count)
+    }
+}
+
+fn has_chrome_outside_descendant(dom: &Dom, ancestor: NodeId, descendant: NodeId) -> bool {
+    let Some(content_branch) = direct_branch(dom, descendant, ancestor) else {
+        return false;
+    };
+    dom.element_children(ancestor).any(|branch| {
+        branch != content_branch
+            && (matches!(dom.tag(branch), Some(Tag::Nav | Tag::Footer))
+                || dom.attr(branch, AttrName::Role).is_some_and(|roles| {
+                    roles.split_whitespace().any(|role| {
+                        matches!(role.to_ascii_lowercase().as_str(), "navigation" | "status")
+                    })
+                })
+                || node_tokens(dom, branch).iter().any(|token| {
+                    matches!(
+                        token.as_str(),
+                        "breadcrumb" | "breadcrumbs" | "feedback" | "toolbar" | "actions"
+                    )
+                }))
+    })
+}
+
+fn lead_heading_branches(
+    dom: &Dom,
+    ancestor: NodeId,
+    descendant: NodeId,
+) -> Option<(NodeId, NodeId)> {
+    let branch = direct_branch(dom, descendant, ancestor)?;
+    if starts_with_heading(dom, branch) {
+        return None;
+    }
+    let previous = previous_substantive_element(dom, branch)?;
+    let heading = dom.descendants(previous).find(|&node| {
+        matches!(
+            dom.tag(node),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        )
+    })?;
+    let heading_chars = dom.normalized_char_count(heading);
+    let branch_chars = dom.normalized_char_count(previous);
+    let auxiliary_chars = branch_chars.saturating_sub(heading_chars);
+    if dom.parent(previous) != Some(ancestor)
+        || heading_chars == 0
+        || auxiliary_chars > 80
+        || branch_chars > heading_chars.saturating_mul(3).saturating_add(40)
+    {
+        return None;
+    }
+    let clutter = matches!(dom.tag(previous), Some(Tag::Nav | Tag::Aside | Tag::Footer))
+        || node_tokens(dom, previous).iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "related" | "recommended" | "navigation" | "breadcrumb" | "advertisement"
+            )
+        })
+        || leading_text(dom, previous).is_some_and(|text| {
+            ["related", "recommended", "more stories"]
+                .iter()
+                .any(|prefix| text.starts_with(prefix))
+        });
+    (!clutter
+        && dom
+            .descendants(previous)
+            .filter(|&node| dom.tag(node) == Some(Tag::A))
+            .count()
+            <= 1)
+        .then_some((previous, branch))
+}
+
+fn has_later_content_branch(dom: &Dom, ancestor: NodeId, branch: NodeId) -> bool {
+    let mut sibling = dom.next_sibling(branch);
+    while let Some(node) = sibling {
+        let chrome = matches!(dom.tag(node), Some(Tag::Nav | Tag::Aside | Tag::Footer))
+            || node_tokens(dom, node).iter().any(|token| {
+                matches!(
+                    token.as_str(),
+                    "related" | "recommended" | "feedback" | "toolbar"
+                )
+            });
+        let content_structure =
+            std::iter::once(node)
+                .chain(dom.descendants(node))
+                .any(|descendant| {
+                    matches!(
+                        dom.tag(descendant),
+                        Some(
+                            Tag::P
+                                | Tag::H1
+                                | Tag::H2
+                                | Tag::H3
+                                | Tag::H4
+                                | Tag::H5
+                                | Tag::H6
+                                | Tag::Pre
+                                | Tag::Table
+                                | Tag::Dl
+                                | Tag::Ol
+                                | Tag::Ul
+                        )
+                    )
+                });
+        if dom.is_element(node)
+            && !chrome
+            && (content_structure || dom.normalized_char_count(node) >= 80)
+        {
+            return true;
+        }
+        sibling = dom.next_sibling(node);
+    }
+    dom.parent(branch) != Some(ancestor)
+}
+
+fn starts_with_heading(dom: &Dom, branch: NodeId) -> bool {
+    std::iter::once(branch)
+        .chain(dom.descendants(branch))
+        .find(|&node| {
+            dom.is_element(node)
+                && dom.tag(node) != Some(Tag::Div)
+                && dom.tag(node) != Some(Tag::Section)
+                && dom.tag(node) != Some(Tag::Header)
+        })
+        .is_some_and(|node| {
+            matches!(
+                dom.tag(node),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            )
+        })
+}
+
+fn previous_substantive_element(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    let mut previous = dom.prev_sibling(node);
+    while let Some(candidate) = previous {
+        if dom.is_element(candidate) {
+            return Some(candidate);
+        }
+        if dom
+            .text_node(candidate)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return None;
+        }
+        previous = dom.prev_sibling(candidate);
+    }
+    None
+}
+
+fn node_tokens(dom: &Dom, node: NodeId) -> Vec<String> {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|name| dom.attr(node, name))
+        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn leading_text(dom: &Dom, node: NodeId) -> Option<String> {
+    let mut text = String::new();
+    for descendant in std::iter::once(node).chain(dom.descendants(node)) {
+        if let Some(value) = dom.text_node(descendant) {
+            text.push_str(value);
+            if text.len() >= 64 {
+                break;
+            }
+        }
+    }
+    let text = text.trim().to_ascii_lowercase();
+    (!text.is_empty()).then_some(text)
 }
 
 const MAX_STRUCTURED_HINTS: usize = 8;
@@ -1312,6 +1623,182 @@ mod tests {
             ),
             "listing"
         );
+    }
+
+    #[test]
+    fn root_selection_promotes_a_complete_semantic_ancestor() {
+        let dom = Dom::parse_document(
+            r#"<body><article id="complete"><section id="focused"><h2>Focused section</h2><p>Polished prose.</p></section><section><h2>Code</h2><pre>one\ntwo</pre></section><section><h2>Data</h2><table><tr><th>Value</th></tr></table></section></article></body>"#,
+        )
+        .unwrap();
+        let complete = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("complete"))
+            .unwrap();
+        let focused = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("focused"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(focused, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == complete)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 900,
+            paragraph_count: 6,
+            heading_count: 4,
+            code_block_count: 1,
+            table_count: 1,
+            link_density: 0.05,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == focused)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            paragraph_count: 2,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: focused,
+                score: 100.0,
+                order: 0,
+            }],
+            dom.body().unwrap(),
+            [],
+        );
+        assert_eq!(selected.node, complete);
+    }
+
+    #[test]
+    fn root_selection_narrows_a_chrome_wrapper_to_its_article() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="docs"><nav>Collection</nav><article id="answer"><p>Complete documented answer.</p></article><footer class="feedback">Was this useful?</footer></main></body>"#,
+        )
+        .unwrap();
+        let docs = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("docs"))
+            .unwrap();
+        let answer = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("answer"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == docs)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 100,
+            paragraph_count: 1,
+            link_density: 0.1,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == answer)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 75,
+            paragraph_count: 1,
+            ..CandidateFeatures::default()
+        };
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: docs,
+                score: 100.0,
+                order: 0,
+            }],
+            dom.body().unwrap(),
+            [],
+        );
+        assert_eq!(selected.node, answer);
+    }
+
+    #[test]
+    fn root_selection_keeps_an_adjacent_lead_heading() {
+        let html = r#"<body><main id="broad"><section><h1>Important label</h1></section><section id="specific"><p>The complete details occupy almost all text in the parent boundary.</p></section></main></body>"#;
+        assert_eq!(
+            select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
+            "broad"
+        );
+    }
+
+    #[test]
+    fn root_selection_does_not_attach_a_substantial_preceding_section() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="broad"><section><h1>Earlier article</h1><p>This unrelated article has several complete sentences. It explains another subject in detail and must not be attached to the selected result.</p><p>The earlier conclusion adds more substantial prose outside its heading.</p></section><section id="specific"><p>The selected guide contains the primary answer with enough detail to dominate the parent text.</p></section></main></body>"#,
+        )
+        .unwrap();
+        let broad = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("broad"))
+            .unwrap();
+        let specific = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("specific"))
+            .unwrap();
+        assert_eq!(lead_heading_branches(&dom, broad, specific), None);
+    }
+
+    #[test]
+    fn lead_heading_boundary_keeps_a_later_conclusion() {
+        let html = r#"<body><main id="broad"><section><h1>Guide label</h1></section><section id="specific"><p>The primary section contains detailed instructions, context, examples, and cautions. It explains each step fully so that this branch contains most of the wrapper text and remains the strongest candidate for extraction.</p></section><section><p>Final compatibility note.</p></section></main></body>"#;
+        assert_eq!(
+            select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
+            "broad"
+        );
+    }
+
+    #[test]
+    fn ancestor_completion_does_not_merge_wrapped_articles() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="listing"><div><article id="first"><p>First article.</p></article></div><div><article><p>Second article.</p></article></div></main></body>"#,
+        )
+        .unwrap();
+        let listing = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("listing"))
+            .unwrap();
+        let first = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("first"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == listing)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 900,
+            paragraph_count: 8,
+            heading_count: 3,
+            link_density: 0.1,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == first)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            paragraph_count: 2,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+        assert_eq!(balanced_semantic_boundary(&dom, &candidates, first), None);
     }
 
     #[test]

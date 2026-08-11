@@ -13,6 +13,14 @@ pub(crate) struct MarkdownConfig {
     pub(crate) images: bool,
 }
 
+/// Returns true when inline text has a serializer-visible character.
+pub(crate) fn has_visible_inline_text(text: &str) -> bool {
+    text.chars().any(|character| {
+        !character.is_whitespace()
+            && !matches!(character, '\u{00a0}' | '\u{200b}' | '\u{2060}' | '\u{feff}')
+    })
+}
+
 impl Default for MarkdownConfig {
     fn default() -> Self {
         Self {
@@ -209,6 +217,35 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         self.out.finish()
     }
 
+    fn has_visible_heading_content(&self, root: T::Node) -> bool {
+        let mut nodes = SmallVec::<[T::Node; 16]>::new();
+        nodes.push(root);
+        while let Some(node) = nodes.pop() {
+            if self
+                .dom
+                .text_node(node)
+                .is_some_and(has_visible_inline_text)
+            {
+                return true;
+            }
+            if self.config.images
+                && self.dom.tag(node) == Some(Tag::Img)
+                && self
+                    .dom
+                    .attr_by_local_name(node, "alt")
+                    .is_some_and(has_visible_inline_text)
+            {
+                return true;
+            }
+            let mut child = self.dom.first_child(node);
+            while let Some(current) = child {
+                nodes.push(current);
+                child = self.dom.next_sibling(current);
+            }
+        }
+        false
+    }
+
     fn push_children(&mut self, id: T::Node, mode: Mode) {
         if let Some(child) = self.dom.first_child(id) {
             self.tasks.push(Task::Siblings(child, mode));
@@ -229,6 +266,12 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
 
         match tag {
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
+                if !self.has_visible_heading_content(id) {
+                    if self.config.images {
+                        self.push_children(id, Mode::Block);
+                    }
+                    return;
+                }
                 self.out.ensure_blank_line();
                 let marker = match tag {
                     Tag::H1 => "#",
@@ -1208,6 +1251,35 @@ mod tests {
             "text more\n"
         );
         assert_eq!(markdown("<div><span></span></div>"), "");
+    }
+
+    #[test]
+    fn image_only_heading_without_alt_text_keeps_the_image() {
+        assert_eq!(
+            markdown(r#"<h2><img src="diagram.png"></h2><p>Explanation.</p>"#),
+            "![](diagram.png)\n\nExplanation.\n"
+        );
+    }
+
+    #[test]
+    fn image_only_heading_is_empty_when_images_are_disabled() {
+        let dom = Dom::parse_fragment(
+            r#"<h2><img src="diagram.png" alt="Diagram"></h2><p>Explanation.</p>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        assert_eq!(
+            render_markdown(
+                &dom,
+                dom.root(),
+                0,
+                MarkdownConfig {
+                    links: true,
+                    images: false,
+                },
+            ),
+            "Explanation.\n"
+        );
     }
 
     #[test]

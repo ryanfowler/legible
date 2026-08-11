@@ -13,7 +13,10 @@ use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, StructuredData};
 use crate::normalize::{finish_normalization, normalize_semantics};
 use crate::page::ExtractedPage;
-use crate::quality::{ContentMetrics, ExtractionQuality};
+use crate::quality::{
+    ContentMetrics, ExtractionQuality, is_access_barrier, is_incoherent_short_result,
+    is_interactive_shell,
+};
 use crate::scoring::*;
 use html5ever::ns;
 use regex::Regex;
@@ -203,6 +206,9 @@ impl<'a> ContentExtractor<'a> {
         if !source_metrics.has_meaningful_text() {
             return Err(Error::NoContent);
         }
+        let short_source_access_barrier = (source_metrics.word_count <= 60
+            || source_metrics.text_chars <= 400)
+            && is_access_barrier(&self.dom, body);
         let structured_root = locate_structured_content(
             &self.dom,
             self.structured_data
@@ -311,6 +317,14 @@ impl<'a> ContentExtractor<'a> {
                 (container, true)
             } else {
                 let mut top_id = selection.node;
+                // Ancestor validation changes the boundary, not the output
+                // contract. Keep the established generic content wrapper.
+                if selection.reason == RootSelectionReason::CompleteAncestor
+                    && matches!(self.dom.tag(top_id), Some(Tag::Article | Tag::Main))
+                {
+                    self.dom.rename_html(top_id, Tag::Div);
+                    self.dom.remove_attr(top_id, AttrName::ItemProp);
+                }
                 // Preserve useful boundary expansion from the prose scoring algorithm when the
                 // structural selector accepts the raw ranking winner. Explicit
                 // child, parent, or schema choices are already final.
@@ -433,6 +447,7 @@ impl<'a> ContentExtractor<'a> {
             self.node_data.clear();
             self.node_data.enable_link_lengths();
 
+            let interactive_shell = is_interactive_shell(&self.dom, content_id);
             let video = regexps::VIDEOS.clone();
             self.prep_article(
                 content_id,
@@ -459,6 +474,7 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.append_child(content_id, w)
             }
             let excerpt = self.content_excerpt(content_id);
+            let access_barrier = is_access_barrier(&self.dom, content_id);
             self.post_process(content_id, &mut cleaning_nodes);
             let result_dom = if synthetic {
                 self.dom.copy_subtree_as_fragment(content_id)
@@ -467,6 +483,8 @@ impl<'a> ContentExtractor<'a> {
             }
             .map_err(|_| Error::NoContent)?;
             let result_metrics = ContentMetrics::measure(&result_dom, result_dom.root());
+            let incoherent_short =
+                is_incoherent_short_result(&result_dom, result_dom.root(), result_metrics);
             let quality = ExtractionQuality::new(
                 source_metrics,
                 result_metrics,
@@ -484,7 +502,13 @@ impl<'a> ContentExtractor<'a> {
             let schema_match = structured_root == Some(selection.node)
                 && !quality.is_suspiciously_small()
                 && (quality.coverage >= 0.2 || quality.text_chars >= 500);
-            if !root_in_document_chrome && (quality.is_good() || schema_match) {
+            if !root_in_document_chrome
+                && !access_barrier
+                && !short_source_access_barrier
+                && !interactive_shell
+                && !incoherent_short
+                && (quality.is_good() || schema_match)
+            {
                 self.dom = result_dom;
                 let root = self.dom.root();
                 return Ok(ExtractedContent {
@@ -495,6 +519,10 @@ impl<'a> ContentExtractor<'a> {
             }
 
             if !root_in_document_chrome
+                && !access_barrier
+                && !short_source_access_barrier
+                && !interactive_shell
+                && !incoherent_short
                 && self.best_attempt.as_ref().is_none_or(|best| {
                     quality.best_attempt_score() > best.quality.best_attempt_score()
                 })

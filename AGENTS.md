@@ -43,12 +43,12 @@ The extraction pipeline flows through these stages:
 |---|---|
 | `extractor.rs` | Public builder, extraction config |
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
-| `candidate.rs` | Internal candidate model and structural root selection |
+| `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup |
 | `normalize.rs` | Semantic normalization, including repeated table listings, before lazy serialization |
-| `quality.rs` | Source-relative extraction quality and best-attempt scoring |
+| `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
