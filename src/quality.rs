@@ -2,7 +2,8 @@
 
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::scoring::{
-    get_link_density_cached, get_or_compute_stats, get_or_compute_stats_excluding,
+    get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
+    get_or_compute_stats_excluding,
 };
 
 /// Text and structure measured for one DOM region.
@@ -269,6 +270,171 @@ impl ExtractionQuality {
     }
 }
 
+/// Detects a dominant access gate. A match needs structural and textual
+/// evidence, except for explicit machine-generated denial text.
+pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
+    let mut buffer = String::new();
+    let text = get_normalized_inner_text(dom, root, &mut buffer).to_ascii_lowercase();
+    if text.is_empty() {
+        return false;
+    }
+    let heading = std::iter::once(root)
+        .chain(dom.descendants(root))
+        .find(|&node| {
+            matches!(dom.tag(node), Some(Tag::H1 | Tag::H2 | Tag::H3))
+                && dom.has_non_whitespace_text(node)
+        })
+        .map(|node| get_normalized_inner_text(dom, node, &mut buffer).to_ascii_lowercase())
+        .unwrap_or_default();
+    let strong_denial_heading = matches!(
+        heading.trim_matches(
+            |character: char| character.is_ascii_punctuation() || character.is_whitespace()
+        ),
+        "access denied" | "request blocked" | "verify you are human"
+    );
+    let exact_gate_heading = strong_denial_heading
+        || matches!(
+            heading.trim_matches(
+                |character: char| character.is_ascii_punctuation() || character.is_whitespace()
+            ),
+            "subscription required"
+                | "subscribe to unlock"
+                | "subscribe to unlock this article"
+                | "content locked"
+                | "article unavailable"
+        );
+    let heading_gate = [
+        "access denied",
+        "access restricted",
+        "request blocked",
+        "verify you are human",
+        "subscription required",
+        "subscribe to unlock",
+        "content locked",
+        "article unavailable",
+    ]
+    .iter()
+    .any(|phrase| heading.starts_with(phrase));
+    let structural_gate = std::iter::once(root)
+        .chain(dom.descendants(root))
+        .any(|node| {
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|name| dom.attr(node, name))
+                .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+                .any(|token| {
+                    matches!(
+                        token.to_ascii_lowercase().as_str(),
+                        "paywall" | "barrier" | "gate" | "subscribe"
+                    )
+                })
+        });
+    let action = [
+        "sign in to continue",
+        "log in to continue",
+        "subscribe to continue",
+        "subscribe to unlock",
+        "choose a plan",
+        "start your trial",
+        "verify you are human",
+        "enable cookies",
+        "try again later",
+    ]
+    .iter()
+    .filter(|phrase| text.contains(**phrase))
+    .count();
+    let machine_denial = (text.contains("automated traffic")
+        || text.contains("identified as automated")
+        || text.contains("bot detection"))
+        && (text.contains("request id")
+            || text.contains("client ip")
+            || text.contains("access denied")
+            || text.contains("verify you are human"));
+    let explicit_machine_denial = (text.contains("identified as automated")
+        || text.contains("automated traffic")
+            && (text.contains("client ip") || text.contains("access denied")))
+        && action > 0;
+    let denial_support = [
+        "permission to access",
+        "do not have permission",
+        "not authorized",
+        "authorization required",
+        "forbidden",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase));
+    let offer = [" per month", "/month", "monthly", "annual", "free trial"]
+        .iter()
+        .filter(|term| text.contains(**term))
+        .count()
+        + usize::from(text.contains('$') || text.contains('€') || text.contains('£'));
+
+    machine_denial && strong_denial_heading
+        || explicit_machine_denial
+        || strong_denial_heading && denial_support
+        || exact_gate_heading && action > 0
+        || heading_gate && structural_gate
+        || structural_gate && action > 0 && offer >= 2
+}
+
+/// Detects a control-dominated application shell with no explanatory content.
+/// Extraction does not execute the client code that would populate such a page.
+pub(crate) fn is_interactive_shell(dom: &Dom, root: NodeId) -> bool {
+    let metrics = ContentMetrics::measure(dom, root);
+    if metrics.word_count > 20 || metrics.paragraph_count > 0 || metrics.heading_count > 0 {
+        return false;
+    }
+    let controls = std::iter::once(root)
+        .chain(dom.descendants(root))
+        .filter(|&node| {
+            matches!(
+                dom.tag(node),
+                Some(
+                    Tag::Button
+                        | Tag::Input
+                        | Tag::Select
+                        | Tag::Textarea
+                        | Tag::Form
+                        | Tag::Datalist
+                )
+            )
+        })
+        .count();
+    let data_structure = dom.descendants(root).any(|node| {
+        matches!(
+            dom.tag(node),
+            Some(Tag::Table | Tag::Pre | Tag::Dl | Tag::Ol | Tag::Ul)
+        )
+    });
+    controls >= 2 && !data_structure
+}
+
+/// Rejects only very short fragments that contain values but no lexical or
+/// structural context.
+pub(crate) fn is_incoherent_short_result(dom: &Dom, root: NodeId, metrics: ContentMetrics) -> bool {
+    if metrics.text_chars > 200 || metrics.word_count > 20 {
+        return false;
+    }
+    let (alphabetic_chars, digit_chars) = std::iter::once(root)
+        .chain(dom.descendants(root))
+        .filter_map(|node| dom.text_node(node))
+        .flat_map(str::chars)
+        .fold((0_usize, 0_usize), |(letters, digits), character| {
+            (
+                letters + usize::from(character.is_alphabetic()),
+                digits + usize::from(character.is_numeric()),
+            )
+        });
+    let has_lexical_text = alphabetic_chars > 0;
+    let contextual_structure = dom
+        .descendants(root)
+        .any(|node| matches!(dom.tag(node), Some(Tag::Th | Tag::Pre | Tag::Math)));
+    let unlabeled_values = alphabetic_chars <= 16
+        && digit_chars >= alphabetic_chars.saturating_mul(2).max(4)
+        && metrics.structured_block_count == 0;
+    (!has_lexical_text || unlabeled_values) && !contextual_structure
+}
+
 fn is_primary_role(roles: &str) -> bool {
     roles
         .split_whitespace()
@@ -362,6 +528,85 @@ mod tests {
         let quality = ExtractionQuality::new(source, punctuation, true);
         assert!(!quality.is_good());
         assert!(quality.is_suspiciously_small());
+    }
+
+    #[test]
+    fn classifies_access_gates_without_rejecting_discussion() {
+        let denied = Dom::parse_document(
+            r#"<body><main class="challenge"><h1>Access denied</h1><p>Automated traffic was detected. Verify you are human.</p><p>Request ID: 123</p></main></body>"#,
+        )
+        .unwrap();
+        assert!(is_access_barrier(&denied, denied.body().unwrap()));
+
+        let wall = Dom::parse_document(
+            r#"<body><main class="paywall"><h1>Subscribe to unlock this article</h1><p>Choose a plan and start your trial.</p><p>$9 per month. $90 annual.</p></main></body>"#,
+        )
+        .unwrap();
+        assert!(is_access_barrier(&wall, wall.body().unwrap()));
+
+        let discussion = Dom::parse_document(
+            r#"<body><main class="challenge"><article><h1>How bot detection works</h1><p>This article explains automated traffic and request IDs without blocking the reader.</p><p>A sample plan costs $9 per month.</p></article></main></body>"#,
+        )
+        .unwrap();
+        assert!(!is_access_barrier(&discussion, discussion.body().unwrap()));
+
+        let troubleshooting = Dom::parse_document(
+            r#"<body><main class="challenge"><article><h1>Access denied troubleshooting</h1><p>Bot detection systems can classify automated traffic. Support engineers use a request ID to find the relevant diagnostic record.</p><p>This guide explains the policy and its recovery design for application developers.</p></article></main></body>"#,
+        )
+        .unwrap();
+        assert!(!is_access_barrier(
+            &troubleshooting,
+            troubleshooting.body().unwrap()
+        ));
+
+        let recovery_guide = Dom::parse_document(
+            r#"<body><article class="barrier"><h1>Human verification recovery</h1><p>Bot detection can associate automated traffic with a request ID. If the prompt says verify you are human, follow the documented recovery procedure.</p><p>The rest of this support article explains diagnosis, accessibility, and account recovery in detail.</p></article></body>"#,
+        )
+        .unwrap();
+        assert!(!is_access_barrier(
+            &recovery_guide,
+            recovery_guide.body().unwrap()
+        ));
+
+        let short_guide = Dom::parse_document(
+            r#"<body><article><h1>Access denied troubleshooting</h1><p>If a stale browser session causes this message, enable cookies and reload the application.</p><p>This short guide explains the recovery steps.</p></article></body>"#,
+        )
+        .unwrap();
+        assert!(!is_access_barrier(
+            &short_guide,
+            short_guide.body().unwrap()
+        ));
+
+        let forbidden = Dom::parse_document(
+            r#"<body><main><h1>Access denied</h1><p>You do not have permission to access this resource.</p></main></body>"#,
+        )
+        .unwrap();
+        assert!(is_access_barrier(&forbidden, forbidden.body().unwrap()));
+    }
+
+    #[test]
+    fn short_coherence_uses_lexical_and_structural_context() {
+        let ruler = Dom::parse_fragment("<div>11.1×10¹⁹ 2.2×10¹⁹</div>", Tag::Div).unwrap();
+        let root = ruler.root();
+        assert!(is_incoherent_short_result(
+            &ruler,
+            root,
+            ContentMetrics::measure(&ruler, root)
+        ));
+
+        for html in [
+            "<p>Status: 200 OK</p>",
+            "<table><tr><th>Value</th></tr><tr><td>42</td></tr></table>",
+            "<pre><code>42</code></pre>",
+            "<math><mn>42</mn></math>",
+        ] {
+            let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+            let root = dom.root();
+            assert!(
+                !is_incoherent_short_result(&dom, root, ContentMetrics::measure(&dom, root)),
+                "{html}"
+            );
+        }
     }
 
     #[test]

@@ -896,6 +896,43 @@ pub(crate) fn heuristic_cleanup(
             && (controls > 0 || links > 0)
             && short;
 
+        let action_label = [
+            "leave a comment",
+            "share",
+            "reply",
+            "rate this",
+            "answer this",
+        ]
+        .iter()
+        .any(|label| text.trim() == *label || text.contains(&format!("{label} ")));
+        let action_url = dom.descendants(node).any(|descendant| {
+            dom.tag(descendant) == Some(Tag::A)
+                && dom.attr(descendant, AttrName::Href).is_some_and(|href| {
+                    let href = href.to_ascii_lowercase();
+                    href.contains("/comments")
+                        || href.contains("action=share")
+                        || href.contains("/reply")
+                        || href.contains("dialog=")
+                })
+        });
+        let interaction_name = contains_any(
+            &name,
+            &[
+                "toolbar",
+                "article-actions",
+                "post-actions",
+                "feedback",
+                "share",
+            ],
+        );
+        let interaction_signals =
+            usize::from(action_label) + usize::from(action_url) + usize::from(interaction_name);
+        let terminal_action = links > 0
+            && stats.text_length < 160
+            && link_density >= 0.55
+            && interaction_signals >= 2
+            && near_content_end(dom, node, root);
+
         if related
             || social
             || signup
@@ -904,6 +941,7 @@ pub(crate) fn heuristic_cleanup(
             || advertisement
             || consent
             || account
+            || terminal_action
         {
             if protected {
                 hoist_protected_children(dom, node, store);
@@ -1001,8 +1039,39 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "signin",
             "sign-in",
             "sidebar",
+            "toolbar",
+            "actions",
+            "feedback",
+            "comment",
         ],
     )
+}
+
+fn near_content_end(dom: &Dom, node: NodeId, root: NodeId) -> bool {
+    let mut current = node;
+    let mut trailing_chars = 0_usize;
+    let mut buffer = String::new();
+    loop {
+        let mut sibling = dom.next_sibling(current);
+        while let Some(next) = sibling {
+            trailing_chars = trailing_chars.saturating_add(
+                crate::scoring::get_normalized_inner_text(dom, next, &mut buffer)
+                    .chars()
+                    .count(),
+            );
+            if trailing_chars > 100 {
+                return false;
+            }
+            sibling = dom.next_sibling(next);
+        }
+        if current == root {
+            return true;
+        }
+        let Some(parent) = dom.parent(current) else {
+            return true;
+        };
+        current = parent;
+    }
 }
 
 fn node_name(dom: &Dom, node: NodeId) -> String {
