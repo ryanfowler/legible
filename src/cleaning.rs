@@ -794,8 +794,22 @@ pub(crate) fn hard_cleanup(
                 .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
             && dom
                 .ancestors(node)
-                .find(|&ancestor| matches!(dom.tag(ancestor), Some(Tag::Form | Tag::Li)))
-                .is_some_and(|ancestor| dom.tag(ancestor) == Some(Tag::Li));
+                .find(|&ancestor| {
+                    matches!(dom.tag(ancestor), Some(Tag::Form | Tag::Li))
+                        || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
+                            roles
+                                .split_ascii_whitespace()
+                                .any(|role| role.eq_ignore_ascii_case("listitem"))
+                        })
+                })
+                .is_some_and(|ancestor| {
+                    dom.tag(ancestor) == Some(Tag::Li)
+                        || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
+                            roles
+                                .split_ascii_whitespace()
+                                .any(|role| role.eq_ignore_ascii_case("listitem"))
+                        })
+                });
         if content_checkbox {
             // Keep only the semantic state. The retained control is disabled,
             // so extracted HTML cannot change the source checklist.

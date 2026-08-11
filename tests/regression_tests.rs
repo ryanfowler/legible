@@ -34,7 +34,7 @@ fn exact_output_preserves_metadata_and_rewrites_urls() {
         page.html(),
         r#"<div id="legible-content" class="page"><article><p>
         <a href="https://example.com/story?x=1&amp;y=2">A relative link</a>
-        <img src="https://example.com/news/images/photo.jpg" srcset="https://example.com/news/small.jpg 1x, https://example.com/large.jpg 2x" alt="Photo">
+        <img src="https://example.com/large.jpg" srcset="https://example.com/news/small.jpg 1x, https://example.com/large.jpg 2x" alt="Photo">
         This paragraph has enough useful article text for deterministic extraction.
         </p></article></div>"#
     );

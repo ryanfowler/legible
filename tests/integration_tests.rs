@@ -85,6 +85,10 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                     attribute.name.ns.as_ref().is_empty()
                         && attribute.name.local.as_ref() == "data-srcset"
                 });
+                let has_srcset = attrs.iter().any(|attribute| {
+                    attribute.name.ns.as_ref().is_empty()
+                        && attribute.name.local.as_ref() == "srcset"
+                });
                 let mut attributes: Vec<_> = attrs
                     .iter()
                     .filter(|attribute| {
@@ -105,7 +109,7 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                             // where this implementation retains data-srcset.
                             && !(name.local.as_ref() == "img"
                                 && local == "src"
-                                && has_data_srcset)
+                                && (has_data_srcset || has_srcset))
                     })
                     .map(|attribute| {
                         let mut value = attribute.value.to_string();

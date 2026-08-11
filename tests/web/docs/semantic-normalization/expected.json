@@ -1,0 +1,12 @@
+{
+  "must_contain": [
+    "## Installation",
+    "- [x] Ship release",
+    "- [ ] Publish notes",
+    "  - Check the archive",
+    "3. Deploy staging",
+    "[Release reference](https://example.test/reference)"
+  ],
+  "must_not_contain": ["[#](#installation)"],
+  "headings_min": 2
+}
