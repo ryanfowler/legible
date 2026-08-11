@@ -274,7 +274,7 @@ impl ExtractionQuality {
 /// evidence, except for explicit machine-generated denial text.
 pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
     let mut buffer = String::new();
-    let text = get_normalized_inner_text(dom, root, &mut buffer).to_ascii_lowercase();
+    let text = normalize_barrier_text(get_normalized_inner_text(dom, root, &mut buffer));
     if text.is_empty() {
         return false;
     }
@@ -284,13 +284,18 @@ pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
             matches!(dom.tag(node), Some(Tag::H1 | Tag::H2 | Tag::H3))
                 && dom.has_non_whitespace_text(node)
         })
-        .map(|node| get_normalized_inner_text(dom, node, &mut buffer).to_ascii_lowercase())
+        .map(|node| normalize_barrier_text(get_normalized_inner_text(dom, node, &mut buffer)))
         .unwrap_or_default();
     let strong_denial_heading = matches!(
         heading.trim_matches(
             |character: char| character.is_ascii_punctuation() || character.is_whitespace()
         ),
-        "access denied" | "request blocked" | "verify you are human"
+        "access denied"
+            | "request blocked"
+            | "verify you are human"
+            | "acces refuse"
+            | "acces restreint"
+            | "requete bloquee"
     );
     let exact_gate_heading = strong_denial_heading
         || matches!(
@@ -312,6 +317,10 @@ pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
         "subscribe to unlock",
         "content locked",
         "article unavailable",
+        "acces refuse",
+        "acces restreint",
+        "requete bloquee",
+        "contenu indisponible",
     ]
     .iter()
     .any(|phrase| heading.starts_with(phrase));
@@ -339,30 +348,41 @@ pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
         "verify you are human",
         "enable cookies",
         "try again later",
+        "connectez-vous pour continuer",
+        "abonnez-vous pour continuer",
+        "verifiez que vous etes humain",
+        "obtenir une autorisation",
+        "autorisation d'acces",
     ]
     .iter()
     .filter(|phrase| text.contains(**phrase))
     .count();
-    let machine_denial = (text.contains("automated traffic")
+    let automated = text.contains("automated traffic")
         || text.contains("identified as automated")
-        || text.contains("bot detection"))
-        && (text.contains("request id")
-            || text.contains("client ip")
+        || text.contains("bot detection")
+        || text.contains("trafic a ete identifie comme automatise")
+        || text.contains("activite de bot")
+        || text.contains("trafic automatise");
+    let request_identifier = text.contains("request id")
+        || text.contains("client ip")
+        || text.contains("incident id")
+        || text.contains("identifiant de requete")
+        || text.contains("adresse ip")
+        || text.contains("identifiant d'incident");
+    let machine_denial = automated
+        && (request_identifier
             || text.contains("access denied")
+            || text.contains("acces refuse")
+            || text.contains("acces restreint")
             || text.contains("verify you are human"));
-    let explicit_machine_denial = (text.contains("identified as automated")
-        || text.contains("automated traffic")
-            && (text.contains("client ip") || text.contains("access denied")))
-        && action > 0;
-    let denial_support = [
-        "permission to access",
-        "do not have permission",
-        "not authorized",
-        "authorization required",
-        "forbidden",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase));
+    let direct_automation_notice = text.contains("your traffic was identified as automated")
+        || text.contains("your traffic has been identified as automated")
+        || text.contains("votre trafic a ete identifie comme automatise");
+    let explicit_machine_denial = (automated
+        && (strong_denial_heading || denial_permission_text(&text))
+        && (request_identifier || action > 0))
+        || direct_automation_notice && request_identifier && action > 0;
+    let denial_support = denial_permission_text(&text);
     let offer = [" per month", "/month", "monthly", "annual", "free trial"]
         .iter()
         .filter(|term| text.contains(**term))
@@ -433,6 +453,39 @@ pub(crate) fn is_incoherent_short_result(dom: &Dom, root: NodeId, metrics: Conte
         && digit_chars >= alphabetic_chars.saturating_mul(2).max(4)
         && metrics.structured_block_count == 0;
     (!has_lexical_text || unlabeled_values) && !contextual_structure
+}
+
+fn denial_permission_text(text: &str) -> bool {
+    [
+        "permission to access",
+        "do not have permission",
+        "not authorized",
+        "authorization required",
+        "forbidden",
+        "autorisation d'acces",
+        "obtenir une autorisation",
+        "acces non autorise",
+        "vous n'etes pas autorise",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
+
+fn normalize_barrier_text(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|character| match character {
+            'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'ö' | 'õ' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ý' | 'ÿ' => 'y',
+            other => other,
+        })
+        .collect()
 }
 
 fn is_primary_role(roles: &str) -> bool {
@@ -543,6 +596,21 @@ mod tests {
         )
         .unwrap();
         assert!(is_access_barrier(&wall, wall.body().unwrap()));
+
+        let french = Dom::parse_document(
+            r#"<html lang="fr"><body><main><h1>Accès restreint</h1><p>Votre trafic a été identifié comme automatisé (bot). Si vous souhaitez obtenir une autorisation d’accès à ce contenu, contactez-nous.</p><p>Adresse IP : 192.0.2.1. Identifiant de requête : abc.</p></main></body></html>"#,
+        )
+        .unwrap();
+        assert!(is_access_barrier(&french, french.body().unwrap()));
+
+        let generic_heading = Dom::parse_document(
+            r#"<body><main><h1>Something went wrong</h1><p>Your traffic was identified as automated. Verify you are human.</p><p>Request ID: 123.</p></main></body>"#,
+        )
+        .unwrap();
+        assert!(is_access_barrier(
+            &generic_heading,
+            generic_heading.body().unwrap()
+        ));
 
         let discussion = Dom::parse_document(
             r#"<body><main class="challenge"><article><h1>How bot detection works</h1><p>This article explains automated traffic and request IDs without blocking the reader.</p><p>A sample plan costs $9 per month.</p></article></main></body>"#,

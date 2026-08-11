@@ -70,11 +70,21 @@ fn normalize_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         let Some(previous_image) = single_image(dom, previous) else {
             continue;
         };
-        if same_image_url(dom, previous_image, image)
+        let previous_source_placeholder = image_has_orphan_placeholder_source(dom, previous_image);
+        let source_placeholder = image_has_orphan_placeholder_source(dom, image);
+        let hydration_pair = same_image_url(dom, previous_image, image)
             && (is_hydration_placeholder(dom, previous_image)
-                || is_hydration_placeholder(dom, image))
-        {
-            let remove = if is_hydration_placeholder(dom, previous_image) {
+                || is_hydration_placeholder(dom, image));
+        let disposable_previous =
+            previous_source_placeholder && !has_meaningful_image_description(dom, previous_image);
+        let disposable_current =
+            source_placeholder && !has_meaningful_image_description(dom, image);
+        if hydration_pair || disposable_previous != disposable_current {
+            let remove = if disposable_previous {
+                previous
+            } else if disposable_current {
+                image
+            } else if is_hydration_placeholder(dom, previous_image) {
                 previous
             } else {
                 image
@@ -82,6 +92,54 @@ fn normalize_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
             dom.detach(remove);
         }
     }
+
+    // A placeholder with no usable lazy source has no visual content. Keep it
+    // only when its accessible text or figure caption conveys useful meaning.
+    for &image in nodes.iter() {
+        if dom.parent(image).is_some()
+            && image_has_orphan_placeholder_source(dom, image)
+            && !has_meaningful_image_description(dom, image)
+        {
+            dom.detach(image);
+        }
+    }
+}
+
+fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
+    let meaningful = |value: &str| {
+        let value = value.trim().to_lowercase();
+        !value.is_empty()
+            && ![
+                "image unavailable",
+                "unavailable image",
+                "placeholder",
+                "loading",
+                "blank image",
+            ]
+            .iter()
+            .any(|label| value == *label)
+    };
+    if ["alt", "aria-label", "title"]
+        .into_iter()
+        .filter_map(|name| dom.attr_by_local_name(image, name))
+        .any(meaningful)
+    {
+        return true;
+    }
+    dom.ancestors(image)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))
+        .is_some_and(|figure| {
+            let sole_image = dom
+                .descendants(figure)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .take(2)
+                .count()
+                == 1;
+            sole_image
+                && dom.descendants(figure).any(|node| {
+                    dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node)
+                })
+        })
 }
 
 fn picture_source(dom: &Dom, image: NodeId) -> Option<(&str, bool)> {
@@ -127,6 +185,27 @@ fn image_has_placeholder_source(dom: &Dom, image: NodeId) -> bool {
             || source.contains("transparent.gif")
             || crate::constants::parse_b64_data_url(&source)
                 .is_some_and(|(end, _)| source.len().saturating_sub(end) < 133)
+    })
+}
+
+fn image_has_orphan_placeholder_source(dom: &Dom, image: NodeId) -> bool {
+    dom.attr(image, AttrName::Src).is_some_and(|source| {
+        let path = source
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(source)
+            .trim_end_matches('/');
+        let basename = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+        let stem = basename
+            .rsplit_once('.')
+            .map_or(basename.as_str(), |(stem, _)| stem);
+        matches!(
+            basename.as_str(),
+            "blank.gif" | "spacer.gif" | "transparent.gif"
+        ) || matches!(
+            stem,
+            "placeholder" | "grey-placeholder" | "image-placeholder" | "photo-placeholder"
+        )
     })
 }
 
@@ -696,6 +775,54 @@ mod tests {
         normalize_semantics(&mut dom, root, &mut nodes);
         finish_normalization(&mut dom, root, &mut nodes);
         (dom, root)
+    }
+
+    #[test]
+    fn flattens_nested_identical_formatting() {
+        let (dom, root) = normalized(
+            "<p><strong>Listen to this <strong>post</strong>:</strong> <em>one <i>two</i></em></p>",
+        );
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "**Listen to this post:** *one two*\n"
+        );
+    }
+
+    #[test]
+    fn removes_orphan_placeholders_and_keeps_described_images() {
+        let (dom, root) = normalized(
+            r#"<img src="grey-placeholder.png"><img src="blank.gif" aria-label="image unavailable"><img src="placeholder.png" alt="A meaningful diagram"><img src="real.jpg" alt="Photo">"#,
+        );
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "![A meaningful diagram](placeholder.png)![Photo](real.jpg)\n"
+        );
+    }
+
+    #[test]
+    fn figure_caption_does_not_preserve_an_extra_placeholder() {
+        let (dom, root) = normalized(
+            r#"<figure><img src="blank.gif"><img src="photo.jpg" alt="Photo"><figcaption>A useful caption</figcaption></figure>"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn placeholder_tokens_outside_known_basenames_do_not_remove_images() {
+        let (dom, root) = normalized(
+            r#"<img src="/photos/placeholder-design.jpg"><img src="/image.jpg?placeholder=true"><img src="https://placeholder.example/image.jpg">"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            3
+        );
     }
 
     #[test]

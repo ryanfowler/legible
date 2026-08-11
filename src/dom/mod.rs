@@ -34,7 +34,7 @@ mod tests {
         assert_eq!(dom.text(body), "Hello world");
         let paragraph = dom.first_descendant_by_tag(body, Tag::P).unwrap();
         assert_eq!(dom.attr_by_local_name(paragraph, "title"), Some("a & b"));
-        dom.set_attr(paragraph, AttrName::Other, "a < b");
+        dom.set_attr(paragraph, AttrName::Title, "a < b");
         let serialized = dom.html(dom.root()).unwrap();
         assert!(serialized.contains("title=\"a &lt; b\""));
         assert!(!serialized.contains("&amp;lt;"));
