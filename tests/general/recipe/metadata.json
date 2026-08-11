@@ -1,0 +1,8 @@
+{
+  "title": "Tomato soup",
+  "description": "A simple tomato soup.",
+  "authors": ["Grace Hopper"],
+  "image": "https://example.test/images/soup.jpg",
+  "tags": ["tomato", "quick"],
+  "language": "en"
+}

@@ -103,5 +103,5 @@ fn uses_dom_byline_fallback_and_can_disable_structured_data() {
         .extract(&html, None)
         .unwrap();
 
-    assert_eq!(page.metadata().authors, ["By DOM Author"]);
+    assert_eq!(page.metadata().authors, ["DOM Author"]);
 }

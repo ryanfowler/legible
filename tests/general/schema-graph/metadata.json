@@ -1,0 +1,13 @@
+{
+  "title": "Graph metadata",
+  "description": "Metadata found inside a schema graph.",
+  "authors": ["Ada Lovelace", "Grace Hopper"],
+  "site_name": "Graph Site",
+  "canonical_url": "https://example.test/articles/graph",
+  "image": "https://example.test/images/graph.png",
+  "published_time": "2025-06-07",
+  "modified_time": "2025-06-08",
+  "language": "en",
+  "section": "Engineering",
+  "tags": ["schema", "metadata"]
+}

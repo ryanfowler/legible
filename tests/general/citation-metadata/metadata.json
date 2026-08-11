@@ -1,0 +1,8 @@
+{
+  "title": "Deterministic tree extraction",
+  "authors": ["Ada Lovelace", "Grace Hopper"],
+  "canonical_url": "https://example.test/papers/tree-extraction",
+  "published_time": "2025/04/05",
+  "language": "en",
+  "tags": ["HTML", "extraction", "Rust"]
+}

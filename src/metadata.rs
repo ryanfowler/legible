@@ -791,6 +791,11 @@ fn collect_meta_value(out: &mut CandidateSet, name: &str, content: &str, is_prop
                 out.add(|set| &mut set.tags, tag, source, confidence);
             }
         }
+        "citation_keywords" => {
+            for tag in content.split([',', ';']) {
+                out.add(|set| &mut set.tags, tag, source, confidence);
+            }
+        }
         _ => {}
     }
 }
@@ -1127,6 +1132,15 @@ fn normalize_text(value: &str) -> Option<String> {
 
 fn normalize_person(value: &str) -> Option<String> {
     let value = normalize_text(value)?;
+    let without_prefix = if value.eq_ignore_ascii_case("by") {
+        ""
+    } else {
+        value
+            .get(..3)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("by "))
+            .map_or(value.as_str(), |_| &value[3..])
+    };
+    let value = normalize_text(without_prefix)?;
     if value.eq_ignore_ascii_case("author")
         || value.eq_ignore_ascii_case("authors")
         || Url::parse(&value).is_ok()
@@ -1464,15 +1478,19 @@ mod tests {
         let result = metadata(
             r#"<head><meta property="og:title" content="{{title}}">
             <meta name="title" content="Real title">
-            <meta name="author" content="Ada"><meta name="citation_author" content="ada">
-            <meta name="keywords" content="Rust, rust, --"></head><body><p>Text</p></body>"#,
+            <meta name="author" content="By Ada"><meta name="citation_author" content="ada">
+            <meta name="keywords" content="Rust, rust, --">
+            <meta name="citation_keywords" content="HTML, Extraction"></head><body><p>Text</p></body>"#,
             None,
             true,
         );
 
         assert_eq!(result.title.as_deref(), Some("Real title"));
         assert_eq!(result.authors, ["Ada"]);
-        assert_eq!(result.tags, ["Rust"]);
+        assert_eq!(result.tags, ["Rust", "HTML", "Extraction"]);
+        assert_eq!(normalize_person("By Ada").as_deref(), Some("Ada"));
+        assert_eq!(normalize_person("By --"), None);
+        assert_eq!(normalize_person("By "), None);
     }
 
     #[test]

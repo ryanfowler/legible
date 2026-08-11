@@ -94,7 +94,7 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 
 ## Testing
 
-`tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html`, `expected.md`, and optional `metadata.json`. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite.
+`tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html` and `expected.md`. It can also have `metadata.json`. Use `expected.error` for a fixture that must fail with a named public error variant. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite.
 
 Default extraction must return `Error::NoContent` for empty, head-only, and image-only documents.
 
