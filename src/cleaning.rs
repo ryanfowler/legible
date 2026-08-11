@@ -712,10 +712,17 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
 /// This phase uses only high-confidence rules. It removes executable markup,
 /// hidden scaffolding, tracking images, and interactive controls. It keeps the
 /// text and structure around removed form controls.
+fn is_hidden_utility_class(class: &str) -> bool {
+    ["invisible", "d-none", "display-none", "u-hidden"]
+        .iter()
+        .any(|expected| class.eq_ignore_ascii_case(expected))
+}
+
 pub(crate) fn hard_cleanup(
     dom: &mut Dom,
     root: NodeId,
     allowed_media: &Regex,
+    relax_static_visibility: bool,
     nodes: &mut Vec<NodeId>,
 ) {
     nodes.clear();
@@ -733,8 +740,7 @@ pub(crate) fn hard_cleanup(
             && dom
                 .attr(node, AttrName::Class)
                 .is_some_and(|class| class.contains("fallback-image"));
-        let hidden = dom.has_attr(node, AttrName::Hidden)
-            || dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image
+        let static_visibility = dom.has_attr(node, AttrName::Hidden)
             || dom.attr(node, AttrName::Style).is_some_and(|style| {
                 let compact: String = style
                     .bytes()
@@ -744,6 +750,36 @@ pub(crate) fn hard_cleanup(
                 let compact = compact.to_ascii_lowercase();
                 compact.contains("display:none") || compact.contains("visibility:hidden")
             });
+        let modal = dom.attr(node, AttrName::AriaModal) == Some("true")
+            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+                roles.split_whitespace().any(|role| {
+                    role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
+                })
+            })
+            || static_visibility
+                && dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                    classes.split_whitespace().any(|class| {
+                        class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
+                    })
+                });
+        let hidden = dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image
+            || !relax_static_visibility && static_visibility
+            || modal;
+        if relax_static_visibility {
+            dom.remove_attr(node, AttrName::Hidden);
+            if let Some(classes) = dom.attr(node, AttrName::Class) {
+                let retained = classes
+                    .split_whitespace()
+                    .filter(|class| !is_hidden_utility_class(class))
+                    .collect::<SmallVec<[&str; 8]>>()
+                    .join(" ");
+                if retained.is_empty() {
+                    dom.remove_attr(node, AttrName::Class);
+                } else if retained != classes {
+                    dom.set_attr(node, AttrName::Class, &retained);
+                }
+            }
+        }
         let tracking_image = tag == Tag::Img
             && is_tracking_image(dom, node)
             && !has_lazy_image_candidate(dom, node)
@@ -1406,7 +1442,7 @@ mod tests {
         let mut text = String::new();
         let allowed = Regex::new("video\\.example").unwrap();
         clean_styles(&mut dom, root, &mut nodes);
-        hard_cleanup(&mut dom, root, &allowed, &mut nodes);
+        hard_cleanup(&mut dom, root, &allowed, false, &mut nodes);
         heuristic_cleanup(&mut dom, root, &mut store, &mut text, &mut nodes);
         dom.text(root)
     }
@@ -1431,7 +1467,13 @@ mod tests {
         )
         .unwrap();
         let root = dom.root();
-        hard_cleanup(&mut dom, root, &Regex::new("$").unwrap(), &mut Vec::new());
+        hard_cleanup(
+            &mut dom,
+            root,
+            &Regex::new("$").unwrap(),
+            false,
+            &mut Vec::new(),
+        );
         let inputs: Vec<_> = dom
             .descendants(root)
             .filter(|&node| dom.tag(node) == Some(Tag::Input))
@@ -1520,7 +1562,13 @@ mod tests {
         .unwrap();
         let root = dom.root();
         let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        hard_cleanup(&mut dom, root, &Regex::new("$").unwrap(), &mut Vec::new());
+        hard_cleanup(
+            &mut dom,
+            root,
+            &Regex::new("$").unwrap(),
+            false,
+            &mut Vec::new(),
+        );
         assert!(dom.parent(image).is_some());
         let picture_image = dom
             .descendants(root)
@@ -1543,7 +1591,13 @@ mod tests {
         )
         .unwrap();
         let root = dom.root();
-        hard_cleanup(&mut dom, root, &Regex::new("$").unwrap(), &mut Vec::new());
+        hard_cleanup(
+            &mut dom,
+            root,
+            &Regex::new("$").unwrap(),
+            false,
+            &mut Vec::new(),
+        );
         assert!(dom.first_descendant_by_tag(root, Tag::Img).is_some());
     }
 

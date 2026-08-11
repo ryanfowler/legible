@@ -44,6 +44,10 @@ harness = false
 name = "general_tests"
 harness = false
 
+[[test]]
+name = "web_tests"
+harness = false
+
 [[bench]]
 name = "extraction"
 harness = false

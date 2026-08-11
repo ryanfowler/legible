@@ -6,6 +6,10 @@ use crate::candidate::{
 };
 use crate::cleaning::*;
 use crate::constants::{is_alter_to_div_exception, is_default_tag_to_score, regexps};
+use crate::diagnostics::{
+    AttemptRejectionReason, CandidateSourceInfo, ContentMetricsInfo, ExtractionAttempt,
+    ExtractionDiagnostics, ExtractionStrategyInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
 use crate::extractor::ExtractorConfig;
@@ -40,12 +44,15 @@ pub(crate) struct ContentExtractor<'a> {
     resolve_fragment_links: bool,
     url_error: Option<url::ParseError>,
     best_attempt: Option<BestAttempt>,
+    diagnostic_attempts: Option<Vec<ExtractionAttempt>>,
 }
 struct BestAttempt {
     content: FrozenContent,
     quality: ExtractionQuality,
     excerpt: Option<String>,
     direction: Option<String>,
+    strategy: ExtractionStrategy,
+    diagnostic_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,15 +61,43 @@ enum ExtractionStrategy {
     RelaxedCleanup,
     BroadContent,
     StructuredDataHint,
+    RelaxedVisibility,
     BodyFallback,
 }
 
+impl From<ExtractionStrategy> for ExtractionStrategyInfo {
+    fn from(value: ExtractionStrategy) -> Self {
+        match value {
+            ExtractionStrategy::Normal => Self::Normal,
+            ExtractionStrategy::RelaxedCleanup => Self::RelaxedCleanup,
+            ExtractionStrategy::BroadContent => Self::BroadContent,
+            ExtractionStrategy::StructuredDataHint => Self::StructuredDataHint,
+            ExtractionStrategy::RelaxedVisibility => Self::RelaxedVisibility,
+            ExtractionStrategy::BodyFallback => Self::BodyFallback,
+        }
+    }
+}
+
+impl From<RootSelectionReason> for RootSelectionReasonInfo {
+    fn from(value: RootSelectionReason) -> Self {
+        match value {
+            RootSelectionReason::Ranked => Self::Ranked,
+            RootSelectionReason::SpecificChild => Self::SpecificChild,
+            RootSelectionReason::SharedParent => Self::SharedParent,
+            RootSelectionReason::CompleteAncestor => Self::CompleteAncestor,
+            RootSelectionReason::StructuredData => Self::StructuredData,
+            RootSelectionReason::BodyFallback => Self::BodyFallback,
+        }
+    }
+}
+
 impl ExtractionStrategy {
-    const ORDER: [Self; 5] = [
+    const ORDER: [Self; 6] = [
         Self::Normal,
         Self::RelaxedCleanup,
         Self::BroadContent,
         Self::StructuredDataHint,
+        Self::RelaxedVisibility,
         Self::BodyFallback,
     ];
 
@@ -71,7 +106,10 @@ impl ExtractionStrategy {
     }
 
     fn conditional_cleanup(self) -> bool {
-        matches!(self, Self::Normal | Self::StructuredDataHint)
+        matches!(
+            self,
+            Self::Normal | Self::StructuredDataHint | Self::RelaxedVisibility
+        )
     }
 }
 struct FrozenContent {
@@ -117,6 +155,7 @@ impl<'a> ContentExtractor<'a> {
             resolve_fragment_links: false,
             url_error,
             best_attempt: None,
+            diagnostic_attempts: options.diagnostics.then(Vec::new),
         }
     }
     pub(crate) fn extract(mut self) -> Result<ExtractedPage> {
@@ -193,22 +232,40 @@ impl<'a> ContentExtractor<'a> {
             .copy_children_as_fragment(content.content_root)
             .map_err(|_| Error::NoContent)?;
         let extracted_root = extracted_dom.root();
+        let diagnostics = self
+            .diagnostic_attempts
+            .take()
+            .map(|attempts| ExtractionDiagnostics {
+                selected_strategy: self.strategy.into(),
+                attempts,
+            });
         Ok(ExtractedPage::new(
             extracted_dom,
             extracted_root,
             self.metadata,
             content.text_length,
+            diagnostics,
         ))
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let body = self.dom.body().ok_or(Error::NoBody)?;
         let source_metrics = ContentMetrics::measure_source(&self.dom, body);
-        if !source_metrics.has_meaningful_text() {
+        let has_relaxable_hidden_content = self.has_relaxable_hidden_content(body);
+        let relaxed_source_metrics = if has_relaxable_hidden_content {
+            ContentMetrics::measure_source_relaxed_visibility(&self.dom, body)
+        } else {
+            source_metrics
+        };
+        if !source_metrics.has_meaningful_text() && !relaxed_source_metrics.has_meaningful_text() {
             return Err(Error::NoContent);
         }
         let short_source_access_barrier = (source_metrics.word_count <= 60
             || source_metrics.text_chars <= 400)
             && is_access_barrier(&self.dom, body);
+        let visibility_recovery_needed = has_relaxable_hidden_content
+            && (source_metrics.word_count <= 30 || source_metrics.text_chars <= 200)
+            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_mul(2)
+            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(100);
         let structured_root = locate_structured_content(
             &self.dom,
             self.structured_data
@@ -219,6 +276,14 @@ impl<'a> ContentExtractor<'a> {
         let mut cleaning_nodes = Vec::new();
         for strategy in ExtractionStrategy::ORDER {
             if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
+                continue;
+            }
+            if strategy == ExtractionStrategy::RelaxedVisibility && !has_relaxable_hidden_content {
+                continue;
+            }
+            if strategy != ExtractionStrategy::RelaxedVisibility
+                && !source_metrics.has_meaningful_text()
+            {
                 continue;
             }
             self.strategy = strategy;
@@ -276,6 +341,25 @@ impl<'a> ContentExtractor<'a> {
                 selection,
                 structured_root,
             );
+            if strategy == ExtractionStrategy::RelaxedVisibility
+                && short_source_access_barrier
+                && let Some(hidden) = ranked
+                    .iter()
+                    .find(|candidate| self.is_inside_static_hidden(candidate.node))
+            {
+                selection = RootSelection {
+                    node: hidden.node,
+                    reason: RootSelectionReason::SpecificChild,
+                    branches: SmallVec::new(),
+                };
+            }
+            let visibility_root_semantic = matches!(
+                working_dom.tag(selection.node),
+                Some(Tag::Article | Tag::Main)
+            ) || working_dom
+                .attr(selection.node, AttrName::Role)
+                .is_some_and(Self::has_primary_role);
+            let root_info = self.root_info(&working_dom, &candidates, &selection);
             let root_in_document_chrome =
                 Self::is_document_chrome_root(&working_dom, selection.node, body);
             if selection.node == body {
@@ -485,8 +569,13 @@ impl<'a> ContentExtractor<'a> {
             let result_metrics = ContentMetrics::measure(&result_dom, result_dom.root());
             let incoherent_short =
                 is_incoherent_short_result(&result_dom, result_dom.root(), result_metrics);
+            let attempt_source_metrics = if strategy == ExtractionStrategy::RelaxedVisibility {
+                relaxed_source_metrics
+            } else {
+                source_metrics
+            };
             let quality = ExtractionQuality::new(
-                source_metrics,
+                attempt_source_metrics,
                 result_metrics,
                 selection.node != body && strategy != ExtractionStrategy::BodyFallback,
             );
@@ -502,13 +591,39 @@ impl<'a> ContentExtractor<'a> {
             let schema_match = structured_root == Some(selection.node)
                 && !quality.is_suspiciously_small()
                 && (quality.coverage >= 0.2 || quality.text_chars >= 500);
-            if !root_in_document_chrome
+            let ignores_visible_source_barrier =
+                strategy == ExtractionStrategy::RelaxedVisibility && has_relaxable_hidden_content;
+            let valid_result = !root_in_document_chrome
                 && !access_barrier
-                && !short_source_access_barrier
+                && !(short_source_access_barrier && !ignores_visible_source_barrier)
                 && !interactive_shell
-                && !incoherent_short
-                && (quality.is_good() || schema_match)
-            {
+                && !incoherent_short;
+            let visibility_candidate_coherent = strategy != ExtractionStrategy::RelaxedVisibility
+                || result_metrics.paragraph_count >= 2
+                || visibility_root_semantic && result_metrics.structured_block_count > 0;
+            let visibility_improves = visibility_candidate_coherent
+                && (strategy != ExtractionStrategy::RelaxedVisibility
+                    || self.best_attempt.as_ref().is_none_or(|best| {
+                        quality.text_chars >= best.quality.text_chars.saturating_mul(2)
+                            || quality.text_chars > best.quality.text_chars
+                                && quality.coverage >= best.quality.coverage + 0.2
+                    }));
+            let deferred_for_visibility =
+                visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
+            let accepted = valid_result
+                && visibility_improves
+                && !deferred_for_visibility
+                && (quality.is_good() || schema_match);
+            if accepted {
+                self.record_attempt(
+                    strategy,
+                    root_info,
+                    attempt_source_metrics,
+                    result_metrics,
+                    quality,
+                    true,
+                    None,
+                );
                 self.dom = result_dom;
                 let root = self.dom.root();
                 return Ok(ExtractedContent {
@@ -518,20 +633,45 @@ impl<'a> ContentExtractor<'a> {
                 });
             }
 
-            if !root_in_document_chrome
-                && !access_barrier
-                && !short_source_access_barrier
-                && !interactive_shell
-                && !incoherent_short
+            let rejection = Self::attempt_rejection_reason(
+                root_in_document_chrome,
+                access_barrier,
+                short_source_access_barrier && !ignores_visible_source_barrier,
+                interactive_shell,
+                incoherent_short,
+                visibility_improves,
+                deferred_for_visibility,
+            );
+            let diagnostic_index = self.record_attempt(
+                strategy,
+                root_info,
+                attempt_source_metrics,
+                result_metrics,
+                quality,
+                false,
+                Some(rejection),
+            );
+            if valid_result
+                && visibility_improves
                 && self.best_attempt.as_ref().is_none_or(|best| {
                     quality.best_attempt_score() > best.quality.best_attempt_score()
                 })
             {
+                if let Some(previous) = self
+                    .best_attempt
+                    .as_ref()
+                    .and_then(|best| best.diagnostic_index)
+                    && let Some(attempts) = self.diagnostic_attempts.as_mut()
+                {
+                    attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
+                }
                 self.best_attempt = Some(BestAttempt {
                     content: FrozenContent { dom: result_dom },
                     quality,
                     excerpt,
                     direction: self.page_direction.clone(),
+                    strategy,
+                    diagnostic_index,
                 });
             }
             self.restore_source(source_dom);
@@ -543,6 +683,13 @@ impl<'a> ContentExtractor<'a> {
         }
         self.dom = best.content.dom;
         self.page_direction = best.direction;
+        self.strategy = best.strategy;
+        if let Some(index) = best.diagnostic_index
+            && let Some(attempts) = self.diagnostic_attempts.as_mut()
+        {
+            attempts[index].accepted = true;
+            attempts[index].rejection_reason = None;
+        }
         let root = self.dom.root();
         Ok(ExtractedContent {
             text_length: best.quality.text_chars,
@@ -550,6 +697,114 @@ impl<'a> ContentExtractor<'a> {
             content_root: root,
         })
     }
+    fn root_info(
+        &self,
+        dom: &Dom,
+        candidates: &CandidateSet,
+        selection: &RootSelection,
+    ) -> Option<RootInfo> {
+        self.diagnostic_attempts.as_ref()?;
+        let candidate = candidates.get(selection.node);
+        let mut candidate_sources = Vec::new();
+        for (internal, public) in [
+            (CandidateSource::Semantic, CandidateSourceInfo::Semantic),
+            (
+                CandidateSource::Readability,
+                CandidateSourceInfo::Readability,
+            ),
+            (
+                CandidateSource::StructuredData,
+                CandidateSourceInfo::StructuredData,
+            ),
+            (CandidateSource::Generic, CandidateSourceInfo::Generic),
+        ] {
+            if candidate.is_some_and(|candidate| candidate.has_source(internal)) {
+                candidate_sources.push(public);
+            }
+        }
+        Some(RootInfo {
+            tag: dom
+                .qual_name(selection.node)
+                .map(|name| name.local.to_string()),
+            id: dom.attr(selection.node, AttrName::Id).map(str::to_owned),
+            classes: dom
+                .attr(selection.node, AttrName::Class)
+                .map(|classes| classes.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
+            selection_reason: selection.reason.into(),
+            candidate_sources,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_attempt(
+        &mut self,
+        strategy: ExtractionStrategy,
+        root: Option<RootInfo>,
+        source: ContentMetrics,
+        result: ContentMetrics,
+        quality: ExtractionQuality,
+        accepted: bool,
+        rejection_reason: Option<AttemptRejectionReason>,
+    ) -> Option<usize> {
+        let attempts = self.diagnostic_attempts.as_mut()?;
+        let index = attempts.len();
+        attempts.push(ExtractionAttempt {
+            strategy: strategy.into(),
+            selected_root: root.expect("diagnostic root is built when diagnostics are enabled"),
+            source: Self::metrics_info(source),
+            result: Self::metrics_info(result),
+            quality: QualityInfo {
+                coverage: quality.coverage,
+                best_attempt_score: quality.best_attempt_score(),
+                good: quality.is_good(),
+                suspiciously_small: quality.is_suspiciously_small(),
+            },
+            accepted,
+            rejection_reason,
+        });
+        Some(index)
+    }
+
+    fn metrics_info(metrics: ContentMetrics) -> ContentMetricsInfo {
+        ContentMetricsInfo {
+            word_count: metrics.word_count,
+            text_chars: metrics.text_chars,
+            paragraph_count: metrics.paragraph_count,
+            heading_count: metrics.heading_count,
+            structured_block_count: metrics.structured_block_count,
+            link_density: metrics.link_density,
+        }
+    }
+
+    fn attempt_rejection_reason(
+        document_chrome: bool,
+        access_barrier: bool,
+        source_access_barrier: bool,
+        interactive_shell: bool,
+        incoherent_short: bool,
+        visibility_improves: bool,
+        deferred_for_visibility: bool,
+    ) -> AttemptRejectionReason {
+        if document_chrome {
+            AttemptRejectionReason::DocumentChrome
+        } else if access_barrier {
+            AttemptRejectionReason::AccessBarrier
+        } else if source_access_barrier {
+            AttemptRejectionReason::SourceAccessBarrier
+        } else if interactive_shell {
+            AttemptRejectionReason::InteractiveShell
+        } else if incoherent_short {
+            AttemptRejectionReason::IncoherentShortResult
+        } else if deferred_for_visibility {
+            AttemptRejectionReason::PotentialHiddenContent
+        } else if !visibility_improves {
+            AttemptRejectionReason::InsufficientImprovement
+        } else {
+            AttemptRejectionReason::LowQuality
+        }
+    }
+
     fn prune_body_fallback_chrome(dom: &mut Dom, body: NodeId) {
         let elements = dom.element_descendants_snapshot_with_depth(body);
         let has_primary_region = elements.iter().any(|&(node, _)| {
@@ -638,7 +893,9 @@ impl<'a> ContentExtractor<'a> {
         structured_root: Option<NodeId>,
     ) -> RootSelection {
         match strategy {
-            ExtractionStrategy::Normal | ExtractionStrategy::RelaxedCleanup => normal,
+            ExtractionStrategy::Normal
+            | ExtractionStrategy::RelaxedCleanup
+            | ExtractionStrategy::RelaxedVisibility => normal,
             ExtractionStrategy::StructuredDataHint => RootSelection {
                 node: structured_root.unwrap_or(normal.node),
                 reason: RootSelectionReason::StructuredData,
@@ -675,12 +932,141 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
+    fn has_hidden_utility_class(&self, node: NodeId) -> bool {
+        self.dom.tag(node) != Some(Tag::A)
+            && self.dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                classes.split_whitespace().any(|class| {
+                    ["invisible", "d-none", "display-none", "u-hidden"]
+                        .iter()
+                        .any(|expected| class.eq_ignore_ascii_case(expected))
+                })
+            })
+    }
+
+    fn is_visibility_recovery_container(&self, node: NodeId) -> bool {
+        matches!(
+            self.dom.tag(node),
+            Some(Tag::Article | Tag::Aside | Tag::Div | Tag::Main | Tag::Nav | Tag::Section)
+        )
+    }
+
+    fn is_static_hidden_marker(&self, node: NodeId) -> bool {
+        self.dom.attr(node, AttrName::AriaHidden) != Some("true")
+            && (!is_probably_visible(&self.dom, node) || self.has_hidden_utility_class(node))
+    }
+
+    fn is_inside_static_hidden(&self, node: NodeId) -> bool {
+        std::iter::once(node)
+            .chain(self.dom.ancestors(node))
+            .any(|ancestor| {
+                self.is_static_hidden_marker(ancestor) && !self.is_modal_or_dialog(ancestor)
+            })
+    }
+
+    fn has_relaxable_hidden_content(&self, root: NodeId) -> bool {
+        self.dom.descendants(root).any(|node| {
+            self.is_visibility_recovery_container(node)
+                && !self.is_modal_or_dialog(node)
+                && self.is_static_hidden_marker(node)
+        })
+    }
+
+    /// Marks hidden roots that have semantic or repeated structural evidence.
+    /// Reverse preorder aggregates each subtree without rescanning descendants.
+    fn relaxed_hidden_roots(&self) -> Vec<bool> {
+        let nodes = self
+            .dom
+            .element_descendants_snapshot_with_depth(self.dom.root());
+        let mut paragraphs = vec![0_u8; self.dom.len()];
+        let mut structured = vec![false; self.dom.len()];
+        let mut allowed = vec![false; self.dom.len()];
+        for &(node, _) in nodes.iter().rev() {
+            let tag = self.dom.tag(node);
+            paragraphs[node.index()] = u8::from(tag == Some(Tag::P));
+            structured[node.index()] = matches!(
+                tag,
+                Some(Tag::Dl | Tag::Figure | Tag::Ol | Tag::Pre | Tag::Table | Tag::Ul)
+            );
+            for child in self.dom.element_children(node) {
+                paragraphs[node.index()] = paragraphs[node.index()]
+                    .saturating_add(paragraphs[child.index()])
+                    .min(2);
+                structured[node.index()] |= structured[child.index()];
+            }
+            let authoritative = matches!(tag, Some(Tag::Article | Tag::Main))
+                || self
+                    .dom
+                    .attr(node, AttrName::Role)
+                    .is_some_and(Self::has_primary_role);
+            allowed[node.index()] =
+                authoritative || paragraphs[node.index()] >= 2 || structured[node.index()];
+        }
+        allowed
+    }
+
+    fn is_duplicate_hidden_variant(&self, node: NodeId) -> bool {
+        if !self.is_static_hidden_marker(node) {
+            return false;
+        }
+        let mut sibling = self.dom.prev_sibling(node);
+        while sibling.is_some_and(|candidate| !self.dom.is_element(candidate)) {
+            sibling = sibling.and_then(|candidate| self.dom.prev_sibling(candidate));
+        }
+        let sibling = sibling.or_else(|| {
+            let mut candidate = self.dom.next_sibling(node);
+            while candidate.is_some_and(|candidate| !self.dom.is_element(candidate)) {
+                candidate = candidate.and_then(|candidate| self.dom.next_sibling(candidate));
+            }
+            candidate
+        });
+        let Some(sibling) = sibling.filter(|&sibling| !self.is_static_hidden_marker(sibling))
+        else {
+            return false;
+        };
+        if self.dom.tag(node) != self.dom.tag(sibling) {
+            return false;
+        }
+        let hidden_text = get_inner_text_owned(&self.dom, node);
+        hidden_text.chars().count() >= 100
+            && hidden_text == get_inner_text_owned(&self.dom, sibling)
+    }
+
+    fn is_visible_for_strategy(&self, node: NodeId) -> bool {
+        let utility_hidden = self.has_hidden_utility_class(node);
+        if self.strategy == ExtractionStrategy::RelaxedVisibility {
+            self.dom.attr(node, AttrName::AriaHidden) != Some("true")
+                || self
+                    .dom
+                    .attr(node, AttrName::Class)
+                    .is_some_and(|class| class.contains("fallback-image"))
+        } else {
+            is_probably_visible(&self.dom, node) && !utility_hidden
+        }
+    }
+
+    fn is_modal_or_dialog(&self, node: NodeId) -> bool {
+        self.dom.attr(node, AttrName::AriaModal) == Some("true")
+            || self.dom.attr(node, AttrName::Role).is_some_and(|roles| {
+                roles.split_whitespace().any(|role| {
+                    role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
+                })
+            })
+            || (!is_probably_visible(&self.dom, node) || self.has_hidden_utility_class(node))
+                && self.dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                    classes.split_whitespace().any(|class| {
+                        class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
+                    })
+                })
+    }
+
     fn discover_candidates(
         &mut self,
         match_buffer: &mut String,
         text_buffer: &mut String,
     ) -> CandidateDiscovery {
         let candidates = CandidateSet::discover_semantic(&self.dom);
+        let relaxed_hidden = (self.strategy == ExtractionStrategy::RelaxedVisibility)
+            .then(|| self.relaxed_hidden_roots());
         let mut to_score = SmallVec::<[NodeId; 256]>::new();
         let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
         let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
@@ -712,9 +1098,13 @@ impl<'a> ContentExtractor<'a> {
             if tag == Tag::A {
                 self.node_data.enable_link_lengths();
             }
-            if !is_probably_visible(&self.dom, id)
-                || self.dom.attr(id, AttrName::AriaModal) == Some("true")
-                    && self.dom.attr(id, AttrName::Role) == Some("dialog")
+            let unsupported_hidden = relaxed_hidden.as_ref().is_some_and(|allowed| {
+                self.is_static_hidden_marker(id)
+                    && (!allowed[id.index()] || self.is_duplicate_hidden_variant(id))
+            });
+            if !self.is_visible_for_strategy(id)
+                || self.is_modal_or_dialog(id)
+                || unsupported_hidden
             {
                 remove_after_scoring.push(id);
                 excluded_depth = Some(depth);
@@ -1108,7 +1498,13 @@ impl<'a> ContentExtractor<'a> {
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
         clean_styles(&mut self.dom, root, nodes);
-        hard_cleanup(&mut self.dom, root, video, nodes);
+        hard_cleanup(
+            &mut self.dom,
+            root,
+            video,
+            self.strategy == ExtractionStrategy::RelaxedVisibility,
+            nodes,
+        );
         if self.strategy.conditional_cleanup() {
             heuristic_cleanup(&mut self.dom, root, &mut self.node_data, text_buffer, nodes);
         }
@@ -1694,6 +2090,181 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         assert_eq!(fallback.node, body);
         assert!(!ExtractionStrategy::BodyFallback.weight_classes());
         assert!(!ExtractionStrategy::BodyFallback.conditional_cleanup());
+    }
+
+    #[test]
+    fn diagnostics_are_opt_in_and_report_the_selected_attempt() {
+        let html = r#"<body><main id="guide" class="docs content"><p>This useful guide has a complete sentence.</p></main></body>"#;
+        let default_page = crate::extract(html, None).unwrap();
+        assert!(default_page.diagnostics().is_none());
+
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        assert_eq!(
+            diagnostics.selected_strategy,
+            ExtractionStrategyInfo::Normal
+        );
+        assert_eq!(diagnostics.attempts.len(), 1);
+        assert!(diagnostics.attempts[0].accepted);
+        assert_eq!(
+            diagnostics.attempts[0].selected_root.tag.as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            diagnostics.attempts[0].selected_root.id.as_deref(),
+            Some("guide")
+        );
+        assert_eq!(
+            diagnostics.attempts[0].selected_root.classes,
+            ["docs", "content"]
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_retries_and_the_actual_winner() {
+        let linked_detail = "Useful linked reference with descriptive context, practical guidance, examples, and details. ";
+        let html = format!(
+            r#"<body><main><p>A short stable introduction.</p><aside class="related"><h2>Related reference</h2><a href="/one">{linked_detail}</a><a href="/two">{linked_detail}</a></aside></main></body>"#
+        );
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        assert!(diagnostics.attempts.len() >= 2);
+        let winner = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        assert_eq!(diagnostics.selected_strategy, winner.strategy);
+        assert!(
+            diagnostics
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.accepted)
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_visibility_recovery_attempts() {
+        let hidden_detail = "The recovered section explains configuration, validation, compatibility, and deployment with practical detail. ".repeat(4);
+        let html = format!(
+            r#"<body><main><p>Visible summary.</p><article hidden><h2>Complete guide</h2><p>{hidden_detail}</p></article></main></body>"#
+        );
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        assert!(diagnostics.attempts.len() >= 2);
+        assert_eq!(
+            diagnostics.selected_strategy,
+            ExtractionStrategyInfo::RelaxedVisibility
+        );
+        assert!(diagnostics.attempts.iter().any(|attempt| {
+            attempt.rejection_reason == Some(AttemptRejectionReason::PotentialHiddenContent)
+        }));
+        assert!(page.text().contains("recovered section"));
+    }
+
+    #[test]
+    fn relaxed_visibility_recovers_hidden_content_without_selecting_hidden_junk() {
+        let hidden_article = r#"<body><article style="display: none"><h1>Recovered guide</h1><p>The hidden server-rendered guide contains coherent content, practical details, and a complete explanation.</p><p>A second paragraph confirms that this is the primary document content.</p></article></body>"#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(hidden_article, None)
+            .unwrap();
+        assert!(page.text().contains("hidden server-rendered guide"));
+        let recovered_html = page.html();
+        assert!(!recovered_html.contains(" hidden="), "{recovered_html}");
+        assert!(
+            !recovered_html.contains("class=\"hidden"),
+            "{recovered_html}"
+        );
+        assert!(
+            !recovered_html.contains("display: none"),
+            "{recovered_html}"
+        );
+        assert_eq!(
+            page.diagnostics().unwrap().selected_strategy,
+            ExtractionStrategyInfo::RelaxedVisibility
+        );
+
+        let visible_article = r#"<body><div hidden><nav><a href="/1">Hidden navigation one</a><a href="/2">Hidden navigation two</a><a href="/3">Hidden navigation three</a></nav></div><main><p>The visible article is the correct primary content.</p></main></body>"#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(visible_article, None)
+            .unwrap();
+        assert_eq!(
+            page.text(),
+            "The visible article is the correct primary content."
+        );
+        assert_eq!(
+            page.diagnostics().unwrap().selected_strategy,
+            ExtractionStrategyInfo::Normal
+        );
+
+        let barrier_and_article = r#"<body><main class="paywall"><h1>Subscribe to unlock this article</h1><p>Choose a plan and sign in to continue. $9 per month. $90 annual.</p></main><article hidden><h1>Recovered report</h1><p>The complete hidden report provides verified facts, careful analysis, and useful context for every reader.</p><p>Its second paragraph gives implementation detail and a clear conclusion.</p></article></body>"#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(barrier_and_article, None)
+            .unwrap();
+        assert!(page.text().contains("complete hidden report"));
+        assert_eq!(
+            page.diagnostics().unwrap().selected_strategy,
+            ExtractionStrategyInfo::RelaxedVisibility
+        );
+
+        let visible_dialog = r#"<body><main class="dialog"><p>This visible dialog transcript is legitimate document content and must remain available.</p><p>A second paragraph provides useful context for the reader.</p></main></body>"#;
+        let page = crate::extract(visible_dialog, None).unwrap();
+        assert!(page.text().contains("legitimate document content"));
+
+        let hidden_modal = r#"<body><div class="modal" style="display:none"><h1>Long promotion</h1><p>This modal contains a long promotional message with many polished words and repeated details that must never replace the document.</p></div><main><p>Short visible answer.</p></main></body>"#;
+        let page = crate::extract(hidden_modal, None).unwrap();
+        assert_eq!(page.text(), "Short visible answer.");
+    }
+
+    #[test]
+    fn relaxed_visibility_handles_hidden_indexes_and_duplicate_variants() {
+        let index = r#"<body><main class="d-none"><h1>Reference index</h1><ul><li><a href="/a">Alpha reference guide</a></li><li><a href="/b">Beta reference guide</a></li><li><a href="/c">Gamma reference guide</a></li><li><a href="/d">Delta reference guide</a></li></ul></main></body>"#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(index, None)
+            .unwrap();
+        assert!(page.text().contains("Alpha reference guide"));
+        assert_eq!(
+            page.diagnostics().unwrap().selected_strategy,
+            ExtractionStrategyInfo::RelaxedVisibility
+        );
+
+        let duplicate = r#"<body><article class="desktop"><p>The responsive article has useful visible content, a complete explanation, practical implementation details, and careful validation guidance for readers.</p></article><article class="d-none mobile"><p>The responsive article has useful visible content, a complete explanation, practical implementation details, and careful validation guidance for readers.</p></article></body>"#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(duplicate, None)
+            .unwrap();
+        assert_eq!(
+            page.diagnostics().unwrap().selected_strategy,
+            ExtractionStrategyInfo::Normal
+        );
+        assert_eq!(page.text().matches("responsive article").count(), 1);
+
+        let hidden_paragraph = r#"<body><p class="d-none">Utility-hidden paragraph must not leak into the result.</p><main><p>Visible short answer.</p></main></body>"#;
+        let page = crate::extract(hidden_paragraph, None).unwrap();
+        assert_eq!(page.text(), "Visible short answer.");
     }
 
     #[test]

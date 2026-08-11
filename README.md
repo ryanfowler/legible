@@ -70,6 +70,20 @@ let page = extractor.extract("<main><p>Page content.</p></main>", None)?;
 `max_elements(0)` sets no limit. Structured-data metadata extraction is enabled by
 default.
 
+Enable structured decision diagnostics only when you need them:
+
+```rust
+# use legible::Extractor;
+let extractor = Extractor::builder().diagnostics(true).build();
+let page = extractor.extract("<main><p>Page content.</p></main>", None)?;
+if let Some(diagnostics) = page.diagnostics() {
+    println!("Selected {:?}", diagnostics.selected_strategy);
+}
+# Ok::<(), legible::Error>(())
+```
+
+Legible does not retain attempt diagnostics by default.
+
 ## Render Markdown
 
 `page.markdown()` includes links and images. Use the builder to change these settings.
@@ -113,6 +127,20 @@ Markdown output contains no raw HTML. It removes links and images that use unsup
 URI schemes. Sanitize any HTML that you later create from the Markdown.
 
 Legible does not fetch URLs.
+
+## Regression fixtures
+
+`tests/general/` contains exact Markdown fixtures. `tests/web/` contains capability
+fixtures with semantic assertions in `expected.json`. Add focused positive and
+negative cases for each extraction heuristic.
+
+Run the optional maintainer comparison tool with:
+
+```bash
+node scripts/compare-defuddle/index.mjs
+```
+
+See `scripts/compare-defuddle/README.md` for optional Defuddle comparison.
 
 ## License
 
