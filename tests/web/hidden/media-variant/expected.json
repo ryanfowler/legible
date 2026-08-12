@@ -1,0 +1,1 @@
+{"must_contain":["![Architecture diagram]","visible explanation"],"must_not_contain":["Duplicated hidden promotional text"],"must_occur_once":["![Architecture diagram]"],"images_min":1}

@@ -1,0 +1,1 @@
+{"must_contain":["x^2+y^2=z^2","semantic equation"],"must_occur_once":["x^2+y^2=z^2"],"must_not_contain":["generated-glyph"]}

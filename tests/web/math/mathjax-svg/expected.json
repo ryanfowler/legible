@@ -1,0 +1,1 @@
+{"must_contain":["\\int_0^1 x\\,dx","semantic LaTeX"],"must_occur_once":["\\int_0^1 x\\,dx"],"must_not_contain":["rendered-glyph"]}
