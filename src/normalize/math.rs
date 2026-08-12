@@ -61,25 +61,45 @@ fn is_annotation_element(local: &str) -> bool {
     local.eq_ignore_ascii_case("annotation") || local.eq_ignore_ascii_case("annotation-xml")
 }
 
-pub(crate) fn is_accessible_math(dom: &Dom, node: NodeId) -> bool {
-    let math = dom.tag(node) == Some(Tag::Math)
-        || std::iter::once(node)
-            .chain(dom.ancestors(node))
-            .any(|ancestor| has_math_wrapper_class(dom, ancestor));
-    math && std::iter::once(node)
-        .chain(dom.descendants(node))
-        .any(|descendant| {
-            dom.qual_name(descendant)
-                .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("annotation"))
-                && dom
-                    .attr_by_local_name(descendant, "encoding")
-                    .is_some_and(|encoding| {
-                        matches!(
-                            encoding.to_ascii_lowercase().as_str(),
-                            "application/x-tex" | "application/x-latex" | "text/tex"
-                        )
-                    })
-        })
+/// Marks elements that contain a usable TeX annotation and are math or inside
+/// a known math wrapper. The previous per-element check walked ancestors and
+/// descendants repeatedly. This reverse/preorder pair keeps the pass linear.
+pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> Vec<bool> {
+    let mut has_annotation = vec![false; dom.len()];
+    for &(node, _) in nodes.iter().rev() {
+        let own_annotation = is_tex_annotation(dom, node);
+        let descendant_annotation = dom
+            .element_children(node)
+            .any(|child| has_annotation[child.index()]);
+        has_annotation[node.index()] = own_annotation || descendant_annotation;
+    }
+
+    let mut inside_wrapper = vec![false; dom.len()];
+    let mut accessible = vec![false; dom.len()];
+    for &(node, _) in nodes {
+        let inherited = dom
+            .parent(node)
+            .is_some_and(|parent| inside_wrapper[parent.index()]);
+        let wrapper = inherited || has_math_wrapper_class(dom, node);
+        inside_wrapper[node.index()] = wrapper;
+        accessible[node.index()] =
+            has_annotation[node.index()] && (dom.tag(node) == Some(Tag::Math) || wrapper);
+    }
+    accessible
+}
+
+fn is_tex_annotation(dom: &Dom, node: NodeId) -> bool {
+    dom.qual_name(node)
+        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("annotation"))
+        && dom
+            .attr_by_local_name(node, "encoding")
+            .is_some_and(is_tex_encoding)
+}
+
+fn is_tex_encoding(value: &str) -> bool {
+    value.eq_ignore_ascii_case("application/x-tex")
+        || value.eq_ignore_ascii_case("application/x-latex")
+        || value.eq_ignore_ascii_case("text/tex")
 }
 
 fn explicit_latex(dom: &Dom, node: NodeId) -> Option<String> {

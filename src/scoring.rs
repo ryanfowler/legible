@@ -202,23 +202,27 @@ pub(crate) struct CandidateFeatureIndex {
     has_links: bool,
 }
 
+/// Counts used by structural boundary selection stay exact. The remaining
+/// counters are capped because ranking only uses small thresholds or bounded
+/// contributions.
 #[derive(Clone, Copy, Debug, Default)]
 struct StructuralCounts {
     paragraphs: u32,
     headings: u32,
-    list_items: u32,
+    list_items: u8,
     code_blocks: u32,
     tables: u32,
     figures: u32,
-    images: u32,
-    protected_blocks: u32,
+    images: u8,
+    protected_blocks: u8,
 }
 
 impl StructuralCounts {
     fn add(&mut self, other: Self) {
         self.paragraphs = self.paragraphs.saturating_add(other.paragraphs);
         self.headings = self.headings.saturating_add(other.headings);
-        self.list_items = self.list_items.saturating_add(other.list_items);
+        // Eight list items reach the ranking bonus cap.
+        self.list_items = self.list_items.saturating_add(other.list_items).min(8);
         self.code_blocks = self.code_blocks.saturating_add(other.code_blocks);
         self.tables = self.tables.saturating_add(other.tables);
         self.figures = self.figures.saturating_add(other.figures);
@@ -299,16 +303,16 @@ impl CandidateFeatureIndex {
             word_count: text.word_count,
             paragraph_count: counts.paragraphs,
             heading_count: counts.headings,
-            list_item_count: counts.list_items,
+            list_item_count: u32::from(counts.list_items),
             code_block_count: counts.code_blocks,
             table_count: counts.tables,
             figure_count: counts.figures,
-            image_count: counts.images,
+            image_count: u32::from(counts.images),
             link_text_chars,
             link_density,
             sentence_end_count: text.sentence_end_count,
             comma_count: text.comma_count,
-            protected_block_count: counts.protected_blocks,
+            protected_block_count: u32::from(counts.protected_blocks),
             readability_score: candidate.readability_score,
             semantic_prior: candidate.semantic_prior,
             positive_name_score,
@@ -471,6 +475,7 @@ pub(crate) fn compute_readability_scores(
     dom: &mut Dom,
     to_score: impl IntoIterator<Item = NodeId>,
     excluded: &[NodeId],
+    excluded_mask: &[bool],
     store: &mut NodeStateStore,
     weight_classes: bool,
 ) -> SmallVec<[ReadabilityScore; 64]> {
@@ -526,7 +531,7 @@ pub(crate) fn compute_readability_scores(
     }
     let mut scores = SmallVec::new();
     for node in discovered {
-        if is_excluded_candidate(dom, node, excluded) {
+        if excluded_mask.get(node.index()).copied().unwrap_or(false) {
             continue;
         }
         let content_score = store.get_content_score(node);
@@ -540,11 +545,26 @@ pub(crate) fn compute_readability_scores(
     scores
 }
 
-fn is_excluded_candidate(dom: &Dom, node: NodeId, excluded: &[NodeId]) -> bool {
-    excluded.contains(&node)
-        || dom
-            .ancestors(node)
-            .any(|ancestor| excluded.contains(&ancestor))
+/// Marks excluded roots and their descendants before the scoring tree is mutated.
+///
+/// A boolean index avoids repeatedly walking candidate ancestor chains. This is
+/// important for malformed documents, where HTML tree repair can create deep
+/// nesting and many candidates.
+pub(crate) fn build_exclusion_mask(dom: &Dom, excluded: &[NodeId]) -> Vec<bool> {
+    if excluded.is_empty() {
+        return Vec::new();
+    }
+    let mut mask = vec![false; dom.len()];
+    for &root in excluded {
+        if root.index() >= mask.len() {
+            continue;
+        }
+        mask[root.index()] = true;
+        for node in dom.descendants(root) {
+            mask[node.index()] = true;
+        }
+    }
+    mask
 }
 pub fn get_class_weight(dom: &Dom, id: NodeId, weight_classes: bool) -> i32 {
     if !weight_classes {
@@ -787,7 +807,7 @@ fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value:
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateFeatureIndex, compute_readability_scores, get_link_density,
+        CandidateFeatureIndex, build_exclusion_mask, compute_readability_scores, get_link_density,
         get_link_density_cached, get_or_compute_stats, stats_for_text,
     };
     use crate::candidate::CandidateSet;
@@ -860,6 +880,39 @@ mod tests {
     }
 
     #[test]
+    fn structural_counts_remain_exact_for_boundary_selection() {
+        let table = "<table><tr><td>A</td><td>B</td></tr>".to_owned()
+            + &"<tr><td>C</td><td>D</td></tr>".repeat(5)
+            + "</table>";
+        let html = format!(
+            "<body><main>{}{}{}{}{}</main></body>",
+            "<p>Text</p>".repeat(300),
+            "<h2>Heading</h2>".repeat(300),
+            "<pre>Code</pre>".repeat(300),
+            table.repeat(300),
+            "<figure><img src=\"image.png\"></figure>".repeat(300),
+        );
+        let dom = Dom::parse_document(&html).unwrap();
+        let main = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let candidate = *candidates
+            .iter()
+            .find(|candidate| candidate.node == main)
+            .unwrap();
+        let mut store = NodeStateStore::new();
+        let mut table_nodes = Vec::new();
+        crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut table_nodes);
+        let index = CandidateFeatureIndex::new(&dom, &store);
+        let features = index.features(&dom, candidate, &mut store, false);
+
+        assert_eq!(features.paragraph_count, 300);
+        assert_eq!(features.heading_count, 300);
+        assert_eq!(features.code_block_count, 300);
+        assert_eq!(features.table_count, 300);
+        assert_eq!(features.figure_count, 300);
+    }
+
+    #[test]
     fn link_density_penalty_is_bounded() {
         let sparse = crate::candidate::CandidateFeatures {
             text_chars: 1_000,
@@ -911,7 +964,7 @@ mod tests {
             .collect();
         let mut store = NodeStateStore::new();
 
-        let scores = compute_readability_scores(&mut dom, paragraphs, &[], &mut store, true);
+        let scores = compute_readability_scores(&mut dom, paragraphs, &[], &[], &mut store, true);
 
         let article_score = scores
             .iter()
@@ -942,7 +995,15 @@ mod tests {
         assert!(stale.text_length > 80);
         assert!(store.link_length(main) > 0.0);
 
-        let scores = compute_readability_scores(&mut dom, [visible], &[excluded], &mut store, true);
+        let excluded_mask = build_exclusion_mask(&dom, &[excluded]);
+        let scores = compute_readability_scores(
+            &mut dom,
+            [visible],
+            &[excluded],
+            &excluded_mask,
+            &mut store,
+            true,
+        );
         assert!(scores.iter().any(|score| score.node == main));
 
         let fresh = get_or_compute_stats(&dom, main, &mut store);
