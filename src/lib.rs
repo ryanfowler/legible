@@ -72,8 +72,9 @@ mod specialized;
 mod text;
 
 pub use diagnostics::{
-    AttemptRejectionReason, CandidateSourceInfo, ContentMetricsInfo, ExtractionAttempt,
-    ExtractionDiagnostics, ExtractionStrategyInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+    AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
+    ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
+    NormalizationCountsInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
 };
 pub use error::{Error, Result};
 pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};

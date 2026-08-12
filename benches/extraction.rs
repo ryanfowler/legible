@@ -36,6 +36,15 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
             "reference" => html.push_str(&format!(
                 "<section><h2>Method {index}</h2><pre><code>let value_{index} = parse(input);</code></pre><table><tr><th>Field</th><th>Value</th></tr><tr><td>index</td><td>{index}</td></tr></table></section>"
             )),
+            "code" => html.push_str(&format!(
+                "<section><h2>Example {index}</h2><div class='highlight language-rust'><div class='toolbar'><button>Copy</button></div><pre><code><span class='line'><span class='line-number'>{index}</span><span>fn example_{index}() {{</span></span><br><span class='line'>    println!(\"value {index}\");</span><br><span class='line'>}}</span></code></pre></div></section>"
+            )),
+            "math" => html.push_str(&format!(
+                "<section><h2>Equation {index}</h2><p>The result follows from <math><mfrac><mi>x</mi><mn>{index}</mn></mfrac></math>.</p><div class='katex'><math aria-hidden='true'><msup><mi>x</mi><mn>2</mn></msup></math><span class='katex-html'>x²</span></div></section>"
+            )),
+            "tables" => html.push_str(&format!(
+                "<section><h2>Dataset {index}</h2><table><thead><tr><th>Name</th><th>Value</th><th>Status</th></tr></thead><tbody><tr><td>entry-{index}</td><td>{index}</td><td>ready</td></tr><tr><td>alternate-{index}</td><td>{}</td><td>complete</td></tr></tbody></table><table role='presentation'><tr><td><p>Layout prose {index} contains a complete explanation that must remain readable after normalization.</p></td></tr></table></section>", index + 1
+            )),
             "listing" => html.push_str(&format!(
                 "<article><h2><a href='/entry/{index}'>Entry {index}</a></h2><p>This entry contains useful summary text and stable benchmark content.</p></article>"
             )),
@@ -97,7 +106,7 @@ fn bench_extract(c: &mut Criterion) {
         let html = benchmark_page(kind, bytes);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
-            b.iter(|| extract(black_box(html), Some(url)))
+            b.iter(|| extract(black_box(html), Some(url)).unwrap())
         });
     }
     group.finish();
@@ -124,9 +133,13 @@ fn bench_lazy_outputs(c: &mut Criterion) {
 
 fn bench_complex_pages(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex_pages");
+    group.sample_size(20);
     for (name, kind, url) in [
         ("prose", "prose", "https://example.com"),
-        ("reference", "reference", "https://example.com"),
+        ("documentation", "reference", "https://example.com"),
+        ("highlighted-code", "code", "https://example.com"),
+        ("math", "math", "https://example.com"),
+        ("table-heavy", "tables", "https://example.com"),
         ("listing", "listing", "https://example.com"),
         ("malformed", "malformed", "https://example.com"),
         ("metadata-heavy", "metadata", "https://example.com"),
@@ -135,7 +148,30 @@ fn bench_complex_pages(c: &mut Criterion) {
         let html = benchmark_page(kind, 250_000);
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &html, |b, html| {
-            b.iter(|| extract(black_box(html), Some(url)))
+            b.iter(|| extract(black_box(html), Some(url)).unwrap())
+        });
+    }
+    group.finish();
+}
+
+fn bench_large_compatibility_fixtures(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_compatibility_fixtures");
+    group.sample_size(10);
+    for (name, html, url) in [
+        (
+            "guardian-article",
+            include_str!("fixtures/guardian-article/source.html"),
+            "https://www.theguardian.com/example",
+        ),
+        (
+            "wikipedia-reference",
+            include_str!("fixtures/wikipedia-reference/source.html"),
+            "https://en.wikipedia.org/wiki/Example",
+        ),
+    ] {
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), html, |b, html| {
+            b.iter(|| extract(black_box(html), Some(url)).unwrap())
         });
     }
     group.finish();
@@ -167,6 +203,7 @@ criterion_group!(
     bench_extract,
     bench_lazy_outputs,
     bench_complex_pages,
+    bench_large_compatibility_fixtures,
     bench_deeply_nested
 );
 criterion_main!(benches);

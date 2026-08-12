@@ -28,18 +28,29 @@ fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     normalize_after_cleanup(dom, root, nodes);
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NormalizationStats {
+    pub(crate) flattened_layout_tables: usize,
+}
+
 /// Normalizes semantic structures that hard cleanup does not remove.
 ///
 /// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
 /// already converted code, math, media, callouts, and footnotes. Cleanup does not
 /// create new source structures for those types.
-pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+pub(crate) fn normalize_after_cleanup(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+) -> NormalizationStats {
     images::normalize(dom, root, nodes);
     headings::normalize(dom, root);
     lists::normalize(dom, root);
     normalize_figures(dom, root);
     normalize_repeated_table_listings(dom, root);
-    tables::normalize_layout_tables(dom, root);
+    NormalizationStats {
+        flattened_layout_tables: tables::normalize_layout_tables(dom, root),
+    }
 }
 
 /// Captures semantic source data that hard cleanup would otherwise remove.

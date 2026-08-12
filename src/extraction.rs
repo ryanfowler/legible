@@ -7,8 +7,9 @@ use crate::candidate::{
 use crate::cleaning::*;
 use crate::constants::{is_alter_to_div_exception, is_default_tag_to_score, regexps};
 use crate::diagnostics::{
-    AttemptRejectionReason, CandidateSourceInfo, ContentMetricsInfo, ExtractionAttempt,
-    ExtractionDiagnostics, ExtractionStrategyInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+    AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
+    ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
+    NormalizationCountsInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
@@ -53,7 +54,10 @@ pub(crate) struct ContentExtractor<'a> {
     url_error: Option<url::ParseError>,
     best_attempt: Option<BestAttempt>,
     diagnostic_attempts: Option<Vec<ExtractionAttempt>>,
+    diagnostic_cleanup_actions: Vec<CleanupActionInfo>,
+    diagnostic_normalization: NormalizationCountsInfo,
     specialized_root: Option<NodeId>,
+    specialized_identity: Option<&'static str>,
     page_kind: PageKind,
 }
 struct BestAttempt {
@@ -196,7 +200,10 @@ impl<'a> ContentExtractor<'a> {
             url_error,
             best_attempt: None,
             diagnostic_attempts: options.diagnostics.then(Vec::new),
+            diagnostic_cleanup_actions: Vec::new(),
+            diagnostic_normalization: NormalizationCountsInfo::default(),
             specialized_root: None,
+            specialized_identity: None,
             page_kind: PageKind::Unknown,
         }
     }
@@ -267,6 +274,7 @@ impl<'a> ContentExtractor<'a> {
             if let Some(result) = specialized {
                 self.dom = result.dom;
                 self.specialized_root = Some(result.root);
+                self.specialized_identity = Some(result.identity);
                 self.page_kind = result.kind;
             }
         }
@@ -310,6 +318,7 @@ impl<'a> ContentExtractor<'a> {
             .take()
             .map(|attempts| ExtractionDiagnostics {
                 selected_strategy: self.strategy.into(),
+                specialized_extractor: self.specialized_identity.map(str::to_owned),
                 attempts,
             });
         let retained_structured_data = self
@@ -385,6 +394,8 @@ impl<'a> ContentExtractor<'a> {
                 continue;
             }
             self.strategy = strategy;
+            self.diagnostic_cleanup_actions.clear();
+            self.diagnostic_normalization = NormalizationCountsInfo::default();
             // Discovery only records nodes. It does not mutate the source DOM.
             // Deferred removals stay attached until all candidate scores and
             // link-density values have been calculated.
@@ -691,6 +702,7 @@ impl<'a> ContentExtractor<'a> {
             let excerpt = self.content_excerpt(content_id);
             let access_barrier = is_access_barrier(&self.dom, content_id);
             self.post_process(content_id, &mut cleaning_nodes);
+            self.capture_normalization_counts(content_id);
             let result_dom = if synthetic {
                 self.dom.copy_subtree_as_fragment(content_id)
             } else {
@@ -915,6 +927,8 @@ impl<'a> ContentExtractor<'a> {
                 good: quality.is_good(),
                 suspiciously_small: quality.is_suspiciously_small(),
             },
+            cleanup_actions: self.diagnostic_cleanup_actions.clone(),
+            normalization: self.diagnostic_normalization,
             accepted,
             rejection_reason,
         });
@@ -1652,8 +1666,11 @@ impl<'a> ContentExtractor<'a> {
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
         preserve_semantics_before_cleanup(&mut self.dom, root);
+        let before = self.diagnostic_element_count(root);
         remove_decorative_media_before_cleanup(&mut self.dom, root);
+        self.record_cleanup_delta(CleanupActionKind::DecorativeMedia, before, root);
         clean_styles(&mut self.dom, root, nodes);
+        let before = self.diagnostic_element_count(root);
         hard_cleanup(
             &mut self.dom,
             root,
@@ -1661,13 +1678,20 @@ impl<'a> ContentExtractor<'a> {
             self.strategy == ExtractionStrategy::RelaxedVisibility,
             nodes,
         );
+        self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
         if self.strategy.conditional_cleanup() && self.page_kind.uses_article_cleanup() {
+            let before = self.diagnostic_element_count(root);
             heuristic_cleanup(&mut self.dom, root, &mut self.node_data, text_buffer, nodes);
+            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 
         // Normalization is separate from relevance cleanup. Serializers receive
         // stable code, figure, image, footnote, and table structures.
-        normalize_after_cleanup(&mut self.dom, root, nodes);
+        let normalization = normalize_after_cleanup(&mut self.dom, root, nodes);
+        if self.diagnostic_attempts.is_some() {
+            self.diagnostic_normalization.flattened_layout_tables =
+                normalization.flattened_layout_tables;
+        }
 
         // Single traversal collects both paragraphs and line breaks,
         // replacing two separate filters over `descendants`.
@@ -1833,8 +1857,77 @@ impl<'a> ContentExtractor<'a> {
                 }
             }
         }
+        let before = self.diagnostic_element_count(root);
         finish_normalization(&mut self.dom, root, nodes);
+        self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
     }
+
+    fn diagnostic_element_count(&self, root: NodeId) -> Option<usize> {
+        self.diagnostic_attempts.as_ref()?;
+        Some(
+            self.dom
+                .descendants(root)
+                .filter(|&node| self.dom.is_element(node))
+                .count(),
+        )
+    }
+
+    fn record_cleanup_delta(
+        &mut self,
+        kind: CleanupActionKind,
+        before: Option<usize>,
+        root: NodeId,
+    ) {
+        let Some(before) = before else {
+            return;
+        };
+        let removed_elements = before.saturating_sub(
+            self.dom
+                .descendants(root)
+                .filter(|&node| self.dom.is_element(node))
+                .count(),
+        );
+        if removed_elements > 0 {
+            self.diagnostic_cleanup_actions.push(CleanupActionInfo {
+                kind,
+                removed_elements,
+            });
+        }
+    }
+
+    fn capture_normalization_counts(&mut self, root: NodeId) {
+        if self.diagnostic_attempts.is_none() {
+            return;
+        }
+        let flattened_layout_tables = self.diagnostic_normalization.flattened_layout_tables;
+        let mut counts = NormalizationCountsInfo {
+            flattened_layout_tables,
+            ..NormalizationCountsInfo::default()
+        };
+        for node in self.dom.descendants(root) {
+            match self.dom.tag(node) {
+                Some(Tag::Pre)
+                    if self
+                        .dom
+                        .element_children(node)
+                        .any(|child| self.dom.tag(child) == Some(Tag::Code)) =>
+                {
+                    counts.code_blocks += 1;
+                }
+                Some(Tag::Img) => counts.images += 1,
+                Some(Tag::Table) => counts.tables += 1,
+                _ => {}
+            }
+            counts.footnote_references +=
+                usize::from(self.dom.attr(node, AttrName::DataFootnoteRef).is_some());
+            counts.footnote_definitions +=
+                usize::from(self.dom.attr(node, AttrName::DataFootnote).is_some());
+            counts.math_expressions +=
+                usize::from(self.dom.attr(node, AttrName::DataMath).is_some());
+        }
+        self.diagnostic_normalization = counts;
+    }
+
     fn restore_source(&mut self, source: Dom) {
         self.dom = source;
         self.page_byline = None;
@@ -2353,6 +2446,15 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 .count()
                 == 1
         );
+        assert!(diagnostics.attempts.iter().all(|attempt| {
+            attempt.normalization.code_blocks == 0
+                && attempt.normalization.footnote_references == 0
+                && attempt.normalization.footnote_definitions == 0
+                && attempt.normalization.math_expressions == 0
+                && attempt.normalization.images == 0
+                && attempt.normalization.tables == 0
+                && attempt.normalization.flattened_layout_tables == 0
+        }));
     }
 
     #[test]
