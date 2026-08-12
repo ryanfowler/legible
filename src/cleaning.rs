@@ -867,15 +867,43 @@ pub(crate) fn heuristic_cleanup(
     nodes: &mut Vec<NodeId>,
 ) {
     nodes.clear();
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    let mut heading_boundaries = vec![false; dom.len()];
+    for &(node, _) in &snapshot {
+        if !is_related_heading(dom, node) {
+            continue;
+        }
+        let mut ancestor = dom.parent(node);
+        while let Some(candidate) = ancestor.filter(|&candidate| candidate != root) {
+            if matches!(
+                dom.tag(candidate),
+                Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Section)
+            ) {
+                let mut candidate_text = String::new();
+                dom.append_normalized_text(candidate, &mut candidate_text);
+                let links = dom
+                    .descendants(candidate)
+                    .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
+                    .count();
+                // Heading-only evidence must stay bounded so long reference sections remain.
+                if links >= 2 && candidate_text.chars().count() < 1_200 {
+                    heading_boundaries[candidate.index()] = true;
+                    break;
+                }
+            }
+            ancestor = dom.parent(candidate);
+        }
+    }
+
     let mut boundary_depth = None;
-    for (node, depth) in dom.element_descendants_snapshot_with_depth(root) {
+    for (node, depth) in snapshot {
         if let Some(outer_depth) = boundary_depth {
             if depth > outer_depth {
                 continue;
             }
             boundary_depth = None;
         }
-        if is_heuristic_boundary(dom, node) {
+        if heading_boundaries[node.index()] || is_heuristic_boundary(dom, node) {
             nodes.push(node);
             boundary_depth = Some(depth);
         }
@@ -1071,6 +1099,38 @@ pub(crate) fn heuristic_cleanup(
     }
 
     remove_contextual_boilerplate(dom, root, store, text_buffer, nodes);
+}
+
+fn is_related_heading(dom: &Dom, node: NodeId) -> bool {
+    if !matches!(
+        dom.tag(node),
+        Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+    ) {
+        return false;
+    }
+    let mut text = String::new();
+    dom.append_normalized_text(node, &mut text);
+    let text = text.trim().to_ascii_lowercase();
+    matches!(
+        text.as_str(),
+        "related"
+            | "related articles"
+            | "related content"
+            | "related posts"
+            | "related stories"
+            | "recommended"
+            | "recommended reading"
+            | "further reading"
+            | "see also"
+            | "read next"
+            | "read more"
+            | "more stories"
+            | "more articles"
+            | "more posts"
+            | "you may also like"
+            | "you might also like"
+            | "about the author"
+    )
 }
 
 /// Removes short textual controls that do not always have useful class names.

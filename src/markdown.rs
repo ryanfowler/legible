@@ -41,6 +41,26 @@ trait MarkdownTree {
     fn attr(&self, node: Self::Node, name: AttrName) -> Option<&str>;
     fn attr_by_local_name(&self, node: Self::Node, name: &str) -> Option<&str>;
 
+    fn has_descendant_tag(&self, root: Self::Node, wanted: Tag) -> bool {
+        let mut nodes = SmallVec::<[Self::Node; 16]>::new();
+        let mut child = self.first_child(root);
+        while let Some(node) = child {
+            nodes.push(node);
+            child = self.next_sibling(node);
+        }
+        while let Some(node) = nodes.pop() {
+            if self.tag(node) == Some(wanted) {
+                return true;
+            }
+            let mut child = self.first_child(node);
+            while let Some(current) = child {
+                nodes.push(current);
+                child = self.next_sibling(current);
+            }
+        }
+        false
+    }
+
     fn for_each_text(&self, root: Self::Node, mut visit: impl FnMut(&str)) {
         let mut nodes = SmallVec::<[(Self::Node, bool); 16]>::new();
         nodes.push((root, false));
@@ -160,6 +180,9 @@ enum Close<N> {
     Block,
     Marker(RunKind),
     TableCellSeparator,
+    TableRow,
+    TableHeaderSeparator(usize),
+    Table,
     Link(N),
     Quote,
     List,
@@ -172,6 +195,8 @@ struct MarkdownSerializer<'a, T: MarkdownTree> {
     out: Output,
     tasks: Vec<Task<T::Node>>,
     list_depth: usize,
+    table_rows: SmallVec<[usize; 4]>,
+    table_gfm: SmallVec<[bool; 4]>,
     config: MarkdownConfig,
 }
 
@@ -184,6 +209,8 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             // adversarial nesting cannot exhaust the call stack.
             tasks: Vec::with_capacity(32),
             list_depth: 0,
+            table_rows: SmallVec::new(),
+            table_gfm: SmallVec::new(),
             config,
         }
     }
@@ -376,6 +403,9 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             Tag::Code => self.code_span(id),
             Tag::Table => {
                 self.out.ensure_blank_line();
+                self.table_rows.push(0);
+                self.table_gfm.push(self.table_gfm.is_empty());
+                self.tasks.push(Task::Close(Close::Table));
                 self.push_children(id, Mode::Block);
             }
             Tag::Tr => self.table_row(id),
@@ -685,7 +715,22 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             self.tasks.push(Task::Close(Close::Block));
             return;
         }
-        self.tasks.push(Task::Close(Close::Block));
+        let gfm = self.table_gfm.last().copied().unwrap_or(false)
+            && !self.dom.has_descendant_tag(id, Tag::Table);
+        let first_row = gfm && self.table_rows.last().is_some_and(|rows| *rows == 0);
+        if let Some(rows) = self.table_rows.last_mut() {
+            *rows += 1;
+        }
+        if gfm {
+            self.out.markup("| ");
+            if first_row {
+                self.tasks
+                    .push(Task::Close(Close::TableHeaderSeparator(cells.len())));
+            }
+            self.tasks.push(Task::Close(Close::TableRow));
+        } else {
+            self.tasks.push(Task::Close(Close::Block));
+        }
         for (index, cell) in cells.into_iter().enumerate().rev() {
             self.tasks.push(Task::Node(cell, Mode::Inline));
             if index != 0 {
@@ -813,6 +858,25 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 self.out.close_marker(marker, marker);
             }
             Close::TableCellSeparator => self.out.markup(" | "),
+            Close::TableRow => {
+                self.out.markup(" |");
+                self.out.newline();
+            }
+            Close::TableHeaderSeparator(columns) => {
+                self.out.markup("| ");
+                for column in 0..columns {
+                    if column > 0 {
+                        self.out.markup(" | ");
+                    }
+                    self.out.markup("---");
+                }
+                self.out.markup(" |");
+                self.out.newline();
+            }
+            Close::Table => {
+                self.table_rows.pop();
+                self.table_gfm.pop();
+            }
             Close::Link(id) => {
                 if self.out.close_marker("[", "](") {
                     // HTML whitespace at the end of the label belongs after
@@ -1664,16 +1728,16 @@ mod tests {
     }
 
     #[test]
-    fn tables_remain_readable_without_gfm_extensions() {
+    fn tables_use_valid_gfm_syntax() {
         assert_eq!(
             markdown("<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"),
-            "A | B\n1 | 2\n"
+            "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
         );
         assert_eq!(
             markdown(
                 "<table><tbody><tr><td>A|B</td><td><strong>C</strong></td></tr></tbody></table>"
             ),
-            "A\\|B | **C**\n"
+            "| A\\|B | **C** |\n| --- | --- |\n"
         );
         assert_eq!(
             markdown(

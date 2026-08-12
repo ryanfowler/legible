@@ -322,8 +322,13 @@ impl<'a> ContentExtractor<'a> {
         let short_source_access_barrier = (source_metrics.word_count <= 60
             || source_metrics.text_chars <= 400)
             && is_access_barrier(&self.dom, body);
+        let substantial_hidden_gain = relaxed_source_metrics.text_chars
+            >= source_metrics.text_chars.saturating_mul(2)
+            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(1_000);
         let visibility_recovery_needed = has_relaxable_hidden_content
-            && (source_metrics.word_count <= 30 || source_metrics.text_chars <= 200)
+            && (source_metrics.word_count <= 30
+                || source_metrics.text_chars <= 200
+                || substantial_hidden_gain)
             && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_mul(2)
             && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(100);
         let structured_root = locate_structured_content(
@@ -2042,6 +2047,44 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     }
 
     #[test]
+    fn cleanup_removes_related_sections_by_heading_and_links() {
+        let html = r#"<body><main><article>
+            <h1>Primary guide</h1>
+            <p>This article explains the primary topic with complete sentences, useful context, practical details, and a clear conclusion. It gives readers enough information to answer the question without relying on the links below.</p>
+            <div class="wp-block-group alignright">
+                <h3>Related</h3>
+                <div><a href="/one">A related story about the same topic</a></div>
+                <div><a href="/two">Another related story with more detail</a></div>
+            </div>
+        </article></main></body>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("primary topic"), "{markdown}");
+        assert!(!markdown.contains("A related story"), "{markdown}");
+        assert!(!markdown.contains("Another related story"), "{markdown}");
+    }
+
+    #[test]
+    fn cleanup_keeps_substantial_further_reading_content() {
+        let substantial_section = "This section explains the related research in detail, including its methods, limitations, and practical implications. ".repeat(14);
+        let html = format!(
+            r#"<body><main><article>
+                <h1>Primary guide</h1>
+                <p>The primary guide contains complete context and a clear conclusion for the reader.</p>
+                <section><h2>Further reading</h2><p>{substantial_section}</p><a href="/one">First reference</a><a href="/two">Second reference</a></section>
+            </article></main></body>"#
+        );
+
+        let markdown = crate::extract(&html, None).unwrap().markdown();
+
+        assert!(
+            markdown.contains("related research in detail"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
     fn unlikely_roles_are_evidence_instead_of_deletion_rules() {
         let html = r#"<body><div role="complementary" class="article-content">
             <p>This complete guide remains available despite its conflicting semantic role.</p>
@@ -2300,6 +2343,27 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             attempt.rejection_reason == Some(AttemptRejectionReason::PotentialHiddenContent)
         }));
         assert!(page.text().contains("recovered section"));
+    }
+
+    #[test]
+    fn relaxed_visibility_recovers_a_large_streamed_fragment() {
+        let hidden_detail = "The streamed article explains configuration, validation, compatibility, deployment, and recovery with practical detail. ".repeat(30);
+        let visible_detail = "The page includes a visible summary with enough metadata and introductory context for normal extraction, but the complete article is still being streamed into the hidden fragment. ".repeat(3);
+        let html = format!(
+            r#"<body><main><header><h1>Streamed article</h1><p>{visible_detail}</p></header><div hidden id="S:0"><p>{hidden_detail}</p><h2>Implementation</h2><p>The second streamed paragraph gives the final implementation details and conclusion.</p></div></main></body>"#
+        );
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+
+        assert!(page.text().contains("streamed article explains"));
+        assert!(page.text().contains("Implementation"));
+        assert_eq!(
+            page.diagnostics().unwrap().selected_strategy,
+            ExtractionStrategyInfo::RelaxedVisibility
+        );
     }
 
     #[test]
