@@ -16,8 +16,8 @@ use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
-    adopt_external_footnotes, collect_external_footnotes, finish_normalization,
-    has_primary_heading_semantics, is_accessible_math, normalize_after_cleanup,
+    accessible_math_nodes, adopt_external_footnotes, collect_external_footnotes,
+    finish_normalization, has_primary_heading_semantics, normalize_after_cleanup,
     normalize_scoring_structure, preserve_semantics_before_cleanup,
     remove_decorative_media_before_cleanup,
 };
@@ -370,10 +370,12 @@ impl<'a> ContentExtractor<'a> {
                     to_score.push(id)
                 }
             }
+            let excluded_mask = build_exclusion_mask(&working_dom, &discovery.remove_after_scoring);
             let readability_scores = compute_readability_scores(
                 &mut working_dom,
                 to_score,
                 &discovery.remove_after_scoring,
+                &excluded_mask,
                 &mut self.node_data,
                 self.strategy.weight_classes(),
             );
@@ -390,7 +392,7 @@ impl<'a> ContentExtractor<'a> {
                 &working_dom,
                 &mut candidates,
                 readability_scores,
-                &discovery.remove_after_scoring,
+                &excluded_mask,
             );
             let body = working_dom.body().ok_or(Error::NoBody)?;
             let mut selection = select_content_root(
@@ -1143,8 +1145,8 @@ impl<'a> ContentExtractor<'a> {
         node_text == sibling_buffer.trim()
     }
 
-    fn is_visible_for_strategy(&self, node: NodeId) -> bool {
-        if is_accessible_math(&self.dom, node) {
+    fn is_visible_for_strategy(&self, node: NodeId, accessible_math: &[bool]) -> bool {
+        if accessible_math.get(node.index()).copied().unwrap_or(false) {
             return true;
         }
         let utility_hidden = self.has_hidden_utility_class(node);
@@ -1197,6 +1199,7 @@ impl<'a> ContentExtractor<'a> {
         let initial_nodes = self
             .dom
             .element_descendants_snapshot_with_depth(self.dom.root());
+        let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
         let mut excluded_depth = None;
         let mut remove_title = true;
         for (id, depth) in initial_nodes {
@@ -1217,7 +1220,7 @@ impl<'a> ContentExtractor<'a> {
                 self.is_static_hidden_marker(id)
                     && (!allowed[id.index()] || self.is_duplicate_hidden_variant(id))
             });
-            if !self.is_visible_for_strategy(id)
+            if !self.is_visible_for_strategy(id, &accessible_math)
                 || self.is_modal_or_dialog(id)
                 || unsupported_hidden
             {
@@ -1303,7 +1306,7 @@ impl<'a> ContentExtractor<'a> {
         dom: &Dom,
         candidates: &mut CandidateSet,
         readability_scores: SmallVec<[ReadabilityScore; 64]>,
-        excluded: &[NodeId],
+        excluded: &[bool],
     ) -> SmallVec<[RankedCandidate; 64]> {
         for readability in readability_scores {
             candidates.add_readability(readability.node, readability.score);
@@ -1331,7 +1334,11 @@ impl<'a> ContentExtractor<'a> {
             .iter()
             .enumerate()
             .filter_map(|(order, candidate)| {
-                if Self::is_excluded_candidate(dom, candidate.node, excluded) {
+                if excluded
+                    .get(candidate.node.index())
+                    .copied()
+                    .unwrap_or(false)
+                {
                     return None;
                 }
                 let length =
@@ -1431,13 +1438,6 @@ impl<'a> ContentExtractor<'a> {
                 .then_with(|| a.order.cmp(&b.order))
         });
         scored
-    }
-
-    fn is_excluded_candidate(dom: &Dom, id: NodeId, excluded: &[NodeId]) -> bool {
-        excluded.contains(&id)
-            || dom
-                .ancestors(id)
-                .any(|ancestor| excluded.contains(&ancestor))
     }
 
     fn gather_siblings(
@@ -1892,20 +1892,18 @@ mod tests {
                 to_score.push(node);
             }
         }
+        let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
+            &excluded_mask,
             &mut readability.node_data,
             readability.strategy.weight_classes(),
         );
         let mut candidates = discovery.candidates;
-        let ranked = readability.rank_candidates(
-            &scoring_dom,
-            &mut candidates,
-            scores,
-            &discovery.remove_after_scoring,
-        );
+        let ranked =
+            readability.rank_candidates(&scoring_dom, &mut candidates, scores, &excluded_mask);
         scoring_dom
             .attr(ranked[0].node, AttrName::Id)
             .expect("winner must have a test ID")
@@ -2478,22 +2476,20 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 to_score.push(node);
             }
         }
+        let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
+            &excluded_mask,
             &mut readability.node_data,
             readability.strategy.weight_classes(),
         );
         assert!(scores.iter().any(|score| score.node == content));
 
         let mut candidates = discovery.candidates;
-        let ranked = readability.rank_candidates(
-            &scoring_dom,
-            &mut candidates,
-            scores,
-            &discovery.remove_after_scoring,
-        );
+        let ranked =
+            readability.rank_candidates(&scoring_dom, &mut candidates, scores, &excluded_mask);
         assert_eq!(ranked[0].node, content);
     }
 
@@ -2525,10 +2521,12 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 to_score.push(node);
             }
         }
+        let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
+            &excluded_mask,
             &mut readability.node_data,
             readability.strategy.weight_classes(),
         );
@@ -2539,12 +2537,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .unwrap();
         assert_eq!(raw_winner.node, blockquote);
         let mut candidates = discovery.candidates;
-        let ranked = readability.rank_candidates(
-            &scoring_dom,
-            &mut candidates,
-            scores,
-            &discovery.remove_after_scoring,
-        );
+        let ranked =
+            readability.rank_candidates(&scoring_dom, &mut candidates, scores, &excluded_mask);
         assert_eq!(ranked[0].node, main);
     }
 
@@ -2620,20 +2614,17 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 to_score.push(id)
             }
         }
+        let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
             to_score,
             &discovery.remove_after_scoring,
+            &excluded_mask,
             &mut readability.node_data,
             readability.strategy.weight_classes(),
         );
         let mut candidates = discovery.candidates;
-        let _ = readability.rank_candidates(
-            &scoring_dom,
-            &mut candidates,
-            scores,
-            &discovery.remove_after_scoring,
-        );
+        let _ = readability.rank_candidates(&scoring_dom, &mut candidates, scores, &excluded_mask);
 
         // Scoring can replace simple wrappers in its private copy. The source
         // subtree remains intact and contributes the same visible text.

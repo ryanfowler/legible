@@ -185,54 +185,62 @@ pub fn mark_data_tables(
             store.set_data_table(id, crate::dom::DataTableState::Layout);
             continue;
         }
-        if dom.has_attr(id, AttrName::Summary)
-            || dom
-                .descendants(id)
-                .any(|x| dom.tag(x) == Some(Tag::Caption) && dom.children(x).next().is_some())
-            || dom.descendants(id).any(|x| {
-                matches!(
-                    dom.tag(x),
-                    Some(Tag::Col | Tag::Colgroup | Tag::Tfoot | Tag::Thead | Tag::Th)
-                )
-            })
-        {
+
+        // Collect all table evidence in one subtree walk. The previous version
+        // scanned each table up to four times, which made malformed nested
+        // tables disproportionately expensive.
+        let mut has_data_structure = dom.has_attr(id, AttrName::Summary);
+        let mut has_nested_table = false;
+        let mut rows = 0_u32;
+        let mut cols = 0_u32;
+        for descendant in dom.descendants(id) {
+            match dom.tag(descendant) {
+                Some(Tag::Table) => has_nested_table = true,
+                Some(Tag::Caption) if dom.children(descendant).next().is_some() => {
+                    has_data_structure = true
+                }
+                Some(Tag::Col | Tag::Colgroup | Tag::Tfoot | Tag::Thead | Tag::Th) => {
+                    has_data_structure = true
+                }
+                Some(Tag::Tr) => {
+                    rows = rows.saturating_add(
+                        dom.attr(descendant, AttrName::RowSpan)
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1),
+                    );
+                    let column_count = dom
+                        .element_children(descendant)
+                        .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
+                        .map(|cell| {
+                            dom.attr(cell, AttrName::ColSpan)
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(1)
+                        })
+                        .fold(0_u32, u32::saturating_add);
+                    cols = cols.max(column_count);
+                }
+                _ => {}
+            }
+        }
+        if has_data_structure {
             store.set_data_table(id, crate::dom::DataTableState::Data);
-            continue;
-        }
-        if dom.descendants(id).any(|x| dom.tag(x) == Some(Tag::Table)) {
+        } else if has_nested_table {
             store.set_data_table(id, crate::dom::DataTableState::Layout);
-            continue;
-        }
-        if is_repeated_listing_table(dom, id) {
+        } else if is_repeated_listing_table(dom, id) {
             store.set_data_table(id, crate::dom::DataTableState::Listing);
-            continue;
+        } else {
+            store.set_data_table(
+                id,
+                if cols == 1
+                    || rows == 1
+                    || rows < 10 && cols <= 4 && rows.saturating_mul(cols) <= 10
+                {
+                    crate::dom::DataTableState::Layout
+                } else {
+                    crate::dom::DataTableState::Data
+                },
+            );
         }
-        let mut rows = 0;
-        let mut cols = 0;
-        for tr in dom.descendants(id).filter(|&x| dom.tag(x) == Some(Tag::Tr)) {
-            rows += dom
-                .attr(tr, AttrName::RowSpan)
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1);
-            let c = dom
-                .element_children(tr)
-                .filter(|&x| matches!(dom.tag(x), Some(Tag::Td | Tag::Th)))
-                .map(|x| {
-                    dom.attr(x, AttrName::ColSpan)
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                })
-                .sum();
-            cols = cols.max(c);
-        }
-        store.set_data_table(
-            id,
-            if cols == 1 || rows == 1 || rows < 10 && cols <= 4 && rows * cols <= 10 {
-                crate::dom::DataTableState::Layout
-            } else {
-                crate::dom::DataTableState::Data
-            },
-        );
     }
 }
 
@@ -1017,7 +1025,7 @@ pub(crate) fn heuristic_cleanup(
             && stats.text_length < 160
             && link_density >= 0.55
             && interaction_signals >= 2
-            && near_content_end(dom, node, root);
+            && near_content_end(dom, node, root, store);
 
         let taxonomy_name = name
             .split(|character: char| !character.is_ascii_alphanumeric())
@@ -1042,7 +1050,7 @@ pub(crate) fn heuristic_cleanup(
             && links >= 2
             && stats.text_length < 300
             && link_density >= 0.45
-            && near_content_end(dom, node, root);
+            && near_content_end(dom, node, root, store);
 
         if related
             || social
@@ -1058,7 +1066,7 @@ pub(crate) fn heuristic_cleanup(
             if protected {
                 hoist_protected_children(dom, node, store);
             }
-            dom.detach(node);
+            detach_and_invalidate_stats(dom, node, store);
         }
     }
 
@@ -1119,8 +1127,8 @@ fn remove_contextual_boilerplate(
                     Some(Tag::A | Tag::Button | Tag::Input | Tag::Select | Tag::Textarea)
                 )
             });
-        let at_start = near_content_start(dom, node, root);
-        let at_end = near_content_end(dom, node, root);
+        let at_start = near_content_start(dom, node, root, store);
+        let at_end = near_content_end(dom, node, root, store);
 
         let reading_time = is_reading_time_label(&text)
             && (at_start
@@ -1157,7 +1165,7 @@ fn remove_contextual_boilerplate(
                 || contains_any(&name, &["newsletter", "subscribe", "signup", "sign-up"]));
 
         if reading_time || advertisement || action || subscription {
-            dom.detach(node);
+            detach_and_invalidate_stats(dom, node, store);
         }
     }
 }
@@ -1190,7 +1198,11 @@ fn is_reading_time_label(text: &str) -> bool {
         && words.next().is_none()
 }
 
-fn hoist_protected_children(dom: &mut Dom, wrapper: NodeId, store: &crate::dom::NodeStateStore) {
+fn hoist_protected_children(
+    dom: &mut Dom,
+    wrapper: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) {
     let protected: SmallVec<[NodeId; 4]> = dom
         .descendants(wrapper)
         .filter(|&node| {
@@ -1202,7 +1214,26 @@ fn hoist_protected_children(dom: &mut Dom, wrapper: NodeId, store: &crate::dom::
         })
         .collect();
     for node in protected {
+        invalidate_stats_for_ancestors(dom, node, store);
         dom.insert_before(wrapper, node);
+    }
+}
+
+fn detach_and_invalidate_stats(
+    dom: &mut Dom,
+    node: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) {
+    invalidate_stats_for_ancestors(dom, node, store);
+    dom.detach(node);
+}
+
+fn invalidate_stats_for_ancestors(dom: &Dom, node: NodeId, store: &mut crate::dom::NodeStateStore) {
+    for ancestor in dom.ancestors(node) {
+        store.invalidate_stats(ancestor);
+        if store.link_lengths_enabled() {
+            store.set_link_length(ancestor, 0.0);
+        }
     }
 }
 
@@ -1293,17 +1324,21 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
     )
 }
 
-fn near_content_end(dom: &Dom, node: NodeId, root: NodeId) -> bool {
+fn near_content_end(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
     let mut current = node;
     let mut trailing_chars = 0_usize;
-    let mut buffer = String::new();
     loop {
         let mut sibling = dom.next_sibling(current);
         while let Some(next) = sibling {
+            // Reuse the cached normalized character count. The previous code
+            // rebuilt every following subtree for each heuristic boundary.
             trailing_chars = trailing_chars.saturating_add(
-                crate::scoring::get_normalized_inner_text(dom, next, &mut buffer)
-                    .chars()
-                    .count(),
+                crate::scoring::get_or_compute_stats(dom, next, store).text_length as usize,
             );
             if trailing_chars > 100 {
                 return false;
@@ -1320,17 +1355,19 @@ fn near_content_end(dom: &Dom, node: NodeId, root: NodeId) -> bool {
     }
 }
 
-fn near_content_start(dom: &Dom, node: NodeId, root: NodeId) -> bool {
+fn near_content_start(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
     let mut current = node;
     let mut leading_chars = 0_usize;
-    let mut buffer = String::new();
     loop {
         let mut sibling = dom.prev_sibling(current);
         while let Some(previous) = sibling {
             leading_chars = leading_chars.saturating_add(
-                crate::scoring::get_normalized_inner_text(dom, previous, &mut buffer)
-                    .chars()
-                    .count(),
+                crate::scoring::get_or_compute_stats(dom, previous, store).text_length as usize,
             );
             if leading_chars > 100 {
                 return false;
@@ -1628,6 +1665,20 @@ mod tests {
     }
 
     #[test]
+    fn extreme_table_spans_do_not_overflow() {
+        let dom = Dom::parse_fragment(
+            r#"<table><tr><td colspan="4294967295">A</td><td colspan="4294967295">B</td></tr><tr><td colspan="4294967295">C</td><td colspan="4294967295">D</td></tr></table>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let mut store = NodeStateStore::new();
+        let mut tables = Vec::new();
+        mark_data_tables(&dom, dom.root(), &mut store, &mut tables);
+        let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+        assert_eq!(store.is_data_table(table), Some(true));
+    }
+
+    #[test]
     fn explicit_data_table_semantics_prevent_listing_classification() {
         for attribute in [r#"role="table""#, r#"datatable="1""#] {
             let html = format!(
@@ -1739,6 +1790,18 @@ mod tests {
         assert!(text.contains("advertisement changed television"), "{text}");
         assert!(text.contains("read more carefully"), "{text}");
         assert!(text.contains("share this article in class"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_invalidates_stats_after_nested_removal() {
+        let advertisements = "<p>Advertisement</p>".repeat(10);
+        let html = format!(
+            "<article><p>Useful article content.</p><p><a href=\"/more\">Read more</a></p><div>{advertisements}</div></article>"
+        );
+        let text = clean_fragment(&html);
+        assert!(text.contains("Useful article content"), "{text}");
+        assert!(!text.contains("Read more"), "{text}");
+        assert!(!text.contains("Advertisement"), "{text}");
     }
 
     #[test]

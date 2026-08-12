@@ -1,7 +1,7 @@
 //! Internal content-root candidates.
 
 use crate::constants::split_word_tokens;
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeLink, Tag};
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
@@ -263,12 +263,14 @@ impl CandidateSet {
             }
         }
 
-        let mut nearest_authoritative_ancestor = vec![None; dom.len()];
+        // NodeLink uses a u32 sentinel, so this index is half the size of
+        // Vec<Option<NodeId>> on targets where NodeId has no niche.
+        let mut nearest_authoritative_ancestor = vec![NodeLink::NONE; dom.len()];
         for (node, _) in dom.element_descendants_snapshot_with_depth(dom.root()) {
             if let Some(parent) = dom.parent(node) {
                 nearest_authoritative_ancestor[node.index()] =
                     if self.is_authoritative_semantic(dom, parent) {
-                        Some(parent)
+                        NodeLink::from_option(Some(parent))
                     } else {
                         nearest_authoritative_ancestor[parent.index()]
                     };
@@ -282,7 +284,7 @@ impl CandidateSet {
                 || dom
                     .attr(candidate.node, AttrName::Role)
                     .is_some_and(|role| matches_role(role, "article"));
-            let Some(parent) = nearest_authoritative_ancestor[candidate.node.index()] else {
+            let Some(parent) = nearest_authoritative_ancestor[candidate.node.index()].get() else {
                 continue;
             };
             if is_article && has_text[candidate.node.index()] {
@@ -294,8 +296,8 @@ impl CandidateSet {
         CandidateContext {
             readability_in_subtree,
             has_authoritative_ancestor: nearest_authoritative_ancestor
-                .into_iter()
-                .map(|ancestor| ancestor.is_some())
+                .iter()
+                .map(|ancestor| ancestor.get().is_some())
                 .collect(),
             authoritative_count,
             article_peer_count,

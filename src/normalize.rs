@@ -80,7 +80,7 @@ pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
     matches!(dom.tag(node), Some(Tag::H1 | Tag::H2)) || headings::has_primary_role(dom, node)
 }
 
-pub(crate) use math::is_accessible_math;
+pub(crate) use math::accessible_math_nodes;
 
 /// Finishes normalization after URL and attribute cleanup.
 ///
@@ -307,6 +307,7 @@ fn normalize_figures(dom: &mut Dom, root: NodeId) {
 fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
     let tables: SmallVec<[(NodeId, u32); 8]> = dom
         .descendants(root)
+        .filter(|&node| dom.tag(node) == Some(Tag::Table))
         .filter_map(|node| repeated_listing_start(dom, node).map(|start| (node, start)))
         .collect();
     for (table, start) in tables.into_iter().rev() {
