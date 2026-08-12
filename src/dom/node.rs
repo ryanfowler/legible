@@ -49,12 +49,14 @@ impl Node {
     }
 }
 impl ElementData {
+    #[inline]
     pub(crate) fn attr(&self, name: AttrName) -> Option<&str> {
         self.attrs
             .iter()
             .find(|attribute| name.matches_local(attribute.name.local.as_ref()))
             .map(|attribute| attribute.value.as_ref())
     }
+    #[inline]
     pub(crate) fn attr_local(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
