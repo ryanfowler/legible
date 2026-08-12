@@ -6,6 +6,8 @@ use crate::scoring::has_single_tag_inside_element;
 /// Converts source code markup into `pre > code` blocks before cleanup can
 /// change line breaks or discard syntax-highlighter token spans.
 pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
+    normalize_line_number_gutters(dom, root);
+
     let nodes = dom.element_descendants_snapshot_with_depth(root);
     for (node, _) in nodes {
         if dom.parent(node).is_none() {
@@ -19,6 +21,11 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
             _ => {}
         }
     }
+
+    // Promotion can create a pre/code block from an orphan multiline code
+    // element. Run the gutter pass again so that form receives the same
+    // protection as a pre-existing block.
+    normalize_line_number_gutters(dom, root);
 
     let pre_blocks: Vec<_> = dom
         .element_descendants_snapshot_with_depth(root)
@@ -58,6 +65,203 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
             dom.replace_with(wrapper, pre);
         }
     }
+}
+
+/// Removes the parallel line-number column produced by common syntax highlighters.
+///
+/// A gutter is presentation. It must be removed before the table or wrapper is
+/// flattened, while source numbers remain ordinary code text.
+fn normalize_line_number_gutters(dom: &mut Dom, root: NodeId) {
+    let tables = dom
+        .element_descendants_snapshot_with_depth(root)
+        .into_iter()
+        .map(|(node, _)| node)
+        .filter(|&node| dom.tag(node) == Some(Tag::Table))
+        .collect::<Vec<_>>();
+
+    for table in tables.into_iter().rev() {
+        if dom.parent(table).is_none() {
+            continue;
+        }
+        let cells = dom
+            .descendants(table)
+            .filter(|&node| {
+                matches!(dom.tag(node), Some(Tag::Td | Tag::Th))
+                    && dom
+                        .ancestors(node)
+                        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Table))
+                        == Some(table)
+            })
+            .collect::<Vec<_>>();
+        let pre_blocks = cells
+            .iter()
+            .filter_map(|&cell| {
+                dom.descendants(cell)
+                    .find(|&node| dom.tag(node) == Some(Tag::Pre))
+            })
+            .collect::<Vec<_>>();
+        // Only flatten a table when the gutter has explicit highlighter
+        // evidence. A numeric-only code block can be legitimate source code,
+        // and guessing from its contents could destroy a real data table.
+        let has_gutter = pre_blocks
+            .iter()
+            .copied()
+            .any(|pre| has_line_number_marker(dom, pre))
+            || cells.iter().copied().any(|cell| is_gutter_cell(dom, cell))
+            || has_line_number_table_class(dom, table);
+        if !has_gutter {
+            continue;
+        }
+        let source_pres = pre_blocks
+            .into_iter()
+            .filter(|&pre| !is_gutter_pre(dom, pre))
+            .collect::<Vec<_>>();
+        if source_pres.is_empty() {
+            continue;
+        }
+        flatten_gutter_table(dom, table, &source_pres);
+    }
+
+    let pre_blocks = dom
+        .element_descendants_snapshot_with_depth(root)
+        .into_iter()
+        .map(|(node, _)| node)
+        .filter(|&node| dom.tag(node) == Some(Tag::Pre))
+        .collect::<Vec<_>>();
+    for pre in pre_blocks {
+        if dom.parent(pre).is_none() {
+            continue;
+        }
+        let line_numbers = dom
+            .descendants(pre)
+            .filter(|&node| is_line_number_element(dom, node))
+            .collect::<Vec<_>>();
+        for line_number in line_numbers {
+            if dom.parent(line_number).is_some() {
+                dom.detach(line_number);
+            }
+        }
+    }
+}
+
+fn flatten_gutter_table(dom: &mut Dom, table: NodeId, source_pres: &[NodeId]) {
+    let source_pre = source_pres[0];
+    let language = language_from_ancestors(dom, source_pre);
+    let source_code = dom
+        .element_children(source_pre)
+        .find(|&node| dom.tag(node) == Some(Tag::Code));
+    let target = source_code.unwrap_or(source_pre);
+    for &additional_pre in &source_pres[1..] {
+        let additional = dom
+            .element_children(additional_pre)
+            .find(|&node| dom.tag(node) == Some(Tag::Code))
+            .unwrap_or(additional_pre);
+        if !code_ends_with_newline(dom, target)
+            && dom.has_non_whitespace_text(additional)
+            && let Ok(newline) = dom.create_text("\n")
+        {
+            dom.append_child(target, newline);
+        }
+        dom.move_children(additional, target);
+    }
+
+    let parent = dom.parent(table);
+    if parent.is_some_and(|node| dom.tag(node) == Some(Tag::Code)) {
+        let Some(parent) = parent else {
+            return;
+        };
+        dom.move_children(target, parent);
+        if let Some(language) = language.as_deref() {
+            dom.set_attr(parent, AttrName::DataLanguage, language);
+        }
+        dom.detach(table);
+    } else if dom.parent(table).is_some() {
+        if let Some(language) = language.as_deref() {
+            dom.set_attr(source_pre, AttrName::DataLanguage, language);
+        }
+        dom.replace_with(table, source_pre);
+    }
+}
+
+fn code_ends_with_newline(dom: &Dom, root: NodeId) -> bool {
+    let mut last_text = None;
+    for node in std::iter::once(root).chain(dom.descendants(root)) {
+        if let Some(text) = dom.text_node(node) {
+            last_text = Some(text);
+        }
+    }
+    last_text.is_some_and(|text| text.ends_with('\n'))
+}
+
+fn language_from_ancestors(dom: &Dom, node: NodeId) -> Option<String> {
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .find_map(|ancestor| language_hint(dom, ancestor))
+}
+
+fn has_line_number_table_class(dom: &Dom, table: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(table, attribute))
+        .flat_map(str::split_whitespace)
+        .map(str::to_ascii_lowercase)
+        .any(|token| {
+            matches!(
+                token.as_str(),
+                "highlighttable" | "lntable" | "rouge-table" | "rouge-line-table"
+            )
+        })
+}
+
+fn is_gutter_pre(dom: &Dom, pre: NodeId) -> bool {
+    has_line_number_marker(dom, pre)
+        || dom.ancestors(pre).any(|ancestor| {
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|attribute| dom.attr(ancestor, attribute))
+                .flat_map(str::split_whitespace)
+                .any(|token| token.eq_ignore_ascii_case("linenodiv"))
+        })
+        || dom
+            .ancestors(pre)
+            .find(|&ancestor| matches!(dom.tag(ancestor), Some(Tag::Td | Tag::Th)))
+            .is_some_and(|cell| is_gutter_cell(dom, cell))
+}
+
+fn is_gutter_cell(dom: &Dom, cell: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(cell, attribute))
+        .flat_map(str::split_whitespace)
+        .map(str::to_ascii_lowercase)
+        .any(|token| matches!(token.as_str(), "linenos" | "rouge-gutter" | "gutter"))
+}
+
+fn has_line_number_marker(dom: &Dom, pre: NodeId) -> bool {
+    std::iter::once(pre)
+        .chain(dom.descendants(pre))
+        .any(|node| is_line_number_element(dom, node))
+}
+
+fn is_line_number_element(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(str::split_whitespace)
+        .map(str::to_ascii_lowercase)
+        .any(|token| {
+            matches!(
+                token.as_str(),
+                "lnt"
+                    | "lineno"
+                    | "line-number"
+                    | "line-numbers"
+                    | "line-numbers-rows"
+                    | "line-number-gutter"
+                    | "rouge-gutter"
+                    | "gutter"
+            ) || token.starts_with("line-number-")
+        })
 }
 
 fn ensure_code_child(dom: &mut Dom, pre: NodeId) {
@@ -326,5 +530,111 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(dom_to_markdown(&dom, root, 0), "```\nfirst\nsecond\n```\n");
+    }
+
+    #[test]
+    fn strips_inline_line_numbers_without_stripping_source_numbers() {
+        let mut dom = Dom::parse_fragment(
+            r#"<pre><code><span class="lineno">1</span><span>let value = 42;</span>
+<span class="lineno">2</span><span>println!("{value}");</span></code></pre>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "```\nlet value = 42;\nprintln!(\"{value}\");\n```\n"
+        );
+    }
+
+    #[test]
+    fn leaves_unmarked_numeric_code_tables_untouched() {
+        let mut dom = Dom::parse_fragment(
+            r#"<table><tr><td><pre><code>1
+2</code></pre></td><td><pre><code>value</code></pre></td></tr></table>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert!(
+            dom.descendants(root)
+                .any(|node| dom.tag(node) == Some(Tag::Table))
+        );
+    }
+
+    #[test]
+    fn strips_gutters_from_multiline_orphan_code() {
+        let mut dom = Dom::parse_fragment(
+            r#"<div><code class="language-rust"><span class="lineno">1</span><span>let value = 42;</span>
+<span class="lineno">2</span><span>value</span></code></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "```rust\nlet value = 42;\nvalue\n```\n"
+        );
+    }
+
+    #[test]
+    fn keeps_source_line_wrappers_with_data_line_number() {
+        let mut dom = Dom::parse_fragment(
+            r#"<pre><code><span data-line-number="1">42</span></code></pre>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(dom_to_markdown(&dom, root, 0), "```\n42\n```\n");
+    }
+
+    #[test]
+    fn flattens_pygments_and_rouge_multirow_gutters() {
+        let mut dom = Dom::parse_fragment(
+            r#"<table class="highlighttable"><tr><td class="linenos"><pre>1</pre></td><td class="code"><pre>first
+</pre></td></tr><tr><td class="linenos"><pre>2</pre></td><td class="code"><pre>second</pre></td></tr></table><table class="rouge-line-table"><tr><td class="rouge-gutter"><pre>1</pre></td><td class="rouge-code"><pre>third
+</pre></td></tr><tr><td class="rouge-gutter"><pre>2</pre></td><td class="rouge-code"><pre>fourth</pre></td></tr></table><table class="highlighttable"><tr><td><div class="linenodiv"><pre>1
+2</pre></div></td><td><pre>fifth
+sixth</pre></td></tr></table>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "```\nfirst\nsecond\n```\n\n```\nthird\nfourth\n```\n\n```\nfifth\nsixth\n```\n"
+        );
+    }
+
+    #[test]
+    fn strips_a_parallel_gutter_but_preserves_numeric_source_lines() {
+        let mut dom = Dom::parse_fragment(
+            r#"<table><tr><td><pre><code><span class="lnt">1
+</span><span class="lnt">2
+</span></code></pre></td><td><pre><code>1
+2</code></pre></td></tr></table>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(dom_to_markdown(&dom, root, 0), "```\n1\n2\n```\n");
     }
 }
