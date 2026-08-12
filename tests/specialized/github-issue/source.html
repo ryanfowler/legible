@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><title>Parser drops code · Issue #42 · example/legible</title></head><body data-turbo-body>
+<header><nav>Code Issues Pull requests Actions Projects</nav></header>
+<main>
+  <h1 class="gh-header-title"><bdi class="js-issue-title">Parser drops code</bdi> <span>#42</span></h1>
+  <div class="js-timeline-item" data-testid="issue-body-container">
+    <div class="timeline-comment-header"><a class="author" rel="author">alice</a><time>Aug 10, 2026</time><button>React</button></div>
+    <div data-testid="issue-body"><div class="issue-toolbar">edited by maintainers</div><div class="comment-body markdown-body js-comment-body"><p>The parser drops indentation from this example:</p><pre><code class="language-rust">fn main() {
+    println!("hello");
+}</code></pre><blockquote><p>Whitespace is part of the example.</p></blockquote></div><div class="issue-footer">reactions and status controls</div></div>
+  </div>
+  <aside>Assignees Labels Development</aside>
+  <div class="js-timeline-item" data-testid="issue-comment"><div class="timeline-comment"><div class="timeline-comment-header"><a class="author" rel="author">bob</a><time>Aug 11, 2026</time><button>React</button></div><div data-testid="comment-body"><div class="comment-toolbar">quote reply</div><div class="comment-body markdown-body js-comment-body"><p>I can reproduce this with nested token spans.</p></div><div class="comment-footer">reactions</div></div></div></div>
+  <div class="js-timeline-item"><div class="timeline-comment"><div class="timeline-comment-header"><a class="author" rel="author">alice</a><time>Aug 12, 2026</time></div><div class="comment-body markdown-body js-comment-body"><p>The new normalization pass fixes it.</p></div></div></div>
+</main>
+</body></html>

@@ -33,9 +33,10 @@ The extraction pipeline flows through these stages:
 1. **Document Parsing** - HTML parsed by `html5ever` into the internal stable-ID arena DOM
 2. **Preparation** (`cleaning.rs`) - Script removal, BR/font normalization, lazy image fixing
 3. **Metadata Extraction** (`metadata.rs`) - Candidate resolution from JSON-LD, OpenGraph, meta tags, and HTML elements
-4. **Content Extraction** (`extraction.rs`) - Strategy retries, candidate selection, and content consolidation
-5. **Content Cleaning** (`cleaning.rs`) - Hard cleanup, contextual boilerplate cleanup, and multi-signal heuristic cleanup
-6. **Semantic Normalization** (`normalize.rs`) - Image, code, figure, footnote, table, and wrapper normalization
+4. **Specialized Recognition** (`specialized/`) - High-confidence listing and discussion extraction
+5. **Content Extraction** (`extraction.rs`) - Strategy retries, candidate selection, and content consolidation
+6. **Content Cleaning** (`cleaning.rs`) - Hard cleanup, contextual boilerplate cleanup, and multi-signal heuristic cleanup
+7. **Semantic Normalization** (`normalize.rs`) - Image, code, figure, footnote, table, and wrapper normalization
 
 ### Key Modules
 
@@ -51,6 +52,8 @@ The extraction pipeline flows through these stages:
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
+| `page_kind.rs` | Internal page categories that control cleanup policy |
+| `specialized/` | Internal registry and extractors for non-article page structures |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |

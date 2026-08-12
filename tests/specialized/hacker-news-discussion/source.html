@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><title>Show HN: A safe HTML extractor | Hacker News</title></head><body>
+<table id="hnmain"><tr><td>
+  <table>
+    <tr class="athing" id="200"><td class="title"><span class="titleline"><a href="https://example.com/legible">Show HN: A safe HTML extractor</a></span></td></tr>
+    <tr><td></td><td class="subtext"><span class="score">75 points</span> by <a class="hnuser">maker</a> <span class="age">1 hour ago</span> | <a>12 comments</a></td></tr>
+    <tr><td colspan="2"><div class="toptext"><p>The extractor keeps a stable document tree and produces useful Markdown without a browser.</p></div></td></tr>
+  </table>
+  <table class="comment-tree">
+    <tr class="athing comtr" id="300"><td class="ind" width="0"><img width="0"></td><td><div class="comment"><span class="comhead"><a class="hnuser">reader</a> <span class="age">45 minutes ago</span></span><div class="commtext c00"><p>This design makes malformed input much easier to test.</p><pre><code class="language-rust">assert!(page.markdown().contains("extractor"));</code></pre></div></div></td></tr>
+    <tr class="athing comtr" id="301"><td class="ind" width="40"><img width="40"></td><td><div class="comment"><span class="comhead"><a class="hnuser">maker</a> <span class="age">30 minutes ago</span></span><div class="commtext c00"><p>Yes. The arena also keeps node identifiers stable.</p></div></div></td></tr>
+    <tr class="athing comtr" id="302"><td class="ind" width="0"><img width="0"></td><td><div class="comment"><span class="comhead"><a class="hnuser">another</a> <span class="age">20 minutes ago</span></span><div class="commtext c00"><p>It is useful that normal code normalization still runs.</p></div></div></td></tr>
+  </table>
+</td></tr></table>
+</body></html>
