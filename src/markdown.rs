@@ -822,7 +822,8 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 !language.is_empty()
                     && language.len() <= 32
                     && language.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'_' | b'.')
+                        byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'+' | b'#' | b'-' | b'_' | b'.')
                     })
             })
     }

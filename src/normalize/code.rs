@@ -1,7 +1,7 @@
 //! Canonical code block normalization.
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
-use crate::scoring::has_single_tag_inside_element;
+use crate::scoring::{get_normalized_inner_text, has_single_tag_inside_element};
 
 /// Converts source code markup into `pre > code` blocks before cleanup can
 /// change line breaks or discard syntax-highlighter token spans.
@@ -278,7 +278,8 @@ fn ensure_code_child(dom: &mut Dom, pre: NodeId) {
     if let Some(code) = code
         && let Some(language) = block_language_hint(dom, code, pre)
     {
-        dom.set_attr(code, AttrName::DataLanguage, &language);
+        set_code_language(dom, code, &language);
+        clear_source_language_markers(dom, pre);
     }
 }
 
@@ -320,7 +321,7 @@ fn promote_multiline_code(dom: &mut Dom, root: NodeId, code: NodeId) {
     dom.insert_before(code, pre);
     dom.append_child(pre, code);
     if let Some(language) = language {
-        dom.set_attr(code, AttrName::DataLanguage, &language);
+        set_code_language(dom, code, &language);
     }
 }
 
@@ -429,6 +430,160 @@ fn block_language_hint(dom: &Dom, code: NodeId, pre: NodeId) -> Option<String> {
             (is_code_wrapper(dom, parent) && is_code_wrapper(dom, grandparent))
                 .then(|| language_hint(dom, grandparent))?
         })
+        .or_else(|| language_from_header(dom, pre))
+}
+
+fn set_code_language(dom: &mut Dom, code: NodeId, language: &str) {
+    clear_source_language_markers(dom, code);
+    dom.set_attr(code, AttrName::DataLanguage, language);
+
+    let canonical = format!("language-{language}");
+    let mut classes = dom
+        .attr(code, AttrName::Class)
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    classes.push(canonical);
+    dom.set_attr(code, AttrName::Class, &classes.join(" "));
+}
+
+fn clear_source_language_markers(dom: &mut Dom, node: NodeId) {
+    dom.remove_attrs(
+        node,
+        &[
+            AttrName::DataCodeLanguage,
+            AttrName::DataLang,
+            AttrName::DataLanguage,
+            AttrName::Language,
+        ],
+    );
+    let Some(class) = dom.attr(node, AttrName::Class) else {
+        return;
+    };
+    let mut retained = Vec::new();
+    let mut tokens = class.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        let lowercase = token.to_ascii_lowercase();
+        if matches!(lowercase.as_str(), "brush:" | "brush")
+            && tokens.peek().is_some_and(|next| {
+                known_language(&next.trim_end_matches(';').to_ascii_lowercase())
+            })
+        {
+            tokens.next();
+            continue;
+        }
+        if lowercase.starts_with("language-")
+            || lowercase.starts_with("lang-")
+            || lowercase.starts_with("highlight-source-")
+            || lowercase.starts_with("brush:")
+        {
+            continue;
+        }
+        retained.push(token.to_owned());
+    }
+    if retained.is_empty() {
+        dom.remove_attr(node, AttrName::Class);
+    } else {
+        dom.set_attr(node, AttrName::Class, &retained.join(" "));
+    }
+}
+
+fn language_from_header(dom: &Dom, pre: NodeId) -> Option<String> {
+    let mut branch = pre;
+    // A highlighter often adds one neutral scrolling or sizing wrapper around
+    // pre. Keep the search local, but do not require that pass-through element
+    // to carry code-specific naming.
+    for depth in 0..2 {
+        let wrapper = dom.parent(branch)?;
+        if depth > 0 && !is_code_wrapper(dom, wrapper) {
+            return None;
+        }
+        let mut sibling = dom.prev_sibling(branch);
+        let mut buffer = String::new();
+        while let Some(node) = sibling {
+            if dom.tag(node).is_none() {
+                if dom
+                    .text_node(node)
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    return None;
+                }
+                sibling = dom.prev_sibling(node);
+                continue;
+            }
+            if dom.tag(node) == Some(Tag::Pre)
+                || dom
+                    .descendants(node)
+                    .any(|child| dom.tag(child) == Some(Tag::Pre))
+            {
+                return None;
+            }
+            let named_label = is_language_label(dom, node);
+            if named_label
+                && let Some(language) = dom
+                    .attr_by_local_name(node, "data-language-label")
+                    .and_then(normalize_explicit_language)
+            {
+                return Some(language);
+            }
+            let label = get_normalized_inner_text(dom, node, &mut buffer);
+            return if named_label {
+                language_from_label(label)
+            } else {
+                explicit_language_from_label(label)
+            };
+        }
+        branch = wrapper;
+    }
+    None
+}
+
+fn is_language_label(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(str::split_whitespace)
+        .map(str::to_ascii_lowercase)
+        .any(|token| {
+            matches!(
+                token.as_str(),
+                "code-header"
+                    | "code-language"
+                    | "code-lang"
+                    | "language-label"
+                    | "highlight-header"
+                    | "codeblock-title"
+            )
+        })
+        || dom
+            .attr_by_local_name(node, "data-language-label")
+            .is_some()
+}
+
+fn language_from_label(value: &str) -> Option<String> {
+    explicit_language_from_label(value).or_else(|| {
+        let value = value.trim().to_ascii_lowercase();
+        known_language(&value).then_some(value)
+    })
+}
+
+fn explicit_language_from_label(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(explicit) = value
+        .strip_prefix("language:")
+        .or_else(|| value.strip_prefix("language "))
+        .map(str::trim)
+    {
+        return normalize_explicit_language(explicit);
+    }
+    let explicit = value.strip_prefix("code:").map(str::trim).or_else(|| {
+        value
+            .strip_suffix(" code block")
+            .or_else(|| value.strip_suffix(" code"))
+            .map(str::trim)
+    })?;
+    known_language(explicit).then(|| explicit.to_owned())
 }
 
 fn is_code_wrapper(dom: &Dom, node: NodeId) -> bool {
@@ -441,42 +596,163 @@ fn is_code_wrapper(dom: &Dom, node: NodeId) -> bool {
                 .any(|token| {
                     matches!(
                         token.to_ascii_lowercase().as_str(),
-                        "highlight" | "codehilite" | "sourcecode"
+                        "highlight"
+                            | "codehilite"
+                            | "sourcecode"
+                            | "code-block"
+                            | "codeblock"
+                            | "syntax-highlight"
                     )
                 }))
 }
 
 fn language_hint(dom: &Dom, node: NodeId) -> Option<String> {
-    if let Some(value) = dom
-        .attr(node, AttrName::DataLanguage)
-        .or_else(|| dom.attr(node, AttrName::Lang))
-        .or_else(|| dom.attr_by_local_name(node, "data-lang"))
-        && let Some(language) = valid_language(value)
-    {
-        return Some(language.to_owned());
+    for name in [
+        AttrName::DataLanguage,
+        AttrName::DataLang,
+        AttrName::DataCodeLanguage,
+        AttrName::Language,
+    ] {
+        if let Some(language) = dom.attr(node, name).and_then(normalize_explicit_language) {
+            return Some(language);
+        }
     }
-    for token in dom.attr(node, AttrName::Class)?.split_whitespace() {
-        let Some(value) = token
+
+    if let Some(label) = dom
+        .attr(node, AttrName::AriaLabel)
+        .and_then(language_from_label)
+        .or_else(|| {
+            dom.attr(node, AttrName::Title)
+                .and_then(explicit_language_from_label)
+        })
+    {
+        return Some(label);
+    }
+
+    let classes = dom.attr(node, AttrName::Class).unwrap_or_default();
+    let mut tokens = classes.split_whitespace();
+    while let Some(token) = tokens.next() {
+        let lowercase = token.to_ascii_lowercase();
+        let prefixed = lowercase
             .strip_prefix("language-")
-            .or_else(|| token.strip_prefix("lang-"))
-        else {
-            continue;
-        };
-        if let Some(language) = valid_language(value) {
-            return Some(language.to_owned());
+            .or_else(|| lowercase.strip_prefix("lang-"))
+            .or_else(|| lowercase.strip_prefix("highlight-source-"));
+        if let Some(language) = prefixed.and_then(normalize_explicit_language) {
+            return Some(language);
+        }
+        if lowercase == "brush:"
+            && let Some(language) = tokens
+                .next()
+                .map(|value| value.trim_end_matches(';').to_ascii_lowercase())
+                .filter(|value| known_language(value))
+        {
+            return Some(language);
+        }
+        if let Some(language) = lowercase
+            .strip_prefix("brush:")
+            .map(|value| value.trim_end_matches(';').to_ascii_lowercase())
+            .filter(|value| known_language(value))
+        {
+            return Some(language);
         }
     }
     None
 }
 
-fn valid_language(value: &str) -> Option<&str> {
-    let value = value.trim();
+fn normalize_explicit_language(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
     (!value.is_empty()
         && value.len() <= 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'_' | b'.')))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'#' | b'-' | b'_' | b'.')
+        }))
     .then_some(value)
+}
+
+fn known_language(value: &str) -> bool {
+    matches!(
+        value,
+        "ada"
+            | "assembly"
+            | "astro"
+            | "bash"
+            | "c"
+            | "c#"
+            | "c++"
+            | "clojure"
+            | "coffee"
+            | "coffeescript"
+            | "cpp"
+            | "csharp"
+            | "cmake"
+            | "css"
+            | "dart"
+            | "diff"
+            | "docker"
+            | "dockerfile"
+            | "elixir"
+            | "elm"
+            | "erb"
+            | "erl"
+            | "erlang"
+            | "f#"
+            | "fish"
+            | "go"
+            | "graphql"
+            | "groovy"
+            | "haskell"
+            | "html"
+            | "ini"
+            | "java"
+            | "javascript"
+            | "js"
+            | "json"
+            | "jsonc"
+            | "jsx"
+            | "kotlin"
+            | "latex"
+            | "less"
+            | "lisp"
+            | "lua"
+            | "make"
+            | "makefile"
+            | "markdown"
+            | "md"
+            | "mdx"
+            | "nginx"
+            | "objective-c"
+            | "ocaml"
+            | "perl"
+            | "php"
+            | "plaintext"
+            | "powershell"
+            | "proto"
+            | "protobuf"
+            | "python"
+            | "r"
+            | "rb"
+            | "ruby"
+            | "rust"
+            | "sass"
+            | "scala"
+            | "scss"
+            | "sh"
+            | "shell"
+            | "solidity"
+            | "sql"
+            | "svelte"
+            | "swift"
+            | "toml"
+            | "tsx"
+            | "typescript"
+            | "vim"
+            | "vue"
+            | "wasm"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "zig"
+    )
 }
 
 #[cfg(test)]
@@ -503,6 +779,93 @@ mod tests {
         assert!(
             !dom.descendants(code)
                 .any(|node| dom.tag(node) == Some(Tag::Br))
+        );
+    }
+
+    #[test]
+    fn extracts_language_from_explicit_attributes_and_classes() {
+        let mut dom = Dom::parse_fragment(
+            concat!(
+                r#"<pre data-lang="Rust"><code>fn main() {}</code></pre>"#,
+                r#"<pre><code language="TSX">&lt;App /&gt;</code></pre>"#,
+                r#"<pre class="highlight-source-python"><code>print('ok')</code></pre>"#,
+                r#"<pre class="brush: ruby;"><code>puts 'ok'</code></pre>"#,
+                r#"<pre data-language="C#"><code>Console.WriteLine();</code></pre>"#,
+                r#"<pre data-lang="python" class="language-python keep"><code class="highlight-source-rust brush keep">fn conflict() {}</code></pre>"#,
+            ),
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            concat!(
+                "```rust\nfn main() {}\n```\n\n",
+                "```tsx\n<App />\n```\n\n",
+                "```python\nprint('ok')\n```\n\n",
+                "```ruby\nputs 'ok'\n```\n\n",
+                "```c#\nConsole.WriteLine();\n```\n\n",
+                "```rust\nfn conflict() {}\n```\n",
+            )
+        );
+        for code in dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Code))
+        {
+            let language = dom.attr(code, AttrName::DataLanguage).unwrap();
+            let canonical = format!("language-{language}");
+            assert!(
+                dom.attr(code, AttrName::Class)
+                    .is_some_and(|class| class.split_whitespace().any(|token| token == canonical))
+            );
+            let pre = dom.parent(code).unwrap();
+            assert_eq!(dom.attr(pre, AttrName::DataLanguage), None);
+            assert_eq!(dom.attr(pre, AttrName::DataLang), None);
+            assert!(!dom.attr(pre, AttrName::Class).is_some_and(|class| {
+                class
+                    .split_whitespace()
+                    .any(|token| token.starts_with("language-"))
+            }));
+        }
+    }
+
+    #[test]
+    fn extracts_language_from_accessible_and_visible_labels() {
+        let mut dom = Dom::parse_fragment(
+            concat!(
+                r#"<pre aria-label="F#"><code>printfn &quot;ok&quot;</code></pre>"#,
+                r#"<div class="code-block"><div class="code-header">Language: CMake</div><div class="overflow"><pre><code>project(example)</code></pre></div><div class="code-header">Ruby</div><pre><code>puts 'ok'</code></pre></div>"#,
+            ),
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "```f#\nprintfn \"ok\"\n```\n\nLanguage: CMake\n\n```cmake\nproject(example)\n```\n\nRuby\n\n```ruby\nputs 'ok'\n```\n"
+        );
+    }
+
+    #[test]
+    fn ignores_natural_language_and_ambiguous_labels() {
+        let mut dom = Dom::parse_fragment(
+            r#"<pre lang="en" aria-label="Example"><code>plain text</code></pre><pre title="example.py"><code>output</code></pre><pre class="r"><code>value &lt;- 1</code></pre><div class="code-block"><div class="code-header">Copy code</div><pre><code>copy()</code></pre><div class="code-header">Console</div><pre><code>console output</code></pre><div class="code-header">Language: Rust</div><p>This paragraph separates the label from the example.</p><pre><code>let x = 1;</code></pre></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "```\nplain text\n```\n\n```\noutput\n```\n\n```\nvalue <- 1\n```\n\nCopy code\n\n```\ncopy()\n```\n\nConsole\n\n```\nconsole output\n```\n\nLanguage: Rust\n\nThis paragraph separates the label from the example.\n\n```\nlet x = 1;\n```\n"
         );
     }
 
