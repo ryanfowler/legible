@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::scoring::{has_hidden_utility_class, has_static_hidden_marker};
 
 pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
@@ -63,17 +64,9 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
 }
 
 fn is_statically_hidden(dom: &Dom, node: NodeId) -> bool {
-    dom.has_attr(node, AttrName::Hidden)
+    has_static_hidden_marker(dom, node)
+        || has_hidden_utility_class(dom, node)
         || dom.attr(node, AttrName::AriaHidden) == Some("true")
-        || dom.attr(node, AttrName::Style).is_some_and(|style| {
-            let compact: String = style
-                .bytes()
-                .filter(|byte| !byte.is_ascii_whitespace())
-                .map(char::from)
-                .collect();
-            let compact = compact.to_ascii_lowercase();
-            compact.contains("display:none") || compact.contains("visibility:hidden")
-        })
 }
 
 fn media_source(dom: &Dom, node: NodeId) -> Option<String> {

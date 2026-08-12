@@ -1045,17 +1045,6 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
-    fn has_hidden_utility_class(&self, node: NodeId) -> bool {
-        self.dom.tag(node) != Some(Tag::A)
-            && self.dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                classes.split_whitespace().any(|class| {
-                    ["invisible", "d-none", "display-none", "u-hidden"]
-                        .iter()
-                        .any(|expected| class.eq_ignore_ascii_case(expected))
-                })
-            })
-    }
-
     fn is_visibility_recovery_container(&self, node: NodeId) -> bool {
         matches!(
             self.dom.tag(node),
@@ -1065,7 +1054,8 @@ impl<'a> ContentExtractor<'a> {
 
     fn is_static_hidden_marker(&self, node: NodeId) -> bool {
         self.dom.attr(node, AttrName::AriaHidden) != Some("true")
-            && (!is_probably_visible(&self.dom, node) || self.has_hidden_utility_class(node))
+            && (!is_probably_visible(&self.dom, node)
+                || has_hidden_utility_class_for_discovery(&self.dom, node))
     }
 
     fn is_inside_static_hidden(&self, node: NodeId) -> bool {
@@ -1154,7 +1144,7 @@ impl<'a> ContentExtractor<'a> {
         if accessible_math.get(node.index()).copied().unwrap_or(false) {
             return true;
         }
-        let utility_hidden = self.has_hidden_utility_class(node);
+        let utility_hidden = has_hidden_utility_class_for_discovery(&self.dom, node);
         if self.strategy == ExtractionStrategy::RelaxedVisibility {
             self.dom.attr(node, AttrName::AriaHidden) != Some("true")
                 || self
@@ -1173,7 +1163,8 @@ impl<'a> ContentExtractor<'a> {
                     role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
                 })
             })
-            || (!is_probably_visible(&self.dom, node) || self.has_hidden_utility_class(node))
+            || (!is_probably_visible(&self.dom, node)
+                || has_hidden_utility_class_for_discovery(&self.dom, node))
                 && self.dom.attr(node, AttrName::Class).is_some_and(|classes| {
                     classes.split_whitespace().any(|class| {
                         class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")

@@ -6,8 +6,9 @@ use crate::constants::{
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStats, Tag};
 use crate::scoring::{
-    get_inner_text, get_link_density_cached, get_or_compute_stats, has_single_tag_inside_element,
-    is_element_without_content, is_phrasing_content,
+    get_inner_text, get_link_density_cached, get_or_compute_stats, has_hidden_utility_class,
+    has_single_tag_inside_element, has_static_hidden_marker, is_element_without_content,
+    is_hidden_utility_class, is_phrasing_content,
 };
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
@@ -745,10 +746,61 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
 /// This phase uses only high-confidence rules. It removes executable markup,
 /// hidden scaffolding, tracking images, and interactive controls. It keeps the
 /// text and structure around removed form controls.
-fn is_hidden_utility_class(class: &str) -> bool {
-    ["invisible", "d-none", "display-none", "u-hidden"]
-        .iter()
-        .any(|expected| class.eq_ignore_ascii_case(expected))
+fn preserve_media_from_hidden_variant(dom: &mut Dom, hidden: NodeId) {
+    let adjacent_element = |forward: bool| {
+        let mut sibling = if forward {
+            dom.next_sibling(hidden)
+        } else {
+            dom.prev_sibling(hidden)
+        };
+        while sibling.is_some_and(|node| {
+            dom.text_node(node)
+                .is_some_and(|text| text.trim().is_empty())
+        }) {
+            sibling = sibling.and_then(|node| {
+                if forward {
+                    dom.next_sibling(node)
+                } else {
+                    dom.prev_sibling(node)
+                }
+            });
+        }
+        sibling.filter(|&node| dom.is_element(node))
+    };
+    let sibling = [adjacent_element(false), adjacent_element(true)]
+        .into_iter()
+        .flatten()
+        .find(|&sibling| {
+            !has_hidden_utility_class(dom, sibling)
+                && dom.any_descendant_by_tags(sibling, &[Tag::Img])
+        });
+    let hidden_images: SmallVec<[NodeId; 4]> = dom
+        .descendants(hidden)
+        .filter(|&node| dom.tag(node) == Some(Tag::Img))
+        .collect();
+    let Some(sibling) = sibling else {
+        for image in hidden_images {
+            dom.insert_before(hidden, image);
+        }
+        return;
+    };
+    let visible_images: SmallVec<[NodeId; 4]> = dom
+        .descendants(sibling)
+        .filter(|&node| dom.tag(node) == Some(Tag::Img))
+        .collect();
+    let single_pair = hidden_images.len() == 1 && visible_images.len() == 1;
+    for hidden_image in hidden_images {
+        let target = visible_images.iter().copied().find(|&visible_image| {
+            let hidden_alt = dom.attr_by_local_name(hidden_image, "alt");
+            hidden_alt.is_some() && hidden_alt == dom.attr_by_local_name(visible_image, "alt")
+        });
+        let target = target.or_else(|| single_pair.then_some(visible_images[0]));
+        if let Some(target) = target {
+            copy_image_attributes(dom, hidden_image, target);
+        } else if useful_image(dom, hidden_image) {
+            dom.append_child(sibling, hidden_image);
+        }
+    }
 }
 
 pub(crate) fn hard_cleanup(
@@ -773,16 +825,18 @@ pub(crate) fn hard_cleanup(
             && dom
                 .attr(node, AttrName::Class)
                 .is_some_and(|class| class.contains("fallback-image"));
-        let static_visibility = dom.has_attr(node, AttrName::Hidden)
-            || dom.attr(node, AttrName::Style).is_some_and(|style| {
-                let compact: String = style
-                    .bytes()
-                    .filter(|byte| !byte.is_ascii_whitespace())
-                    .map(char::from)
-                    .collect();
-                let compact = compact.to_ascii_lowercase();
-                compact.contains("display:none") || compact.contains("visibility:hidden")
+        let accessible_skip_link = tag == Tag::A
+            && dom
+                .attr(node, AttrName::Href)
+                .is_some_and(|href| href.starts_with('#'))
+            && dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                classes.split_ascii_whitespace().any(|class| {
+                    class.eq_ignore_ascii_case("skip-link")
+                        || class.to_ascii_lowercase().starts_with("skip-to-")
+                })
             });
+        let utility_visibility = has_hidden_utility_class(dom, node) && !accessible_skip_link;
+        let static_visibility = has_static_hidden_marker(dom, node) || utility_visibility;
         let modal = dom.attr(node, AttrName::AriaModal) == Some("true")
             || dom.attr(node, AttrName::Role).is_some_and(|roles| {
                 roles.split_whitespace().any(|role| {
@@ -866,6 +920,9 @@ pub(crate) fn hard_cleanup(
         let disallowed_embed = matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe)
             && !has_allowed_media(dom, node, allowed_media);
         if hidden || tracking_image || executable || control || disallowed_embed {
+            if hidden && utility_visibility {
+                preserve_media_from_hidden_variant(dom, node);
+            }
             dom.detach(node);
         }
     }

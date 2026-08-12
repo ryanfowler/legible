@@ -2,6 +2,7 @@
 
 use crate::constants::split_word_tokens;
 use crate::dom::{AttrName, Dom, NodeId, NodeLink, Tag};
+use crate::scoring::has_static_hidden_marker;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
@@ -1185,17 +1186,8 @@ fn is_blocked_structured_region(dom: &Dom, node: NodeId) -> bool {
     matches!(
         dom.tag(node),
         Some(Tag::Script | Tag::Style | Tag::Template | Tag::Meta | Tag::Link)
-    ) || dom.has_attr(node, AttrName::Hidden)
+    ) || has_static_hidden_marker(dom, node)
         || dom.attr(node, AttrName::AriaHidden) == Some("true")
-        || dom.attr(node, AttrName::Style).is_some_and(|style| {
-            let compact = style
-                .bytes()
-                .filter(|byte| !byte.is_ascii_whitespace())
-                .map(char::from)
-                .collect::<String>()
-                .to_ascii_lowercase();
-            compact.contains("display:none") || compact.contains("visibility:hidden")
-        })
 }
 
 fn is_text_flow_boundary(tag: Option<Tag>) -> bool {

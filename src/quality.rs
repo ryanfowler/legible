@@ -3,7 +3,8 @@
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
-    get_or_compute_stats_excluding,
+    get_or_compute_stats_excluding, has_hidden_utility_class_for_discovery,
+    has_static_hidden_marker,
 };
 
 /// Text and structure measured for one DOM region.
@@ -54,23 +55,8 @@ impl ContentMetrics {
         let mut excluded = vec![false; dom.len()];
         for &(node, _) in &elements {
             let tag = dom.tag(node);
-            let statically_hidden = dom.has_attr(node, AttrName::Hidden)
-                || dom.attr(node, AttrName::Style).is_some_and(|style| {
-                    let compact = style
-                        .bytes()
-                        .filter(|byte| !byte.is_ascii_whitespace())
-                        .map(char::from)
-                        .collect::<String>()
-                        .to_ascii_lowercase();
-                    compact.contains("display:none") || compact.contains("visibility:hidden")
-                });
-            let utility_hidden = dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                classes.split_whitespace().any(|class| {
-                    ["invisible", "d-none", "display-none", "u-hidden"]
-                        .iter()
-                        .any(|expected| class.eq_ignore_ascii_case(expected))
-                })
-            });
+            let statically_hidden = has_static_hidden_marker(dom, node);
+            let utility_hidden = has_hidden_utility_class_for_discovery(dom, node);
             let modal_class = (statically_hidden || utility_hidden)
                 && dom.attr(node, AttrName::Class).is_some_and(|classes| {
                     classes.split_whitespace().any(|class| {

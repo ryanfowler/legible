@@ -750,9 +750,7 @@ pub fn has_child_block_element(dom: &Dom, id: NodeId) -> bool {
         .any(|x| dom.is_element(x) && dom.tag(x).is_some_and(is_div_to_p_elem))
 }
 pub fn is_probably_visible(dom: &Dom, id: NodeId) -> bool {
-    if dom.attr(id, AttrName::Style).is_some_and(has_hidden_style)
-        || dom.has_attr(id, AttrName::Hidden)
-    {
+    if has_static_hidden_marker(dom, id) {
         return false;
     }
     if dom.attr(id, AttrName::AriaHidden) == Some("true")
@@ -776,42 +774,300 @@ pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str, text_buffer: &mut String
     let t = get_inner_text(dom, id, text_buffer);
     !t.is_empty() && t.len() < 400 && t.chars().count() < 100
 }
-fn has_hidden_style(style: &str) -> bool {
-    let style = style.as_bytes();
-    (0..style.len()).any(|start| {
-        matches_style_declaration(style, start, b"display", b"none")
-            || matches_style_declaration(style, start, b"visibility", b"hidden")
+pub(crate) fn has_static_hidden_marker(dom: &Dom, id: NodeId) -> bool {
+    dom.has_attr(id, AttrName::Hidden)
+        || dom.attr(id, AttrName::Style).is_some_and(has_hidden_style)
+}
+
+pub(crate) fn has_hidden_utility_class(dom: &Dom, id: NodeId) -> bool {
+    dom.attr(id, AttrName::Class).is_some_and(|classes| {
+        let display_show = classes
+            .split_ascii_whitespace()
+            .any(is_responsive_display_show);
+        let visibility_show = classes.split_ascii_whitespace().any(|class| {
+            class
+                .to_ascii_lowercase()
+                .split_once(':')
+                .is_some_and(|(variant, value)| {
+                    is_responsive_breakpoint(variant) && value == "visible"
+                })
+        });
+        let accessibility_show = classes.split_ascii_whitespace().any(|class| {
+            class
+                .to_ascii_lowercase()
+                .split_once(':')
+                .is_some_and(|(variant, value)| {
+                    is_responsive_breakpoint(variant) && value == "not-sr-only"
+                })
+        });
+        classes.split_ascii_whitespace().any(|class| {
+            if ["hidden", "d-none", "display-none", "u-hidden"]
+                .iter()
+                .any(|expected| class.eq_ignore_ascii_case(expected))
+            {
+                !display_show
+            } else if class.eq_ignore_ascii_case("invisible") {
+                !visibility_show
+            } else if class.eq_ignore_ascii_case("visually-hidden")
+                || class.eq_ignore_ascii_case("sr-only")
+            {
+                !accessibility_show
+            } else {
+                false
+            }
+        })
     })
 }
 
-fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value: &[u8]) -> bool {
-    let property_end = start + property.len();
-    if property_end > style.len() || !style[start..property_end].eq_ignore_ascii_case(property) {
+fn is_responsive_breakpoint(value: &str) -> bool {
+    matches!(value, "sm" | "md" | "lg" | "xl" | "xxl" | "2xl")
+}
+
+fn is_responsive_display_show(class: &str) -> bool {
+    let class = class.to_ascii_lowercase();
+    let tailwind = class.split_once(':').is_some_and(|(variant, display)| {
+        is_responsive_breakpoint(variant) && is_visible_display_utility(display)
+    });
+    let bootstrap = class
+        .strip_prefix("d-")
+        .and_then(|class| class.split_once('-'))
+        .is_some_and(|(breakpoint, display)| {
+            is_responsive_breakpoint(breakpoint) && is_visible_display_utility(display)
+        });
+    tailwind || bootstrap
+}
+
+fn is_visible_display_utility(value: &str) -> bool {
+    matches!(
+        value,
+        "block"
+            | "inline"
+            | "inline-block"
+            | "flex"
+            | "inline-flex"
+            | "grid"
+            | "inline-grid"
+            | "table"
+            | "contents"
+    )
+}
+
+pub(crate) fn has_hidden_utility_class_for_discovery(dom: &Dom, id: NodeId) -> bool {
+    // Hidden skip links and page anchors must not change candidate boundaries.
+    if dom.tag(id) == Some(Tag::A) || !has_hidden_utility_class(dom, id) {
         return false;
     }
-    let mut cursor = property_end;
-    while style.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-        cursor += 1;
+    let authoritative_root = matches!(dom.tag(id), Some(Tag::Article | Tag::Main))
+        || dom.attr(id, AttrName::Role).is_some_and(|roles| {
+            roles.split_ascii_whitespace().any(|role| {
+                role.eq_ignore_ascii_case("article") || role.eq_ignore_ascii_case("main")
+            })
+        });
+    authoritative_root
+        || dom.attr(id, AttrName::Class).is_some_and(|classes| {
+            classes.split_ascii_whitespace().any(|class| {
+                ["invisible", "d-none", "display-none", "u-hidden"]
+                    .iter()
+                    .any(|expected| class.eq_ignore_ascii_case(expected))
+            })
+        })
+}
+
+pub(crate) fn is_hidden_utility_class(class: &str) -> bool {
+    // Match complete, unconditional utility names only. Responsive variants
+    // such as `sm:hidden` can be visible at other viewport widths.
+    [
+        "hidden",
+        "invisible",
+        "visually-hidden",
+        "sr-only",
+        "d-none",
+        "display-none",
+        "u-hidden",
+    ]
+    .iter()
+    .any(|expected| class.eq_ignore_ascii_case(expected))
+}
+
+fn has_hidden_style(style: &str) -> bool {
+    // Store (hidden, important) for each property. A later declaration wins
+    // unless an earlier declaration used !important.
+    let mut display = None;
+    let mut visibility = None;
+    let mut opacity = None;
+    for declaration in style.split(';') {
+        let Some((property, raw_value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let (value, important) = raw_value.rsplit_once('!').map_or_else(
+            || (raw_value.trim(), false),
+            |(value, priority)| {
+                if priority.trim().eq_ignore_ascii_case("important") {
+                    (value.trim(), true)
+                } else {
+                    (raw_value.trim(), false)
+                }
+            },
+        );
+        let state = if property.trim().eq_ignore_ascii_case("display") {
+            valid_display_visibility(value).map(|hidden| (&mut display, hidden))
+        } else if property.trim().eq_ignore_ascii_case("visibility") {
+            valid_visibility(value).map(|hidden| (&mut visibility, hidden))
+        } else if property.trim().eq_ignore_ascii_case("opacity") {
+            valid_opacity(value).map(|hidden| (&mut opacity, hidden))
+        } else {
+            None
+        };
+        if let Some((state, hidden)) = state
+            && !state.is_some_and(|(_, previous_important)| previous_important && !important)
+        {
+            *state = Some((hidden, important));
+        }
     }
-    if style.get(cursor) != Some(&b':') {
-        return false;
+    [display, visibility, opacity]
+        .into_iter()
+        .flatten()
+        .any(|(hidden, _)| hidden)
+}
+
+fn valid_display_visibility(value: &str) -> Option<bool> {
+    let value = value.to_ascii_lowercase();
+    if value == "none" {
+        return Some(true);
     }
-    cursor += 1;
-    while style.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-        cursor += 1;
+    matches!(
+        value.as_str(),
+        "initial"
+            | "inherit"
+            | "unset"
+            | "revert"
+            | "revert-layer"
+            | "block"
+            | "inline"
+            | "inline-block"
+            | "flow-root"
+            | "run-in"
+            | "list-item"
+            | "flex"
+            | "inline-flex"
+            | "grid"
+            | "inline-grid"
+            | "table"
+            | "inline-table"
+            | "table-row"
+            | "table-cell"
+            | "table-caption"
+            | "table-row-group"
+            | "table-header-group"
+            | "table-footer-group"
+            | "table-column"
+            | "table-column-group"
+            | "contents"
+            | "ruby"
+            | "ruby-base"
+            | "ruby-text"
+            | "ruby-base-container"
+            | "ruby-text-container"
+            | "-webkit-box"
+    )
+    .then_some(false)
+}
+
+fn valid_visibility(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse") {
+        Some(true)
+    } else if [
+        "visible",
+        "initial",
+        "inherit",
+        "unset",
+        "revert",
+        "revert-layer",
+    ]
+    .iter()
+    .any(|expected| value.eq_ignore_ascii_case(expected))
+    {
+        Some(false)
+    } else {
+        None
     }
-    let value_end = cursor + value.len();
-    value_end <= style.len() && style[cursor..value_end].eq_ignore_ascii_case(value)
+}
+
+fn valid_opacity(value: &str) -> Option<bool> {
+    if ["initial", "inherit", "unset", "revert", "revert-layer"]
+        .iter()
+        .any(|expected| value.eq_ignore_ascii_case(expected))
+    {
+        return Some(false);
+    }
+    let opacity = value
+        .strip_suffix('%')
+        .map_or_else(
+            || value.parse::<f64>(),
+            |value| value.parse::<f64>().map(|value| value / 100.0),
+        )
+        .ok()?;
+    (0.0..=1.0).contains(&opacity).then_some(opacity == 0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CandidateFeatureIndex, build_exclusion_mask, compute_readability_scores, get_link_density,
-        get_link_density_cached, get_or_compute_stats, stats_for_text,
+        get_link_density_cached, get_or_compute_stats, has_hidden_utility_class,
+        has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text,
     };
     use crate::candidate::CandidateSet;
     use crate::dom::{Dom, NodeStateStore, Tag};
+
+    #[test]
+    fn static_visibility_handles_inline_css_declarations() {
+        let dom = Dom::parse_fragment(
+            r#"<i style="DISPLAY : none !important"></i><i style="visibility: HIDDEN"></i><i style="opacity: 0.0"></i><i style="opacity: 0.2; display: block"></i><i style="not-display:none"></i><i style="display:none; display:block"></i><i style="visibility:hidden!important; visibility:visible"></i><i style="opacity:0!important; opacity:1!important"></i><i style="display:none; display:"></i><i style="opacity:0; opacity:invalid"></i><i style="display:none; display:initial"></i><i style="visibility:hidden; visibility:initial"></i><i style="opacity:0; opacity:initial"></i><i style="display:none; display:inherit"></i><i style="visibility:hidden; visibility:unset"></i><i style="opacity:0; opacity:inherit"></i>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let nodes = dom.element_children(dom.root()).collect::<Vec<_>>();
+        assert!(!is_probably_visible(&dom, nodes[0]));
+        assert!(!is_probably_visible(&dom, nodes[1]));
+        assert!(!is_probably_visible(&dom, nodes[2]));
+        assert!(is_probably_visible(&dom, nodes[3]));
+        assert!(is_probably_visible(&dom, nodes[4]));
+        assert!(is_probably_visible(&dom, nodes[5]));
+        assert!(!is_probably_visible(&dom, nodes[6]));
+        assert!(is_probably_visible(&dom, nodes[7]));
+        assert!(!is_probably_visible(&dom, nodes[8]));
+        assert!(!is_probably_visible(&dom, nodes[9]));
+        assert!(is_probably_visible(&dom, nodes[10]));
+        assert!(is_probably_visible(&dom, nodes[11]));
+        assert!(is_probably_visible(&dom, nodes[12]));
+        assert!(is_probably_visible(&dom, nodes[13]));
+        assert!(is_probably_visible(&dom, nodes[14]));
+        assert!(is_probably_visible(&dom, nodes[15]));
+    }
+
+    #[test]
+    fn hidden_utilities_do_not_match_responsive_variants() {
+        let dom = Dom::parse_fragment(
+            r#"<i class="hidden"></i><i class="invisible"></i><i class="visually-hidden"></i><i class="sr-only"></i><i class="sm:hidden md:invisible not-sr-only"></i><i class="hidden md:block"></i><a class="hidden"></a><i class="d-none d-md-block"></i><i class="invisible md:block"></i><i class="invisible md:visible"></i><i class="sr-only md:not-sr-only"></i>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let nodes = dom.element_children(dom.root()).collect::<Vec<_>>();
+        assert!(
+            nodes[..4]
+                .iter()
+                .all(|&node| has_hidden_utility_class(&dom, node))
+        );
+        assert!(!has_hidden_utility_class(&dom, nodes[4]));
+        assert!(!has_hidden_utility_class(&dom, nodes[5]));
+        assert!(has_hidden_utility_class(&dom, nodes[6]));
+        assert!(!has_hidden_utility_class_for_discovery(&dom, nodes[6]));
+        assert!(!has_hidden_utility_class(&dom, nodes[7]));
+        assert!(has_hidden_utility_class(&dom, nodes[8]));
+        assert!(!has_hidden_utility_class(&dom, nodes[9]));
+        assert!(!has_hidden_utility_class(&dom, nodes[10]));
+    }
 
     #[test]
     fn text_stats_match_for_ascii_and_unicode_paths() {

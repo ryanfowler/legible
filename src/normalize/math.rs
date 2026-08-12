@@ -2,15 +2,40 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
-    for (node, _) in nodes {
-        if dom.parent(node).is_none() || dom.attr(node, AttrName::DataMath).is_some() {
+    let mut script_for_rendered = vec![None; dom.len()];
+    let mut rendered_for_script = vec![None; dom.len()];
+    for &(node, _) in &nodes {
+        if dom.tag(node) != Some(Tag::Script) {
             continue;
         }
         let Some(latex) = explicit_latex(dom, node) else {
             continue;
         };
-        let block = is_block_math(dom, node);
-        let fallback = math_fallback(dom, node).unwrap_or_else(|| latex.clone());
+        let Some(rendered) = adjacent_rendered_math(dom, node).filter(|&rendered| {
+            authoritative_rendered_latex(dom, rendered)
+                .is_none_or(|rendered_latex| rendered_latex.trim() == latex.trim())
+        }) else {
+            continue;
+        };
+        script_for_rendered[rendered.index()] = Some(node);
+        rendered_for_script[node.index()] = Some(rendered);
+    }
+
+    for (node, _) in nodes {
+        if dom.parent(node).is_none() || dom.attr(node, AttrName::DataMath).is_some() {
+            continue;
+        }
+        let paired_script = script_for_rendered[node.index()];
+        let Some(latex) = paired_script
+            .and_then(|script| explicit_latex(dom, script))
+            .or_else(|| explicit_latex(dom, node))
+        else {
+            continue;
+        };
+        let rendered_sibling = rendered_for_script[node.index()];
+        let source = rendered_sibling.unwrap_or(node);
+        let block = is_block_math(dom, source) || is_block_math(dom, node);
+        let fallback = math_fallback(dom, source).unwrap_or_else(|| latex.clone());
         let Ok(canonical) = dom.create_html_element(if block { Tag::Div } else { Tag::Span })
         else {
             continue;
@@ -24,7 +49,13 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
         if let Ok(text) = dom.create_text(&fallback) {
             dom.append_child(canonical, text);
         }
-        dom.replace_with(node, canonical);
+        dom.replace_with(source, canonical);
+        let source_script = paired_script.or((source != node).then_some(node));
+        if let Some(script) = source_script
+            && script != source
+        {
+            dom.detach(script);
+        }
     }
 }
 
@@ -102,6 +133,49 @@ fn is_tex_encoding(value: &str) -> bool {
         || value.eq_ignore_ascii_case("text/tex")
 }
 
+fn adjacent_rendered_math(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    for forward in [true, false] {
+        let mut sibling = if forward {
+            dom.next_sibling(node)
+        } else {
+            dom.prev_sibling(node)
+        };
+        while sibling.is_some_and(|sibling| {
+            dom.text_node(sibling)
+                .is_some_and(|text| text.trim().is_empty())
+        }) {
+            sibling = sibling.and_then(|sibling| {
+                if forward {
+                    dom.next_sibling(sibling)
+                } else {
+                    dom.prev_sibling(sibling)
+                }
+            });
+        }
+        if sibling.is_some_and(|sibling| has_math_wrapper_class(dom, sibling)) {
+            return sibling;
+        }
+    }
+    None
+}
+
+fn authoritative_rendered_latex(dom: &Dom, node: NodeId) -> Option<String> {
+    for name in ["data-latex", "data-tex"] {
+        if let Some(value) = dom
+            .attr_by_local_name(node, name)
+            .filter(|value| valid_latex(value))
+        {
+            return Some(value.trim().to_owned());
+        }
+    }
+    std::iter::once(node)
+        .chain(dom.descendants(node))
+        .find(|&descendant| is_tex_annotation(dom, descendant))
+        .map(|annotation| dom.text(annotation))
+        .filter(|value| valid_latex(value))
+        .map(|value| value.trim().to_owned())
+}
+
 fn explicit_latex(dom: &Dom, node: NodeId) -> Option<String> {
     for name in ["data-latex", "data-tex"] {
         if let Some(value) = dom
@@ -159,11 +233,20 @@ fn explicit_latex(dom: &Dom, node: NodeId) -> Option<String> {
         .map(|annotation| dom.text(annotation))
         .filter(|value| valid_latex(value))
         .map(|value| value.trim().to_owned());
-    annotated.or_else(|| {
-        (dom.tag(node) == Some(Tag::Math))
-            .then(|| mathml_latex(dom, node))
-            .flatten()
-    })
+    if annotated.is_some() {
+        return annotated;
+    }
+    for name in ["alttext", "aria-label"] {
+        if let Some(value) = dom
+            .attr_by_local_name(node, name)
+            .filter(|value| valid_latex(value))
+        {
+            return Some(value.trim().to_owned());
+        }
+    }
+    (dom.tag(node) == Some(Tag::Math))
+        .then(|| mathml_latex(dom, node))
+        .flatten()
 }
 
 fn image_is_equation(dom: &Dom, node: NodeId) -> bool {
@@ -197,10 +280,43 @@ fn looks_like_latex(value: &str) -> bool {
             .any(|byte| matches!(byte, b'\\' | b'^' | b'_' | b'=' | b'{' | b'}'))
 }
 
-#[derive(Clone, Copy)]
 enum MathMlTask {
     Node(NodeId),
-    Literal(&'static str),
+    Literal(String),
+}
+
+fn literal(value: &str) -> MathMlTask {
+    MathMlTask::Literal(value.to_owned())
+}
+
+fn push_joined_children(tasks: &mut Vec<MathMlTask>, children: &[NodeId], separators: &[String]) {
+    for (index, &child) in children.iter().enumerate().rev() {
+        tasks.push(MathMlTask::Node(child));
+        if index > 0 && !separators.is_empty() {
+            tasks.push(MathMlTask::Literal(
+                separators[(index - 1).min(separators.len() - 1)].clone(),
+            ));
+        }
+    }
+}
+
+fn escape_tex_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.trim().chars() {
+        match character {
+            '\\' => escaped.push_str("\\textbackslash{}"),
+            '{' => escaped.push_str("\\{"),
+            '}' => escaped.push_str("\\}"),
+            '%' | '$' | '#' | '&' | '_' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            '^' => escaped.push_str("\\^{}"),
+            '~' => escaped.push_str("\\~{}"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn mathml_latex(dom: &Dom, root: NodeId) -> Option<String> {
@@ -208,7 +324,7 @@ fn mathml_latex(dom: &Dom, root: NodeId) -> Option<String> {
     let mut tasks = vec![MathMlTask::Node(root)];
     while let Some(task) = tasks.pop() {
         match task {
-            MathMlTask::Literal(value) => output.push_str(value),
+            MathMlTask::Literal(value) => output.push_str(&value),
             MathMlTask::Node(node) => {
                 if let Some(text) = dom.text_node(node) {
                     output.push_str(text.trim());
@@ -218,43 +334,116 @@ fn mathml_latex(dom: &Dom, root: NodeId) -> Option<String> {
                     .qual_name(node)
                     .map(|name| name.local.as_ref())
                     .unwrap_or("");
-                let children: Vec<NodeId> = dom.children(node).collect();
+                let children: Vec<NodeId> = dom
+                    .children(node)
+                    .filter(|&child| {
+                        !dom.text_node(child)
+                            .is_some_and(|text| text.trim().is_empty())
+                    })
+                    .collect();
                 match (local, children.as_slice()) {
                     ("semantics", [presentation, ..]) => {
                         tasks.push(MathMlTask::Node(*presentation));
                     }
                     ("annotation" | "annotation-xml", _) => {}
+                    ("mtext", _) => {
+                        output.push_str("\\text{");
+                        output.push_str(&escape_tex_text(&dom.text(node)));
+                        output.push('}');
+                    }
                     ("msup", [base, exponent, ..]) => {
-                        tasks.push(MathMlTask::Literal("}"));
+                        tasks.push(literal("}"));
                         tasks.push(MathMlTask::Node(*exponent));
-                        tasks.push(MathMlTask::Literal("^{"));
+                        tasks.push(literal("^{"));
                         tasks.push(MathMlTask::Node(*base));
                     }
                     ("msub", [base, subscript, ..]) => {
-                        tasks.push(MathMlTask::Literal("}"));
+                        tasks.push(literal("}"));
                         tasks.push(MathMlTask::Node(*subscript));
-                        tasks.push(MathMlTask::Literal("_{"));
+                        tasks.push(literal("_{"));
                         tasks.push(MathMlTask::Node(*base));
                     }
                     ("mfrac", [numerator, denominator, ..]) => {
-                        tasks.push(MathMlTask::Literal("}"));
+                        tasks.push(literal("}"));
                         tasks.push(MathMlTask::Node(*denominator));
-                        tasks.push(MathMlTask::Literal("}{"));
+                        tasks.push(literal("}{"));
                         tasks.push(MathMlTask::Node(*numerator));
-                        tasks.push(MathMlTask::Literal("\\frac{"));
+                        tasks.push(literal("\\frac{"));
                     }
                     ("msqrt", _) => {
-                        tasks.push(MathMlTask::Literal("}"));
-                        for child in children.into_iter().rev() {
-                            tasks.push(MathMlTask::Node(child));
-                        }
-                        tasks.push(MathMlTask::Literal("\\sqrt{"));
+                        tasks.push(literal("}"));
+                        push_joined_children(&mut tasks, &children, &[]);
+                        tasks.push(literal("\\sqrt{"));
                     }
-                    _ => {
-                        for child in children.into_iter().rev() {
-                            tasks.push(MathMlTask::Node(child));
-                        }
+                    ("mroot", [radicand, index, ..]) => {
+                        tasks.push(literal("}"));
+                        tasks.push(MathMlTask::Node(*radicand));
+                        tasks.push(literal("]{"));
+                        tasks.push(MathMlTask::Node(*index));
+                        tasks.push(literal("\\sqrt["));
                     }
+                    ("munder", [base, under, ..]) => {
+                        tasks.push(literal("}"));
+                        tasks.push(MathMlTask::Node(*base));
+                        tasks.push(literal("}{"));
+                        tasks.push(MathMlTask::Node(*under));
+                        tasks.push(literal("\\underset{"));
+                    }
+                    ("mover", [base, over, ..]) => {
+                        tasks.push(literal("}"));
+                        tasks.push(MathMlTask::Node(*base));
+                        tasks.push(literal("}{"));
+                        tasks.push(MathMlTask::Node(*over));
+                        tasks.push(literal("\\overset{"));
+                    }
+                    ("munderover", [base, under, over, ..]) => {
+                        tasks.push(literal("}}"));
+                        tasks.push(MathMlTask::Node(*base));
+                        tasks.push(literal("}{"));
+                        tasks.push(MathMlTask::Node(*under));
+                        tasks.push(literal("\\underset{"));
+                        tasks.push(literal("}{"));
+                        tasks.push(MathMlTask::Node(*over));
+                        tasks.push(literal("\\overset{"));
+                    }
+                    ("mfenced", _) => {
+                        let open = dom.attr_by_local_name(node, "open").unwrap_or("(");
+                        let close = dom.attr_by_local_name(node, "close").unwrap_or(")");
+                        let separators = dom
+                            .attr_by_local_name(node, "separators")
+                            .unwrap_or(",")
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .map(|character| character.to_string())
+                            .collect::<Vec<_>>();
+                        tasks.push(MathMlTask::Literal(close.to_owned()));
+                        push_joined_children(&mut tasks, &children, &separators);
+                        tasks.push(MathMlTask::Literal(open.to_owned()));
+                    }
+                    ("mtable", _) => {
+                        tasks.push(literal("\\end{aligned}"));
+                        push_joined_children(&mut tasks, &children, &[" \\\\ ".to_owned()]);
+                        tasks.push(literal("\\begin{aligned}"));
+                    }
+                    ("mtr", _) => {
+                        push_joined_children(&mut tasks, &children, &[" & ".to_owned()]);
+                    }
+                    ("mlabeledtr", [label, cells @ ..]) => {
+                        let label = dom
+                            .text(*label)
+                            .trim()
+                            .trim_start_matches('(')
+                            .trim_end_matches(')')
+                            .to_owned();
+                        if !label.is_empty() {
+                            tasks.push(MathMlTask::Literal(format!(
+                                "\\tag{{{}}}",
+                                escape_tex_text(&label)
+                            )));
+                        }
+                        push_joined_children(&mut tasks, cells, &[" & ".to_owned()]);
+                    }
+                    _ => push_joined_children(&mut tasks, &children, &[]),
                 }
             }
         }
@@ -280,14 +469,17 @@ fn is_math_script_type(value: &str) -> bool {
 }
 
 fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {
-    dom.attr(node, AttrName::Class).is_some_and(|classes| {
-        classes.split_whitespace().any(|class| {
-            matches!(
-                class.to_ascii_lowercase().as_str(),
-                "katex" | "katex-display" | "mathjax" | "mathjax-display" | "tex2jax_process"
-            )
+    dom.qual_name(node)
+        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"))
+        || dom.attr(node, AttrName::Class).is_some_and(|classes| {
+            classes.split_whitespace().any(|class| {
+                let class = class.to_ascii_lowercase();
+                matches!(
+                    class.as_str(),
+                    "katex" | "katex-display" | "mathjax" | "mathjax-display" | "tex2jax_process"
+                ) || class.starts_with("mathjax_")
+            })
         })
-    })
 }
 
 fn is_block_math(dom: &Dom, node: NodeId) -> bool {
@@ -309,14 +501,20 @@ fn is_block_math(dom: &Dom, node: NodeId) -> bool {
     {
         return true;
     }
-    if dom.attr(node, AttrName::Class).is_some_and(|classes| {
-        classes.split_whitespace().any(|class| {
-            matches!(
-                class.to_ascii_lowercase().as_str(),
-                "katex-display" | "math-display" | "mathjax-display"
-            )
+    if dom
+        .attr_by_local_name(node, "display")
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("block")
         })
-    }) {
+        || dom.attr(node, AttrName::Class).is_some_and(|classes| {
+            classes.split_whitespace().any(|class| {
+                matches!(
+                    class.to_ascii_lowercase().as_str(),
+                    "katex-display" | "math-display" | "mathjax-display"
+                )
+            })
+        })
+    {
         return true;
     }
     matches!(dom.tag(node), Some(Tag::Div | Tag::P))
@@ -330,7 +528,7 @@ mod tests {
 
     #[test]
     fn extracts_katex_annotation_once() {
-        let mut dom = Dom::parse_fragment(r#"<p>A <span class="katex"><math><semantics><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math><span class="katex-html">duplicate</span></span>.</p>"#, Tag::Div).unwrap();
+        let mut dom = Dom::parse_fragment(r#"<p>A <span class="katex" aria-label="E equals m c squared"><math><semantics><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math><span class="katex-html">duplicate</span></span>.</p>"#, Tag::Div).unwrap();
         let root = dom.root();
         normalize(&mut dom, root);
         assert_eq!(dom_to_markdown(&dom, root, 0), "A $E=mc^2$.\n");
@@ -346,6 +544,101 @@ mod tests {
         let root = dom.root();
         normalize(&mut dom, root);
         assert_eq!(dom_to_markdown(&dom, root, 0), "$E=mc^{2}$\n");
+    }
+
+    #[test]
+    fn converts_extended_mathml_structures() {
+        let cases = [
+            (
+                "<math><mroot>\n  <mi>x</mi>\n  <mn>3</mn>\n</mroot></math>",
+                "$\\sqrt[3]{x}$\n",
+            ),
+            (
+                "<math><munder><mo>∑</mo><mi>i</mi></munder><mover><mi>x</mi><mo>¯</mo></mover><munderover><mo>∫</mo><mn>0</mn><mn>1</mn></munderover></math>",
+                "$\\underset{i}{∑}\\overset{¯}{x}\\overset{1}{\\underset{0}{∫}}$\n",
+            ),
+            (
+                r#"<math><mfenced open="[" close="]" separators=";,"><mi>a</mi><mi>b</mi><mi>c</mi></mfenced><mtext>speed &amp; time</mtext></math>"#,
+                "$[a;b,c]\\text{speed \\& time}$\n",
+            ),
+        ];
+        for (source, expected) in cases {
+            let mut dom = Dom::parse_fragment(source, Tag::Div).unwrap();
+            let root = dom.root();
+            normalize(&mut dom, root);
+            assert_eq!(dom_to_markdown(&dom, root, 0), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn converts_labeled_mathml_equations_without_duplicate_labels() {
+        let mut dom = Dom::parse_fragment(
+            r#"<math display="block"><mtable><mlabeledtr><mtd><mtext>(1)</mtext></mtd><mtd><mi>x</mi><mo>=</mo><mn>1</mn></mtd></mlabeledtr></mtable></math>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "$$\n\\begin{aligned}x=1\\tag{1}\\end{aligned}\n$$\n"
+        );
+    }
+
+    #[test]
+    fn normalizes_rendered_mathjax_from_accessible_labels() {
+        let mut dom = Dom::parse_fragment(
+            r#"<mjx-container class="MathJax" jax="SVG" display="true" aria-label="\int_0^1 x dx"><svg><path d="glyph"></path></svg></mjx-container><mjx-container class="MathJax" jax="CHTML" aria-label="a+b"><mjx-math><mjx-mi></mjx-mi></mjx-math></mjx-container>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "$$\n\\int_0^1 x dx\n$$\n$a+b$\n"
+        );
+    }
+
+    #[test]
+    fn uses_adjacent_tex_source_for_rendered_mathjax_once() {
+        let mut dom = Dom::parse_fragment(
+            r#"<script type="math/tex; mode=display">x=1</script>
+<mjx-container class="MathJax" jax="CHTML" display="true"><mjx-math><mjx-mi></mjx-mi></mjx-math></mjx-container>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(dom_to_markdown(&dom, root, 0), "$$\nx=1\n$$\n");
+    }
+
+    #[test]
+    fn keeps_cells_from_an_empty_mathml_equation_label() {
+        let mut dom = Dom::parse_fragment(
+            r#"<math><mtable><mlabeledtr><mtd></mtd><mtd><mi>x</mi><mo>=</mo><mn>2</mn></mtd></mlabeledtr></mtable></math>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "$\\begin{aligned}x=2\\end{aligned}$\n"
+        );
+    }
+
+    #[test]
+    fn pairs_tex_source_after_rendered_mathjax() {
+        let mut dom = Dom::parse_fragment(
+            r#"<mjx-container class="MathJax" jax="CHTML" aria-label="y equals two"><mjx-math></mjx-math></mjx-container>
+<script type="math/tex">y=2</script>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(dom_to_markdown(&dom, root, 0), "$y=2$\n");
     }
 
     #[test]
