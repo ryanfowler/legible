@@ -91,6 +91,155 @@ fn keeps_source_url_fallbacks_separate_from_the_base_element() {
 }
 
 #[test]
+fn filters_template_metadata_before_applying_source_precedence() {
+    let html = format!(
+        r#"<html lang="undefined"><head>
+        <title>Default Title</title>
+        <meta property="og:title" content="Practical metadata">
+        <meta property="og:description" content="Default description">
+        <meta name="twitter:description" content="A useful page summary.">
+        <meta property="og:site_name" content="N/A">
+        <meta property="article:section" content="N/A">
+        <meta name="author" content="Your Name">
+        <meta name="citation_author" content="Ada Lovelace">
+        <script type="application/ld+json">{{
+          "@context":"https://schema.org", "@type":"Article",
+          "headline":"Default Title", "author":{{"name":"Unknown"}}
+        }}</script></head><body><main><h1>Practical metadata</h1><p>{CONTENT}</p></main></body></html>"#
+    );
+
+    let page = Extractor::builder()
+        .metadata_diagnostics(true)
+        .build()
+        .extract(&html, Some("https://example.com/article"))
+        .unwrap();
+    let metadata = page.metadata();
+    let diagnostics = page.metadata_diagnostics().unwrap();
+
+    assert_eq!(metadata.title.as_deref(), Some("Practical metadata"));
+    assert_eq!(
+        metadata.description.as_deref(),
+        Some("A useful page summary.")
+    );
+    assert_eq!(metadata.site_name.as_deref(), Some("example.com"));
+    assert!(metadata.language.is_none());
+    assert!(metadata.section.is_none());
+    assert_eq!(metadata.authors, ["Ada Lovelace"]);
+    assert_eq!(
+        diagnostics.title.selected.as_ref().unwrap().source,
+        legible::MetadataSource::OpenGraph
+    );
+    assert_eq!(
+        diagnostics.description.selected.as_ref().unwrap().source,
+        legible::MetadataSource::Twitter
+    );
+    assert!(
+        diagnostics
+            .title
+            .alternatives
+            .iter()
+            .all(|candidate| candidate.value != "Default Title")
+    );
+    assert!(diagnostics.language.selected.is_none());
+    assert!(diagnostics.language.alternatives.is_empty());
+    assert!(diagnostics.section.selected.is_none());
+    assert!(diagnostics.section.alternatives.is_empty());
+
+    let ambiguous = extract(
+        &format!(
+            r#"<html><head><title>Unknown</title>
+            <meta property="article:tag" content="Unknown">
+            <meta property="article:tag" content="None">
+            <meta name="author" content="Unknown">
+            </head><body><main><h1>Unknown</h1><p>{CONTENT}</p></main></body></html>"#
+        ),
+        None,
+    )
+    .unwrap();
+    assert_eq!(ambiguous.metadata().title.as_deref(), Some("Unknown"));
+    assert_eq!(ambiguous.metadata().tags, ["Unknown", "None"]);
+    assert_eq!(ambiguous.metadata().authors, ["Unknown"]);
+
+    let fallbacks = Extractor::builder()
+        .metadata_diagnostics(true)
+        .build()
+        .extract(
+            &format!(
+                r#"<html dir="sideways"><head><title>Default Title</title></head>
+                <body><main><h1>Default Title</h1><div class="byline">Your Name</div>
+                <p>{CONTENT}</p></main></body></html>"#
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(fallbacks.metadata().title.is_none());
+    assert!(fallbacks.metadata().authors.is_empty());
+    assert!(fallbacks.metadata().direction.is_none());
+    let diagnostics = fallbacks.metadata_diagnostics().unwrap();
+    assert!(diagnostics.title.selected.is_none());
+    assert!(diagnostics.authors.selected.is_empty());
+    assert!(diagnostics.direction.selected.is_none());
+}
+
+#[test]
+fn normalizes_and_deduplicates_authors_across_metadata_sources() {
+    let html = format!(
+        r#"<html><head><title>Author normalization</title>
+        <meta name="dc:creator" content="By&nbsp;ÉMILIE DU CHÂTELET">
+        <meta name="author" content="By Émilie du Châtelet">
+        <script type="application/ld+json">{{
+          "@context":"https://schema.org", "@type":"Article",
+          "headline":"Author normalization",
+          "author":[{{"name":"Émilie du Châtelet"}},{{"name":"Ada Lovelace"}}]
+        }}</script></head><body><main><h1>Author normalization</h1><p>{CONTENT}</p></main></body></html>"#
+    );
+
+    let page = Extractor::builder()
+        .metadata_diagnostics(true)
+        .build()
+        .extract(&html, None)
+        .unwrap();
+
+    assert_eq!(
+        page.metadata().authors,
+        ["Émilie du Châtelet", "Ada Lovelace"]
+    );
+    let authors = &page.metadata_diagnostics().unwrap().authors;
+    assert_eq!(authors.selected.len(), 2);
+    assert_eq!(authors.selected[0].source, legible::MetadataSource::JsonLd);
+
+    let confidence_mismatch = format!(
+        r#"<html><head><title>Author source</title>
+        <meta name="dc:creator" content="Ada Lovelace">
+        <script type="application/ld+json">{{
+          "@context":"https://schema.org", "@type":"WebPage",
+          "name":"Author source", "author":{{"name":"ADA LOVELACE"}}
+        }}</script></head><body><main><h1>Author source</h1><p>{CONTENT}</p></main></body></html>"#
+    );
+    let page = Extractor::builder()
+        .metadata_diagnostics(true)
+        .build()
+        .extract(&confidence_mismatch, None)
+        .unwrap();
+    assert_eq!(page.metadata().authors, ["Ada Lovelace"]);
+    assert_eq!(
+        page.metadata_diagnostics().unwrap().authors.selected[0].source,
+        legible::MetadataSource::DublinCore
+    );
+
+    let intentional_lowercase = format!(
+        r#"<html><head><title>Intentional lowercase</title>
+        <meta name="dc:creator" content="Bell Hooks">
+        <script type="application/ld+json">{{
+          "@context":"https://schema.org", "@type":"Article",
+          "headline":"Intentional lowercase", "author":{{"name":"bell hooks"}}
+        }}</script></head><body><main><h1>Intentional lowercase</h1><p>{CONTENT}</p></main></body></html>"#
+    );
+    let page = extract(&intentional_lowercase, None).unwrap();
+    assert_eq!(page.metadata().authors, ["bell hooks"]);
+}
+
+#[test]
 fn uses_dom_byline_fallback_and_can_disable_structured_data() {
     let html = format!(
         r#"<html><head><title>Page</title><script type="application/ld+json">{{

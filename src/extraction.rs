@@ -253,17 +253,33 @@ impl<'a> ContentExtractor<'a> {
         }
         unwrap_noscript_images(&mut self.dom);
         prep_document(&mut self.dom);
-        self.page_title = self.metadata.title.take().unwrap_or(title);
+        self.page_title = self
+            .metadata
+            .title
+            .take()
+            .or_else(|| metadata::normalize_title(&title))
+            .unwrap_or_default();
         let content = self.extract_content()?;
         self.metadata.title = (!self.page_title.is_empty()).then_some(self.page_title);
         if self.metadata.authors.is_empty()
-            && let Some(byline) = self.page_byline
+            && let Some(byline) = self
+                .page_byline
+                .as_deref()
+                .and_then(metadata::normalize_person)
         {
             self.metadata.authors.push(byline);
         }
         self.metadata.description = self.metadata.description.or(content.excerpt);
-        self.metadata.direction = self.metadata.direction.or(self.page_direction);
-        self.metadata.language = self.metadata.language.or(self.page_language);
+        self.metadata.direction = self.metadata.direction.or_else(|| {
+            self.page_direction
+                .as_deref()
+                .and_then(metadata::normalize_direction)
+        });
+        self.metadata.language = self.metadata.language.or_else(|| {
+            self.page_language
+                .as_deref()
+                .and_then(metadata::normalize_language)
+        });
         if let Some(diagnostics) = &mut self.metadata_diagnostics {
             diagnostics.complete_with_fallbacks(&self.metadata);
         }

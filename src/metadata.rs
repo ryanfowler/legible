@@ -346,7 +346,7 @@ fn complete_list(field: &mut MetadataListFieldDiagnostics<String>, values: &[Str
         if !field
             .selected
             .iter()
-            .any(|selected| selected.value.eq_ignore_ascii_case(value))
+            .any(|selected| metadata_values_equal(&selected.value, value))
         {
             field.selected.push(inferred_value(value));
         }
@@ -1218,15 +1218,24 @@ fn resolve_candidates(
     base_url: Option<&Url>,
     retain_diagnostics: bool,
 ) -> (Metadata, Option<MetadataDiagnostics>) {
-    normalize_all(&mut candidates.title, normalize_text);
-    normalize_all(&mut candidates.description, normalize_text);
+    normalize_all(&mut candidates.title, normalize_title);
+    normalize_all(&mut candidates.description, normalize_description);
     normalize_all(&mut candidates.authors, normalize_person);
-    normalize_all(&mut candidates.site_name, normalize_text);
-    normalize_all(&mut candidates.published_time, normalize_text);
-    normalize_all(&mut candidates.modified_time, normalize_text);
+    if candidates
+        .authors
+        .iter()
+        .any(|candidate| !is_ambiguous_person_placeholder(&candidate.value))
+    {
+        candidates
+            .authors
+            .retain(|candidate| !is_ambiguous_person_placeholder(&candidate.value));
+    }
+    normalize_all(&mut candidates.site_name, normalize_site_name);
+    normalize_all(&mut candidates.published_time, normalize_scalar_text);
+    normalize_all(&mut candidates.modified_time, normalize_scalar_text);
     normalize_all(&mut candidates.language, normalize_language);
     normalize_all(&mut candidates.direction, normalize_direction);
-    normalize_all(&mut candidates.section, normalize_text);
+    normalize_all(&mut candidates.section, normalize_scalar_text);
     normalize_all(&mut candidates.tags, normalize_text);
     normalize_urls(&mut candidates.canonical_url, base_url);
     normalize_urls(&mut candidates.image, base_url);
@@ -1270,7 +1279,7 @@ fn resolve_candidates(
     let diagnostics = retain_diagnostics.then(|| MetadataDiagnostics {
         title: scalar_diagnostics(&candidates.title, metadata.title.as_deref()),
         description: scalar_diagnostics(&candidates.description, metadata.description.as_deref()),
-        authors: list_diagnostics(&candidates.authors, &metadata.authors),
+        authors: author_list_diagnostics(&candidates.authors, &metadata.authors),
         site_name: scalar_diagnostics(&candidates.site_name, metadata.site_name.as_deref()),
         canonical_url: scalar_diagnostics(
             &candidates.canonical_url,
@@ -1321,6 +1330,31 @@ fn scalar_diagnostics(
             })
             .map(|candidate| public_value(candidate, candidate.value.clone()))
             .collect(),
+    }
+}
+
+fn author_list_diagnostics(
+    candidates: &[MetadataCandidate],
+    selected: &[String],
+) -> MetadataListFieldDiagnostics<String> {
+    let mut selected_orders = Vec::new();
+    let selected = selected
+        .iter()
+        .filter_map(|value| {
+            let candidate = resolve_best_exact_matching(candidates, value, &selected_orders)
+                .or_else(|| resolve_best_matching(candidates, value, &selected_orders))?;
+            selected_orders.push(candidate.order);
+            Some(public_value(candidate, value.clone()))
+        })
+        .collect();
+    let alternatives = candidates
+        .iter()
+        .filter(|candidate| !selected_orders.contains(&candidate.order))
+        .map(|candidate| public_value(candidate, candidate.value.clone()))
+        .collect();
+    MetadataListFieldDiagnostics {
+        selected,
+        alternatives,
     }
 }
 
@@ -1388,19 +1422,95 @@ fn normalize_text(value: &str) -> Option<String> {
     }
 }
 
-fn normalize_person(value: &str) -> Option<String> {
+pub(crate) fn normalize_title(value: &str) -> Option<String> {
+    normalize_field_text(
+        value,
+        &[
+            "title",
+            "page title",
+            "default title",
+            "your title",
+            "n/a",
+            "not available",
+            "null",
+            "undefined",
+            "unset",
+        ],
+    )
+}
+
+fn normalize_description(value: &str) -> Option<String> {
+    normalize_field_text(
+        value,
+        &[
+            "description",
+            "page description",
+            "default description",
+            "your description",
+            "n/a",
+            "not available",
+            "null",
+            "undefined",
+            "unset",
+        ],
+    )
+}
+
+fn normalize_site_name(value: &str) -> Option<String> {
+    normalize_field_text(
+        value,
+        &[
+            "site name",
+            "website name",
+            "default site name",
+            "your site name",
+            "n/a",
+            "not available",
+            "null",
+            "undefined",
+            "unset",
+        ],
+    )
+}
+
+fn normalize_field_text(value: &str, placeholders: &[&str]) -> Option<String> {
     let value = normalize_text(value)?;
-    let without_prefix = if value.eq_ignore_ascii_case("by") {
-        ""
-    } else {
-        value
-            .get(..3)
-            .filter(|prefix| prefix.eq_ignore_ascii_case("by "))
-            .map_or(value.as_str(), |_| &value[3..])
-    };
+    (!placeholders
+        .iter()
+        .any(|placeholder| value.eq_ignore_ascii_case(placeholder)))
+    .then_some(value)
+}
+
+fn normalize_scalar_text(value: &str) -> Option<String> {
+    normalize_field_text(
+        value,
+        &["n/a", "not available", "null", "undefined", "unset"],
+    )
+}
+
+pub(crate) fn normalize_person(value: &str) -> Option<String> {
+    let value = normalize_text(value)?;
+    if value.eq_ignore_ascii_case("by") {
+        return None;
+    }
+    let without_prefix = strip_by_prefix(&value);
     let value = normalize_text(without_prefix)?;
-    if value.eq_ignore_ascii_case("author")
-        || value.eq_ignore_ascii_case("authors")
+    if [
+        "author",
+        "authors",
+        "author name",
+        "default author",
+        "your name",
+        "n/a",
+        "not applicable",
+        "not available",
+        "none",
+        "null",
+        "undefined",
+        "unset",
+    ]
+    .iter()
+    .any(|placeholder| value.eq_ignore_ascii_case(placeholder))
         || Url::parse(&value).is_ok()
         || value.chars().count() > 120
     {
@@ -1410,12 +1520,26 @@ fn normalize_person(value: &str) -> Option<String> {
     }
 }
 
-fn normalize_language(value: &str) -> Option<String> {
-    let value = normalize_text(value)?;
+fn strip_by_prefix(value: &str) -> &str {
+    let Some(prefix) = value.get(..2) else {
+        return value;
+    };
+    let remainder = &value[2..];
+    if prefix.eq_ignore_ascii_case("by")
+        && remainder.chars().next().is_some_and(char::is_whitespace)
+    {
+        remainder.trim_start()
+    } else {
+        value
+    }
+}
+
+pub(crate) fn normalize_language(value: &str) -> Option<String> {
+    let value = normalize_scalar_text(value)?;
     Some(value.replace('_', "-"))
 }
 
-fn normalize_direction(value: &str) -> Option<String> {
+pub(crate) fn normalize_direction(value: &str) -> Option<String> {
     let value = normalize_text(value)?.to_ascii_lowercase();
     matches!(value.as_str(), "ltr" | "rtl" | "auto").then_some(value)
 }
@@ -1443,6 +1567,21 @@ fn resolve_best(candidates: &[MetadataCandidate]) -> Option<&MetadataCandidate> 
     best.map(|(candidate, _)| candidate)
 }
 
+fn resolve_best_exact_matching<'a>(
+    candidates: &'a [MetadataCandidate],
+    value: &str,
+    excluded_orders: &[usize],
+) -> Option<&'a MetadataCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.value == value && !excluded_orders.contains(&candidate.order))
+        .max_by(|first, second| {
+            candidate_resolution_score(first, candidates)
+                .cmp(&candidate_resolution_score(second, candidates))
+                .then_with(|| second.order.cmp(&first.order))
+        })
+}
+
 fn resolve_best_matching<'a>(
     candidates: &'a [MetadataCandidate],
     value: &str,
@@ -1450,7 +1589,8 @@ fn resolve_best_matching<'a>(
 ) -> Option<&'a MetadataCandidate> {
     let mut best: Option<(&MetadataCandidate, u16)> = None;
     for candidate in candidates.iter().filter(|candidate| {
-        candidate.value.eq_ignore_ascii_case(value) && !excluded_orders.contains(&candidate.order)
+        metadata_values_equal(&candidate.value, value)
+            && !excluded_orders.contains(&candidate.order)
     }) {
         let score = candidate_resolution_score(candidate, candidates);
         if best.is_none_or(|(current, current_score)| {
@@ -1469,7 +1609,8 @@ fn candidate_resolution_score(
     let agreements = candidates
         .iter()
         .filter(|other| {
-            other.source != candidate.source && other.value.eq_ignore_ascii_case(&candidate.value)
+            other.source != candidate.source
+                && metadata_values_equal(&other.value, &candidate.value)
         })
         .count() as u16;
     u16::from(candidate.confidence) + agreements.min(3) * 5
@@ -1478,7 +1619,7 @@ fn candidate_resolution_score(
 fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Option<String> {
     let filtered: Vec<_> = candidates
         .iter()
-        .filter(|candidate| !candidate.value.eq_ignore_ascii_case(excluded))
+        .filter(|candidate| !metadata_values_equal(&candidate.value, excluded))
         .cloned()
         .collect();
     resolve_one(&filtered)
@@ -1492,21 +1633,38 @@ fn resolve_authors(candidates: &[MetadataCandidate]) -> Vec<String> {
     else {
         return Vec::new();
     };
-    let mut selected: Vec<_> = candidates
+    let selected: Vec<_> = candidates
         .iter()
         .filter(|candidate| candidate.confidence.saturating_add(8) >= maximum)
-        .cloned()
         .collect();
-    for candidate in &mut selected {
-        if let Some(first) = candidates
+    let mut authors = Vec::new();
+    for candidate in &selected {
+        if authors
             .iter()
-            .find(|value| value.value.eq_ignore_ascii_case(&candidate.value))
+            .any(|value: &String| metadata_values_equal(value, &candidate.value))
         {
-            candidate.value.clone_from(&first.value);
-            candidate.order = first.order;
+            continue;
+        }
+        let representative = selected
+            .iter()
+            .copied()
+            .filter(|other| metadata_values_equal(&other.value, &candidate.value))
+            .max_by(|first, second| {
+                author_spelling_score(&first.value)
+                    .cmp(&author_spelling_score(&second.value))
+                    .then_with(|| {
+                        candidate_resolution_score(first, candidates)
+                            .cmp(&candidate_resolution_score(second, candidates))
+                    })
+                    .then_with(|| second.order.cmp(&first.order))
+            })
+            .unwrap_or(candidate);
+        authors.push(representative.value.clone());
+        if authors.len() == 10 {
+            break;
         }
     }
-    resolve_many(&selected).into_iter().take(10).collect()
+    authors
 }
 
 fn resolve_many(candidates: &[MetadataCandidate]) -> Vec<String> {
@@ -1516,12 +1674,26 @@ fn resolve_many(candidates: &[MetadataCandidate]) -> Vec<String> {
     for candidate in candidates {
         if !values
             .iter()
-            .any(|value: &String| value.eq_ignore_ascii_case(&candidate.value))
+            .any(|value: &String| metadata_values_equal(value, &candidate.value))
         {
             values.push(candidate.value);
         }
     }
     values
+}
+
+fn is_ambiguous_person_placeholder(value: &str) -> bool {
+    value.eq_ignore_ascii_case("unknown")
+}
+
+fn author_spelling_score(value: &str) -> u8 {
+    u8::from(value.chars().any(char::is_lowercase))
+}
+
+fn metadata_values_equal(first: &str, second: &str) -> bool {
+    first.eq_ignore_ascii_case(second)
+        || (!first.is_ascii() || !second.is_ascii())
+            && caseless::canonical_caseless_match_str(first, second)
 }
 
 fn strip_site_affix(title: &str, site: &str) -> Option<String> {
@@ -1796,11 +1968,20 @@ mod tests {
         );
 
         assert_eq!(result.title.as_deref(), Some("Real title"));
-        assert_eq!(result.authors, ["Ada"]);
+        assert_eq!(result.authors, ["ada"]);
         assert_eq!(result.tags, ["Rust", "HTML", "Extraction"]);
         assert_eq!(normalize_person("By Ada").as_deref(), Some("Ada"));
+        assert_eq!(normalize_person("By\u{a0}Ada").as_deref(), Some("Ada"));
+        assert_eq!(
+            normalize_person("Byron Smith").as_deref(),
+            Some("Byron Smith")
+        );
+        assert_eq!(normalize_person("李").as_deref(), Some("李"));
         assert_eq!(normalize_person("By --"), None);
         assert_eq!(normalize_person("By "), None);
+        assert!(metadata_values_equal("Émilie", "E\u{301}MILIE"));
+        assert!(metadata_values_equal("Straße", "STRASSE"));
+        assert!(metadata_values_equal("ΟΣ", "ος"));
     }
 
     #[test]
