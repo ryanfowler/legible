@@ -28,9 +28,11 @@ impl Dom {
     pub(crate) fn contains(&self, id: NodeId) -> bool {
         id.index() < self.nodes.len()
     }
+    #[inline]
     pub(crate) fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id.index()]
     }
+    #[inline]
     pub(crate) fn node_mut(&mut self, id: NodeId) -> &mut Node {
         &mut self.nodes[id.index()]
     }
@@ -59,30 +61,39 @@ impl Dom {
     pub(crate) fn create_text(&mut self, text: &str) -> Result<NodeId, DomError> {
         self.create(NodeData::Text(StrTendril::from(text)))
     }
+    #[inline]
     pub(crate) fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).parent.get()
     }
+    #[inline]
     pub(crate) fn prev_sibling(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).prev_sibling.get()
     }
+    #[inline]
     pub(crate) fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).next_sibling.get()
     }
+    #[inline]
     pub(crate) fn first_child(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).first_child.get()
     }
+    #[inline]
     pub(crate) fn last_child(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).last_child.get()
     }
+    #[inline]
     pub(crate) fn is_element(&self, id: NodeId) -> bool {
         matches!(self.node(id).data, NodeData::Element(_))
     }
+    #[inline]
     pub(crate) fn is_text(&self, id: NodeId) -> bool {
         matches!(self.node(id).data, NodeData::Text(_))
     }
+    #[inline]
     pub(crate) fn is_comment(&self, id: NodeId) -> bool {
         matches!(self.node(id).data, NodeData::Comment(_))
     }
+    #[inline]
     pub(crate) fn tag(&self, id: NodeId) -> Option<Tag> {
         match &self.node(id).data {
             NodeData::Element(e) => Some(e.tag),
@@ -95,30 +106,35 @@ impl Dom {
             _ => None,
         }
     }
+    #[inline]
     pub(crate) fn text_node(&self, id: NodeId) -> Option<&str> {
         match &self.node(id).data {
             NodeData::Text(s) => Some(s.as_ref()),
             _ => None,
         }
     }
+    #[inline]
     pub(crate) fn attrs(&self, id: NodeId) -> &[super::Attribute] {
         match &self.node(id).data {
             NodeData::Element(e) => &e.attrs,
             _ => &[],
         }
     }
+    #[inline]
     pub(crate) fn attr(&self, id: NodeId, name: AttrName) -> Option<&str> {
         match &self.node(id).data {
             NodeData::Element(e) => e.attr(name),
             _ => None,
         }
     }
+    #[inline]
     pub(crate) fn attr_by_local_name(&self, id: NodeId, name: &str) -> Option<&str> {
         match &self.node(id).data {
             NodeData::Element(e) => e.attr_local(name),
             _ => None,
         }
     }
+    #[inline]
     pub(crate) fn has_attr(&self, id: NodeId, name: AttrName) -> bool {
         self.attr(id, name).is_some()
     }

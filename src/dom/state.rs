@@ -89,6 +89,13 @@ impl NodeStateStore {
         self.entries[id.index()].stats = s;
         self.entries[id.index()].stats_epoch = self.stats_epoch
     }
+    /// Forces the next `get_stats` call to recompute stats for this node.
+    /// Does not reset link lengths; callers must handle those separately
+    /// if the node's link contribution has changed.
+    pub(crate) fn invalidate_stats(&mut self, id: super::NodeId) {
+        self.sync_len(id.index() + 1);
+        self.entries[id.index()].stats_epoch = 0;
+    }
     pub(crate) fn enable_link_lengths(&mut self) {
         self.link_lengths
             .get_or_insert_with(|| vec![0.0; self.entries.len()]);

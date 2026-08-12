@@ -505,12 +505,23 @@ pub(crate) fn compute_readability_scores(
         }
     }
 
-    // Structural preparation and deferred cleanup produce different text and
-    // link totals. Keep propagated scores, but recompute cached statistics.
-    store.clear_stats();
+    // Detach excluded nodes and invalidate cached stats for their ancestors.
+    // Leaf-level paragraph text is unchanged, so their cached stats remain valid.
+    // This avoids a full text re-scan in the second pass.
+    let mut ancestors_to_invalidate = SmallVec::<[NodeId; 64]>::new();
     for &node in excluded {
         if dom.parent(node).is_some() {
+            // Collect ancestors before detaching
+            for ancestor in dom.ancestors(node) {
+                ancestors_to_invalidate.push(ancestor);
+            }
             dom.detach(node);
+        }
+    }
+    for &node in &ancestors_to_invalidate {
+        store.invalidate_stats(node);
+        if store.link_lengths_enabled() {
+            store.set_link_length(node, 0.0);
         }
     }
     let mut scores = SmallVec::new();
@@ -777,7 +788,7 @@ fn matches_style_declaration(style: &[u8], start: usize, property: &[u8], value:
 mod tests {
     use super::{
         CandidateFeatureIndex, compute_readability_scores, get_link_density,
-        get_link_density_cached, stats_for_text,
+        get_link_density_cached, get_or_compute_stats, stats_for_text,
     };
     use crate::candidate::CandidateSet;
     use crate::dom::{Dom, NodeStateStore, Tag};
@@ -908,6 +919,35 @@ mod tests {
             .map(|candidate| candidate.score)
             .unwrap();
         assert!(article_score > 2.0);
+    }
+
+    #[test]
+    fn invalidating_excluded_descendant_refreshes_ancestor_stats_and_links() {
+        let mut dom = Dom::parse_document(
+            r#"<body><main><p>Visible answer contains enough useful words for scoring.</p><div id="excluded"><a href="/ad">Excluded linked promotion with many extra words.</a></div></main></body>"#,
+        )
+        .unwrap();
+        let main = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+        let visible = dom
+            .descendants(main)
+            .find(|&node| dom.tag(node) == Some(Tag::P))
+            .unwrap();
+        let excluded = dom
+            .descendants(main)
+            .find(|&node| dom.attr(node, crate::dom::AttrName::Id) == Some("excluded"))
+            .unwrap();
+        let mut store = NodeStateStore::new();
+        store.enable_link_lengths();
+        let stale = get_or_compute_stats(&dom, main, &mut store);
+        assert!(stale.text_length > 80);
+        assert!(store.link_length(main) > 0.0);
+
+        let scores = compute_readability_scores(&mut dom, [visible], &[excluded], &mut store, true);
+        assert!(scores.iter().any(|score| score.node == main));
+
+        let fresh = get_or_compute_stats(&dom, main, &mut store);
+        assert!(fresh.text_length < stale.text_length);
+        assert_eq!(store.link_length(main), 0.0);
     }
 
     #[test]

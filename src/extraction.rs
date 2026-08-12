@@ -1132,9 +1132,15 @@ impl<'a> ContentExtractor<'a> {
         if self.dom.tag(node) != self.dom.tag(sibling) {
             return false;
         }
-        let hidden_text = get_inner_text_owned(&self.dom, node);
-        hidden_text.chars().count() >= 100
-            && hidden_text == get_inner_text_owned(&self.dom, sibling)
+        let mut node_buffer = String::new();
+        let mut sibling_buffer = String::new();
+        self.dom.append_text(node, &mut node_buffer);
+        let node_text = node_buffer.trim();
+        if node_text.chars().count() < 100 {
+            return false;
+        }
+        self.dom.append_text(sibling, &mut sibling_buffer);
+        node_text == sibling_buffer.trim()
     }
 
     fn is_visible_for_strategy(&self, node: NodeId) -> bool {
@@ -1303,9 +1309,10 @@ impl<'a> ContentExtractor<'a> {
             candidates.add_readability(readability.node, readability.score);
         }
 
-        // Readability scoring clears the text cache after it detaches deferred
-        // clutter. Reuse that cache here. Feature calculation uses the same
-        // tree and would otherwise repeat a full postorder text scan.
+        // Readability scoring selectively invalidates ancestors after it
+        // detaches deferred clutter. Reuse those refreshed statistics and the
+        // unaffected leaf cache. Feature calculation uses the same tree and
+        // would otherwise repeat a full postorder text scan.
         let mut table_nodes = Vec::new();
         mark_data_tables(dom, dom.root(), &mut self.node_data, &mut table_nodes);
         let feature_index = CandidateFeatureIndex::new(dom, &self.node_data);
@@ -1624,11 +1631,17 @@ impl<'a> ContentExtractor<'a> {
         // stable code, figure, image, footnote, and table structures.
         normalize_after_cleanup(&mut self.dom, root, nodes);
 
-        let paragraphs: SmallVec<[NodeId; 64]> = self
-            .dom
-            .descendants(root)
-            .filter(|&node| self.dom.tag(node) == Some(Tag::P))
-            .collect();
+        // Single traversal collects both paragraphs and line breaks,
+        // replacing two separate filters over `descendants`.
+        let mut paragraphs = SmallVec::<[NodeId; 64]>::new();
+        let mut breaks = SmallVec::<[NodeId; 32]>::new();
+        for id in self.dom.descendants(root) {
+            match self.dom.tag(id) {
+                Some(Tag::P) => paragraphs.push(id),
+                Some(Tag::Br) => breaks.push(id),
+                _ => {}
+            }
+        }
         for paragraph in paragraphs {
             let media = self.dom.descendants(paragraph).any(|node| {
                 matches!(
@@ -1640,11 +1653,6 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.detach(paragraph);
             }
         }
-        let breaks: SmallVec<[NodeId; 32]> = self
-            .dom
-            .descendants(root)
-            .filter(|&node| self.dom.tag(node) == Some(Tag::Br))
-            .collect();
         for line_break in breaks {
             if crate::cleaning::next_non_whitespace_sibling(&self.dom, line_break)
                 .is_some_and(|node| self.dom.tag(node) == Some(Tag::P))
@@ -1654,6 +1662,7 @@ impl<'a> ContentExtractor<'a> {
         }
     }
     fn content_excerpt(&self, root: NodeId) -> Option<String> {
+        let mut buffer = String::new();
         self.dom
             .descendants(root)
             .filter(|&node| self.dom.tag(node) == Some(Tag::P))
@@ -1675,8 +1684,16 @@ impl<'a> ContentExtractor<'a> {
                                 })
                     })
             })
-            .map(|node| get_inner_text_owned(&self.dom, node))
-            .find(|text| !text.is_empty())
+            .find_map(|node| {
+                buffer.clear();
+                self.dom.append_text(node, &mut buffer);
+                let trimmed = buffer.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            })
     }
     fn post_process(&mut self, root: NodeId, nodes: &mut Vec<NodeId>) {
         // URI repair, class cleanup, and comment removal share one stable
@@ -2376,6 +2393,42 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let hidden_paragraph = r#"<body><p class="d-none">Utility-hidden paragraph must not leak into the result.</p><main><p>Visible short answer.</p></main></body>"#;
         let page = crate::extract(hidden_paragraph, None).unwrap();
         assert_eq!(page.text(), "Visible short answer.");
+    }
+
+    #[test]
+    fn short_multibyte_hidden_variant_is_not_duplicate() {
+        let text = "界".repeat(34);
+        let html = format!(
+            "<body><article><p>{text}</p></article><article class=\"d-none\"><p>{text}</p></article></body>"
+        );
+        let dom = Dom::parse_document(&html).unwrap();
+        let config = ExtractorConfig::default();
+        let extractor = ContentExtractor::from_document(dom, None, &config);
+        let hidden = extractor
+            .dom
+            .descendants(extractor.dom.root())
+            .find(|&node| extractor.dom.attr(node, AttrName::Class) == Some("d-none"))
+            .unwrap();
+
+        assert!(!extractor.is_duplicate_hidden_variant(hidden));
+    }
+
+    #[test]
+    fn long_multibyte_hidden_variant_compares_trimmed_text() {
+        let text = "界".repeat(100);
+        let html = format!(
+            "<body><article><p> {text} </p></article><article class=\"d-none\">\n<p> {text} </p>\n</article></body>"
+        );
+        let dom = Dom::parse_document(&html).unwrap();
+        let config = ExtractorConfig::default();
+        let extractor = ContentExtractor::from_document(dom, None, &config);
+        let hidden = extractor
+            .dom
+            .descendants(extractor.dom.root())
+            .find(|&node| extractor.dom.attr(node, AttrName::Class) == Some("d-none"))
+            .unwrap();
+
+        assert!(extractor.is_duplicate_hidden_variant(hidden));
     }
 
     #[test]
