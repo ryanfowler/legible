@@ -643,7 +643,10 @@ mod tests {
         );
         let markdown = dom_to_markdown(&dom, root, 0);
         assert!(markdown.contains("Use `cargo test` now."));
-        assert!(markdown.contains("Call\n`run()`"), "{markdown}");
+        assert!(
+            markdown.contains("| Call |\n| --- |\n| `run()` |"),
+            "{markdown}"
+        );
         assert!(!markdown.contains("```plaintext"));
     }
 

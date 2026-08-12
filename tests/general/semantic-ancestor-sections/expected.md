@@ -23,9 +23,10 @@ cargo build --release
 
 Independent tests compare the detector with two reference instruments.
 
-Instrument | Error
-Portable sensor | 1.2%
-Reference | 1.0%
+| Instrument | Error |
+| --- | --- |
+| Portable sensor | 1.2% |
+| Reference | 1.0% |
 
 ## Conclusion
 
