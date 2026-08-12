@@ -22,11 +22,13 @@ use crate::normalize::{
     remove_decorative_media_before_cleanup,
 };
 use crate::page::ExtractedPage;
+use crate::page_kind::PageKind;
 use crate::quality::{
     ContentMetrics, ExtractionQuality, is_access_barrier, is_incoherent_short_result,
     is_interactive_shell,
 };
 use crate::scoring::*;
+use crate::specialized::{self, DocumentContext};
 use html5ever::ns;
 use regex::Regex;
 use smallvec::SmallVec;
@@ -51,6 +53,8 @@ pub(crate) struct ContentExtractor<'a> {
     url_error: Option<url::ParseError>,
     best_attempt: Option<BestAttempt>,
     diagnostic_attempts: Option<Vec<ExtractionAttempt>>,
+    specialized_root: Option<NodeId>,
+    page_kind: PageKind,
 }
 struct BestAttempt {
     content: FrozenContent,
@@ -192,6 +196,8 @@ impl<'a> ContentExtractor<'a> {
             url_error,
             best_attempt: None,
             diagnostic_attempts: options.diagnostics.then(Vec::new),
+            specialized_root: None,
+            page_kind: PageKind::Unknown,
         }
     }
     pub(crate) fn extract(mut self) -> Result<ExtractedPage> {
@@ -253,6 +259,17 @@ impl<'a> ContentExtractor<'a> {
         }
         unwrap_noscript_images(&mut self.dom);
         prep_document(&mut self.dom);
+        if self.options.content_root.is_none() {
+            let specialized = specialized::extract(&DocumentContext {
+                dom: &self.dom,
+                source_uri: self.source_uri.as_ref(),
+            });
+            if let Some(result) = specialized {
+                self.dom = result.dom;
+                self.specialized_root = Some(result.root);
+                self.page_kind = result.kind;
+            }
+        }
         self.page_title = self
             .metadata
             .title
@@ -319,7 +336,7 @@ impl<'a> ContentExtractor<'a> {
                     .ok_or(Error::ContentRootNotFound)?,
             )
         } else {
-            None
+            self.specialized_root
         };
         let footnote_definitions = collect_external_footnotes(&self.dom);
         let source_metrics = exact_root.map_or_else(
@@ -371,7 +388,16 @@ impl<'a> ContentExtractor<'a> {
             // Discovery only records nodes. It does not mutate the source DOM.
             // Deferred removals stay attached until all candidate scores and
             // link-density values have been calculated.
-            let discovery = self.discover_candidates(&mut match_buffer, &mut text_buffer);
+            let mut discovery = self.discover_candidates(&mut match_buffer, &mut text_buffer);
+            if let Some(root) = self.specialized_root {
+                // A specialized extractor has already separated content from
+                // page chrome. Generic discovery can still provide ranking
+                // data, but it must not remove canonical titles or bylines.
+                discovery.remove_after_scoring.retain(|node| {
+                    *node != root && !self.dom.ancestors(*node).any(|ancestor| ancestor == root)
+                });
+                self.page_byline = None;
+            }
 
             // Prepare and score one working copy. Score propagation runs before
             // deferred clutter is detached. The prepared source stays intact
@@ -1635,7 +1661,7 @@ impl<'a> ContentExtractor<'a> {
             self.strategy == ExtractionStrategy::RelaxedVisibility,
             nodes,
         );
-        if self.strategy.conditional_cleanup() {
+        if self.strategy.conditional_cleanup() && self.page_kind.uses_article_cleanup() {
             heuristic_cleanup(&mut self.dom, root, &mut self.node_data, text_buffer, nodes);
         }
 

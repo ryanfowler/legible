@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><title>Show HN: Resilient comment trees | Hacker News</title></head><body>
+<table id="hnmain"><tr><td>
+  <table>
+    <tr class="athing" id="500"><td class="title"><span class="titleline"><a href="https://example.com/tree">Show HN: Resilient comment trees</a></span></td></tr>
+    <tr><td></td><td class="subtext"><span class="score">12 points</span> by <a class="hnuser">builder</a> <span class="age">1 hour ago</span> | <a href="item?id=500">2 comments</a></td></tr>
+  </table>
+  <table class="comment-tree">
+    <tr class="athing comtr" id="501"><td class="ind" width="0"><img width="0"></td><td><div class="comment"><span class="comhead"><a class="hnuser">root</a> <span class="age">50 minutes ago</span></span><div class="commtext c00"><p>This root comment remains the nearest valid ancestor.</p></div></div></td></tr>
+    <tr class="athing comtr" id="502"><td class="ind" width="40"><img width="40"></td><td><div class="comment"><span class="comhead"><a class="hnuser">sibling</a> <span class="age">40 minutes ago</span></span><div class="commtext c00"><p>This visible child precedes a deleted sibling.</p></div></div></td></tr>
+    <tr class="athing comtr" id="503"><td class="ind" width="40"><img width="40"></td><td><div class="comment"><span class="comhead"><span class="age">deleted</span></span><div class="comment-collapsed">[deleted]</div></div></td></tr>
+    <tr class="athing comtr" id="504"><td class="ind" width="80"><img width="80"></td><td><div class="comment"><span class="comhead"><a class="hnuser">survivor</a> <span class="age">30 minutes ago</span></span><div class="commtext c00"><p>This reply attaches to the root instead of the unrelated visible child.</p></div></div></td></tr>
+  </table>
+</td></tr></table>
+</body></html>

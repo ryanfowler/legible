@@ -54,6 +54,10 @@ harness = false
 name = "defuddle_tests"
 harness = false
 
+[[test]]
+name = "specialized_tests"
+harness = false
+
 [[bench]]
 name = "extraction"
 harness = false

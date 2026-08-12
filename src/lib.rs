@@ -65,8 +65,10 @@ mod markdown;
 mod metadata;
 mod normalize;
 mod page;
+mod page_kind;
 mod quality;
 mod scoring;
+mod specialized;
 mod text;
 
 pub use diagnostics::{

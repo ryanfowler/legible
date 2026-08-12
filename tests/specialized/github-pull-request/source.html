@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><title>Preserve stable node IDs by alice · Pull Request #77</title></head><body data-turbo-body>
+<main>
+  <h1 class="gh-header-title"><bdi class="js-issue-title">Preserve stable node IDs</bdi> <span>#77</span></h1>
+  <div class="js-timeline-item" data-testid="issue-body-container"><a class="author" rel="author">alice</a><time>Aug 9, 2026</time><div data-testid="issue-body" class="comment-body markdown-body js-comment-body"><p>This change keeps identifiers stable after HTML tree repair.</p><ul><li>Keep arena allocation private.</li><li>Use preorder snapshots before mutation.</li></ul></div></div>
+  <div class="js-timeline-item" data-testid="pull-request-review"><a class="author" rel="author">reviewer</a><time>Aug 10, 2026</time><div data-testid="pull-request-review-body"><p>The traversal rule looks correct.</p><pre><code>for node in snapshot {
+    normalize(node);
+}</code></pre></div><button>Resolve conversation</button></div>
+</main>
+</body></html>
