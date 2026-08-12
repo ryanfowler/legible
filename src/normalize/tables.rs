@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 /// Explicit table semantics always win. For unmarked tables, this pass uses
 /// shape and cell content together. It keeps regular multi-row grids, but
 /// removes the table structure from one-dimensional and block-rich layouts.
-pub(super) fn normalize_layout_tables(dom: &mut Dom, root: NodeId) {
+pub(super) fn normalize_layout_tables(dom: &mut Dom, root: NodeId) -> usize {
     let tables: SmallVec<[NodeId; 16]> = dom
         .descendants(root)
         .filter(|&node| dom.tag(node) == Some(Tag::Table))
@@ -14,12 +14,15 @@ pub(super) fn normalize_layout_tables(dom: &mut Dom, root: NodeId) {
 
     // Transform inner tables first. This keeps every retained child attached
     // when an outer layout table is flattened afterward.
+    let mut flattened = 0;
     for table in tables.into_iter().rev() {
         if dom.parent(table).is_none() || !is_layout_table(dom, table) {
             continue;
         }
         flatten(dom, table);
+        flattened += 1;
     }
+    flattened
 }
 
 fn is_layout_table(dom: &Dom, table: NodeId) -> bool {

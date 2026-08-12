@@ -83,6 +83,7 @@ fn extract_listing(context: &DocumentContext<'_>) -> Option<SpecializedResult> {
         dom,
         root,
         kind: PageKind::Listing,
+        identity: "hacker-news",
     })
 }
 
@@ -129,6 +130,7 @@ fn extract_discussion(
         dom,
         root,
         kind: PageKind::Discussion,
+        identity: "hacker-news",
     })
 }
 

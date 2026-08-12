@@ -114,6 +114,41 @@ pub enum AttemptRejectionReason {
     Superseded,
 }
 
+/// A major cleanup stage that removed retained content elements.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CleanupActionKind {
+    /// Decorative or placeholder media was removed.
+    DecorativeMedia,
+    /// Executable, hidden, or interactive markup was removed.
+    HardCleanup,
+    /// Peripheral content was removed by multi-signal heuristics.
+    HeuristicCleanup,
+    /// Empty elements and presentation wrappers were removed.
+    FinalCleanup,
+}
+
+/// The number of elements removed by one major cleanup stage.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CleanupActionInfo {
+    pub kind: CleanupActionKind,
+    pub removed_elements: usize,
+}
+
+/// Counts of canonical semantic structures in one extraction result.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NormalizationCountsInfo {
+    pub code_blocks: usize,
+    pub footnote_references: usize,
+    pub footnote_definitions: usize,
+    pub math_expressions: usize,
+    pub images: usize,
+    pub tables: usize,
+    pub flattened_layout_tables: usize,
+}
+
 /// Diagnostic data for one extraction attempt.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
@@ -123,6 +158,10 @@ pub struct ExtractionAttempt {
     pub source: ContentMetricsInfo,
     pub result: ContentMetricsInfo,
     pub quality: QualityInfo,
+    /// Major cleanup stages that removed one or more elements.
+    pub cleanup_actions: Vec<CleanupActionInfo>,
+    /// Canonical semantic structures produced by normalization.
+    pub normalization: NormalizationCountsInfo,
     pub accepted: bool,
     pub rejection_reason: Option<AttemptRejectionReason>,
 }
@@ -132,5 +171,7 @@ pub struct ExtractionAttempt {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtractionDiagnostics {
     pub selected_strategy: ExtractionStrategyInfo,
+    /// The specialized extractor that produced the canonical input, if any.
+    pub specialized_extractor: Option<String>,
     pub attempts: Vec<ExtractionAttempt>,
 }

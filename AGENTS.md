@@ -11,6 +11,7 @@ cargo test test_name   # Run a specific test (test names are sanitized from test
 cargo fmt              # Format code - run after making changes
 cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
+cargo bench --bench extraction # Run compatibility performance benchmarks
 cargo +nightly fuzz run <target> # Run a fuzz target (requires nightly + cargo-fuzz)
 prettier -w .          # Format other files
 ```
@@ -51,6 +52,7 @@ The extraction pipeline flows through these stages:
 | `normalize.rs` / `normalize/` | Ordered semantic passes for math, media, callouts, images, headings, lists, code, figures, footnotes, tables, and wrappers |
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
+| `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -131,3 +133,7 @@ let page = extractor.extract(html, None)?;
 Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.
 
 The internal `fuzzing` feature exposes retained-DOM validation only to fuzz targets. Do not use it in normal applications.
+
+## Performance
+
+`benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input. See `benches/README.md` for baseline commands and regression guardrails.

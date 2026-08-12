@@ -252,6 +252,72 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_report_cleanup_and_normalized_structures() {
+        let html = r#"<main><article><h1>Technical guide</h1><p>This guide explains a complete process with enough useful detail for extraction. It provides stable context and a clear result.</p><pre><code class='language-rust'>fn main() {}</code></pre><p>More substantial prose completes the guide and keeps the selected article coherent.</p><aside class='newsletter'><p>Join our newsletter</p><form><input type='email'><button>Subscribe</button></form></aside></article></main>"#;
+        let page = Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let attempt = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+
+        assert_eq!(attempt.normalization.code_blocks, 1);
+        assert!(attempt.cleanup_actions.iter().any(|action| {
+            action.kind == crate::diagnostics::CleanupActionKind::HeuristicCleanup
+                && action.removed_elements > 0
+        }));
+    }
+
+    #[test]
+    fn diagnostics_count_normalized_semantics() {
+        let html = r##"<main><article><h1>Reference guide</h1><p>This guide explains the semantic examples with enough useful context for stable extraction.<a href="#note" role="doc-noteref">1</a></p><pre><code>fn main() {}</code></pre><math><mi>x</mi></math><figure><img src="diagram.png" alt="Diagram"></figure><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table><table role="presentation"><tr><td><p>Layout prose remains readable.</p></td></tr></table><aside id="note" role="doc-footnote">A useful note.</aside><p>A final paragraph provides more substantial content and a clear conclusion.</p></article></main>"##;
+        let page = Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let counts = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap()
+            .normalization;
+
+        assert_eq!(counts.code_blocks, 1);
+        assert_eq!(counts.footnote_references, 1);
+        assert_eq!(counts.footnote_definitions, 1);
+        assert_eq!(counts.math_expressions, 1);
+        assert_eq!(counts.images, 1);
+        assert_eq!(counts.tables, 1);
+        assert_eq!(counts.flattened_layout_tables, 1);
+    }
+
+    #[test]
+    fn diagnostics_report_specialized_extractor_identity() {
+        let page = Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(
+                include_str!("../tests/specialized/hacker-news-listing/source.html"),
+                Some("https://news.ycombinator.com/"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            page.diagnostics().unwrap().specialized_extractor.as_deref(),
+            Some("hacker-news")
+        );
+    }
+
+    #[test]
     fn poor_hint_does_not_override_better_automatic_content() {
         let html = "<body><aside id='poor-hint'><p>Brief sidebar note.</p></aside><article id='article'><h1>Substantial article</h1><p>This article explains the main subject in detail. It gives readers the context that they need to understand the result, and it contains several complete sentences.</p><p>The second paragraph adds practical evidence, examples, and a clear conclusion. This is the useful page content that automatic extraction should retain.</p></article></body>";
         let page = Extractor::builder()

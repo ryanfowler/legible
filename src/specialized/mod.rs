@@ -18,6 +18,7 @@ pub(crate) struct SpecializedResult {
     pub(crate) dom: Dom,
     pub(crate) root: NodeId,
     pub(crate) kind: PageKind,
+    pub(crate) identity: &'static str,
 }
 
 /// Converts one recognized page type into canonical semantic HTML.
@@ -121,6 +122,7 @@ mod tests {
                 dom,
                 root,
                 kind: PageKind::Listing,
+                identity: "dummy",
             })
         }
     }
@@ -137,6 +139,7 @@ mod tests {
                 dom,
                 root,
                 kind: PageKind::Discussion,
+                identity: "later",
             })
         }
     }
@@ -151,6 +154,7 @@ mod tests {
         let result = extract_with_registry(&context, &[&DummyExtractor, &LaterExtractor]).unwrap();
 
         assert_eq!(result.kind, PageKind::Listing);
+        assert_eq!(result.identity, "dummy");
         assert_eq!(result.dom.text(result.root), "Specialized content");
     }
 

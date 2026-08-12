@@ -78,11 +78,16 @@ let extractor = Extractor::builder().diagnostics(true).build();
 let page = extractor.extract("<main><p>Page content.</p></main>", None)?;
 if let Some(diagnostics) = page.diagnostics() {
     println!("Selected {:?}", diagnostics.selected_strategy);
+    println!("Specialized extractor: {:?}", diagnostics.specialized_extractor);
+    for attempt in &diagnostics.attempts {
+        println!("Cleanup: {:?}", attempt.cleanup_actions);
+        println!("Normalization: {:?}", attempt.normalization);
+    }
 }
 # Ok::<(), legible::Error>(())
 ```
 
-Legible does not retain attempt diagnostics by default.
+Legible does not retain attempt diagnostics by default. When enabled, diagnostics record each strategy, the selected root, quality metrics, major cleanup actions, semantic normalization counts, and the specialized extractor identity.
 
 Use a content hint when you know a likely content container. The hint adds strong
 evidence, but Legible can select a better container. Use `content_root` when you
@@ -159,6 +164,14 @@ node scripts/compare-defuddle/index.mjs
 ```
 
 See `scripts/compare-defuddle/README.md` for optional Defuddle comparison.
+
+Run the compatibility performance suite with:
+
+```bash
+cargo bench --bench extraction
+```
+
+See `benches/README.md` for workloads, baseline commands, and performance guardrails.
 
 ## License
 

@@ -67,6 +67,7 @@ impl SpecializedExtractor for GitHubExtractor {
             dom,
             root,
             kind: PageKind::Discussion,
+            identity: "github",
         })
     }
 }
