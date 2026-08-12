@@ -33,10 +33,12 @@ pub fn prep_document(dom: &mut Dom) {
 
     ids.clear();
     if let Some(body) = dom.body() {
-        ids.extend(
-            dom.descendants(body)
-                .filter(|&id| dom.tag(id) == Some(Tag::Br)),
-        );
+        ids.extend(dom.descendants(body).filter(|&id| {
+            dom.tag(id) == Some(Tag::Br)
+                && !dom
+                    .ancestors(id)
+                    .any(|ancestor| matches!(dom.tag(ancestor), Some(Tag::Pre | Tag::Code)))
+        }));
     }
     replace_brs(dom, &ids);
 
@@ -1494,6 +1496,24 @@ mod tests {
         let span = dom.first_descendant_by_tag(body, Tag::Span).unwrap();
         assert_eq!(dom.parent(paragraph), dom.parent(span));
         assert!(!dom.descendants(paragraph).any(|id| id == span));
+    }
+
+    #[test]
+    fn preserves_code_line_breaks_during_document_preparation() {
+        let mut dom = Dom::parse_document(
+            "<body><pre><code>one<br><br>two</code></pre><code>three<br><br>four</code></body>",
+        )
+        .unwrap();
+
+        prep_document(&mut dom);
+
+        let body = dom.body().unwrap();
+        assert_eq!(
+            dom.descendants(body)
+                .filter(|&node| dom.tag(node) == Some(Tag::Br))
+                .count(),
+            4
+        );
     }
 
     #[test]

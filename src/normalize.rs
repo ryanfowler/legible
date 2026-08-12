@@ -1,6 +1,7 @@
 //! Semantic normalization for retained content.
 
 mod callouts;
+mod code;
 mod footnotes;
 mod headings;
 mod images;
@@ -29,13 +30,12 @@ fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
 /// Normalizes semantic structures that hard cleanup does not remove.
 ///
 /// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
-/// already converted math, media, callouts, and footnotes. Cleanup does not
+/// already converted code, math, media, callouts, and footnotes. Cleanup does not
 /// create new source structures for those types.
 pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     images::normalize(dom, root, nodes);
     headings::normalize(dom, root);
     lists::normalize(dom, root);
-    normalize_code_blocks(dom, root);
     normalize_figures(dom, root);
     normalize_repeated_table_listings(dom, root);
     normalize_layout_tables(dom, root);
@@ -46,6 +46,7 @@ pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
     math::normalize(dom, root);
     media::normalize(dom, root);
     callouts::normalize(dom, root);
+    code::normalize(dom, root);
     footnotes::normalize(dom, root);
 }
 
@@ -89,165 +90,6 @@ pub(crate) use math::accessible_math_nodes;
 pub(crate) fn finish_normalization(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     simplify_nested_elements(dom, root, nodes);
     remove_empty_nodes(dom, root, nodes);
-}
-
-fn normalize_code_blocks(dom: &mut Dom, root: NodeId) {
-    let nodes = dom.element_descendants_snapshot_with_depth(root);
-    for (node, _) in nodes {
-        if dom.parent(node).is_none() {
-            continue;
-        }
-        match dom.tag(node) {
-            Some(Tag::Pre) => {
-                let code = if has_single_tag_inside_element(dom, node, Tag::Code) {
-                    dom.element_children(node).next()
-                } else {
-                    let Ok(code) = dom.create_html_element(Tag::Code) else {
-                        continue;
-                    };
-                    dom.move_children(node, code);
-                    dom.append_child(node, code);
-                    Some(code)
-                };
-                if let Some(code) = code
-                    && let Some(language) = block_language_hint(dom, code, node)
-                {
-                    dom.set_attr(code, AttrName::DataLanguage, &language);
-                }
-            }
-            Some(Tag::Code) if dom.tag(dom.parent(node).unwrap_or(root)) != Some(Tag::Pre) => {
-                let parent = dom.parent(node).unwrap_or(root);
-                let phrasing_parent = matches!(
-                    dom.tag(parent),
-                    Some(
-                        Tag::P
-                            | Tag::H1
-                            | Tag::H2
-                            | Tag::H3
-                            | Tag::H4
-                            | Tag::H5
-                            | Tag::H6
-                            | Tag::A
-                            | Tag::Td
-                            | Tag::Th
-                    )
-                );
-                let block = !phrasing_parent
-                    && std::iter::once(node)
-                        .chain(dom.descendants(node))
-                        .any(|descendant| {
-                            dom.text_node(descendant)
-                                .is_some_and(|text| text.contains('\n'))
-                        });
-                if block {
-                    let language = language_hint(dom, node);
-                    let Ok(pre) = dom.create_html_element(Tag::Pre) else {
-                        continue;
-                    };
-                    dom.insert_before(node, pre);
-                    dom.append_child(pre, node);
-                    if let Some(language) = language {
-                        dom.set_attr(node, AttrName::DataLanguage, &language);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Common syntax highlighters put one pre block inside a decorative div.
-    let wrappers = dom.element_descendants_snapshot_with_depth(root);
-    for (wrapper, _) in wrappers.into_iter().rev() {
-        if dom.parent(wrapper).is_none() || dom.tag(wrapper) != Some(Tag::Div) {
-            continue;
-        }
-        let named_as_code = [AttrName::Class, AttrName::Id]
-            .into_iter()
-            .filter_map(|attribute| dom.attr(wrapper, attribute))
-            .any(|value| {
-                value.split_whitespace().any(|token| {
-                    let token = token.to_ascii_lowercase();
-                    token == "highlight"
-                        || token == "codehilite"
-                        || token == "sourcecode"
-                        || token.starts_with("highlight-")
-                })
-            });
-        if named_as_code
-            && has_single_tag_inside_element(dom, wrapper, Tag::Pre)
-            && let Some(pre) = dom.element_children(wrapper).next()
-        {
-            dom.replace_with(wrapper, pre);
-        }
-    }
-}
-
-fn block_language_hint(dom: &Dom, code: NodeId, pre: NodeId) -> Option<String> {
-    language_hint(dom, code)
-        .or_else(|| language_hint(dom, pre))
-        .or_else(|| {
-            // Syntax highlighters commonly store the language on one of two
-            // decorative wrappers around the pre element. Keep this lookup
-            // bounded and require code-wrapper structure.
-            let parent = dom.parent(pre)?;
-            is_code_wrapper(dom, parent).then(|| language_hint(dom, parent))?
-        })
-        .or_else(|| {
-            let parent = dom.parent(pre)?;
-            let grandparent = dom.parent(parent)?;
-            (is_code_wrapper(dom, parent) && is_code_wrapper(dom, grandparent))
-                .then(|| language_hint(dom, grandparent))?
-        })
-}
-
-fn is_code_wrapper(dom: &Dom, node: NodeId) -> bool {
-    if dom.tag(node) != Some(Tag::Div) {
-        return false;
-    }
-    language_hint(dom, node).is_some()
-        || [AttrName::Class, AttrName::Id]
-            .into_iter()
-            .filter_map(|attribute| dom.attr(node, attribute))
-            .flat_map(str::split_whitespace)
-            .any(|token| {
-                matches!(
-                    token.to_ascii_lowercase().as_str(),
-                    "highlight" | "codehilite" | "sourcecode"
-                )
-            })
-}
-
-fn language_hint(dom: &Dom, node: NodeId) -> Option<String> {
-    if let Some(value) = dom
-        .attr(node, AttrName::DataLanguage)
-        .or_else(|| dom.attr(node, AttrName::Lang))
-        .or_else(|| dom.attr_by_local_name(node, "data-lang"))
-        && let Some(language) = valid_language(value)
-    {
-        return Some(language.to_owned());
-    }
-    for token in dom.attr(node, AttrName::Class)?.split_whitespace() {
-        let Some(value) = token
-            .strip_prefix("language-")
-            .or_else(|| token.strip_prefix("lang-"))
-        else {
-            continue;
-        };
-        if let Some(language) = valid_language(value) {
-            return Some(language.to_owned());
-        }
-    }
-    None
-}
-
-fn valid_language(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()
-        && value.len() <= 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'_' | b'.')))
-    .then_some(value)
 }
 
 fn normalize_figures(dom: &mut Dom, root: NodeId) {
