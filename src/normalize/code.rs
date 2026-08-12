@@ -331,17 +331,19 @@ fn normalize_line_breaks(dom: &mut Dom, pre: NodeId) {
     else {
         return;
     };
-    if !dom
-        .descendants(code)
-        .filter_map(|node| dom.text_node(node))
-        .any(|text| !text.trim().is_empty())
-    {
-        return;
-    }
     let breaks: Vec<_> = dom
         .descendants(code)
         .filter(|&node| dom.tag(node) == Some(Tag::Br))
         .collect();
+    let has_authored_text = dom
+        .descendants(code)
+        .filter_map(|node| dom.text_node(node))
+        .any(|text| !text.is_empty());
+    // A lone break in an otherwise empty pre is commonly a textarea mirror or
+    // placeholder. Two breaks encode a blank line even without other text.
+    if breaks.len() < 2 && !has_authored_text {
+        return;
+    }
     for line_break in breaks {
         if dom.parent(line_break).is_some()
             && let Ok(newline) = dom.create_text("\n")
@@ -502,6 +504,46 @@ mod tests {
             !dom.descendants(code)
                 .any(|node| dom.tag(node) == Some(Tag::Br))
         );
+    }
+
+    #[test]
+    fn preserves_whitespace_across_syntax_token_spans() {
+        let mut dom = Dom::parse_fragment(
+            concat!(
+                "<pre><code>",
+                "<span>    first</span><span>  </span><span>\n</span>",
+                "<span>\tsecond</span><span>\n\n</span>",
+                "<span>  third  </span><span>\n</span>",
+                "</code></pre>"
+            ),
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            concat!(
+                "```\n",
+                "    first  \n",
+                "\tsecond\n",
+                "\n",
+                "  third  \n",
+                "```\n"
+            )
+        );
+    }
+
+    #[test]
+    fn preserves_blank_code_lines_encoded_only_as_breaks() {
+        let mut dom = Dom::parse_fragment("<pre><code><br><br></code></pre>", Tag::Div).unwrap();
+        let root = dom.root();
+
+        normalize(&mut dom, root);
+
+        assert_eq!(dom_to_markdown(&dom, root, 0), "```\n\n\n```\n");
     }
 
     #[test]

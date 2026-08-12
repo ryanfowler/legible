@@ -1728,6 +1728,51 @@ mod tests {
     }
 
     #[test]
+    fn code_blocks_preserve_indentation_tabs_and_blank_lines() {
+        assert_eq!(
+            markdown(concat!(
+                "<pre><code>",
+                "    indented\n",
+                "\n",
+                "\twith_tab\n",
+                "  leading and trailing  \n",
+                "</code></pre>"
+            )),
+            concat!(
+                "```\n",
+                "    indented\n",
+                "\n",
+                "\twith_tab\n",
+                "  leading and trailing  \n",
+                "```\n"
+            )
+        );
+    }
+
+    #[test]
+    fn code_blocks_canonicalize_only_the_fence_boundary_newline() {
+        // A fenced block needs a line break before its closing fence. Therefore,
+        // source with no final newline and source with one final newline have the
+        // same Markdown representation. Additional final newlines remain code.
+        assert_eq!(
+            markdown("<pre><code>value</code></pre>"),
+            "```\nvalue\n```\n"
+        );
+        assert_eq!(
+            markdown("<pre><code>value\n</code></pre>"),
+            "```\nvalue\n```\n"
+        );
+        assert_eq!(
+            markdown("<pre><code>value\n\n</code></pre>"),
+            "```\nvalue\n\n```\n"
+        );
+        assert_eq!(
+            markdown("<pre><code>value  \n</code></pre>"),
+            "```\nvalue  \n```\n"
+        );
+    }
+
+    #[test]
     fn tables_use_valid_gfm_syntax() {
         assert_eq!(
             markdown("<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"),

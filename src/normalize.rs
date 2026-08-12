@@ -372,8 +372,31 @@ fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
 fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.clear();
     nodes.extend(dom.descendants(root));
+
+    // Whitespace-only syntax token elements contain significant code text.
+    // Record preformatted ancestry in one preorder pass so empty-node cleanup
+    // does not need an ancestor scan for each element.
+    let mut in_preformatted_code = vec![false; dom.len()];
+    let mut has_text = vec![false; dom.len()];
+    for &node in nodes.iter() {
+        in_preformatted_code[node.index()] = dom.parent(node).is_some_and(|parent| {
+            dom.tag(parent) == Some(Tag::Pre) || in_preformatted_code[parent.index()]
+        });
+    }
     for &node in nodes.iter().rev() {
+        has_text[node.index()] |= dom.text_node(node).is_some_and(|text| !text.is_empty());
+        if has_text[node.index()]
+            && let Some(parent) = dom.parent(node)
+        {
+            has_text[parent.index()] = true;
+        }
+    }
+
+    for &node in nodes.iter().rev() {
+        let significant_code_whitespace =
+            in_preformatted_code[node.index()] && has_text[node.index()];
         if dom.parent(node).is_some()
+            && !significant_code_whitespace
             && dom.attr(node, AttrName::DataMath).is_none()
             && matches!(
                 dom.tag(node),
