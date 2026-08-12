@@ -20,6 +20,7 @@ fuzzing = []
 tracing = ["dep:tracing"]
 
 [dependencies]
+caseless = "0.2"
 html5ever = "0.39"
 memchr = "2.8"
 regex = "1.13"
