@@ -1,6 +1,8 @@
 use crate::cleaning::fix_lazy_images;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
+use std::borrow::Cow;
+use url::form_urlencoded;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SrcsetDescriptor {
@@ -523,7 +525,7 @@ fn likely_duplicate(dom: &Dom, first: NodeId, second: NodeId) -> bool {
 
 fn image_quality(dom: &Dom, image: NodeId) -> (bool, Option<(u8, u32)>, u64) {
     let real = !is_hydration_placeholder(dom, image);
-    let responsive = responsive_quality(dom, image);
+    let responsive = responsive_quality(dom, image).max(next_image_width(dom, image));
     let declared_width = dom
         .attr(image, AttrName::Width)
         .and_then(|value| value.parse::<u64>().ok())
@@ -575,7 +577,7 @@ fn image_container_within(dom: &Dom, image: NodeId, boundary: NodeId) -> NodeId 
 fn is_image_only_wrapper(dom: &Dom, wrapper: NodeId, image: NodeId) -> bool {
     matches!(
         dom.tag(wrapper),
-        Some(Tag::A | Tag::Picture | Tag::Span | Tag::Div)
+        Some(Tag::A | Tag::Picture | Tag::Span | Tag::Div | Tag::P)
     ) && single_image(dom, wrapper) == Some(image)
         && std::iter::once(wrapper)
             .chain(dom.descendants(wrapper))
@@ -585,7 +587,15 @@ fn is_image_only_wrapper(dom: &Dom, wrapper: NodeId, image: NodeId) -> bool {
                     || dom.is_comment(node)
                     || matches!(
                         dom.tag(node),
-                        Some(Tag::A | Tag::Picture | Tag::Source | Tag::Span | Tag::Div | Tag::Img)
+                        Some(
+                            Tag::A
+                                | Tag::Picture
+                                | Tag::Source
+                                | Tag::Span
+                                | Tag::Div
+                                | Tag::P
+                                | Tag::Img
+                        )
                     )
             })
 }
@@ -715,13 +725,69 @@ fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
 }
 
 fn same_image_url(dom: &Dom, first: NodeId, second: NodeId) -> bool {
-    [AttrName::Src, AttrName::DataSrc]
+    // Image normalization has already promoted the best responsive candidate
+    // into `src`. Compare only concrete sources. A shared low-resolution
+    // candidate does not prove that two responsive images are the same.
+    let first_urls: SmallVec<[Cow<'_, str>; 2]> = [AttrName::Src, AttrName::DataSrc]
         .into_iter()
-        .any(|attribute| {
-            dom.attr(first, attribute)
-                .filter(|value| !value.is_empty())
-                .is_some_and(|value| dom.attr(second, attribute) == Some(value))
-        })
+        .filter_map(|attribute| dom.attr(first, attribute))
+        .filter(|url| !url.is_empty())
+        .map(image_resource)
+        .collect();
+    let second_urls: SmallVec<[Cow<'_, str>; 2]> = [AttrName::Src, AttrName::DataSrc]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(second, attribute))
+        .filter(|url| !url.is_empty())
+        .map(image_resource)
+        .collect();
+    first_urls
+        .iter()
+        .any(|first_url| second_urls.contains(first_url))
+}
+
+fn image_urls(dom: &Dom, image: NodeId) -> SmallVec<[&str; 8]> {
+    let mut urls = SmallVec::new();
+    for attribute in [
+        AttrName::Src,
+        AttrName::DataSrc,
+        AttrName::Srcset,
+        AttrName::DataSrcset,
+    ] {
+        let Some(value) = dom.attr(image, attribute).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if matches!(attribute, AttrName::Srcset | AttrName::DataSrcset) {
+            urls.extend(
+                parse_srcset(value)
+                    .into_iter()
+                    .map(|candidate| candidate.url),
+            );
+        } else {
+            urls.push(value);
+        }
+    }
+    urls
+}
+
+fn image_resource(url: &str) -> Cow<'_, str> {
+    next_image_parameter(url, "url").map_or(Cow::Borrowed(url), Cow::Owned)
+}
+
+fn next_image_parameter(url: &str, parameter: &str) -> Option<String> {
+    let (path, query) = url.split_once('?')?;
+    if !path.trim_end_matches('/').ends_with("/_next/image") {
+        return None;
+    }
+    form_urlencoded::parse(query.as_bytes())
+        .find_map(|(name, value)| (name == parameter).then(|| value.into_owned()))
+}
+
+fn next_image_width(dom: &Dom, image: NodeId) -> Option<(u8, u32)> {
+    image_urls(dom, image)
+        .into_iter()
+        .filter_map(|url| next_image_parameter(url, "w")?.parse::<u32>().ok())
+        .max()
+        .map(|width| (2, width))
 }
 
 fn is_hydration_placeholder(dom: &Dom, image: NodeId) -> bool {
@@ -854,6 +920,64 @@ mod tests {
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
             "![Detailed diagram](large.jpg)\n"
+        );
+    }
+
+    #[test]
+    fn deduplicates_nextjs_optimizer_variants_and_keeps_the_largest() {
+        let (dom, root) = normalized(
+            r#"<p><img src="/_next/image?url=%2Fphoto.jpg&amp;w=32&amp;q=20" alt="Photo"></p><p><img src="/_next/image?url=%2Fphoto.jpg&amp;w=1600&amp;q=85" alt="Photo"></p>"#,
+        );
+        let images: SmallVec<[NodeId; 2]> = dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            dom.attr(images[0], AttrName::Src),
+            Some("/_next/image?url=%2Fphoto.jpg&w=1600&q=85")
+        );
+    }
+
+    #[test]
+    fn keeps_distinct_nextjs_resources_with_generic_alt_text() {
+        let (dom, root) = normalized(
+            r#"<img src="/_next/image?url=%2Fbefore.jpg&amp;w=1200" alt="image"><img src="/_next/image?url=%2Fafter.jpg&amp;w=1200" alt="image">"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn nextjs_density_sets_keep_the_largest_optimizer_variant() {
+        let (dom, root) = normalized(
+            r#"<p><img srcset="/_next/image?url=%2Fphoto.jpg&amp;w=32 1x, /_next/image?url=%2Fphoto.jpg&amp;w=64 2x" alt="Photo"></p><p><img srcset="/_next/image?url=%2Fphoto.jpg&amp;w=800 1x, /_next/image?url=%2Fphoto.jpg&amp;w=1600 2x" alt="Photo"></p>"#,
+        );
+        let images: SmallVec<[NodeId; 2]> = dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            dom.attr(images[0], AttrName::Src),
+            Some("/_next/image?url=%2Fphoto.jpg&w=1600")
+        );
+    }
+
+    #[test]
+    fn shared_low_resolution_candidates_do_not_merge_distinct_images() {
+        let (dom, root) = normalized(
+            r#"<img srcset="shared.jpg 1x, before.jpg 2x" alt="Before"><img srcset="shared.jpg 1x, after.jpg 2x" alt="After">"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            2
         );
     }
 

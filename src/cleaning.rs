@@ -468,19 +468,29 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         }
     }
 }
-fn single_image_fragment(dom: &Dom) -> Option<NodeId> {
-    let mut image = None;
+fn single_image_fragment(dom: &Dom) -> Option<(NodeId, NodeId)> {
+    let mut media = None;
     for node in dom.children(dom.root()) {
-        if dom.tag(node) == Some(Tag::Img) && image.is_none() {
-            image = Some(node);
+        if dom.is_element(node) && media.is_none() {
+            media = Some(node);
         } else if !dom
             .text_node(node)
             .is_some_and(|text| text.trim().is_empty())
+            && !dom.is_comment(node)
         {
             return None;
         }
     }
-    image
+    let media = media?;
+    let image = single_image_element(dom, media)?;
+    matches!(dom.tag(media), Some(Tag::Img | Tag::Picture)).then_some((media, image))
+}
+
+fn noscript_media_root(dom: &Dom, noscript: NodeId, image: NodeId) -> NodeId {
+    dom.ancestors(image)
+        .take_while(|&ancestor| ancestor != noscript)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))
+        .unwrap_or(image)
 }
 
 fn useful_image(dom: &Dom, id: NodeId) -> bool {
@@ -516,6 +526,26 @@ fn copy_image_attributes(dom: &mut Dom, from: NodeId, to: NodeId) {
             );
         }
         dom.set_attr_qual(to, name, value);
+    }
+}
+
+fn copy_missing_image_description(dom: &mut Dom, from: NodeId, to: NodeId) {
+    let attrs: SmallVec<[(QualName, String); 3]> = dom
+        .attrs(from)
+        .iter()
+        .filter(|attribute| {
+            matches!(
+                attribute.name.local.as_ref(),
+                "alt" | "aria-label" | "title"
+            ) && !attribute.value.trim().is_empty()
+                && dom
+                    .attr_by_local_name(to, attribute.name.local.as_ref())
+                    .is_none_or(|value| value.trim().is_empty())
+        })
+        .map(|attribute| (attribute.name.clone(), attribute.value.to_string()))
+        .collect();
+    for (name, value) in attrs {
+        dom.set_attr_qual(to, name, value.into());
     }
 }
 
@@ -654,15 +684,17 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
             if is_tracking_image(dom, image) {
                 continue;
             }
+            let media = noscript_media_root(dom, id, image);
             let (previous, placeholders) = previous_useful_image(dom, id, image);
             if let Some((previous, previous_image)) = previous {
                 copy_image_attributes(dom, previous_image, image);
+                copy_missing_image_description(dom, previous_image, image);
                 dom.detach(previous);
                 for placeholder in placeholders {
                     dom.detach(placeholder);
                 }
             }
-            dom.insert_before(id, image);
+            dom.insert_before(id, media);
             dom.detach(id);
             continue;
         }
@@ -684,24 +716,32 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
         let Ok(fragment) = Dom::parse_fragment(markup, Tag::Div) else {
             continue;
         };
-        let Some(source_image) = single_image_fragment(&fragment) else {
+        let Some((source_media, source_image)) = single_image_fragment(&fragment) else {
             continue;
         };
         if is_tracking_image(&fragment, source_image) {
             continue;
         }
-        let Ok(new_image) = dom.import_subtree(&fragment, source_image) else {
+        let Ok(new_media) = dom.import_subtree(&fragment, source_media) else {
+            continue;
+        };
+        let new_image = if dom.tag(new_media) == Some(Tag::Img) {
+            new_media
+        } else if let Some(image) = dom.first_descendant_by_tag(new_media, Tag::Img) {
+            image
+        } else {
             continue;
         };
         let (previous, placeholders) = previous_useful_image(dom, id, new_image);
         if let Some((previous, previous_image)) = previous {
             copy_image_attributes(dom, previous_image, new_image);
+            copy_missing_image_description(dom, previous_image, new_image);
             dom.detach(previous);
             for placeholder in placeholders {
                 dom.detach(placeholder);
             }
         }
-        dom.insert_before(id, new_image);
+        dom.insert_before(id, new_media);
         dom.detach(id);
     }
 }
@@ -2369,6 +2409,32 @@ mod tests {
         assert!(
             !dom.descendants(dom.root())
                 .any(|id| dom.tag(id) == Some(Tag::Noscript))
+        );
+    }
+
+    #[test]
+    fn preserves_an_escaped_noscript_picture_and_placeholder_description() {
+        let mut dom = Dom::parse_document(
+            r#"<main><img src="placeholder.gif" alt="Recovered chart"><noscript>&lt;picture&gt;&lt;source srcset="small.webp 1x, large.webp 2x"&gt;&lt;img src="fallback.jpg"&gt;&lt;/picture&gt;</noscript></main>"#,
+        )
+        .unwrap();
+
+        unwrap_noscript_images(&mut dom);
+
+        let root = dom.root();
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("fallback.jpg"));
+        assert_eq!(
+            dom.attr_by_local_name(image, "alt"),
+            Some("Recovered chart")
+        );
+        assert!(dom.first_descendant_by_tag(root, Tag::Picture).is_some());
+        assert!(dom.first_descendant_by_tag(root, Tag::Source).is_some());
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            1
         );
     }
 
