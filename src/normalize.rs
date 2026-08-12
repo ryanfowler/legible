@@ -8,10 +8,11 @@ mod images;
 mod lists;
 mod math;
 mod media;
+mod tables;
 
 use crate::cleaning::{repeated_listing_start, simplify_nested_elements};
 use crate::dom::{AttrName, Dom, NodeId, Tag};
-use crate::scoring::{has_single_tag_inside_element, is_element_without_content};
+use crate::scoring::is_element_without_content;
 use smallvec::SmallVec;
 
 /// Normalizes retained markup into a predictable tree for all serializers.
@@ -38,7 +39,7 @@ pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut V
     lists::normalize(dom, root);
     normalize_figures(dom, root);
     normalize_repeated_table_listings(dom, root);
-    normalize_layout_tables(dom, root);
+    tables::normalize_layout_tables(dom, root);
 }
 
 /// Captures semantic source data that hard cleanup would otherwise remove.
@@ -316,41 +317,6 @@ fn remove_listing_controls(dom: &mut Dom, row: NodeId, buffer: &mut String) {
 
 fn is_control_separator_character(character: char) -> bool {
     matches!(character, '|' | '·' | '-' | '–' | '—' | '•')
-}
-
-fn normalize_layout_tables(dom: &mut Dom, root: NodeId) {
-    let tables: SmallVec<[NodeId; 16]> = dom
-        .descendants(root)
-        .filter(|&node| dom.tag(node) == Some(Tag::Table))
-        .collect();
-    for table in tables {
-        if dom.parent(table).is_none() {
-            continue;
-        }
-        let body = if has_single_tag_inside_element(dom, table, Tag::Tbody) {
-            dom.element_children(table).next()
-        } else {
-            Some(table)
-        };
-        let Some(body) = body else { continue };
-        if !has_single_tag_inside_element(dom, body, Tag::Tr) {
-            continue;
-        }
-        let Some(row) = dom.element_children(body).next() else {
-            continue;
-        };
-        if !has_single_tag_inside_element(dom, row, Tag::Td) {
-            continue;
-        }
-        let Some(cell) = dom.element_children(row).next() else {
-            continue;
-        };
-        let phrasing = dom
-            .children(cell)
-            .all(|node| crate::scoring::is_phrasing_content(dom, node));
-        dom.rename_html(cell, if phrasing { Tag::P } else { Tag::Div });
-        dom.replace_with(table, cell);
-    }
 }
 
 fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {

@@ -48,6 +48,7 @@ The extraction pipeline flows through these stages:
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
 | `normalize.rs` / `normalize/` | Ordered semantic passes for math, media, callouts, images, headings, lists, code, figures, footnotes, tables, and wrappers |
+| `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
