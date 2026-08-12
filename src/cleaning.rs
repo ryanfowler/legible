@@ -4,7 +4,7 @@ use crate::constants::{
     PRESENTATIONAL_ATTRIBUTES, has_image_extension, has_image_src, has_image_srcset,
     is_deprecated_size_attribute_elem, parse_b64_data_url,
 };
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeStats, Tag};
 use crate::scoring::{
     get_inner_text, get_link_density_cached, get_or_compute_stats, has_single_tag_inside_element,
     is_element_without_content, is_phrasing_content,
@@ -167,6 +167,17 @@ fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStor
             )
         )
         || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
+}
+
+fn has_protected_ancestor(
+    dom: &Dom,
+    id: NodeId,
+    root: NodeId,
+    store: &crate::dom::NodeStateStore,
+) -> bool {
+    dom.ancestors(id)
+        .take_while(|&ancestor| ancestor != root)
+        .any(|ancestor| is_protected_content(dom, ancestor, store))
 }
 
 pub fn mark_data_tables(
@@ -870,52 +881,97 @@ pub(crate) fn heuristic_cleanup(
 ) {
     nodes.clear();
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    let mut heading_boundaries = vec![false; dom.len()];
+    store.clear_stats();
+    store.enable_link_lengths();
+    get_or_compute_stats(dom, root, store);
+
+    // Count links once. Discovery uses the capped index instead of rescanning
+    // each related-content subtree for links.
+    let mut link_counts = vec![0_u8; dom.len()];
     for &(node, _) in &snapshot {
-        if !is_related_heading(dom, node) {
-            continue;
-        }
-        let mut ancestor = dom.parent(node);
-        while let Some(candidate) = ancestor.filter(|&candidate| candidate != root) {
-            if matches!(
-                dom.tag(candidate),
-                Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Section)
-            ) {
-                let mut candidate_text = String::new();
-                dom.append_normalized_text(candidate, &mut candidate_text);
-                let links = dom
-                    .descendants(candidate)
-                    .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
-                    .count();
-                // Heading-only evidence must stay bounded so long reference sections remain.
-                if links >= 2 && candidate_text.chars().count() < 1_200 {
-                    heading_boundaries[candidate.index()] = true;
-                    break;
-                }
-            }
-            ancestor = dom.parent(candidate);
+        link_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::A));
+    }
+    for &(node, _) in snapshot.iter().rev() {
+        if let Some(parent) = dom.parent(node) {
+            link_counts[parent.index()] = link_counts[parent.index()]
+                .saturating_add(link_counts[node.index()])
+                .min(3);
         }
     }
 
+    let mut discovered_boundaries = vec![false; dom.len()];
+    let mut inspected_subscription = vec![false; dom.len()];
+    let mut table_depths = SmallVec::<[u32; 8]>::new();
+    for &(node, depth) in &snapshot {
+        while table_depths
+            .last()
+            .is_some_and(|&table_depth| table_depth >= depth)
+        {
+            table_depths.pop();
+        }
+        let inside_table = !table_depths.is_empty();
+        if dom.tag(node) == Some(Tag::Table) {
+            table_depths.push(depth);
+        }
+        if related_heading_signal(dom, node) != RelatedHeadingSignal::None {
+            mark_related_heading_boundary(
+                dom,
+                node,
+                root,
+                &link_counts,
+                store,
+                &mut discovered_boundaries,
+            );
+        }
+        if dom.tag(node) == Some(Tag::Form) {
+            mark_subscription_boundary(
+                dom,
+                node,
+                root,
+                store,
+                &mut inspected_subscription,
+                &mut discovered_boundaries,
+            );
+        }
+        if is_structural_breadcrumb_candidate(dom, node, inside_table) {
+            discovered_boundaries[node.index()] = true;
+        }
+    }
+
+    mark_data_tables(dom, root, store, &mut Vec::new());
+    if remove_direct_peripheral_siblings(dom, root, &snapshot, &link_counts, store) {
+        store.clear_stats();
+    }
+    let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
+
+    // Keep only outermost candidates. A classifier can inspect the complete
+    // subtree once instead of rescanning every nested wrapper.
     let mut boundary_depth = None;
     for (node, depth) in snapshot {
         if let Some(outer_depth) = boundary_depth {
-            if depth > outer_depth {
+            if depth > outer_depth && !discovered_boundaries[node.index()] {
                 continue;
             }
-            boundary_depth = None;
+            if depth <= outer_depth {
+                boundary_depth = None;
+            }
         }
-        if heading_boundaries[node.index()] || is_heuristic_boundary(dom, node) {
-            nodes.push(node);
-            boundary_depth = Some(depth);
+        if dom.parent(node).is_some() {
+            if discovered_boundaries[node.index()] {
+                nodes.push(node);
+                continue;
+            }
+            if is_heuristic_boundary(dom, node) {
+                nodes.push(node);
+                boundary_depth = Some(depth);
+            }
         }
     }
-    store.clear_stats();
-    store.enable_link_lengths();
-    mark_data_tables(dom, root, store, &mut Vec::new());
-    let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
     for &node in nodes.iter().rev() {
-        if dom.parent(node).is_none() || is_protected_content(dom, node, store) {
+        if dom.parent(node).is_none()
+            || is_protected_content(dom, node, store)
+            || has_protected_ancestor(dom, node, root, store)
+        {
             continue;
         }
         let stats = get_or_compute_stats(dom, node, store);
@@ -940,25 +996,33 @@ pub(crate) fn heuristic_cleanup(
         let link_density = get_link_density_cached(dom, node, stats.text_length, store);
         let short = stats.text_length < 350 || stats.text_length * 5 < root_length;
 
-        let related_name = contains_any(
-            &name,
-            &["related", "recommended", "more-stories", "more_stories"],
-        ) || dom.descendants(node).any(|descendant| {
-            contains_any(
-                &node_name(dom, descendant),
-                &["related", "recommended", "more-stories", "more_stories"],
+        // Empty boundaries cannot contain useful positional clutter evidence.
+        // Skipping them also avoids long sibling scans on empty form shells.
+        let (at_start, at_end) = if stats.text_length == 0 {
+            (false, false)
+        } else {
+            (
+                near_content_start(dom, node, root, store),
+                near_content_end(dom, node, root, store),
             )
-        });
-        let related_text = starts_with_any(
-            &text,
-            &[
-                "related",
-                "recommended",
-                "more stories",
-                "you may also like",
-            ],
-        );
-        let related = (related_name || related_text) && links >= 2 && link_density >= 0.2 && short;
+        };
+        let has_form = dom.tag(node) == Some(Tag::Form)
+            || dom
+                .descendants(node)
+                .any(|descendant| dom.tag(descendant) == Some(Tag::Form));
+        let metrics = PeripheralMetrics {
+            name: &name,
+            text: &text,
+            stats,
+            links,
+            controls,
+            has_form,
+            link_density,
+            at_start,
+            at_end,
+            short,
+        };
+        let related = is_related_content(dom, node, &metrics);
 
         let social_name = contains_any(&name, &["share", "social", "sharedaddy"]);
         let social_links = dom
@@ -975,16 +1039,9 @@ pub(crate) fn heuristic_cleanup(
             .count();
         let social = social_name && (social_links > 0 || links >= 2) && short;
 
-        let signup_terms = contains_any(
-            &format!("{name} {text}"),
-            &["newsletter", "subscribe", "sign-up", "signup", "sign up"],
-        );
-        let has_form = dom.tag(node) == Some(Tag::Form)
-            || dom
-                .descendants(node)
-                .any(|descendant| dom.tag(descendant) == Some(Tag::Form));
-        let signup = signup_terms && (controls > 0 || links > 0 || has_form) && short;
+        let signup = is_newsletter_cta(&metrics);
 
+        let breadcrumb = is_breadcrumb(dom, node, &metrics);
         let navigation_semantic = dom.tag(node) == Some(Tag::Nav)
             || dom.attr(node, AttrName::Role).is_some_and(|role| {
                 role.split_whitespace()
@@ -1003,6 +1060,7 @@ pub(crate) fn heuristic_cleanup(
             );
         let navigation = navigation_semantic
             && !documentation_toc
+            && !breadcrumb
             && (menu_name || links >= 3)
             && link_density >= 0.6
             && stats.text_length < 500;
@@ -1019,6 +1077,14 @@ pub(crate) fn heuristic_cleanup(
         let account = contains_any(&name, &["login", "sign-in", "signin"])
             && (controls > 0 || links > 0)
             && short;
+        let comment_ui = name.contains("comment")
+            && stats.text_length < 180
+            && (text.starts_with("comments")
+                && text.contains("login")
+                && text.contains("0 comments")
+                || text.starts_with("login") && text.contains("0 comments")
+                || text.starts_with("share: 0 comments")
+                || text == "0 comments subscribe rss");
 
         let action_label = [
             "leave a comment",
@@ -1081,17 +1147,33 @@ pub(crate) fn heuristic_cleanup(
             && stats.text_length < 300
             && link_density >= 0.45
             && near_content_end(dom, node, root, store);
+        let peripheral_panel_name = name
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| matches!(token, "sidebar" | "comments" | "commentlist"));
+        let terminal_peripheral_panel = peripheral_panel_name
+            && links >= 3
+            && short
+            && link_density >= 0.2
+            && (at_end || text.starts_with("comments") && text.contains("subscribe"));
+        let print_citation = links >= 2
+            && short
+            && contains_any(&name, &["print-citation", "story-footer"])
+            && text.contains("appears in print");
 
         if related
             || social
             || signup
+            || breadcrumb
             || navigation
             || author
             || advertisement
             || consent
             || account
+            || comment_ui
             || terminal_action
             || terminal_taxonomy
+            || terminal_peripheral_panel
+            || print_citation
         {
             if protected {
                 hoist_protected_children(dom, node, store);
@@ -1103,36 +1185,591 @@ pub(crate) fn heuristic_cleanup(
     remove_contextual_boilerplate(dom, root, store, text_buffer, nodes);
 }
 
-fn is_related_heading(dom: &Dom, node: NodeId) -> bool {
+fn remove_direct_peripheral_siblings(
+    dom: &mut Dom,
+    root: NodeId,
+    snapshot: &[(NodeId, u32)],
+    link_counts: &[u8],
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let mut seen = vec![false; dom.len()];
+    seen[root.index()] = true;
+    let mut parents = vec![root];
+    for &(node, _) in snapshot {
+        if (related_heading_signal(dom, node) == RelatedHeadingSignal::Strong
+            || dom.tag(node) == Some(Tag::Form))
+            && let Some(parent) = dom.parent(node)
+            && !std::mem::replace(&mut seen[parent.index()], true)
+        {
+            parents.push(parent);
+        }
+    }
+
+    let mut changed = false;
+    for parent in parents {
+        if dom.parent(parent).is_none() && parent != root {
+            continue;
+        }
+        if is_protected_content(dom, parent, store)
+            || has_protected_ancestor(dom, parent, root, store)
+        {
+            continue;
+        }
+        changed |= remove_direct_peripheral_children(dom, parent, link_counts, store);
+    }
+    changed
+}
+
+fn remove_direct_peripheral_children(
+    dom: &mut Dom,
+    parent: NodeId,
+    link_counts: &[u8],
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let parent_name = node_name(dom, parent);
+    let children: Vec<_> = dom.element_children(parent).collect();
+    let mut remove = vec![false; children.len()];
+
+    for (index, &child) in children.iter().enumerate() {
+        if related_heading_signal(dom, child) != RelatedHeadingSignal::Strong
+            || related_name_signal(&parent_name)
+        {
+            continue;
+        }
+        let mut links = 0_u8;
+        let mut end = index;
+        for (offset, &sibling) in children[index + 1..].iter().take(12).enumerate() {
+            if matches!(
+                dom.tag(sibling),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            ) {
+                break;
+            }
+            let stats = get_or_compute_stats(dom, sibling, store);
+            let sibling_links = link_counts[sibling.index()];
+            if is_protected_content(dom, sibling, store)
+                || sibling_links == 0 && stats.has_non_whitespace
+            {
+                break;
+            }
+            links = links.saturating_add(sibling_links).min(3);
+            end = index + offset + 1;
+        }
+        if links >= 2 {
+            remove[index..=end].fill(true);
+        }
+    }
+
+    for (index, &child) in children.iter().enumerate() {
+        if dom.tag(child) != Some(Tag::Form) || has_explicit_newsletter_name(&parent_name) {
+            continue;
+        }
+        let mut start = index;
+        let mut text = String::new();
+        for &previous in children[..index].iter().rev().take(3) {
+            let tag = dom.tag(previous);
+            if !matches!(
+                tag,
+                Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P)
+            ) {
+                break;
+            }
+            start -= 1;
+            if matches!(tag, Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)) {
+                break;
+            }
+        }
+        if start == index {
+            continue;
+        }
+        for &sibling in &children[start..=index] {
+            dom.append_normalized_text(sibling, &mut text);
+            text.push(' ');
+        }
+        let name = node_name(dom, child);
+        if has_newsletter_evidence(&name, &text.to_ascii_lowercase()) {
+            remove[start..=index].fill(true);
+        }
+    }
+
+    let mut changed = false;
+    for (&node, remove) in children.iter().zip(remove) {
+        if remove && dom.parent(node).is_some() {
+            if is_protected_content(dom, node, store) {
+                continue;
+            }
+            let protected = dom
+                .descendants(node)
+                .any(|descendant| is_protected_content(dom, descendant, store));
+            if protected {
+                hoist_protected_children(dom, node, store);
+            }
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+enum RelatedHeadingSignal {
+    None,
+    Ambiguous,
+    Strong,
+}
+
+struct PeripheralMetrics<'a> {
+    name: &'a str,
+    text: &'a str,
+    stats: NodeStats,
+    links: usize,
+    controls: usize,
+    has_form: bool,
+    link_density: f64,
+    at_start: bool,
+    at_end: bool,
+    short: bool,
+}
+
+fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
     if !matches!(
         dom.tag(node),
         Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
     ) {
-        return false;
+        return RelatedHeadingSignal::None;
     }
     let mut text = String::new();
     dom.append_normalized_text(node, &mut text);
     let text = text.trim().to_ascii_lowercase();
-    matches!(
+    if matches!(
         text.as_str(),
-        "related"
-            | "related articles"
+        "related articles"
             | "related content"
             | "related posts"
             | "related stories"
             | "recommended"
             | "recommended reading"
-            | "further reading"
-            | "see also"
             | "read next"
-            | "read more"
             | "more stories"
             | "more articles"
             | "more posts"
             | "you may also like"
             | "you might also like"
-            | "about the author"
+    ) || text
+        .strip_prefix("more from ")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.split_whitespace().count() <= 6)
+    {
+        RelatedHeadingSignal::Strong
+    } else if matches!(
+        text.as_str(),
+        "related" | "further reading" | "see also" | "read more"
+    ) {
+        RelatedHeadingSignal::Ambiguous
+    } else {
+        // In particular, keep academic sections such as "Related Work".
+        RelatedHeadingSignal::None
+    }
+}
+
+fn mark_related_heading_boundary(
+    dom: &Dom,
+    heading: NodeId,
+    root: NodeId,
+    link_counts: &[u8],
+    store: &crate::dom::NodeStateStore,
+    boundaries: &mut [bool],
+) {
+    for candidate in dom
+        .ancestors(heading)
+        .take_while(|&node| node != root)
+        .take(8)
+    {
+        if !matches!(
+            dom.tag(candidate),
+            Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Section)
+        ) {
+            continue;
+        }
+        // A heading is discovery evidence only. Keep long reference sections
+        // out of the candidate set before the detailed classifier runs.
+        if link_counts[candidate.index()] >= 2
+            && store
+                .get_stats(candidate)
+                .is_some_and(|stats| stats.text_length < 1_200)
+        {
+            boundaries[candidate.index()] = true;
+            break;
+        }
+    }
+}
+
+fn append_bounded_text(dom: &Dom, root: NodeId, node_limit: usize, output: &mut String) {
+    for node in std::iter::once(root)
+        .chain(dom.descendants(root))
+        .take(node_limit)
+    {
+        let Some(text) = dom
+            .text_node(node)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(text);
+    }
+}
+
+fn mark_subscription_boundary(
+    dom: &Dom,
+    form: NodeId,
+    root: NodeId,
+    store: &crate::dom::NodeStateStore,
+    inspected: &mut [bool],
+    boundaries: &mut [bool],
+) {
+    for candidate in dom.ancestors(form).take_while(|&node| node != root).take(4) {
+        if !matches!(
+            dom.tag(candidate),
+            Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Section)
+        ) {
+            continue;
+        }
+        if std::mem::replace(&mut inspected[candidate.index()], true) {
+            if boundaries[candidate.index()] {
+                return;
+            }
+            continue;
+        }
+        if store
+            .get_stats(candidate)
+            .is_none_or(|stats| stats.text_length >= 800)
+        {
+            continue;
+        }
+        let name = node_name(dom, candidate);
+        let mut text = String::new();
+        append_bounded_text(dom, candidate, 128, &mut text);
+        let text = text.to_ascii_lowercase();
+        if !has_newsletter_evidence(&name, &text) {
+            continue;
+        }
+        let has_direct_copy = dom.element_children(candidate).take(12).any(|child| {
+            matches!(
+                dom.tag(child),
+                Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P)
+            ) && {
+                let mut child_text = String::new();
+                dom.append_normalized_text(child, &mut child_text);
+                has_newsletter_cta_text(&child_text.to_ascii_lowercase())
+            }
+        });
+        if has_explicit_newsletter_name(&name) || has_direct_copy {
+            boundaries[candidate.index()] = true;
+            return;
+        }
+    }
+}
+
+fn is_structural_breadcrumb_candidate(dom: &Dom, node: NodeId, inside_table: bool) -> bool {
+    let semantic_navigation = dom.tag(node) == Some(Tag::Nav)
+        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+            roles
+                .split_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("navigation"))
+        });
+    if dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
+        matches!(
+            label.trim().to_ascii_lowercase().as_str(),
+            "breadcrumb" | "breadcrumbs"
+        )
+    }) {
+        return true;
+    }
+    if !matches!(dom.tag(node), Some(Tag::Div | Tag::Nav | Tag::P)) {
+        return false;
+    }
+    if inside_table {
+        return false;
+    }
+    if dom.element_children(node).any(|child| {
+        matches!(
+            dom.tag(child),
+            Some(Tag::Article | Tag::Div | Tag::P | Tag::Section)
+        )
+    }) {
+        return false;
+    }
+
+    // Inspect only a small, shallow prefix. This finds ordinary unlabelled
+    // trails without turning candidate discovery into nested subtree scans.
+    let mut stack = SmallVec::<[(NodeId, u8); 24]>::new();
+    stack.extend(dom.children(node).map(|child| (child, 0)));
+    let mut visited = 0usize;
+    let mut links = 0usize;
+    let mut separator = 0usize;
+    while let Some((current, depth)) = stack.pop() {
+        visited += 1;
+        if visited > 32 {
+            return false;
+        }
+        links += usize::from(dom.tag(current) == Some(Tag::A));
+        separator =
+            separator.saturating_add(dom.text_node(current).map_or(0, breadcrumb_separator_count));
+        if depth < 2 {
+            stack.extend(dom.children(current).map(|child| (child, depth + 1)));
+        }
+    }
+    links >= 2 && separator >= 2 && semantic_navigation
+}
+
+fn has_breadcrumb_name(dom: &Dom, node: NodeId, name: &str) -> bool {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| matches!(token, "breadcrumb" | "breadcrumbs"))
+        || dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
+            matches!(
+                label.trim().to_ascii_lowercase().as_str(),
+                "breadcrumb" | "breadcrumbs"
+            )
+        })
+}
+
+fn breadcrumb_separator_count(text: &str) -> usize {
+    text.chars()
+        .filter(|&character| matches!(character, '>' | '/' | '›' | '»'))
+        .take(3)
+        .count()
+}
+
+fn is_breadcrumb(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    if !metrics.at_start
+        || metrics.links < 2
+        || metrics.stats.text_length > 280
+        || metrics.stats.sentence_end_count > 1
+    {
+        return false;
+    }
+    let all_fragment_links = dom
+        .descendants(node)
+        .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
+        .all(|link| {
+            dom.attr(link, AttrName::Href)
+                .is_some_and(|href| href.starts_with('#'))
+        });
+    if all_fragment_links {
+        return false;
+    }
+
+    let explicit = has_breadcrumb_name(dom, node, metrics.name);
+    let navigation = dom.tag(node) == Some(Tag::Nav)
+        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+            roles
+                .split_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("navigation"))
+        });
+    let separator = breadcrumb_separator_count(metrics.text) >= 2;
+    let linked_list_items = dom
+        .descendants(node)
+        .filter(|&descendant| dom.tag(descendant) == Some(Tag::Li))
+        .filter(|&item| {
+            dom.descendants(item)
+                .any(|descendant| dom.tag(descendant) == Some(Tag::A))
+        })
+        .take(2)
+        .count();
+    let list_shape = linked_list_items >= 2;
+    let compact_links = metrics.stats.text_length <= (metrics.links as u32).saturating_mul(70);
+
+    compact_links
+        && metrics.link_density >= if explicit { 0.25 } else { 0.4 }
+        && (explicit || separator || navigation && list_shape)
+}
+
+fn has_explicit_newsletter_name(name: &str) -> bool {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token == "newsletter")
+}
+
+fn has_subscription_name(name: &str) -> bool {
+    name.contains("sign-up")
+        || name
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| matches!(token, "subscribe" | "subscription" | "signup"))
+}
+
+fn has_newsletter_evidence(name: &str, text: &str) -> bool {
+    has_explicit_newsletter_name(name)
+        || text.contains("newsletter")
+        || has_subscription_name(name) && text.contains("email")
+        || has_newsletter_cta_text(text)
+            && (text.contains("inbox")
+                || text.trim_start().starts_with("subscribe")
+                || text.trim_start().starts_with("join"))
+}
+
+fn has_newsletter_cta_text(text: &str) -> bool {
+    let text = text.trim();
+    starts_with_any(
+        text,
+        &[
+            "subscribe",
+            "sign up",
+            "join our newsletter",
+            "join the newsletter",
+            "get updates",
+            "stay informed",
+            "enter your email",
+        ],
+    ) || contains_any(
+        text,
+        &[
+            "subscribe to our newsletter",
+            "sign up for our newsletter",
+            "get updates in your inbox",
+            "enter your email",
+        ],
     )
+}
+
+fn is_newsletter_cta(metrics: &PeripheralMetrics<'_>) -> bool {
+    let action = metrics.has_form || metrics.controls > 0 || metrics.links > 0;
+    let explicit_newsletter =
+        has_explicit_newsletter_name(metrics.name) || metrics.text.contains("newsletter");
+    let boundary = metrics.at_start || metrics.at_end || explicit_newsletter;
+    let short_copy = metrics.stats.text_length < 800
+        && metrics.stats.word_count <= 120
+        && metrics.stats.sentence_end_count <= 8
+        && metrics.short;
+    let explicit_subscription_cta = has_subscription_name(metrics.name)
+        && metrics.links > 0
+        && metrics.text.trim_start().starts_with("subscribe");
+    boundary
+        && action
+        && short_copy
+        && (has_newsletter_evidence(metrics.name, metrics.text) || explicit_subscription_cta)
+}
+
+fn related_name_signal(name: &str) -> bool {
+    contains_any(
+        name,
+        &[
+            "related",
+            "recommend",
+            "more-stories",
+            "more_stories",
+            "read-next",
+        ],
+    )
+}
+
+fn related_text_signal(text: &str) -> bool {
+    starts_with_any(
+        text,
+        &[
+            "related",
+            "recommended",
+            "more stories",
+            "you may also like",
+        ],
+    )
+}
+
+fn related_heading_signal_in(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
+    dom.descendants(node)
+        .map(|descendant| related_heading_signal(dom, descendant))
+        .max()
+        .unwrap_or(RelatedHeadingSignal::None)
+}
+
+fn has_academic_related_heading(dom: &Dom, node: NodeId) -> bool {
+    dom.descendants(node).any(|descendant| {
+        matches!(
+            dom.tag(descendant),
+            Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) && {
+            let mut text = String::new();
+            dom.append_normalized_text(descendant, &mut text);
+            text.trim().eq_ignore_ascii_case("related work")
+        }
+    })
+}
+
+fn linked_short_child_count(dom: &Dom, parent: NodeId) -> usize {
+    dom.element_children(parent)
+        .filter(|&child| {
+            !matches!(
+                dom.tag(child),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            ) && dom.normalized_char_count(child) <= 240
+                && (dom.tag(child) == Some(Tag::A)
+                    || dom
+                        .descendants(child)
+                        .any(|descendant| dom.tag(descendant) == Some(Tag::A)))
+        })
+        .take(3)
+        .count()
+}
+
+fn has_repeated_link_cards(dom: &Dom, node: NodeId) -> bool {
+    if linked_short_child_count(dom, node) >= 2 {
+        return true;
+    }
+    dom.element_children(node).any(|container| {
+        matches!(
+            dom.tag(container),
+            Some(Tag::Div | Tag::Ol | Tag::Section | Tag::Ul)
+        ) && linked_short_child_count(dom, container) >= 2
+    })
+}
+
+fn is_related_content(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    if metrics.links < 2 || has_academic_related_heading(dom, node) {
+        return false;
+    }
+    let heading = related_heading_signal_in(dom, node);
+    let named = related_name_signal(metrics.name)
+        || dom
+            .descendants(node)
+            .any(|descendant| related_name_signal(&node_name(dom, descendant)));
+    if heading == RelatedHeadingSignal::None && !named && !related_text_signal(metrics.text) {
+        return false;
+    }
+    // Preserve the established cleanup behavior for short, explicitly named
+    // related blocks. Academic "Related Work" sections remain excluded.
+    if metrics.short && metrics.link_density >= 0.2 {
+        return true;
+    }
+    if metrics.stats.text_length >= 1_200 {
+        return false;
+    }
+    let repeated_cards = has_repeated_link_cards(dom, node);
+    let non_link_chars = f64::from(metrics.stats.text_length) * (1.0 - metrics.link_density);
+    let sparse_text = non_link_chars <= 320.0 && metrics.stats.sentence_end_count <= 7;
+
+    if !sparse_text {
+        return false;
+    }
+
+    if metrics.at_end {
+        return match heading {
+            RelatedHeadingSignal::Strong => repeated_cards || metrics.link_density >= 0.45,
+            RelatedHeadingSignal::Ambiguous => repeated_cards && metrics.link_density >= 0.45,
+            RelatedHeadingSignal::None => named && repeated_cards && metrics.link_density >= 0.3,
+        };
+    }
+    if metrics.at_start {
+        return named && repeated_cards && metrics.link_density >= 0.2;
+    }
+
+    // Mid-article removal needs every strong signal. This keeps ordinary link
+    // sections while removing a clear card interruption between prose blocks.
+    heading == RelatedHeadingSignal::Strong
+        && repeated_cards
+        && metrics.link_density >= 0.35
+        && metrics.stats.text_length < 700
+        && non_link_chars <= 240.0
 }
 
 /// Removes short textual controls that do not always have useful class names.
@@ -1953,6 +2590,21 @@ mod tests {
         html.push_str(&"</div>".repeat(depth));
         let text = clean_fragment(&html);
         assert!(text.contains("Retained documentation"));
+    }
+
+    #[test]
+    fn heuristic_cleanup_indexes_many_forms_and_related_sections_once() {
+        let mut html = String::from("<main><p>Retained documentation.</p>");
+        for index in 0..2_000 {
+            html.push_str(&format!(
+                "<form></form><section><p>Get updates in your inbox.</p><form><label>Email<input></label></form></section><aside class=\"related-links\"><h2>Related</h2><a href=\"/{index}/a\">A</a><a href=\"/{index}/b\">B</a></aside>"
+            ));
+        }
+        html.push_str("</main>");
+
+        let text = clean_fragment(&html);
+
+        assert_eq!(text, "Retained documentation.");
     }
 
     #[test]

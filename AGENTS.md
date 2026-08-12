@@ -71,7 +71,7 @@ These invariants are costly to violate:
 - **Separate cleanup and normalization.** Cleanup decides what to remove. Normalization makes retained markup predictable for serializers.
 - **Use static image evidence together.** Small dimensions are a signal. Protect described images, math, responsive sources, and captioned figures.
 - **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
-- **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal.
+- **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal. Breadcrumb, subscription, and related-content cleanup must also use structure and document position.
 - **Strip only explicit code gutters.** Treat syntax-highlighter line numbers as presentation, but preserve numeric source code and source-line wrappers.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
