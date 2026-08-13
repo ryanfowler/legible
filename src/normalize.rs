@@ -74,6 +74,10 @@ pub(crate) fn remove_decorative_media_before_cleanup(dom: &mut Dom, root: NodeId
     images::remove_decorative_media(dom, root);
 }
 
+pub(crate) fn adjacent_lead_media(dom: &Dom, root: NodeId) -> Option<NodeId> {
+    images::adjacent_lead_media(dom, root)
+}
+
 pub(crate) fn adopt_external_footnotes(
     definitions: &footnotes::Definitions,
     fragment: &mut Dom,

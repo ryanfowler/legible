@@ -17,10 +17,10 @@ use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
-    accessible_math_nodes, adopt_external_footnotes, collect_external_footnotes,
-    finish_normalization, has_primary_heading_semantics, normalize_after_cleanup,
-    normalize_scoring_structure, normalize_svg_before_scoring, preserve_semantics_before_cleanup,
-    remove_decorative_media_before_cleanup,
+    accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes,
+    collect_external_footnotes, finish_normalization, has_primary_heading_semantics,
+    normalize_after_cleanup, normalize_scoring_structure, normalize_svg_before_scoring,
+    preserve_semantics_before_cleanup, remove_decorative_media_before_cleanup,
 };
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
@@ -655,6 +655,9 @@ impl<'a> ContentExtractor<'a> {
                 }
                 (top_id, false)
             };
+            let lead_media = (!synthetic && exact_root.is_none())
+                .then(|| adjacent_lead_media(&self.dom, top_id))
+                .flatten();
             let content_id = if synthetic {
                 top_id
             } else {
@@ -670,6 +673,13 @@ impl<'a> ContentExtractor<'a> {
                 };
                 self.create_container(top_id, &siblings).unwrap_or(top_id)
             };
+            if let Some(lead_media) = lead_media
+                && lead_media != content_id
+                && self.dom.parent(lead_media).is_some()
+                && let Some(first_child) = self.dom.first_child(content_id)
+            {
+                self.dom.insert_before(first_child, lead_media);
+            }
 
             if let Some(direction) = std::iter::once(top_id)
                 .chain(self.dom.ancestors(top_id))
