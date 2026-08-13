@@ -19,7 +19,7 @@ use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
     accessible_math_nodes, adopt_external_footnotes, collect_external_footnotes,
     finish_normalization, has_primary_heading_semantics, normalize_after_cleanup,
-    normalize_scoring_structure, preserve_semantics_before_cleanup,
+    normalize_scoring_structure, normalize_svg_before_scoring, preserve_semantics_before_cleanup,
     remove_decorative_media_before_cleanup,
 };
 use crate::page::ExtractedPage;
@@ -266,6 +266,8 @@ impl<'a> ContentExtractor<'a> {
         }
         unwrap_noscript_images(&mut self.dom);
         prep_document(&mut self.dom);
+        let document_root = self.dom.root();
+        normalize_svg_before_scoring(&mut self.dom, document_root);
         if self.options.content_root.is_none() {
             let specialized = specialized::extract(&DocumentContext {
                 dom: &self.dom,

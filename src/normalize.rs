@@ -8,6 +8,7 @@ mod images;
 mod lists;
 mod math;
 mod media;
+mod svg;
 mod tables;
 
 use crate::cleaning::{repeated_listing_start, simplify_nested_elements};
@@ -56,10 +57,16 @@ pub(crate) fn normalize_after_cleanup(
 /// Captures semantic source data that hard cleanup would otherwise remove.
 pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
     math::normalize(dom, root);
+    svg::normalize(dom, root);
     media::normalize(dom, root);
     callouts::normalize(dom, root);
     code::normalize(dom, root);
     footnotes::normalize(dom, root);
+}
+
+/// Removes SVG implementation details and replaces accessible charts before scoring.
+pub(crate) fn normalize_svg_before_scoring(dom: &mut Dom, root: NodeId) {
+    svg::normalize(dom, root);
 }
 
 /// Removes decorative media while source sizing and naming evidence is intact.
