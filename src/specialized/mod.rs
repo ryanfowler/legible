@@ -1,8 +1,10 @@
 //! Specialized extraction for pages whose structure is not article prose.
 
+mod discourse;
 mod discussion;
 mod github;
 mod hacker_news;
+mod reddit;
 
 use crate::dom::{Dom, NodeId};
 use crate::page_kind::PageKind;
@@ -28,8 +30,12 @@ trait SpecializedExtractor: Sync {
     fn extract(&self, context: &DocumentContext<'_>) -> Option<SpecializedResult>;
 }
 
-static EXTRACTORS: [&dyn SpecializedExtractor; 2] =
-    [&hacker_news::HackerNewsExtractor, &github::GitHubExtractor];
+static EXTRACTORS: [&dyn SpecializedExtractor; 4] = [
+    &hacker_news::HackerNewsExtractor,
+    &github::GitHubExtractor,
+    &discourse::DiscourseExtractor,
+    &reddit::RedditExtractor,
+];
 
 /// Runs the first high-confidence extractor in registry order.
 pub(crate) fn extract(context: &DocumentContext<'_>) -> Option<SpecializedResult> {

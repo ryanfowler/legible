@@ -130,21 +130,14 @@ impl DiscussionBuilder {
 
         let list =
             if let Some(parent_index) = self.retained_at_depth.iter().rposition(Option::is_some) {
-                if let Some(list) = self.retained_at_depth[parent_index]
-                    .as_ref()
-                    .and_then(|frame| frame.nested_list)
-                {
+                let parent_frame = self.retained_at_depth[parent_index].as_ref()?;
+                if let Some(list) = parent_frame.nested_list {
                     list
                 } else {
-                    let parent = self.retained_at_depth[parent_index]
-                        .as_ref()
-                        .expect("reply frame exists")
-                        .item;
+                    let parent = parent_frame.item;
                     let list = create_element(&mut self.dom, parent, Tag::Ul)?;
-                    self.retained_at_depth[parent_index]
-                        .as_mut()
-                        .expect("reply frame exists")
-                        .nested_list = Some(list);
+                    let parent_frame = self.retained_at_depth[parent_index].as_mut()?;
+                    parent_frame.nested_list = Some(list);
                     list
                 }
             } else {
