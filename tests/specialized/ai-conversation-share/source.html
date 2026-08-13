@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head><title>Shared conversation</title></head>
+  <body>
+    <header><nav>Home Sign in Share</nav></header>
+    <main>
+      <h1>How should a parser preserve code?</h1>
+      <article data-testid="conversation-turn" data-message-author-role="user">
+        <div class="message-header">User <button>Copy</button></div>
+        <div data-testid="message-content">
+          <p>How can I preserve code in a static HTML extractor?</p>
+        </div>
+      </article>
+      <article data-testid="conversation-turn" data-message-author-role="assistant">
+        <div class="message-header">Assistant <button>Copy</button></div>
+        <div data-testid="message-content">
+          <p>Keep the retained DOM and normalize the code block separately.</p>
+          <pre><code class="language-rust">fn main() {
+    println!("hello");
+}</code></pre>
+          <ul><li>Do not fetch the network.</li><li>Keep rendering lazy.</li></ul>
+        </div>
+      </article>
+    </main>
+    <footer>Feedback and related conversations</footer>
+  </body>
+</html>

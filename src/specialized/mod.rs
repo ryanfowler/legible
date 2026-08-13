@@ -1,5 +1,6 @@
 //! Specialized extraction for pages whose structure is not article prose.
 
+mod ai_conversation;
 mod discourse;
 mod discussion;
 mod github;
@@ -30,11 +31,12 @@ trait SpecializedExtractor: Sync {
     fn extract(&self, context: &DocumentContext<'_>) -> Option<SpecializedResult>;
 }
 
-static EXTRACTORS: [&dyn SpecializedExtractor; 4] = [
+static EXTRACTORS: [&dyn SpecializedExtractor; 5] = [
     &hacker_news::HackerNewsExtractor,
     &github::GitHubExtractor,
     &discourse::DiscourseExtractor,
     &reddit::RedditExtractor,
+    &ai_conversation::AiConversationExtractor,
 ];
 
 /// Runs the first high-confidence extractor in registry order.
