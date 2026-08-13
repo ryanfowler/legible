@@ -1,11 +1,10 @@
 //! GitHub issue and pull request discussion extraction.
 
 use super::{
-    DocumentContext, SpecializedExtractor, SpecializedResult, append_text, class_contains,
-    create_element, has_class, import_children, new_output,
+    DocumentContext, SpecializedExtractor, SpecializedResult, class_contains,
+    discussion::DiscussionBuilder, has_class,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
-use crate::page_kind::PageKind;
 
 pub(super) struct GitHubExtractor;
 
@@ -44,31 +43,29 @@ impl SpecializedExtractor for GitHubExtractor {
             return None;
         }
 
-        let (mut dom, root) = new_output()?;
-        let heading = create_element(&mut dom, root, Tag::H1)?;
-        if source.tag(title) == Some(Tag::H1) {
-            if !import_children(source, title, &mut dom, heading) {
+        let mut builder = DiscussionBuilder::new()?;
+        if !builder.set_title(source, title) {
+            return None;
+        }
+
+        let (author, time) = entry_metadata(source, bodies[0]);
+        if !builder.append_primary_byline(author.as_deref(), time.as_deref()) {
+            return None;
+        }
+        if !builder.append_primary_body(source, bodies[0]) {
+            return None;
+        }
+        if bodies.len() > 1 {
+            if !builder.set_reply_heading("Discussion") {
                 return None;
             }
-        } else {
-            append_text(&mut dom, heading, source.text(title).trim());
-        }
-
-        append_entry(source, &mut dom, root, bodies[0], false)?;
-        if bodies.len() > 1 {
-            let comments_heading = create_element(&mut dom, root, Tag::H2)?;
-            append_text(&mut dom, comments_heading, "Discussion");
             for &entry in &bodies[1..] {
-                append_entry(source, &mut dom, root, entry, true)?;
+                let (author, time) = entry_metadata(source, entry);
+                builder.append_reply(source, 0, author.as_deref(), time.as_deref(), Some(entry))?;
             }
         }
 
-        Some(SpecializedResult {
-            dom,
-            root,
-            kind: PageKind::Discussion,
-            identity: "github",
-        })
+        Some(builder.finish("github"))
     }
 }
 
@@ -123,43 +120,17 @@ fn is_discussion_body(dom: &Dom, node: NodeId) -> bool {
             })
 }
 
-fn append_entry(
-    source: &Dom,
-    output: &mut Dom,
-    root: NodeId,
-    body: NodeId,
-    comment: bool,
-) -> Option<()> {
+fn entry_metadata(source: &Dom, body: NodeId) -> (Option<String>, Option<String>) {
     let container = entry_container(source, body);
-    if let Some(author) = find_author(source, container) {
-        let heading = create_element(output, root, if comment { Tag::H3 } else { Tag::P })?;
-        if comment {
-            append_text(output, heading, source.text(author).trim());
-        } else {
-            let strong = create_element(output, heading, Tag::Strong)?;
-            append_text(output, strong, source.text(author).trim());
-        }
-        if let Some(time) = source
-            .descendants(container)
-            .find(|&node| source.tag(node) == Some(Tag::Time))
-        {
-            let value = source.text(time);
-            let value = value.trim();
-            if !value.is_empty() {
-                append_text(output, heading, " · ");
-                append_text(output, heading, value);
-            }
-        }
-    } else if comment {
-        let heading = create_element(output, root, Tag::H3)?;
-        append_text(output, heading, "Comment");
-    }
-
-    let article = create_element(output, root, Tag::Article)?;
-    if !import_children(source, body, output, article) {
-        return None;
-    }
-    Some(())
+    let author = find_author(source, container)
+        .map(|node| source.text(node).trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let time = source
+        .descendants(container)
+        .find(|&node| source.tag(node) == Some(Tag::Time))
+        .map(|node| source.text(node).trim().to_owned())
+        .filter(|value| !value.is_empty());
+    (author, time)
 }
 
 fn entry_container(dom: &Dom, body: NodeId) -> NodeId {

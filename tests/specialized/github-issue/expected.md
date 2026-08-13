@@ -12,12 +12,12 @@ fn main() {
 
 > Whitespace is part of the example.
 
+
 ## Discussion
 
-### bob · Aug 11, 2026
+- **bob** · Aug 11, 2026
 
-I can reproduce this with nested token spans.
+  I can reproduce this with nested token spans.
+- **alice** · Aug 12, 2026
 
-### alice · Aug 12, 2026
-
-The new normalization pass fixes it.
+  The new normalization pass fixes it.
