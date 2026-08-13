@@ -5,6 +5,7 @@ use crate::constants::{
     is_deprecated_size_attribute_elem, parse_b64_data_url,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStats, Tag};
+use crate::page_kind::PageKind;
 use crate::scoring::{
     get_inner_text, get_link_density_cached, get_or_compute_stats, has_hidden_utility_class,
     has_single_tag_inside_element, has_static_hidden_marker, is_element_without_content,
@@ -972,6 +973,7 @@ pub(crate) fn hard_cleanup(
 pub(crate) fn heuristic_cleanup(
     dom: &mut Dom,
     root: NodeId,
+    page_kind: PageKind,
     store: &mut crate::dom::NodeStateStore,
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
@@ -1033,9 +1035,21 @@ pub(crate) fn heuristic_cleanup(
         if is_structural_breadcrumb_candidate(dom, node, inside_table) {
             discovered_boundaries[node.index()] = true;
         }
+        if is_structural_peripheral_candidate(dom, node, page_kind, store) {
+            discovered_boundaries[node.index()] = true;
+        }
     }
 
     mark_data_tables(dom, root, store, &mut Vec::new());
+    if remove_explicit_peripheral_sections(dom, root, &snapshot, &link_counts, store) {
+        store.clear_stats();
+    }
+    if remove_terminal_taxonomy_before_footnotes(dom, root, &snapshot, &link_counts, store) {
+        store.clear_stats();
+    }
+    if remove_job_company_profiles(dom, root, page_kind, &snapshot, store) {
+        store.clear_stats();
+    }
     if remove_direct_peripheral_siblings(dom, root, &snapshot, &link_counts, store) {
         store.clear_stats();
     }
@@ -1087,6 +1101,11 @@ pub(crate) fn heuristic_cleanup(
                 )
             })
             .count();
+        let images = dom
+            .descendants(node)
+            .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
+            .take(4)
+            .count();
         let protected = dom
             .descendants(node)
             .any(|descendant| is_protected_content(dom, descendant, store));
@@ -1104,15 +1123,19 @@ pub(crate) fn heuristic_cleanup(
             )
         };
         let has_form = dom.tag(node) == Some(Tag::Form)
-            || dom
-                .descendants(node)
-                .any(|descendant| dom.tag(descendant) == Some(Tag::Form));
+            || dom.descendants(node).any(|descendant| {
+                dom.tag(descendant) == Some(Tag::Form)
+                    || dom.tag(descendant) == Some(Tag::Other)
+                        && dom.attr_by_local_name(descendant, "action").is_some()
+                        && node_name(dom, descendant).contains("newsletter-form")
+            });
         let metrics = PeripheralMetrics {
             name: &name,
             text: &text,
             stats,
             links,
             controls,
+            images,
             has_form,
             link_density,
             at_start,
@@ -1163,7 +1186,22 @@ pub(crate) fn heuristic_cleanup(
             && stats.text_length < 500;
 
         let author_name = contains_any(&name, &["author-bio", "author_bio", "profile", "bio"]);
-        let author = author_name && short && (social_links > 0 || links >= 2);
+        let inside_article_toc = std::iter::once(node)
+            .chain(dom.ancestors(node))
+            .any(|ancestor| {
+                dom.attr_by_local_name(ancestor, "data-article-toc")
+                    .is_some()
+            });
+        let author_card = (author_name || inside_article_toc)
+            && short
+            && (at_start || at_end)
+            && links >= 1
+            && images >= 1;
+        let author = author_name && short && (social_links > 0 || links >= 2 || author_card);
+        let author_promotion = is_author_promotion(dom, node, &metrics);
+        let audio_controls = is_audio_controls(&metrics);
+        let job_profile = is_job_profile_content(dom, node, page_kind, &metrics);
+        let collection_promotion = is_collection_promotion(dom, node, &metrics);
 
         let advertisement =
             strong_ad_name(&name) && short && (links > 0 || stats.text_length < 100);
@@ -1243,7 +1281,7 @@ pub(crate) fn heuristic_cleanup(
             && links >= 2
             && stats.text_length < 300
             && link_density >= 0.45
-            && near_content_end(dom, node, root, store);
+            && near_content_end_ignoring_footnotes(dom, node, root, store);
         let peripheral_panel_name = name
             .split(|character: char| !character.is_ascii_alphanumeric())
             .any(|token| matches!(token, "sidebar" | "comments" | "commentlist"));
@@ -1263,6 +1301,10 @@ pub(crate) fn heuristic_cleanup(
             || breadcrumb
             || navigation
             || author
+            || author_promotion
+            || audio_controls
+            || job_profile
+            || collection_promotion
             || advertisement
             || consent
             || account
@@ -1272,7 +1314,12 @@ pub(crate) fn heuristic_cleanup(
             || terminal_peripheral_panel
             || print_citation
         {
-            if protected {
+            if protected
+                && !author_card
+                && !author_promotion
+                && !job_profile
+                && !collection_promotion
+            {
                 hoist_protected_children(dom, node, store);
             }
             detach_and_invalidate_stats(dom, node, store);
@@ -1280,6 +1327,347 @@ pub(crate) fn heuristic_cleanup(
     }
 
     remove_contextual_boilerplate(dom, root, store, text_buffer, nodes);
+}
+
+fn remove_explicit_peripheral_sections(
+    dom: &mut Dom,
+    root: NodeId,
+    snapshot: &[(NodeId, u32)],
+    link_counts: &[u8],
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let terminal_related = snapshot
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, &(node, _))| {
+            let name = node_name(dom, node);
+            (name.contains("related")
+                && contains_any(&name, &["articles", "cards", "grid", "stories"])
+                && related_heading_signal_in(dom, node) == RelatedHeadingSignal::Strong
+                && link_counts[node.index()] >= 3
+                && near_content_end(dom, node, root, store))
+            .then_some((index, node))
+        });
+
+    let mut changed = false;
+    let mut detached_depth = None;
+    for (index, &(node, depth)) in snapshot.iter().enumerate() {
+        if detached_depth.is_some_and(|outer_depth| depth > outer_depth) {
+            continue;
+        }
+        detached_depth = None;
+        if dom.parent(node).is_none() {
+            continue;
+        }
+
+        let name = node_name(dom, node);
+        let article_toc = dom.attr_by_local_name(node, "data-article-toc").is_some();
+        let related_component = name.contains("related-content-tout")
+            || name.contains("related")
+                && contains_any(&name, &["articles", "cards", "grid", "stories"]);
+        let audio_player = contains_any(&name, &["audio-player", "audio_player"]);
+        let article_meta = name.contains("article-hero__meta-aside");
+        let share_controls = name.contains("share-dropdown");
+        let newsletter_component = name.contains("article-newsletter");
+        if !article_toc
+            && !related_component
+            && !audio_player
+            && !article_meta
+            && !share_controls
+            && !newsletter_component
+        {
+            continue;
+        }
+        let stats = get_or_compute_stats(dom, node, store);
+        let mut text = String::new();
+        append_bounded_text(dom, node, 256, &mut text);
+        let text = text.trim().to_ascii_lowercase();
+        let action_link = dom.descendants(node).any(|descendant| {
+            dom.attr(descendant, AttrName::Href)
+                .is_some_and(|href| !href.trim().is_empty())
+        });
+        let image = dom
+            .descendants(node)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::Img));
+        let audio = dom
+            .descendants(node)
+            .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Audio | Tag::Source)));
+        let custom_form = dom.descendants(node).any(|descendant| {
+            dom.tag(descendant) == Some(Tag::Other)
+                && dom.attr_by_local_name(descendant, "action").is_some()
+                && node_name(dom, descendant).contains("newsletter-form")
+        });
+
+        let author_promotion = article_toc
+            && stats.text_length < 1_200
+            && action_link
+            && image
+            && text.contains("the latest from ")
+            && text.contains("monthly")
+            && contains_any(&text, &["news", "updates", "newsletter"]);
+        let collection = stats.text_length < 800
+            && name.contains("related-content-tout")
+            && action_link
+            && (text.starts_with("collection ") || text == "collection")
+            && terminal_related.is_some_and(|(related_index, related_node)| {
+                related_index > index
+                    && starts_terminal_peripheral_sequence(dom, node, related_node, root, store)
+            });
+        let related_cards = terminal_related.is_some_and(|(_, related_node)| related_node == node);
+        let audio_controls = audio_player
+            && stats.text_length < 500
+            && (audio || action_link)
+            && contains_any(
+                &text,
+                &[
+                    "listen to article",
+                    "listen to this article",
+                    "[[duration]]",
+                ],
+            );
+        let meta_artifact =
+            article_meta && stats.text_length < 100 && text.contains('|') && looks_like_date(&text);
+        let share = share_controls
+            && stats.text_length < 500
+            && text.starts_with("share")
+            && (link_counts[node.index()] >= 2 || text == "share");
+        let newsletter = newsletter_component
+            && stats.text_length < 1_200
+            && custom_form
+            && text.contains("in your inbox")
+            && text.contains("sign up for our newsletter");
+
+        if author_promotion
+            || collection
+            || related_cards
+            || audio_controls
+            || meta_artifact
+            || share
+            || newsletter
+        {
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+            detached_depth = Some(depth);
+        }
+    }
+    changed
+}
+
+fn starts_terminal_peripheral_sequence(
+    dom: &Dom,
+    first: NodeId,
+    last: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let mut first_path = vec![false; dom.len()];
+    first_path[first.index()] = true;
+    for ancestor in dom.ancestors(first) {
+        first_path[ancestor.index()] = true;
+    }
+    let common_parent = std::iter::once(last)
+        .chain(dom.ancestors(last))
+        .find(|node| first_path[node.index()])
+        .unwrap_or(root);
+    let first_branch = std::iter::once(first)
+        .chain(dom.ancestors(first))
+        .take_while(|&node| node != common_parent)
+        .last()
+        .unwrap_or(first);
+    let last_branch = std::iter::once(last)
+        .chain(dom.ancestors(last))
+        .take_while(|&node| node != common_parent)
+        .last()
+        .unwrap_or(last);
+    if first_branch == last_branch {
+        return first == last;
+    }
+
+    let mut trailing_chars = 0_usize;
+    let mut sibling = dom.next_sibling(first_branch);
+    while let Some(next) = sibling {
+        if next == last_branch {
+            return true;
+        }
+        if is_terminal_sequence_bridge(dom, next, store) {
+            sibling = dom.next_sibling(next);
+            continue;
+        }
+        trailing_chars = trailing_chars
+            .saturating_add(get_or_compute_stats(dom, next, store).text_length as usize);
+        if trailing_chars > 100 {
+            return false;
+        }
+        sibling = dom.next_sibling(next);
+    }
+    false
+}
+
+fn is_terminal_sequence_bridge(
+    dom: &Dom,
+    node: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let name = node_name(dom, node);
+    if name.contains("footnotes") {
+        return true;
+    }
+    if get_or_compute_stats(dom, node, store).text_length >= 1_200 {
+        return false;
+    }
+    contains_any(
+        &name,
+        &[
+            "article-newsletter",
+            "article-tags",
+            "audio-player",
+            "newsletter-form",
+            "share-dropdown",
+            "tag-list",
+            "taxonomy",
+        ],
+    ) || dom.descendants(node).take(64).any(|descendant| {
+        contains_any(
+            &node_name(dom, descendant),
+            &["article-newsletter", "newsletter-form"],
+        )
+    })
+}
+
+fn looks_like_date(text: &str) -> bool {
+    text.bytes().any(|byte| byte.is_ascii_digit())
+        && contains_any(
+            text,
+            &[
+                "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+            ],
+        )
+}
+
+fn remove_terminal_taxonomy_before_footnotes(
+    dom: &mut Dom,
+    root: NodeId,
+    snapshot: &[(NodeId, u32)],
+    link_counts: &[u8],
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    for &(node, _) in snapshot {
+        if dom.parent(node).is_none() || !node_name(dom, node).contains("article-tags") {
+            continue;
+        }
+        let stats = get_or_compute_stats(dom, node, store);
+        if stats.text_length < 300
+            && link_counts[node.index()] >= 2
+            && near_content_end_ignoring_footnotes(dom, node, root, store)
+        {
+            detach_and_invalidate_stats(dom, node, store);
+            return true;
+        }
+    }
+    false
+}
+
+fn remove_job_company_profiles(
+    dom: &mut Dom,
+    root: NodeId,
+    page_kind: PageKind,
+    snapshot: &[(NodeId, u32)],
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    if page_kind != PageKind::JobListing {
+        return false;
+    }
+
+    let mut field_counts = vec![0_u8; dom.len()];
+    let mut founder_counts = vec![0_u8; dom.len()];
+    let mut image_counts = vec![0_u8; dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        if dom.element_children(node).next().is_none() && is_profile_field_label(dom, node) {
+            field_counts[node.index()] = 1;
+        }
+        if dom.element_children(node).next().is_none() {
+            let mut text = String::new();
+            dom.append_normalized_text(node, &mut text);
+            founder_counts[node.index()] = u8::from(text.trim().eq_ignore_ascii_case("founder"));
+        }
+        image_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::Img));
+        if let Some(parent) = dom.parent(node) {
+            field_counts[parent.index()] = field_counts[parent.index()]
+                .saturating_add(field_counts[node.index()])
+                .min(4);
+            founder_counts[parent.index()] = founder_counts[parent.index()]
+                .saturating_add(founder_counts[node.index()])
+                .min(2);
+            image_counts[parent.index()] = image_counts[parent.index()]
+                .saturating_add(image_counts[node.index()])
+                .min(2);
+        }
+    }
+
+    // Responsive job cards often repeat one founder profile for desktop and
+    // mobile. Remove the smallest shared profile wrapper. Keep the nearby
+    // application copy and link.
+    let mut changed = false;
+    let mut blocked_ancestors = vec![false; dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        if dom.parent(node).is_none()
+            || blocked_ancestors[node.index()]
+            || !matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+            || founder_counts[node.index()] < 2
+            || image_counts[node.index()] < 2 && !has_repeated_profile_identity(dom, node)
+        {
+            continue;
+        }
+        if get_or_compute_stats(dom, node, store).text_length < 800 {
+            for ancestor in dom.ancestors(node) {
+                blocked_ancestors[ancestor.index()] = true;
+            }
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
+    }
+
+    // Inspect outer candidates first. A job sidebar can contain one company
+    // card followed by founder cards. Remove their shared terminal boundary.
+    for &(node, _) in snapshot {
+        if dom.parent(node).is_none()
+            || !matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+            || field_counts[node.index()] < 3
+        {
+            continue;
+        }
+        let stats = get_or_compute_stats(dom, node, store);
+        if stats.text_length >= 1_600 || !near_content_end(dom, node, root, store) {
+            continue;
+        }
+        detach_and_invalidate_stats(dom, node, store);
+        return true;
+    }
+    changed
+}
+
+fn has_repeated_profile_identity(dom: &Dom, node: NodeId) -> bool {
+    let mut identities = SmallVec::<[String; 8]>::new();
+    for descendant in dom.descendants(node) {
+        if dom.element_children(descendant).next().is_some() {
+            continue;
+        }
+        let mut text = String::new();
+        dom.append_normalized_text(descendant, &mut text);
+        let text = text.trim();
+        if !(3..=80).contains(&text.len()) || text.eq_ignore_ascii_case("founder") {
+            continue;
+        }
+        if identities
+            .iter()
+            .any(|identity| identity.eq_ignore_ascii_case(text))
+        {
+            return true;
+        }
+        identities.push(text.to_owned());
+    }
+    false
 }
 
 fn remove_direct_peripheral_siblings(
@@ -1424,6 +1812,7 @@ struct PeripheralMetrics<'a> {
     stats: NodeStats,
     links: usize,
     controls: usize,
+    images: usize,
     has_form: bool,
     link_density: f64,
     at_start: bool,
@@ -1456,6 +1845,7 @@ fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
             | "more posts"
             | "you may also like"
             | "you might also like"
+            | "collection"
     ) || text
         .strip_prefix("more from ")
         .is_some_and(|suffix| !suffix.is_empty() && suffix.split_whitespace().count() <= 6)
@@ -1626,6 +2016,66 @@ fn is_structural_breadcrumb_candidate(dom: &Dom, node: NodeId, inside_table: boo
     links >= 2 && separator >= 2 && semantic_navigation
 }
 
+fn is_structural_peripheral_candidate(
+    dom: &Dom,
+    node: NodeId,
+    page_kind: PageKind,
+    store: &crate::dom::NodeStateStore,
+) -> bool {
+    if !matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Header | Tag::Other | Tag::Section)
+    ) || store
+        .get_stats(node)
+        .is_some_and(|stats| stats.text_length >= 1_600)
+    {
+        return false;
+    }
+
+    let name = node_name(dom, node);
+    let structural_name = contains_any(
+        &name,
+        &[
+            "audio-player",
+            "audio_player",
+            "card-grid",
+            "card_grid",
+            "collection-grid",
+            "collection_grid",
+            "company-profile",
+            "company_profile",
+            "founder",
+            "news",
+            "profile-grid",
+            "profile_grid",
+            "story-grid",
+            "story_grid",
+        ],
+    );
+    let job_name = page_kind == PageKind::JobListing
+        && contains_any(
+            &name,
+            &["card", "company", "employer", "founder", "profile"],
+        );
+    let promotional_heading = dom.descendants(node).take(48).any(|descendant| {
+        if !matches!(
+            dom.tag(descendant),
+            Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) {
+            return false;
+        }
+        let mut text = String::new();
+        dom.append_normalized_text(descendant, &mut text);
+        let text = text.trim().to_ascii_lowercase();
+        text == "collection"
+            || text == "company profile"
+            || text == "founders"
+            || text.starts_with("the latest from ")
+    });
+
+    structural_name || job_name || promotional_heading
+}
+
 fn has_breadcrumb_name(dom: &Dom, node: NodeId, name: &str) -> bool {
     name.split(|character: char| !character.is_ascii_alphanumeric())
         .any(|token| matches!(token, "breadcrumb" | "breadcrumbs"))
@@ -1752,6 +2202,69 @@ fn is_newsletter_cta(metrics: &PeripheralMetrics<'_>) -> bool {
         && (has_newsletter_evidence(metrics.name, metrics.text) || explicit_subscription_cta)
 }
 
+fn is_author_promotion(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    if !(metrics.at_start || metrics.at_end) || !metrics.short || metrics.stats.text_length >= 700 {
+        return false;
+    }
+    let latest_label = metrics.text.contains("the latest from ")
+        || metrics.text.starts_with("latest from ")
+        || metrics.text.contains("latest articles from ");
+    let profile_shape = matches!(dom.tag(node), Some(Tag::Header | Tag::Aside | Tag::Section))
+        || contains_any(metrics.name, &["author", "profile", "bio", "promotion"]);
+    let author_media = metrics.images > 0 && metrics.links > 0;
+    let promotional_copy = metrics.text.contains("monthly")
+        && contains_any(metrics.text, &["news", "updates", "newsletter"]);
+    latest_label && profile_shape && (author_media || promotional_copy)
+}
+
+fn is_collection_promotion(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    if !metrics.at_end || !metrics.short || metrics.stats.text_length >= 800 || metrics.links == 0 {
+        return false;
+    }
+    let labelled = metrics.text.starts_with("collection ")
+        || metrics.text == "collection"
+        || has_heading_text(dom, node, "collection");
+    let explicit_tout = contains_any(metrics.name, &["related-content-tout", "collection"]);
+    let promotional_shape = explicit_tout
+        || metrics.images > 0 && matches!(dom.tag(node), Some(Tag::Aside | Tag::Section));
+    labelled && promotional_shape
+}
+
+fn is_audio_controls(metrics: &PeripheralMetrics<'_>) -> bool {
+    let named = contains_any(metrics.name, &["audio", "player", "listen"]);
+    let labelled = metrics.text.contains("listen to article")
+        || metrics.text.contains("listen to this article")
+        || metrics.text.contains("[[duration]]");
+    metrics.short && metrics.stats.text_length < 240 && named && labelled
+}
+
+fn is_profile_field_label(dom: &Dom, node: NodeId) -> bool {
+    let mut text = String::new();
+    dom.append_normalized_text(node, &mut text);
+    let text = text.trim().trim_end_matches(':').trim();
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "founded" | "batch" | "team size" | "status"
+    )
+}
+
+fn is_job_profile_content(
+    dom: &Dom,
+    node: NodeId,
+    page_kind: PageKind,
+    metrics: &PeripheralMetrics<'_>,
+) -> bool {
+    if page_kind != PageKind::JobListing || metrics.stats.text_length >= 1_600 {
+        return false;
+    }
+    let named_profile = contains_any(metrics.name, &["founder", "profile-card", "profile_card"]);
+    let repeated_founder_card = metrics.name.contains("card")
+        && metrics.images >= 2
+        && metrics.text.match_indices("founder").take(2).count() >= 2;
+    metrics.at_end && named_profile && (metrics.images >= 2 || has_repeated_link_cards(dom, node))
+        || repeated_founder_card
+}
+
 fn related_name_signal(name: &str) -> bool {
     contains_any(
         name,
@@ -1761,6 +2274,7 @@ fn related_name_signal(name: &str) -> bool {
             "more-stories",
             "more_stories",
             "read-next",
+            "collection",
         ],
     )
 }
@@ -1773,6 +2287,7 @@ fn related_text_signal(text: &str) -> bool {
             "recommended",
             "more stories",
             "you may also like",
+            "collection",
         ],
     )
 }
@@ -1894,6 +2409,13 @@ fn is_related_content(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) 
         return false;
     }
     let repeated_cards = has_repeated_link_cards(dom, node);
+    let terminal_card_grid = metrics.at_end
+        && heading == RelatedHeadingSignal::Strong
+        && metrics.links >= 3
+        && (metrics.images >= 2 || repeated_cards);
+    if terminal_card_grid {
+        return true;
+    }
     // "Next Steps" is also a common instructional heading. Require card
     // structure before treating a short section with this heading as related
     // content. Other explicit related labels keep the established behavior.
@@ -2160,6 +2682,12 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "breadcrumb",
             "author",
             "profile",
+            "collection",
+            "audio",
+            "player",
+            "founder",
+            "company-profile",
+            "company_profile",
             "bio",
             "advert",
             "sponsor",
@@ -2215,6 +2743,36 @@ fn near_content_end(
     }
 }
 
+fn near_content_end_ignoring_footnotes(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let mut current = node;
+    let mut trailing_chars = 0_usize;
+    loop {
+        let mut sibling = dom.next_sibling(current);
+        while let Some(next) = sibling {
+            if !node_name(dom, next).contains("footnotes") {
+                trailing_chars = trailing_chars
+                    .saturating_add(get_or_compute_stats(dom, next, store).text_length as usize);
+                if trailing_chars > 100 {
+                    return false;
+                }
+            }
+            sibling = dom.next_sibling(next);
+        }
+        if current == root {
+            return true;
+        }
+        let Some(parent) = dom.parent(current) else {
+            return true;
+        };
+        current = parent;
+    }
+}
+
 fn near_content_start(
     dom: &Dom,
     node: NodeId,
@@ -2246,6 +2804,11 @@ fn near_content_start(
 
 fn node_name(dom: &Dom, node: NodeId) -> String {
     let mut value = String::new();
+    if dom.tag(node) == Some(Tag::Other)
+        && let Some(name) = dom.qual_name(node)
+    {
+        value.push_str(name.local.as_ref());
+    }
     for name in [AttrName::Class, AttrName::Id] {
         if let Some(part) = dom.attr(node, name) {
             if !value.is_empty() {
@@ -2564,7 +3127,14 @@ mod tests {
         let allowed = Regex::new("video\\.example").unwrap();
         clean_styles(&mut dom, root, &mut nodes);
         hard_cleanup(&mut dom, root, &allowed, false, &mut nodes);
-        heuristic_cleanup(&mut dom, root, &mut store, &mut text, &mut nodes);
+        heuristic_cleanup(
+            &mut dom,
+            root,
+            PageKind::Unknown,
+            &mut store,
+            &mut text,
+            &mut nodes,
+        );
         dom.text(root)
     }
 
@@ -2648,6 +3218,26 @@ mod tests {
             "Subscribe",
             "About the author",
             "Sponsored",
+        ] {
+            assert!(!text.contains(clutter), "retained {clutter}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_trailing_audio_and_collection_cards() {
+        let text = clean_fragment(
+            r#"<article><p>The product report explains the complete result and the purchase options.</p>
+            <div class="article-audio-player"><time>August 13, 2026</time><span> | </span><p>Listen to article</p><span>[[duration]] minutes</span><button>Play</button></div>
+            <section class="collection-grid"><h2>Collection</h2><p>Made by Google 2026</p><div class="cards"><a href="/one"><img src="one.jpg" alt="First story">First story</a><a href="/two"><img src="two.jpg" alt="Second story">Second story</a><a href="/three"><img src="three.jpg" alt="Third story">Third story</a></div></section></article>"#,
+        );
+        assert!(text.contains("product report"), "{text}");
+        for clutter in [
+            "August 13",
+            "Listen to article",
+            "[[duration]]",
+            "Collection",
+            "Made by Google",
+            "First story",
         ] {
             assert!(!text.contains(clutter), "retained {clutter}: {text}");
         }
