@@ -2,6 +2,7 @@ use crate::cleaning::fix_lazy_images;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use url::form_urlencoded;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -17,19 +18,47 @@ struct SrcsetCandidate<'a> {
     descriptor: SrcsetDescriptor,
 }
 
+/// Returns one high-confidence lead-media sibling for a narrow prose root.
+///
+/// Structural root selection can correctly choose a focused prose wrapper
+/// while leaving its lead image near the selected root. Keep the expansion
+/// local so a remote header image cannot enter the article.
+pub(super) fn adjacent_lead_media(dom: &Dom, content_root: NodeId) -> Option<NodeId> {
+    std::iter::once(content_root)
+        .chain(dom.ancestors(content_root).take(8))
+        .flat_map(|node| {
+            std::iter::successors(previous_element_sibling(dom, node), |&sibling| {
+                previous_element_sibling(dom, sibling)
+            })
+            .take(8)
+        })
+        .find(|&candidate| {
+            let image = match dom.tag(candidate) {
+                Some(Tag::Img) => Some(candidate),
+                Some(Tag::P) => single_image(dom, candidate),
+                Some(Tag::Figure | Tag::Picture) => sole_descendant_image(dom, candidate),
+                _ => None,
+            };
+            image.is_some_and(|image| {
+                (has_responsive_candidate(dom, image)
+                    || dom
+                        .descendants(candidate)
+                        .any(|node| source_has_responsive_or_lazy_image(dom, node)))
+                    && has_meaningful_image_description(dom, image)
+                    && image_role_score(dom, image, true, 1).is_meaningful()
+            })
+        })
+}
+
 pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
-    let mut caption_content = vec![false; dom.len()];
     let mut responsive_content = vec![false; dom.len()];
     let mut svg_description_content = vec![false; dom.len()];
     for &(node, _) in nodes.iter().rev() {
-        caption_content[node.index()] |=
-            dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node);
         responsive_content[node.index()] |= source_has_responsive_or_lazy_image(dom, node);
         svg_description_content[node.index()] |=
             is_svg_description_element(dom, node) && dom.has_non_whitespace_text(node);
         if let Some(parent) = dom.parent(node) {
-            caption_content[parent.index()] |= caption_content[node.index()];
             responsive_content[parent.index()] |= responsive_content[node.index()];
             svg_description_content[parent.index()] |= svg_description_content[node.index()];
         }
@@ -39,8 +68,7 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
     let mut responsive_picture_context = vec![false; dom.len()];
     let mut contexts: Vec<(bool, bool)> = Vec::new();
     let root_context = (
-        dom.attr(root, AttrName::DataMath).is_some()
-            || dom.tag(root) == Some(Tag::Figure) && caption_content[root.index()],
+        dom.attr(root, AttrName::DataMath).is_some(),
         dom.tag(root) == Some(Tag::Picture) && responsive_content[root.index()],
     );
     for &(node, depth) in &nodes {
@@ -49,9 +77,7 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
         }
         let (parent_protected, parent_responsive) =
             contexts.last().copied().unwrap_or(root_context);
-        let protected = parent_protected
-            || dom.attr(node, AttrName::DataMath).is_some()
-            || dom.tag(node) == Some(Tag::Figure) && caption_content[node.index()];
+        let protected = parent_protected || dom.attr(node, AttrName::DataMath).is_some();
         let responsive = parent_responsive
             || dom.tag(node) == Some(Tag::Picture) && responsive_content[node.index()];
         protected_context[node.index()] = protected;
@@ -59,34 +85,297 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
         contexts.push((protected, responsive));
     }
 
+    let first_paragraph = nodes
+        .iter()
+        .position(|&(node, _)| dom.tag(node) == Some(Tag::P));
+    let mut positions = vec![usize::MAX; dom.len()];
+    for (position, &(node, _)) in nodes.iter().enumerate() {
+        positions[node.index()] = position;
+    }
+    let mut repetitions: HashMap<String, u16> = HashMap::new();
+    for &(node, _) in &nodes {
+        if dom.tag(node) == Some(Tag::Img)
+            && let Some(resource) = primary_image_resource(dom, node)
+        {
+            let count = repetitions.entry(resource).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    // Controls often provide a lightbox around a real figure. Hard cleanup
+    // removes controls, so move high-confidence media out of them first.
+    let controls: SmallVec<[NodeId; 8]> = nodes
+        .iter()
+        .filter_map(|&(node, _)| (dom.tag(node) == Some(Tag::Button)).then_some(node))
+        .collect();
+    for control in controls {
+        if dom.parent(control).is_none() {
+            continue;
+        }
+        let Some(image) = dom
+            .descendants(control)
+            .find(|&node| dom.tag(node) == Some(Tag::Img))
+        else {
+            continue;
+        };
+        let media_ancestors: SmallVec<[NodeId; 4]> = dom
+            .ancestors(image)
+            .take_while(|&ancestor| ancestor != control)
+            .collect();
+        let media = media_ancestors
+            .iter()
+            .copied()
+            .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))
+            .or_else(|| {
+                media_ancestors
+                    .iter()
+                    .copied()
+                    .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))
+            })
+            .unwrap_or(image);
+        let mut role = image_role_score(
+            dom,
+            image,
+            first_paragraph.is_some_and(|first| positions[image.index()] < first),
+            repetitions
+                .get(&primary_image_resource(dom, image).unwrap_or_default())
+                .copied()
+                .unwrap_or(1),
+        );
+        if has_figure_caption(dom, image) {
+            role.positive += 7;
+        }
+        if role.is_meaningful() {
+            dom.insert_before(control, media);
+        }
+    }
+
     for &(node, _) in nodes.iter().rev() {
         if dom.parent(node).is_none() || !matches!(dom.tag(node), Some(Tag::Img | Tag::Svg)) {
             continue;
         }
-        if has_direct_meaningful_description(dom, node)
-            || dom.tag(node) == Some(Tag::Svg) && svg_description_content[node.index()]
+        if dom.tag(node) == Some(Tag::Svg) && svg_description_content[node.index()]
             || protected_context[node.index()]
-            || responsive_picture_context[node.index()]
-            || has_responsive_candidate(dom, node)
-            || has_lazy_candidate(dom, node)
         {
             continue;
         }
-
-        let dimensions = static_dimensions(dom, node);
-        let very_small = dimensions
-            .into_iter()
-            .flatten()
-            .any(|dimension| dimension <= 1);
-        let small = dimensions
-            .into_iter()
-            .flatten()
-            .any(|dimension| dimension <= 32);
-        let decorative_name = decorative_image_name(dom, node);
-        if very_small || small && decorative_name {
+        let repeated = primary_image_resource(dom, node)
+            .and_then(|resource| repetitions.get(&resource).copied())
+            .unwrap_or(1);
+        let mut role = image_role_score(
+            dom,
+            node,
+            first_paragraph.is_some_and(|first| positions[node.index()] < first),
+            repeated,
+        );
+        if has_figure_caption(dom, node) {
+            role.positive += 7;
+        }
+        let strong_peripheral = has_strong_peripheral_role(dom, node);
+        if !strong_peripheral
+            && (responsive_picture_context[node.index()]
+                || has_responsive_candidate(dom, node)
+                || has_lazy_candidate(dom, node))
+        {
+            role.positive += 9;
+        }
+        if role.should_remove() {
             dom.detach(node);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ImageRoleScore {
+    positive: i16,
+    negative: i16,
+}
+
+impl ImageRoleScore {
+    fn is_meaningful(self) -> bool {
+        self.positive >= 4 && self.positive > self.negative
+    }
+
+    fn should_remove(self) -> bool {
+        self.negative >= 5 && self.negative >= self.positive + 2
+    }
+}
+
+fn image_role_score(
+    dom: &Dom,
+    image: NodeId,
+    before_first_paragraph: bool,
+    repetitions: u16,
+) -> ImageRoleScore {
+    let mut score = ImageRoleScore::default();
+    let dimensions = static_dimensions(dom, image);
+    let very_small = dimensions
+        .into_iter()
+        .flatten()
+        .any(|dimension| dimension <= 1);
+    let small = dimensions
+        .into_iter()
+        .flatten()
+        .any(|dimension| dimension <= 32);
+    let large = dimensions
+        .into_iter()
+        .flatten()
+        .max()
+        .is_some_and(|size| size >= 200);
+    let descriptive = has_direct_meaningful_description(dom, image);
+    let responsive = has_responsive_candidate(dom, image) || has_lazy_candidate(dom, image);
+    let names = image_context_name(dom, image);
+    let related = contains_role_token(
+        &names,
+        &[
+            "related",
+            "recommend",
+            "recirculation",
+            "more-stories",
+            "more_articles",
+            "tout",
+        ],
+    );
+    let profile = contains_role_token(
+        &names,
+        &[
+            "avatar", "avatars", "author", "authors", "byline", "founder", "founders", "profile",
+            "bio",
+        ],
+    );
+    let avatar = contains_role_token(&names, &["avatar", "avatars"]);
+    let logo_or_icon = contains_role_token(
+        &names,
+        &["favicon", "logo", "icon", "badge", "sprite", "integration"],
+    );
+    let card_grid = contains_role_token(&names, &["card", "cards", "grid", "tile"]);
+
+    score.positive += i16::from(descriptive) * 7;
+    score.positive += i16::from(responsive) * 3;
+    score.positive += i16::from(large) * 2;
+    score.positive += i16::from(before_first_paragraph && (descriptive || responsive || large)) * 2;
+    score.positive += i16::from(
+        dom.ancestors(image)
+            .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figure)),
+    ) * 2;
+
+    score.negative += i16::from(small && decorative_image_name(dom, image)) * 3;
+    score.negative +=
+        i16::from(very_small && (!descriptive || decorative_image_name(dom, image))) * 10;
+    score.negative += i16::from(profile) * 4;
+    score.negative += i16::from(avatar) * 8;
+    score.negative += i16::from(logo_or_icon) * 5;
+    score.negative += i16::from(contains_role_token(
+        &names,
+        &["favicon", "logo", "integration"],
+    )) * 3;
+    score.negative += i16::from(related) * 24;
+    score.negative += i16::from(card_grid) * 2;
+    score.negative += i16::from(profile && repetitions >= 2) * 8;
+    score.negative += if repetitions >= 3 {
+        4
+    } else if repetitions == 2 {
+        2
+    } else {
+        0
+    };
+    score
+}
+
+fn image_context_name(dom: &Dom, image: NodeId) -> String {
+    let mut name = String::new();
+    for node in std::iter::once(image).chain(dom.ancestors(image).take(6)) {
+        if let Some(tag) = dom.qual_name(node) {
+            name.push(' ');
+            name.push_str(tag.local.as_ref());
+        }
+        for attribute in [AttrName::Class, AttrName::Id, AttrName::Role, AttrName::Src] {
+            if let Some(value) = dom.attr(node, attribute) {
+                name.push(' ');
+                name.push_str(value);
+            }
+        }
+    }
+    name.to_ascii_lowercase()
+}
+
+fn has_strong_peripheral_role(dom: &Dom, image: NodeId) -> bool {
+    let names = image_context_name(dom, image);
+    contains_role_token(
+        &names,
+        &[
+            "avatar",
+            "avatars",
+            "author",
+            "authors",
+            "byline",
+            "founder",
+            "founders",
+            "profile",
+            "bio",
+            "related",
+            "recommend",
+            "recirculation",
+            "more-stories",
+            "more_articles",
+            "tout",
+            "favicon",
+            "logo",
+            "integration",
+        ],
+    )
+}
+
+fn contains_role_token(value: &str, patterns: &[&str]) -> bool {
+    let normalize = |text: &str| {
+        text.split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect::<SmallVec<[&str; 8]>>()
+            .join(" ")
+    };
+    patterns.iter().any(|pattern| {
+        let pattern = normalize(pattern);
+        if !pattern.contains(' ') {
+            return value
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|token| token == pattern);
+        }
+        value
+            .split_ascii_whitespace()
+            .any(|field| normalize(field) == pattern)
+    })
+}
+
+fn sole_descendant_image(dom: &Dom, root: NodeId) -> Option<NodeId> {
+    let mut images = dom
+        .descendants(root)
+        .filter(|&node| dom.tag(node) == Some(Tag::Img));
+    let image = images.next()?;
+    images.next().is_none().then_some(image)
+}
+
+fn primary_image_resource(dom: &Dom, image: NodeId) -> Option<String> {
+    let source = [AttrName::Src, AttrName::DataSrc]
+        .into_iter()
+        .find_map(|attribute| valid_image_attribute(dom.attr(image, attribute)))
+        .or_else(|| {
+            [AttrName::Srcset, AttrName::DataSrcset]
+                .into_iter()
+                .find_map(|attribute| dom.attr(image, attribute).and_then(best_srcset_candidate))
+                .map(|candidate| candidate.url)
+        })?;
+    let resource = image_resource(source);
+    let resource = resource.split('#').next().unwrap_or(resource.as_ref());
+    let identity = if resource.contains("X-Amz-Signature=")
+        || resource.contains("X-Amz-Credential=")
+        || resource.contains("x-amz-signature=")
+        || resource.contains("x-amz-credential=")
+    {
+        resource.split('?').next().unwrap_or(resource)
+    } else {
+        resource
+    };
+    Some(identity.to_owned())
 }
 
 fn static_dimensions(dom: &Dom, node: NodeId) -> [Option<u32>; 2] {
@@ -637,6 +926,21 @@ fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
         })
 }
 
+fn has_figure_caption(dom: &Dom, image: NodeId) -> bool {
+    dom.ancestors(image)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))
+        .is_some_and(|figure| {
+            dom.descendants(figure)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .take(2)
+                .count()
+                == 1
+                && dom.descendants(figure).any(|node| {
+                    dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node)
+                })
+        })
+}
+
 fn has_direct_meaningful_description(dom: &Dom, image: NodeId) -> bool {
     ["alt", "aria-label", "title"]
         .into_iter()
@@ -1055,7 +1359,7 @@ mod tests {
     #[test]
     fn keeps_small_meaningful_and_responsive_images() {
         let mut dom = Dom::parse_document(
-            r#"<main><img class="icon" src="status.png" width="16" alt="Service is available"><img class="icon" src="small.jpg" width="16" srcset="small.jpg 16w, diagram.jpg 640w"><picture><source srcset="large.jpg 2x"><img class="icon" src="small.jpg" width="16"></picture><figure><img class="icon" src="diagram.svg?w=24" width="24"><figcaption>Network topology</figcaption></figure><img class="equation" src="equation.png" width="16" alt="x = y"><svg class="status-icon" width="16" height="16"><title>Warning status</title><path></path></svg></main>"#,
+            r#"<main><img src="status-dot.png" width="1" alt="Service is available"><img class="icon" src="status.png" width="16" alt="Service is available"><img class="icon" src="small.jpg" width="16" srcset="small.jpg 16w, diagram.jpg 640w"><picture><source srcset="large.jpg 2x"><img class="icon" src="small.jpg" width="16"></picture><figure><img class="icon" src="diagram.svg?w=24" width="24"><figcaption>Network topology</figcaption></figure><img class="equation" src="equation.png" width="16" alt="x = y"><svg class="status-icon" width="16" height="16"><title>Warning status</title><path></path></svg></main>"#,
         )
         .unwrap();
         let root = dom.body().unwrap();
@@ -1064,7 +1368,7 @@ mod tests {
             dom.descendants(root)
                 .filter(|&node| dom.tag(node) == Some(Tag::Img))
                 .count(),
-            5
+            6
         );
         assert!(
             dom.descendants(root)
@@ -1089,6 +1393,76 @@ mod tests {
                 dom.first_descendant_by_tag(root, Tag::Img).is_some(),
                 "{html}"
             );
+        }
+    }
+
+    #[test]
+    fn classifies_related_cards_and_repeated_avatars_as_peripheral() {
+        let mut dom = Dom::parse_document(
+            r#"<main><p>The article explains the complete result.</p><section class="more-stories card-grid"><a href="/next"><figure><img src="next.jpg" width="800" alt="A related report" srcset="next.jpg 800w"><figcaption>A related report</figcaption></figure></a></section><section class="founders"><div class="card"><img src="https://s3.test/opaque/53b72097.jpg?X-Amz-Signature=one" srcset="https://s3.test/opaque/53b72097.jpg?X-Amz-Signature=one 2x" width="800" alt="Pat Example"></div><div class="card"><img src="https://s3.test/opaque/53b72097.jpg?X-Amz-Signature=two" srcset="https://s3.test/opaque/53b72097.jpg?X-Amz-Signature=two 2x" width="800" alt="Pat Example"></div></section></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_none());
+    }
+
+    #[test]
+    fn keeps_case_distinct_signed_profile_resources() {
+        let mut dom = Dom::parse_document(
+            r#"<main><section class="founders"><div class="card"><img src="https://s3.test/opaque/AbC.jpg?X-Amz-Signature=one" width="800" alt="Pat Example"></div><div class="card"><img src="https://s3.test/opaque/abc.jpg?X-Amz-Signature=two" width="800" alt="Sam Example"></div></section></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn preserves_meaningful_media_from_a_lightbox_control() {
+        let mut dom = Dom::parse_document(
+            r#"<main><p>Introduction.</p><button><figure><img src="lead.jpg" alt=""><figcaption>Detailed lead illustration</figcaption></figure></button><p>Article body.</p></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        let button = dom.first_descendant_by_tag(root, Tag::Button).unwrap();
+        remove_decorative_media(&mut dom, root);
+        let figure = dom.first_descendant_by_tag(root, Tag::Figure).unwrap();
+        assert_eq!(dom.parent(figure), dom.parent(button));
+        assert_eq!(dom.next_sibling(figure), Some(button));
+    }
+
+    #[test]
+    fn preserves_a_responsive_picture_from_a_lightbox_control() {
+        let mut dom = Dom::parse_document(
+            r#"<main><p>Introduction.</p><button><picture><source srcset="lead-large.webp 1200w"><img src="lead-small.jpg" alt="Detailed lead illustration"></picture></button><p>Article body.</p></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        let button = dom.first_descendant_by_tag(root, Tag::Button).unwrap();
+        remove_decorative_media(&mut dom, root);
+        let picture = dom.first_descendant_by_tag(root, Tag::Picture).unwrap();
+        assert_eq!(dom.parent(picture), dom.parent(button));
+        assert!(dom.first_descendant_by_tag(picture, Tag::Source).is_some());
+    }
+
+    #[test]
+    fn recognizes_adjacent_figure_and_picture_leads() {
+        for html in [
+            r#"<main><figure><img src="lead.jpg" srcset="lead.jpg 1200w" alt=""><figcaption>Detailed lead diagram</figcaption></figure><article><p>Article body.</p></article></main>"#,
+            r#"<main><picture><source srcset="lead.webp 1200w"><img src="lead.jpg" alt="Detailed lead diagram"></picture><article><p>Article body.</p></article></main>"#,
+        ] {
+            let dom = Dom::parse_document(html).unwrap();
+            let article = dom
+                .first_descendant_by_tag(dom.root(), Tag::Article)
+                .unwrap();
+            let lead = adjacent_lead_media(&dom, article).expect(html);
+            assert!(matches!(dom.tag(lead), Some(Tag::Figure | Tag::Picture)));
         }
     }
 }
