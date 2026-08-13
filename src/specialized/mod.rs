@@ -1,5 +1,6 @@
 //! Specialized extraction for pages whose structure is not article prose.
 
+mod discussion;
 mod github;
 mod hacker_news;
 

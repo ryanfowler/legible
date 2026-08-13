@@ -57,6 +57,7 @@ The extraction pipeline flows through these stages:
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
+| `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
@@ -81,6 +82,7 @@ These invariants are costly to violate:
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal. Breadcrumb, subscription, and related-content cleanup must also use structure and document position.
 - **Strip only explicit code gutters.** Treat syntax-highlighter line numbers as presentation, but preserve numeric source code and source-line wrappers.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
+- **Canonicalize discussions once.** Specialized discussion extractors must use the shared builder for primary posts, reply metadata, rich reply bodies, and retained nesting.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Keep the cleaning node snapshot and text buffers alive across extraction retries and sequential mutation passes.
 
 ### Common Pitfalls

@@ -2,7 +2,7 @@
 
 use super::{
     DocumentContext, SpecializedExtractor, SpecializedResult, append_text, create_element,
-    has_class, import_children, new_output,
+    discussion::DiscussionBuilder, has_class, new_output,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::page_kind::PageKind;
@@ -97,92 +97,53 @@ fn extract_discussion(
     let title_link = source
         .descendants(titleline)
         .find(|&node| source.tag(node) == Some(Tag::A))?;
-    let (mut dom, root) = new_output()?;
-    let heading = create_element(&mut dom, root, Tag::H1)?;
-    let link = dom.import_subtree(source, title_link).ok()?;
-    dom.append_child(heading, link);
+    let mut builder = DiscussionBuilder::new()?;
+    if !builder.set_title(source, title_link) {
+        return None;
+    }
 
-    if let Some(metadata) = story_metadata(source, story) {
-        let paragraph = create_element(&mut dom, root, Tag::P)?;
-        append_text(&mut dom, paragraph, &metadata);
+    if let Some(metadata) = story_metadata(source, story)
+        && !builder.append_primary_text(&metadata)
+    {
+        return None;
     }
     if let Some(top_text) = source
         .descendants(source.root())
         .find(|&node| has_class(source, node, "toptext"))
+        && !builder.append_primary_body(source, top_text)
     {
-        let article = create_element(&mut dom, root, Tag::Article)?;
-        if !import_children(source, top_text, &mut dom, article) {
-            return None;
-        }
+        return None;
     }
 
     let has_renderable_comments = comments
         .iter()
         .any(|&comment| find_descendant_with_class(source, comment, "commtext").is_some());
     if has_renderable_comments {
-        let comments_heading = create_element(&mut dom, root, Tag::H2)?;
-        append_text(&mut dom, comments_heading, "Comments");
-        let comment_list = create_element(&mut dom, root, Tag::Ul)?;
-        append_comments(source, &mut dom, comment_list, comments)?;
+        if !builder.set_reply_heading("Comments") {
+            return None;
+        }
+        append_comments(source, &mut builder, comments)?;
     }
 
-    Some(SpecializedResult {
-        dom,
-        root,
-        kind: PageKind::Discussion,
-        identity: "hacker-news",
-    })
+    Some(builder.finish("hacker-news"))
 }
 
 fn append_comments(
     source: &Dom,
-    output: &mut Dom,
-    root_list: NodeId,
+    builder: &mut DiscussionBuilder,
     comments: &[NodeId],
 ) -> Option<()> {
-    let mut retained_at_depth: Vec<Option<NodeId>> = Vec::new();
-    let mut nested_lists: Vec<(NodeId, NodeId)> = Vec::new();
-
     for &comment in comments {
         let depth = comment_depth(source, comment);
-        if retained_at_depth.len() > depth {
-            retained_at_depth.truncate(depth);
-        } else {
-            retained_at_depth.resize(depth, None);
-        }
         let Some(body) = find_descendant_with_class(source, comment, "commtext") else {
+            builder.append_reply(source, depth, None, None, None)?;
             continue;
         };
-        let parent_item = retained_at_depth.iter().rev().flatten().next().copied();
-        let list = if let Some(parent) = parent_item {
-            if let Some((_, list)) = nested_lists.iter().find(|(item, _)| *item == parent) {
-                *list
-            } else {
-                let list = create_element(output, parent, Tag::Ul)?;
-                nested_lists.push((parent, list));
-                list
-            }
-        } else {
-            root_list
-        };
-        let item = create_element(output, list, Tag::Li)?;
-        let header = create_element(output, item, Tag::P)?;
-        if let Some(author) = find_descendant_with_class(source, comment, "hnuser") {
-            let strong = create_element(output, header, Tag::Strong)?;
-            append_text(output, strong, source.text(author).trim());
-        } else {
-            let strong = create_element(output, header, Tag::Strong)?;
-            append_text(output, strong, "Anonymous");
-        }
-        if let Some(age) = find_descendant_with_class(source, comment, "age") {
-            append_text(output, header, " · ");
-            append_text(output, header, source.text(age).trim());
-        }
-        let content = create_element(output, item, Tag::Div)?;
-        if !import_children(source, body, output, content) {
-            return None;
-        }
-        retained_at_depth.push(Some(item));
+        let author = find_descendant_with_class(source, comment, "hnuser")
+            .map(|node| normalized_text(source, node));
+        let age = find_descendant_with_class(source, comment, "age")
+            .map(|node| normalized_text(source, node));
+        builder.append_reply(source, depth, author.as_deref(), age.as_deref(), Some(body))?;
     }
     Some(())
 }
