@@ -1334,6 +1334,8 @@ impl<'a> ContentExtractor<'a> {
             let duplicates_title = if remove_title && has_primary_heading_semantics(&self.dom, id) {
                 let heading = get_inner_text(&self.dom, id, text_buffer);
                 heading_matches_page_title(&self.page_title, heading)
+                    && (!self.metadata.title_from_content_heading
+                        || heading_matches_page_title(&self.structured_title, heading))
             } else {
                 false
             };

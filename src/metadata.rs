@@ -6,7 +6,9 @@ use crate::constants::{
     remove_title_separators, split_word_tokens,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
-use crate::scoring::{get_inner_text, get_inner_text_owned, get_normalized_inner_text};
+use crate::scoring::{
+    get_inner_text, get_inner_text_owned, get_normalized_inner_text, has_static_hidden_marker,
+};
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -45,6 +47,7 @@ pub struct Metadata {
     /// Page tags in source order.
     pub tags: Vec<String>,
     pub(crate) has_source_author: bool,
+    pub(crate) title_from_content_heading: bool,
 }
 
 /// Parsed schema.org data. It remains available after metadata discovery so a
@@ -408,7 +411,7 @@ pub(crate) fn discover_with_diagnostics(
     retain_diagnostics: bool,
 ) -> (Metadata, Option<MetadataDiagnostics>) {
     let mut candidates = CandidateSet::default();
-    let identity_title = content_identity_title(dom, document_title);
+    let identity_title = metadata_identity_title(dom, document_title);
     collect_structured_candidates(structured, &identity_title, source_url, &mut candidates);
     collect_meta_candidates(dom, &mut candidates);
     collect_link_candidates(dom, &mut candidates);
@@ -605,6 +608,18 @@ pub(crate) fn content_identity_title(dom: &Dom, document_title: &str) -> String 
     dom.first_descendant_by_tag(dom.root(), Tag::H1)
         .map(|heading| get_inner_text_owned(dom, heading))
         .unwrap_or_default()
+}
+
+fn metadata_identity_title(dom: &Dom, document_title: &str) -> String {
+    best_visible_heading(
+        dom,
+        dom.descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::H1)),
+    )
+    .filter(|&heading| visible_heading_confidence(dom, heading) > 78)
+    .map(|heading| get_inner_text_owned(dom, heading))
+    .filter(|title| !title.trim().is_empty())
+    .unwrap_or_else(|| document_title.to_owned())
 }
 
 fn primary_hint_item<'a>(
@@ -1049,10 +1064,13 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
         .descendants(dom.root())
         .filter(|&id| dom.is_element(id))
         .collect();
-    let primary_heading = elements
-        .iter()
-        .copied()
-        .find(|&id| dom.tag(id) == Some(Tag::H1));
+    let primary_heading = best_visible_heading(
+        dom,
+        elements
+            .iter()
+            .copied()
+            .filter(|&id| dom.tag(id) == Some(Tag::H1)),
+    );
     let mut text_buffer = String::new();
     for id in elements {
         if dom.tag(id) == Some(Tag::Html) {
@@ -1075,7 +1093,15 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
         }
         if dom.tag(id) == Some(Tag::H1) {
             let text = get_inner_text(dom, id, &mut text_buffer);
-            out.add(|set| &mut set.title, text, MetadataSource::HtmlElement, 78);
+            let confidence = visible_heading_confidence(dom, id);
+            if confidence > 0 {
+                out.add(
+                    |set| &mut set.title,
+                    text,
+                    MetadataSource::HtmlElement,
+                    confidence,
+                );
+            }
         }
         let itemprop = dom.attr(id, AttrName::ItemProp).unwrap_or("");
         let mut has_author_itemprop = false;
@@ -1088,7 +1114,10 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
         // distance from the heading because that scans ancestors and siblings.
         let itemprop_is_page_metadata = dom.tag(id) == Some(Tag::Meta)
             || (has_author_itemprop || has_published_itemprop)
-                && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading));
+                && primary_heading.is_some_and(|heading| {
+                    is_near_heading(dom, id, heading)
+                        || metadata_container_near_heading(dom, id, heading)
+                });
         if itemprop_is_page_metadata && has_author_itemprop {
             let name_node = dom.descendants(id).find(|&child| {
                 dom.attr(child, AttrName::ItemProp).is_some_and(|value| {
@@ -1157,20 +1186,306 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
             .into_iter()
             .flatten()
             .flat_map(|value| value.split_ascii_whitespace())
-            .any(|token| {
-                token.eq_ignore_ascii_case("author")
-                    || token.eq_ignore_ascii_case("byline")
-                    || token.eq_ignore_ascii_case("p-author")
-            });
+            .any(is_author_container_token);
         if author_element
-            && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading))
+            && primary_heading.is_some_and(|heading| is_byline_near_heading(dom, id, heading))
         {
-            let value = get_inner_text(dom, id, &mut text_buffer);
+            let author_node = preferred_author_node(dom, id);
+            let value = get_inner_text(dom, author_node.unwrap_or(id), &mut text_buffer);
             if value.chars().count() <= 120 {
                 out.add(|set| &mut set.authors, value, MetadataSource::Inferred, 62);
             }
+            let visible_date = preferred_byline_date(dom, id);
+            if let Some(date) = visible_date.as_deref() {
+                out.add(
+                    |set| &mut set.published_time,
+                    date,
+                    MetadataSource::Inferred,
+                    48,
+                );
+            }
+            if (visible_date.is_some()
+                || dom
+                    .descendants(id)
+                    .any(|node| dom.tag(node) == Some(Tag::Time)))
+                && let Some(section_node) = preferred_byline_section_node(dom, id, author_node)
+            {
+                let section = get_inner_text(dom, section_node, &mut text_buffer);
+                out.add(
+                    |set| &mut set.section,
+                    section,
+                    MetadataSource::Inferred,
+                    46,
+                );
+            }
         }
     }
+}
+
+fn preferred_byline_date(dom: &Dom, container: NodeId) -> Option<String> {
+    dom.descendants(container)
+        .filter_map(|node| dom.text_node(node))
+        .find_map(extract_written_date)
+}
+
+fn extract_written_date(text: &str) -> Option<String> {
+    written_date(text).map(|(_, date)| date)
+}
+
+fn written_date(text: &str) -> Option<(usize, String)> {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let mut earliest = None;
+    for month in MONTHS {
+        for (start, _) in text.match_indices(month) {
+            let value = normalize_whitespace(&text[start..]);
+            let mut parts = value.split_ascii_whitespace();
+            if parts.next() != Some(month) {
+                continue;
+            }
+            let Some(day) = parts.next().map(|value| value.trim_end_matches(',')) else {
+                continue;
+            };
+            let Some(year) = parts
+                .next()
+                .map(|value| value.trim_end_matches(|character: char| !character.is_ascii_digit()))
+            else {
+                continue;
+            };
+            if day.parse::<u8>().is_ok_and(|day| (1..=31).contains(&day))
+                && year.len() == 4
+                && year.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                let date = format!("{month} {day}, {year}");
+                if earliest
+                    .as_ref()
+                    .is_none_or(|(current, _): &(usize, String)| start < *current)
+                {
+                    earliest = Some((start, date));
+                }
+            }
+        }
+    }
+    earliest
+}
+
+fn is_author_container_token(token: &str) -> bool {
+    token.eq_ignore_ascii_case("author")
+        || token.eq_ignore_ascii_case("byline")
+        || token.eq_ignore_ascii_case("p-author")
+        || token.to_ascii_lowercase().ends_with("byline")
+}
+
+fn metadata_container_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
+    let mut current = dom.parent(node);
+    while let Some(ancestor) = current {
+        let is_metadata_container = [
+            dom.attr(ancestor, AttrName::Class),
+            dom.attr(ancestor, AttrName::Id),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|value| value.split_ascii_whitespace())
+        .any(is_author_container_token);
+        if is_metadata_container {
+            return is_near_heading(dom, ancestor, heading);
+        }
+        current = dom.parent(ancestor);
+    }
+    false
+}
+
+fn visible_heading_confidence(dom: &Dom, heading: NodeId) -> u8 {
+    if !is_visible_metadata_heading(dom, heading) {
+        return 0;
+    }
+    let text = get_inner_text_owned(dom, heading);
+    if normalize_text(&text).is_none() {
+        return 0;
+    }
+    let title_bonus = u8::from(has_class_or_id_token(dom, heading, "p-name")) * 4
+        + u8::from(split_word_tokens(&text).take(4).count() == 4) * 2;
+    let mut current = Some(heading);
+    while let Some(node) = current {
+        if dom.tag(node) == Some(Tag::Article) {
+            return 82 + title_bonus;
+        }
+        if dom.tag(node) == Some(Tag::Main) {
+            return 80 + title_bonus;
+        }
+        if [
+            dom.attr(node, AttrName::Class),
+            dom.attr(node, AttrName::Id),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|value| value.split_ascii_whitespace())
+        .any(is_primary_content_token)
+        {
+            return 88 + title_bonus;
+        }
+        current = dom.parent(node);
+    }
+    78 + title_bonus
+}
+
+fn is_visible_metadata_heading(dom: &Dom, heading: NodeId) -> bool {
+    let mut current = Some(heading);
+    while let Some(node) = current {
+        if has_static_hidden_marker(dom, node)
+            || dom
+                .attr(node, AttrName::AriaHidden)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        {
+            return false;
+        }
+        current = dom.parent(node);
+    }
+    true
+}
+
+fn has_class_or_id_token(dom: &Dom, node: NodeId, expected: &str) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split_ascii_whitespace())
+    .any(|token| token.eq_ignore_ascii_case(expected))
+}
+
+fn best_visible_heading(dom: &Dom, headings: impl Iterator<Item = NodeId>) -> Option<NodeId> {
+    headings
+        .filter(|&heading| visible_heading_confidence(dom, heading) > 0)
+        .fold(None, |best, heading| {
+            best.filter(|&current| {
+                visible_heading_confidence(dom, current) >= visible_heading_confidence(dom, heading)
+            })
+            .or(Some(heading))
+        })
+}
+
+fn is_primary_content_token(token: &str) -> bool {
+    [
+        "article-content",
+        "article-body",
+        "entry-content",
+        "e-content",
+        "h-entry",
+        "main-content",
+        "post-content",
+        "post-body",
+    ]
+    .iter()
+    .any(|value| token.eq_ignore_ascii_case(value))
+}
+
+fn preferred_author_node(dom: &Dom, container: NodeId) -> Option<NodeId> {
+    dom.descendants(container)
+        .find(|&node| has_itemprop(dom, node, "name"))
+        .or_else(|| {
+            dom.descendants(container).find(|&node| {
+                [
+                    dom.attr(node, AttrName::Class),
+                    dom.attr(node, AttrName::Id),
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|value| value.split_ascii_whitespace())
+                .any(|token| {
+                    ["author-name", "byline-name", "p-author"]
+                        .iter()
+                        .any(|value| token.eq_ignore_ascii_case(value))
+                })
+            })
+        })
+        .or_else(|| {
+            dom.descendants(container).find(|&node| {
+                dom.tag(node) == Some(Tag::A)
+                    && (dom.attr(node, AttrName::Rel).is_some_and(|rel| {
+                        rel.split_ascii_whitespace()
+                            .any(|part| part.eq_ignore_ascii_case("author"))
+                    }) || dom
+                        .attr(node, AttrName::Href)
+                        .is_some_and(|href| href.to_ascii_lowercase().contains("/author/")))
+            })
+        })
+        .or_else(|| {
+            dom.element_children(container).find(|&node| {
+                matches!(dom.tag(node), Some(Tag::B | Tag::Strong))
+                    && get_inner_text_owned(dom, node).chars().count() <= 80
+            })
+        })
+}
+
+fn preferred_byline_section_node(
+    dom: &Dom,
+    container: NodeId,
+    author_node: Option<NodeId>,
+) -> Option<NodeId> {
+    let mut links = dom.descendants(container).filter(|&node| {
+        dom.tag(node) == Some(Tag::A)
+            && author_node.is_none_or(|author| node != author)
+            && is_section_link(dom, node)
+            && !dom.attr(node, AttrName::Rel).is_some_and(|rel| {
+                rel.split_ascii_whitespace()
+                    .any(|part| part.eq_ignore_ascii_case("author"))
+            })
+            && !dom
+                .attr(node, AttrName::Href)
+                .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"))
+    });
+    let first = links.next()?;
+    links.next().is_none().then_some(first)
+}
+
+fn is_section_link(dom: &Dom, link: NodeId) -> bool {
+    let section_path = dom.attr(link, AttrName::Href).is_some_and(|href| {
+        let path = href.to_ascii_lowercase();
+        [
+            "/section/",
+            "/sections/",
+            "/category/",
+            "/categories/",
+            "/topic/",
+            "/topics/",
+        ]
+        .iter()
+        .any(|marker| path.contains(marker))
+    });
+    section_path || previous_element_sibling(dom, link) == Some(Tag::Hr)
+}
+
+fn previous_element_sibling(dom: &Dom, node: NodeId) -> Option<Tag> {
+    let mut sibling = dom.prev_sibling(node);
+    while let Some(current) = sibling {
+        if let Some(tag) = dom.tag(current) {
+            return Some(tag);
+        }
+        sibling = dom.prev_sibling(current);
+    }
+    None
+}
+
+fn has_itemprop(dom: &Dom, node: NodeId, expected: &str) -> bool {
+    dom.attr(node, AttrName::ItemProp).is_some_and(|value| {
+        value
+            .split_ascii_whitespace()
+            .any(|part| part.eq_ignore_ascii_case(expected))
+    })
 }
 
 fn is_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
@@ -1181,6 +1496,35 @@ fn is_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
     nearest_ancestor_with_tag(dom, node, Tag::Header)
         .zip(nearest_ancestor_with_tag(dom, heading, Tag::Header))
         .is_some_and(|(node_header, heading_header)| node_header == heading_header)
+}
+
+fn is_byline_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
+    is_near_heading(dom, node, heading)
+        || (nearest_ancestor_with_tag(dom, node, Tag::Aside).is_none()
+            && document_element_distance(dom, node, heading) <= 12)
+}
+
+fn document_element_distance(dom: &Dom, first: NodeId, second: NodeId) -> usize {
+    let mut first_position = None;
+    let mut second_position = None;
+    for (position, node) in dom
+        .descendants(dom.root())
+        .filter(|&node| dom.is_element(node))
+        .enumerate()
+    {
+        if node == first {
+            first_position = Some(position);
+        }
+        if node == second {
+            second_position = Some(position);
+        }
+        if first_position.is_some() && second_position.is_some() {
+            break;
+        }
+    }
+    first_position
+        .zip(second_position)
+        .map_or(usize::MAX, |(first, second)| first.abs_diff(second))
 }
 
 fn sibling_element_distance(dom: &Dom, first: NodeId, second: NodeId) -> usize {
@@ -1236,7 +1580,7 @@ fn resolve_candidates(
     normalize_all(&mut candidates.language, normalize_language);
     normalize_all(&mut candidates.direction, normalize_direction);
     normalize_all(&mut candidates.section, normalize_scalar_text);
-    normalize_all(&mut candidates.tags, normalize_text);
+    normalize_all(&mut candidates.tags, normalize_list_text);
     normalize_urls(&mut candidates.canonical_url, base_url);
     normalize_urls(&mut candidates.image, base_url);
     normalize_urls(&mut candidates.favicon, base_url);
@@ -1259,6 +1603,13 @@ fn resolve_candidates(
             title = Some(stripped);
         }
     }
+    let title_from_content_heading = title.as_deref().is_some_and(|title| {
+        candidates.title.iter().any(|candidate| {
+            candidate.source == MetadataSource::HtmlElement
+                && candidate.confidence >= 90
+                && metadata_values_equal(&candidate.value, title)
+        })
+    });
 
     let metadata = Metadata {
         title,
@@ -1275,6 +1626,7 @@ fn resolve_candidates(
         section: resolve_one(&candidates.section),
         tags: resolve_many(&candidates.tags),
         has_source_author,
+        title_from_content_heading,
     };
     let diagnostics = retain_diagnostics.then(|| MetadataDiagnostics {
         title: scalar_diagnostics(&candidates.title, metadata.title.as_deref()),
@@ -1484,17 +1836,26 @@ fn normalize_field_text(value: &str, placeholders: &[&str]) -> Option<String> {
 fn normalize_scalar_text(value: &str) -> Option<String> {
     normalize_field_text(
         value,
-        &["n/a", "not available", "null", "undefined", "unset"],
+        &["n/a", "not available", "none", "null", "undefined", "unset"],
     )
+}
+
+fn normalize_list_text(value: &str) -> Option<String> {
+    normalize_scalar_text(value)
 }
 
 pub(crate) fn normalize_person(value: &str) -> Option<String> {
     let value = normalize_text(value)?;
-    if value.eq_ignore_ascii_case("by") {
+    if value.eq_ignore_ascii_case("by")
+        || ["last updated", "last modified"]
+            .iter()
+            .any(|prefix| value.to_ascii_lowercase().starts_with(prefix))
+    {
         return None;
     }
-    let without_prefix = strip_by_prefix(&value);
-    let value = normalize_text(without_prefix)?;
+    let without_label = strip_metadata_label_prefix(&value);
+    let without_prefix = strip_by_prefix(without_label);
+    let value = normalize_text(person_name_segment(without_prefix))?;
     if [
         "author",
         "authors",
@@ -1518,6 +1879,109 @@ pub(crate) fn normalize_person(value: &str) -> Option<String> {
     } else {
         Some(value)
     }
+}
+
+fn strip_metadata_label_prefix(value: &str) -> &str {
+    for label in ["posted", "published", "updated"] {
+        let Some(prefix) = value.get(..label.len()) else {
+            continue;
+        };
+        let remainder = &value[label.len()..];
+        if prefix.eq_ignore_ascii_case(label)
+            && remainder
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_whitespace() || character == ':')
+        {
+            return remainder.trim_start_matches(|character: char| {
+                character.is_whitespace() || character == ':'
+            });
+        }
+    }
+    value
+}
+
+fn person_name_segment(value: &str) -> &str {
+    let value = value.trim().trim_start_matches(['|', '·', '—', '–']).trim();
+    let separator_boundary = value
+        .char_indices()
+        .filter_map(|(index, character)| {
+            matches!(character, '|' | '·' | '—' | '–').then_some(index)
+        })
+        .chain(metadata_label_boundary(value))
+        .min()
+        .unwrap_or(value.len());
+    let date_boundary = written_date(value)
+        .map(|(index, _)| index)
+        .filter(|&index| index > 0)
+        .unwrap_or(value.len());
+    let boundary = separator_boundary
+        .min(date_boundary)
+        .min(clock_time_boundary(value).unwrap_or(value.len()));
+    let value = value[..boundary].trim();
+    if let Some((name, role)) = value.split_once(',')
+        && [
+            "engineer",
+            "editor",
+            "writer",
+            "reporter",
+            "correspondent",
+            "director",
+            "manager",
+            "founder",
+            "president",
+            "officer",
+            "developer",
+            "designer",
+        ]
+        .iter()
+        .any(|word| role.to_ascii_lowercase().contains(word))
+    {
+        name.trim()
+    } else {
+        value
+    }
+}
+
+fn clock_time_boundary(value: &str) -> Option<usize> {
+    for (colon, _) in value.match_indices(':') {
+        let start = value[..colon]
+            .rfind(char::is_whitespace)
+            .map_or(0, |index| index + 1);
+        let end = value[colon + 1..]
+            .find(|character: char| !character.is_ascii_digit())
+            .map_or(value.len(), |index| colon + 1 + index);
+        let hour = &value[start..colon];
+        let minute = &value[colon + 1..end];
+        if hour.parse::<u8>().is_ok_and(|hour| hour <= 23)
+            && minute.parse::<u8>().is_ok_and(|minute| minute <= 59)
+        {
+            return Some(start);
+        }
+    }
+    None
+}
+
+fn metadata_label_boundary(value: &str) -> Option<usize> {
+    let lowercase = value.to_ascii_lowercase();
+    ["posted", "published", "updated"]
+        .into_iter()
+        .flat_map(|label| {
+            lowercase
+                .match_indices(label)
+                .map(move |(index, _)| (index, label))
+        })
+        .filter_map(|(index, label)| {
+            let before = value[..index].chars().next_back();
+            let after = value[index + label.len()..].chars().next();
+            (index > 0
+                && before.is_some_and(|character| {
+                    character.is_whitespace() || matches!(character, '|' | '·' | '—' | '–')
+                })
+                && after.is_none_or(|character| character.is_whitespace() || character == ':'))
+            .then_some(index)
+        })
+        .min()
 }
 
 fn strip_by_prefix(value: &str) -> &str {
@@ -1977,6 +2441,39 @@ mod tests {
             Some("Byron Smith")
         );
         assert_eq!(normalize_person("李").as_deref(), Some("李"));
+        assert_eq!(
+            normalize_person("Mary May Smith").as_deref(),
+            Some("Mary May Smith")
+        );
+        assert_eq!(
+            normalize_person("Mary May Smith May 5, 2026").as_deref(),
+            Some("Mary May Smith")
+        );
+        assert_eq!(
+            normalize_person("Jane Doe|Senior Editor").as_deref(),
+            Some("Jane Doe")
+        );
+        assert_eq!(
+            normalize_person("Jane Doe published August 13, 2026").as_deref(),
+            Some("Jane Doe")
+        );
+        assert_eq!(
+            normalize_person("Published by Jane Doe").as_deref(),
+            Some("Jane Doe")
+        );
+        assert_eq!(
+            normalize_person("Sarah Archer 1:39 PM ET").as_deref(),
+            Some("Sarah Archer")
+        );
+        assert_eq!(normalize_person("Last Updated: January 7, 2025"), None);
+        assert_eq!(
+            normalize_person("| Carl Sverre , Senior Software Engineer").as_deref(),
+            Some("Carl Sverre")
+        );
+        assert_eq!(
+            normalize_person("Daroc AldenJuly 29, 2026 LSFMM+BPF").as_deref(),
+            Some("Daroc Alden")
+        );
         assert_eq!(normalize_person("By --"), None);
         assert_eq!(normalize_person("By "), None);
         assert!(metadata_values_equal("Émilie", "E\u{301}MILIE"));
@@ -2027,6 +2524,49 @@ mod tests {
             false,
         );
         assert!(result.published_time.is_none());
+    }
+
+    #[test]
+    fn does_not_treat_a_byline_action_link_as_a_section() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><div class="byline"><span class="author-name">Jane Doe</span><time itemprop="datePublished" datetime="2026-08-13">August 13, 2026</time><a href="/subscribe">Subscribe</a></div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Jane Doe"]);
+        assert_eq!(result.published_time.as_deref(), Some("2026-08-13"));
+        assert!(result.section.is_none());
+    }
+
+    #[test]
+    fn prefers_an_article_heading_over_a_site_heading_in_main() {
+        let result = metadata(
+            r#"<main><h1>Acme</h1><article><h1>Real Story</h1><p>Article body.</p></article></main>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Real Story"));
+    }
+
+    #[test]
+    fn hidden_and_empty_headings_do_not_supply_a_title() {
+        let result = metadata(
+            r#"<main><h1 style="display:none">Hidden title</h1><h1> </h1><p>Body.</p></main>"#,
+            None,
+            false,
+        );
+
+        assert!(result.title.is_none());
+    }
+
+    #[test]
+    fn written_date_uses_document_order_instead_of_month_order() {
+        assert_eq!(
+            extract_written_date("Published July 29, 2026 Updated January 2, 2027").as_deref(),
+            Some("July 29, 2026")
+        );
     }
 
     #[test]

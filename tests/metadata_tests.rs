@@ -157,7 +157,7 @@ fn filters_template_metadata_before_applying_source_precedence() {
     )
     .unwrap();
     assert_eq!(ambiguous.metadata().title.as_deref(), Some("Unknown"));
-    assert_eq!(ambiguous.metadata().tags, ["Unknown", "None"]);
+    assert_eq!(ambiguous.metadata().tags, ["Unknown"]);
     assert_eq!(ambiguous.metadata().authors, ["Unknown"]);
 
     let fallbacks = Extractor::builder()

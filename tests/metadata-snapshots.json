@@ -289,7 +289,6 @@
   },
   "breitbart": {
     "authors": [
-      "Lucas Nolan22 Dec 2016651",
       "Lucas Nolan"
     ],
     "canonical_url": "http://www.breitbart.com/tech/2016/12/22/neutral-snopes-fact-checker-david-emery-un-angry-trump-supporters/",
@@ -1190,7 +1189,7 @@
   },
   "lwn-1": {
     "authors": [
-      "Nathan Willis March 25, 2015"
+      "Nathan Willis"
     ],
     "canonical_url": "http://fakehost/test/page.html",
     "description": "The Arduino has been one of the biggest success stories of the open-hardware movement, but that success does not protect it from internal conflict. In recent months, two of the project's founders have come into conflict about the direction of future efforts—and that conflict has turned into a legal dispute about who owns the rights to the Arduino trademark.",
@@ -1199,7 +1198,7 @@
     "image": null,
     "language": null,
     "modified_time": null,
-    "published_time": null,
+    "published_time": "March 25, 2015",
     "section": null,
     "site_name": null,
     "tags": [],
@@ -1429,7 +1428,6 @@
       "Sudan",
       "South Sudan",
       "United States",
-      "null",
       "US"
     ],
     "title": "United States to Lift Sudan Sanctions"
@@ -1945,9 +1943,7 @@
     "title": "Share buttons removal test"
   },
   "spiceworks": {
-    "authors": [
-      "Last Updated: January 7, 2025"
-    ],
+    "authors": [],
     "canonical_url": "https://www.spiceworks.com/marketing/marketing-strategy/news/rewriting-rules-of-engagement-with-video-in-2020-vidyard-introduces-new-features-on-its-video-platform/",
     "description": "Vidyard launches new tools and features on its platform to help professionals collaborate and share videos on the go.",
     "direction": null,
@@ -2159,7 +2155,7 @@
     "image": null,
     "language": "en",
     "modified_time": null,
-    "published_time": null,
+    "published_time": "2019-11-21",
     "section": null,
     "site_name": null,
     "tags": [],
@@ -2584,7 +2580,7 @@
   },
   "yahoo-3": {
     "authors": [
-      "GILLIAN MOHNEY March 11, 2015 3:46 PM"
+      "GILLIAN MOHNEY"
     ],
     "canonical_url": "https://gma.yahoo.com/veteran-wraps-baby-american-flag-photo-sparks-controversy-175203890--abc-news-topstories.html",
     "description": "A photographer and Navy veteran is fighting back after a photo she posted to Facebook started an online backlash. Vanessa Hicks said she had no idea her photo would be considered controversial. The photo, from a military family’s newborn photo shoot, showed a newborn infant wrapped in an American flag held by his father, who was in his military uniform. Hicks, a Navy veteran herself and the wife of an active-duty Navy member, said her intention was to honor the flag as well as her clients, who wanted to incorporate their military service in the photo shoot.",
