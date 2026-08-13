@@ -1,0 +1,18 @@
+{
+  "id": "http-api-endpoint",
+  "category": "api-reference",
+  "source_url": "https://example.test/http-api-endpoint",
+  "page_shape": "reference",
+  "must_include": [
+    "POST /v1/exports",
+    "Returns 202 while the export is queued",
+    "Idempotency-Key"
+  ],
+  "must_exclude": ["Try premium API monitoring"],
+  "expected": {
+    "headings_h2_min": 3,
+    "code_blocks_min": 2,
+    "tables_min": 1
+  },
+  "notes": "An HTTP endpoint page must retain request, response, and header semantics."
+}

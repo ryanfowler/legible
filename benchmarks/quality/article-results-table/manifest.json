@@ -1,0 +1,15 @@
+{
+  "id": "article-results-table",
+  "category": "news-article",
+  "source_url": "https://example.test/article-results-table",
+  "page_shape": "article",
+  "must_include": [
+    "Bean yields increased after drip lines were installed",
+    "North plot"
+  ],
+  "must_exclude": ["Garden supply deals"],
+  "expected": {
+    "tables_min": 1
+  },
+  "notes": "A short report contains a real results table that must remain content."
+}

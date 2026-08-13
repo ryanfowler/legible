@@ -1,0 +1,16 @@
+{
+  "id": "architecture-components",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/architecture-components",
+  "page_shape": "document",
+  "must_include": [
+    "The gateway validates identity before routing",
+    "Workers acknowledge jobs only after durable storage"
+  ],
+  "must_exclude": ["Architecture webinar registration"],
+  "expected": {
+    "headings_h2_min": 3,
+    "lists_min": 1
+  },
+  "notes": "An architecture overview must preserve the component sequence and invariants."
+}

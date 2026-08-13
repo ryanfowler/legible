@@ -1,0 +1,12 @@
+{
+  "id": "article-resilient-lead",
+  "category": "news-article",
+  "source_url": "https://example.test/article-resilient-lead",
+  "page_shape": "article",
+  "must_include": [
+    "The unit will visit six rural communities",
+    "Appointments are optional during the first month"
+  ],
+  "must_exclude": ["Quick links for patients"],
+  "notes": "A concise article lead must not be displaced by a larger list of patient links."
+}

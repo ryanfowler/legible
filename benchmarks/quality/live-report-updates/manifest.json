@@ -1,0 +1,16 @@
+{
+  "id": "live-report-updates",
+  "category": "news-article",
+  "source_url": "https://example.test/live-report-updates",
+  "page_shape": "article",
+  "must_include": [
+    "18:40 The final district reported",
+    "16:10 Officials began the verification pass"
+  ],
+  "must_exclude": ["Install our results widget"],
+  "expected": {
+    "headings_min": 1,
+    "lists_min": 1
+  },
+  "notes": "A live report must preserve reverse-chronological update entries and their times."
+}

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Event ordering model</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/concepts-event-ordering" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Event ordering model</h1>
+        <p>
+          Ordering is guaranteed only within one partition. Events from
+          different partitions can arrive in any relative order.
+        </p>
+        <p>
+          A partition is an ordered append-only sequence. The broker assigns an
+          offset after it accepts an event, and consumers read offsets in
+          increasing order. This guarantee does not imply that wall-clock times
+          increase or that two producers observe one shared sequence.
+        </p>
+        <p>
+          Select a partition key from the entity whose state must remain
+          consistent. An account identifier is suitable when all account changes
+          must be applied in order. A random key distributes load well but gives
+          consumers no useful ordering boundary.
+        </p>
+        <h2>Producer sequence</h2>
+        <p>
+          Each producer writes a monotonic sequence number into the event
+          envelope.
+        </p>
+        <p>
+          The sequence protects against a producer retry that reaches the broker
+          after a later write. The consumer stores the last accepted value for
+          each entity. It can ignore an older duplicate and can pause processing
+          when it observes a gap that requires recovery.
+        </p>
+        <p>
+          A producer must keep its sequence state in durable storage. Resetting
+          the number after a process restart makes a valid new event look like a
+          duplicate. If durable state is not practical, use an epoch identifier
+          with the sequence and define how consumers adopt a new epoch.
+        </p>
+        <h2>Consumer responsibility</h2>
+        <p>
+          Consumers must handle duplicate delivery because a retry can occur
+          after the broker stores an event.
+        </p>
+        <p>
+          Apply an event and record its offset in one transaction when the data
+          store supports that operation. Otherwise, make the update idempotent
+          and record a stable event identifier. Acknowledging before either
+          record is durable can lose work after a crash.
+        </p>
+        <p>
+          Consumers that combine partitions need an explicit merge rule. They
+          can process events as they arrive, wait for bounded timestamps, or
+          calculate a derived view independently for each partition. No choice
+          creates a global order that the broker did not provide.
+        </p>
+        <h2>Next steps</h2>
+        <p>
+          Record the last applied sequence per entity, test replay from an older
+          offset, and alert on gaps before accepting production traffic.
+        </p>
+        <p>
+          Test process termination before and after every durable write. Then
+          replay a captured stream with duplicates, gaps, and events from
+          several partitions. The final state must be deterministic even when
+          the observed arrival order changes between runs.
+        </p>
+      </article>
+    </main>
+    <aside>Next recommended course</aside>
+  </body>
+</html>

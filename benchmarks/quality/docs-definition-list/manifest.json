@@ -1,0 +1,16 @@
+{
+  "id": "docs-definition-list",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-definition-list",
+  "page_shape": "reference",
+  "must_include": [
+    "Lease duration",
+    "Time a worker owns a job before renewal",
+    "Visibility delay"
+  ],
+  "must_exclude": ["Glossary search suggestions"],
+  "expected": {
+    "headings_min": 1
+  },
+  "notes": "A terminology reference uses a definition list that must keep terms beside definitions."
+}

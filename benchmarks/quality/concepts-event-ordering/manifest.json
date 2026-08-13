@@ -1,0 +1,17 @@
+{
+  "id": "concepts-event-ordering",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/concepts-event-ordering",
+  "page_shape": "document",
+  "must_include": [
+    "Ordering is guaranteed only within one partition",
+    "Consumers must handle duplicate delivery",
+    "A producer must keep its sequence state in durable storage",
+    "Test process termination before and after every durable write"
+  ],
+  "must_exclude": ["Next recommended course"],
+  "expected": {
+    "headings_h2_min": 3
+  },
+  "notes": "A long conceptual document must preserve caveats, examples, and a substantial final section."
+}

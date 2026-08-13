@@ -1,0 +1,16 @@
+{
+  "id": "food-blog-narrative",
+  "category": "blog-post",
+  "source_url": "https://example.test/food-blog-narrative",
+  "page_shape": "article",
+  "must_include": [
+    "The dough needed twenty grams less water",
+    "Cool the loaf for two full hours"
+  ],
+  "must_exclude": ["Shop my favourite mixing bowls"],
+  "expected": {
+    "headings_h2_min": 2,
+    "lists_min": 1
+  },
+  "notes": "A food essay combines narrative and a useful method without retaining shopping links."
+}

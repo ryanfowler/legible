@@ -1,0 +1,16 @@
+{
+  "id": "docs-inline-warning",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-inline-warning",
+  "page_shape": "document",
+  "must_include": [
+    "Deletion removes all unexported snapshots",
+    "Export the audit log before deletion"
+  ],
+  "must_exclude": ["Chat with a workspace specialist"],
+  "expected": {
+    "headings_h2_min": 2,
+    "lists_min": 1
+  },
+  "notes": "A destructive-operation guide must preserve its warning and prerequisite list."
+}

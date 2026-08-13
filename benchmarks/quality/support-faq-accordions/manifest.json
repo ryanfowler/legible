@@ -1,0 +1,15 @@
+{
+  "id": "support-faq-accordions",
+  "category": "product-support",
+  "source_url": "https://example.test/support-faq-accordions",
+  "page_shape": "document",
+  "must_include": [
+    "Backups run every six hours",
+    "A deleted backup remains recoverable for seven days"
+  ],
+  "must_exclude": ["Was this page helpful"],
+  "expected": {
+    "headings_h2_min": 2
+  },
+  "notes": "FAQ answers are present in serialized accordion markup and must all remain."
+}

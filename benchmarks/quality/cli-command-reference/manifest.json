@@ -1,0 +1,17 @@
+{
+  "id": "cli-command-reference",
+  "category": "api-reference",
+  "source_url": "https://example.test/cli-command-reference",
+  "page_shape": "reference",
+  "must_include": [
+    "Remove entries that have not been used recently",
+    "--older-than DURATION"
+  ],
+  "must_exclude": ["Command palette", "Send documentation feedback"],
+  "expected": {
+    "headings_h2_min": 2,
+    "code_blocks_min": 1,
+    "tables_min": 1
+  },
+  "notes": "A CLI reference must preserve syntax, option definitions, and an example."
+}

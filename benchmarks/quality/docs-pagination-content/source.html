@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Paginate list responses</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/docs-pagination-content" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Paginate list responses</h1>
+        <p>
+          Pass the returned cursor without modifying it. Cursors can change
+          format between service versions.
+        </p>
+        <h2>Final page</h2>
+        <p>
+          A missing next cursor marks the final page. An empty item array alone
+          does not.
+        </p>
+        <h2>Example</h2>
+        <pre><code>GET /v1/items?after=eyJpZCI6MTAwfQ</code></pre>
+      </article>
+      <nav>
+        <a href="/previous">Previous documentation page</a
+        ><a href="/next">Next documentation page</a>
+      </nav>
+    </main>
+  </body>
+</html>

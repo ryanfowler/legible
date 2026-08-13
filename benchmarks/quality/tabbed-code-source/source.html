@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Create a health endpoint</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/tabbed-code-source" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Create a health endpoint</h1>
+        <p>Return a stable status field so monitors do not depend on prose.</p>
+        <section class="tabs">
+          <h2>Go</h2>
+          <div role="tabpanel">
+            <pre><code class="language-go">func health(w http.ResponseWriter) {
+  io.WriteString(w, `{"status":"ok"}`)
+}</code></pre>
+          </div>
+          <h2>JavaScript</h2>
+          <div role="tabpanel">
+            <pre><code class="language-js">app.get('/health', (_request, response) =&gt; {
+  response.json({ status: 'ok' });
+});</code></pre>
+          </div>
+        </section>
+      </article>
+    </main>
+    <button>Open interactive assistant</button>
+  </body>
+</html>

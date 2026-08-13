@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Consume a text stream</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link
+      rel="canonical"
+      href="https://example.test/javascript-stream-tutorial"
+    />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Consume a text stream</h1>
+        <p>
+          Decode each chunk with streaming mode enabled so split Unicode
+          sequences remain valid.
+        </p>
+        <p>
+          Network chunk boundaries do not match character boundaries. A single
+          UTF-8 sequence can begin at the end of one chunk and finish in the
+          next. Decoding every chunk independently replaces that character with
+          an error marker even though the complete byte stream is valid.
+        </p>
+        <p>
+          Create one decoder for the full response. Streaming mode tells the
+          decoder to retain an incomplete trailing sequence. Append each decoded
+          string to the destination or send it to a parser that can also accept
+          partial input.
+        </p>
+        <pre><code class="language-js">const decoder = new TextDecoder();
+for await (const chunk of source) {
+  output += decoder.decode(chunk, { stream: true });
+}</code></pre>
+        <h2>Flush the decoder</h2>
+        <p>
+          Call the decoder once without a chunk after the source closes. This
+          flushes buffered bytes and reports an incomplete final sequence. Do
+          not create a second decoder for this step because it cannot see the
+          bytes retained by the first instance.
+        </p>
+        <pre><code class="language-js">output += decoder.decode();</code></pre>
+        <p>
+          When malformed input must stop processing, construct the decoder with
+          the fatal option. Catch the resulting exception at the boundary that
+          owns the response so the application can close files, cancel related
+          work, and report which stream failed.
+        </p>
+        <p>
+          Test with chunk sizes of one byte as well as normal transport sizes.
+          Include characters that use two, three, and four bytes. The output
+          must match decoding the same bytes in one complete buffer.
+        </p>
+      </article>
+    </main>
+    <aside>Run this example in our cloud playground</aside>
+  </body>
+</html>

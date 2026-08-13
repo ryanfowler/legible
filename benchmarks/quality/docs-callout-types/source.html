@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Rotate signing keys</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/docs-callout-types" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Rotate signing keys</h1>
+        <p>
+          Create the replacement key before you change the active identifier.
+        </p>
+        <aside role="note">
+          <h2>Overlap window</h2>
+          <p>
+            Keep the previous public key during the overlap window so existing
+            tokens can be verified.
+          </p>
+        </aside>
+        <aside role="alert">
+          <p>
+            <strong>Warning:</strong> Never place a private key in the
+            configuration file.
+          </p>
+        </aside>
+        <pre><code>active_key = "key-2026-08"</code></pre>
+      </article>
+    </main>
+    <aside>Upgrade to enterprise key management</aside>
+  </body>
+</html>

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Parse a framed message</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/code-heavy-line-numbers" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Parse a framed message</h1>
+        <p>
+          Read the length prefix before allocating the payload. Reject lengths
+          above the configured maximum.
+        </p>
+        <div class="highlight">
+          <pre class="line-numbers">
+1
+2
+3
+4 Copy code</pre>
+          <pre><code class="language-rust">fn read_frame(input: &amp;mut &amp;[u8]) -&gt; Result&lt;Frame&gt; {
+    let length = read_length(input)?;
+    ensure!(length &lt;= MAX_FRAME);
+    read_payload(input, length)
+}</code></pre>
+        </div>
+      </article>
+    </main>
+  </body>
+</html>

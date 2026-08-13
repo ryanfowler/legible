@@ -1,0 +1,16 @@
+{
+  "id": "rust-api-reference",
+  "category": "api-reference",
+  "source_url": "https://example.test/rust-api-reference",
+  "page_shape": "reference",
+  "must_include": [
+    "Reserves capacity for at least additional bytes",
+    "Panics if the new capacity exceeds isize::MAX"
+  ],
+  "must_exclude": ["Crate navigation", "Copy item path"],
+  "expected": {
+    "headings_min": 2,
+    "code_blocks_min": 1
+  },
+  "notes": "A Rust-style API page must retain the signature, panic contract, and example."
+}

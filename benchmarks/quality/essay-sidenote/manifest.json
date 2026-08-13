@@ -1,0 +1,12 @@
+{
+  "id": "essay-sidenote",
+  "category": "long-form-essay",
+  "source_url": "https://example.test/essay-sidenote",
+  "page_shape": "article",
+  "must_include": [
+    "The margin became a second timeline",
+    "Observers used symbols to mark uncertain sightings"
+  ],
+  "must_exclude": ["More stationery reviews"],
+  "notes": "A semantic sidenote contains useful context and must not be confused with a recommendation sidebar."
+}

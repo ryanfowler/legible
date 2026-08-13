@@ -1,0 +1,18 @@
+{
+  "id": "docs-large-navigation",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-large-navigation",
+  "page_shape": "document",
+  "must_include": [
+    "Set a separate limit for each route group",
+    "Limits are evaluated before request body parsing"
+  ],
+  "must_exclude": [
+    "Authentication guide",
+    "On this page Overview Defaults Exceptions"
+  ],
+  "expected": {
+    "headings_h2_min": 2
+  },
+  "notes": "A short document must outrank large global and local navigation trees."
+}

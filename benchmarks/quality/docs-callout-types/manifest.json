@@ -1,0 +1,15 @@
+{
+  "id": "docs-callout-types",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-callout-types",
+  "page_shape": "document",
+  "must_include": [
+    "Keep the previous public key during the overlap window",
+    "Never place a private key in the configuration file"
+  ],
+  "must_exclude": ["Upgrade to enterprise key management"],
+  "expected": {
+    "code_blocks_min": 1
+  },
+  "notes": "A security guide must keep note and warning callouts as content."
+}

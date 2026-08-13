@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Buffer::reserve</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/rust-api-reference" />
+  </head>
+  <body>
+    <nav>Crate navigation Modules Traits Types</nav>
+    <main>
+      <article>
+        <h1>Method Buffer::reserve</h1>
+        <pre><code class="language-rust">pub fn reserve(&amp;mut self, additional: usize)</code></pre>
+        <p>
+          Reserves capacity for at least additional bytes without changing the
+          current length.
+        </p>
+        <p>
+          The buffer can reserve more space than requested to reduce future
+          allocations. Callers must not depend on the exact resulting capacity.
+          Existing bytes and their order remain unchanged when storage moves.
+        </p>
+        <p>
+          Use this method when the next write size is known and allocation
+          failure can follow the normal panic policy. Use the fallible reserve
+          method when input can request untrusted or unusually large buffers.
+        </p>
+        <h2>Panics</h2>
+        <p>Panics if the new capacity exceeds isize::MAX bytes.</p>
+        <p>
+          The allocator can also abort or panic when it cannot satisfy the
+          request. Validate protocol length fields before converting them into a
+          reservation size.
+        </p>
+        <h2>Example</h2>
+        <pre><code class="language-rust">let mut data = Buffer::new();
+data.reserve(32);</code></pre>
+        <p>
+          The example reserves once before a sequence of small writes. Repeated
+          calls are valid, but calculating the complete upcoming size usually
+          gives the allocator better information.
+        </p>
+      </article>
+      <button>Copy item path</button>
+    </main>
+  </body>
+</html>

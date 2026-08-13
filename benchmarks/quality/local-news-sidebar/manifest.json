@@ -1,0 +1,15 @@
+{
+  "id": "local-news-sidebar",
+  "category": "news-article",
+  "source_url": "https://example.test/local-news-sidebar",
+  "page_shape": "article",
+  "must_include": [
+    "The west branch will stay open until nine",
+    "The schedule starts on 3 October"
+  ],
+  "must_exclude": ["Council meeting archive", "Weather alerts"],
+  "expected": {
+    "links_max": 1
+  },
+  "notes": "A local report must survive beside dense municipal navigation and alert links."
+}

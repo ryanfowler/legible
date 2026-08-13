@@ -1,0 +1,18 @@
+{
+  "id": "documentation-index",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/documentation-index",
+  "page_shape": "listing",
+  "must_include": [
+    "Object lifecycle policies",
+    "Recover a deleted volume",
+    "Monitor replication lag"
+  ],
+  "must_exclude": ["Sign in to view billing"],
+  "expected": {
+    "headings_min": 2,
+    "lists_min": 1,
+    "links_min": 3
+  },
+  "notes": "A documentation landing page is a useful link index, not article clutter."
+}

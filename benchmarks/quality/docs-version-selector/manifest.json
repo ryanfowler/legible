@@ -1,0 +1,16 @@
+{
+  "id": "docs-version-selector",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-version-selector",
+  "page_shape": "document",
+  "must_include": [
+    "Version 4 stores session records in the primary region",
+    "Set session_region before startup"
+  ],
+  "must_exclude": ["Version 2 Version 3 Version 4 nightly"],
+  "expected": {
+    "headings_min": 1,
+    "code_blocks_min": 1
+  },
+  "notes": "A version selector must not replace the version-specific guide content."
+}

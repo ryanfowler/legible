@@ -1,0 +1,16 @@
+{
+  "id": "legacy-table-doc",
+  "category": "legacy-html",
+  "source_url": "https://example.test/legacy-table-doc",
+  "page_shape": "document",
+  "must_include": [
+    "Enter the proxy host in the network panel",
+    "Restart the client after saving"
+  ],
+  "must_exclude": ["Legacy product navigation"],
+  "expected": {
+    "headings_min": 2,
+    "tables_max": 0
+  },
+  "notes": "A legacy layout table contains prose and must flatten without losing reading order."
+}

@@ -1,0 +1,16 @@
+{
+  "id": "article-fact-box",
+  "category": "news-article",
+  "source_url": "https://example.test/article-fact-box",
+  "page_shape": "article",
+  "must_include": [
+    "Meters report one total every twenty-four hours",
+    "Key facts"
+  ],
+  "must_exclude": ["Request a sales demonstration"],
+  "expected": {
+    "headings_min": 1,
+    "lists_min": 1
+  },
+  "notes": "A useful fact box inside an article must survive while an external sales card is removed."
+}

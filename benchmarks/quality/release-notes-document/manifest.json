@@ -1,0 +1,16 @@
+{
+  "id": "release-notes-document",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/release-notes-document",
+  "page_shape": "document",
+  "must_include": [
+    "Workers now drain active jobs during rolling updates",
+    "The legacy token flag is deprecated"
+  ],
+  "must_exclude": ["Compare enterprise plans"],
+  "expected": {
+    "headings_h2_min": 3,
+    "lists_min": 1
+  },
+  "notes": "Release notes contain several small but meaningful sections and issue lists."
+}

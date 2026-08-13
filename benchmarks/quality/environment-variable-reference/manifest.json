@@ -1,0 +1,17 @@
+{
+  "id": "environment-variable-reference",
+  "category": "api-reference",
+  "source_url": "https://example.test/environment-variable-reference",
+  "page_shape": "reference",
+  "must_include": [
+    "NORTHSTAR_CACHE_DIR",
+    "Directory for reusable downloaded objects",
+    "NORTHSTAR_LOG"
+  ],
+  "must_exclude": ["Copy all variable names"],
+  "expected": {
+    "tables_min": 1,
+    "headings_min": 1
+  },
+  "notes": "An environment-variable page must retain long identifiers and exact defaults."
+}

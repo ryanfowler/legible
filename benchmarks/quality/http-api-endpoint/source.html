@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Create an export</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/http-api-endpoint" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Create an export</h1>
+        <pre><code>POST /v1/exports</code></pre>
+        <p>
+          Creates an asynchronous export. Returns 202 while the export is
+          queued.
+        </p>
+        <h2>Headers</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Required</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Idempotency-Key</td>
+              <td>Yes</td>
+            </tr>
+          </tbody>
+        </table>
+        <h2>Request</h2>
+        <pre><code class="language-json">{ "format": "csv" }</code></pre>
+        <h2>Response</h2>
+        <pre><code class="language-json">{ "status": "queued" }</code></pre>
+      </article>
+    </main>
+    <aside>Try premium API monitoring</aside>
+  </body>
+</html>
