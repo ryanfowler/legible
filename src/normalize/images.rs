@@ -40,11 +40,14 @@ pub(super) fn adjacent_lead_media(dom: &Dom, content_root: NodeId) -> Option<Nod
                 _ => None,
             };
             image.is_some_and(|image| {
-                (has_responsive_candidate(dom, image)
-                    || dom
-                        .descendants(candidate)
-                        .any(|node| source_has_responsive_or_lazy_image(dom, node)))
+                (matches!(dom.tag(candidate), Some(Tag::Figure | Tag::Picture))
+                    || has_responsive_candidate(dom, image)
+                    || static_dimensions(dom, image)
+                        .into_iter()
+                        .flatten()
+                        .any(|dimension| dimension >= 200))
                     && has_meaningful_image_description(dom, image)
+                    && !has_adjacent_lead_peripheral_role(dom, image)
                     && image_role_score(dom, image, true, 1).is_meaningful()
             })
         })
@@ -133,7 +136,7 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
                     .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))
             })
             .unwrap_or(image);
-        let mut role = image_role_score(
+        let role = image_role_score(
             dom,
             image,
             first_paragraph.is_some_and(|first| positions[image.index()] < first),
@@ -142,9 +145,6 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
                 .copied()
                 .unwrap_or(1),
         );
-        if has_figure_caption(dom, image) {
-            role.positive += 7;
-        }
         if role.is_meaningful() {
             dom.insert_before(control, media);
         }
@@ -168,9 +168,6 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
             first_paragraph.is_some_and(|first| positions[node.index()] < first),
             repeated,
         );
-        if has_figure_caption(dom, node) {
-            role.positive += 7;
-        }
         let strong_peripheral = has_strong_peripheral_role(dom, node);
         if !strong_peripheral
             && (responsive_picture_context[node.index()]
@@ -181,6 +178,81 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
         }
         if role.should_remove() {
             dom.detach(node);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ImageRoleEvidence {
+    descriptive: bool,
+    captioned: bool,
+    responsive: bool,
+    meaningful_dimensions: bool,
+    lead_position: bool,
+    figure: bool,
+    small_dimensions: bool,
+    tracking_dimensions: bool,
+    profile_context: bool,
+    avatar_context: bool,
+    related_context: bool,
+    logo_or_icon_context: bool,
+    card_grid_context: bool,
+    repetitions: u16,
+}
+
+impl ImageRoleEvidence {
+    fn collect(dom: &Dom, image: NodeId, before_first_paragraph: bool, repetitions: u16) -> Self {
+        let dimensions = static_dimensions(dom, image);
+        let tracking_dimensions = dimensions
+            .into_iter()
+            .flatten()
+            .any(|dimension| dimension <= 1);
+        let small_dimensions = dimensions
+            .into_iter()
+            .flatten()
+            .any(|dimension| dimension <= 32);
+        let meaningful_dimensions = dimensions
+            .into_iter()
+            .flatten()
+            .max()
+            .is_some_and(|size| size >= 200);
+        let names = image_context_name(dom, image);
+        Self {
+            descriptive: has_direct_meaningful_description(dom, image),
+            captioned: has_figure_caption(dom, image),
+            responsive: has_responsive_candidate(dom, image) || has_lazy_candidate(dom, image),
+            meaningful_dimensions,
+            lead_position: is_lead_position(dom, image, before_first_paragraph),
+            figure: dom
+                .ancestors(image)
+                .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figure)),
+            small_dimensions,
+            tracking_dimensions,
+            profile_context: contains_role_token(
+                &names,
+                &[
+                    "avatar", "avatars", "author", "authors", "byline", "founder", "founders",
+                    "profile", "bio",
+                ],
+            ),
+            avatar_context: contains_role_token(&names, &["avatar", "avatars"]),
+            related_context: contains_role_token(
+                &names,
+                &[
+                    "related",
+                    "recommend",
+                    "recirculation",
+                    "more-stories",
+                    "more_articles",
+                    "tout",
+                ],
+            ),
+            logo_or_icon_context: contains_role_token(
+                &names,
+                &["favicon", "logo", "icon", "badge", "sprite", "integration"],
+            ),
+            card_grid_context: contains_role_token(&names, &["card", "cards", "grid", "tile"]),
+            repetitions,
         }
     }
 }
@@ -207,74 +279,40 @@ fn image_role_score(
     before_first_paragraph: bool,
     repetitions: u16,
 ) -> ImageRoleScore {
+    let evidence = ImageRoleEvidence::collect(dom, image, before_first_paragraph, repetitions);
     let mut score = ImageRoleScore::default();
-    let dimensions = static_dimensions(dom, image);
-    let very_small = dimensions
-        .into_iter()
-        .flatten()
-        .any(|dimension| dimension <= 1);
-    let small = dimensions
-        .into_iter()
-        .flatten()
-        .any(|dimension| dimension <= 32);
-    let large = dimensions
-        .into_iter()
-        .flatten()
-        .max()
-        .is_some_and(|size| size >= 200);
-    let descriptive = has_direct_meaningful_description(dom, image);
-    let responsive = has_responsive_candidate(dom, image) || has_lazy_candidate(dom, image);
-    let names = image_context_name(dom, image);
-    let related = contains_role_token(
-        &names,
-        &[
-            "related",
-            "recommend",
-            "recirculation",
-            "more-stories",
-            "more_articles",
-            "tout",
-        ],
-    );
-    let profile = contains_role_token(
-        &names,
-        &[
-            "avatar", "avatars", "author", "authors", "byline", "founder", "founders", "profile",
-            "bio",
-        ],
-    );
-    let avatar = contains_role_token(&names, &["avatar", "avatars"]);
-    let logo_or_icon = contains_role_token(
-        &names,
-        &["favicon", "logo", "icon", "badge", "sprite", "integration"],
-    );
-    let card_grid = contains_role_token(&names, &["card", "cards", "grid", "tile"]);
 
-    score.positive += i16::from(descriptive) * 7;
-    score.positive += i16::from(responsive) * 3;
-    score.positive += i16::from(large) * 2;
-    score.positive += i16::from(before_first_paragraph && (descriptive || responsive || large)) * 2;
+    score.positive += i16::from(evidence.descriptive) * 7;
+    score.positive += i16::from(evidence.captioned) * 7;
+    score.positive += i16::from(evidence.responsive) * 3;
+    score.positive += i16::from(evidence.meaningful_dimensions) * 2;
     score.positive += i16::from(
-        dom.ancestors(image)
-            .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figure)),
+        evidence.lead_position
+            && (evidence.descriptive
+                || evidence.captioned
+                || evidence.responsive
+                || evidence.meaningful_dimensions),
     ) * 2;
+    score.positive += i16::from(evidence.figure) * 2;
 
-    score.negative += i16::from(small && decorative_image_name(dom, image)) * 3;
-    score.negative +=
-        i16::from(very_small && (!descriptive || decorative_image_name(dom, image))) * 10;
-    score.negative += i16::from(profile) * 4;
-    score.negative += i16::from(avatar) * 8;
-    score.negative += i16::from(logo_or_icon) * 5;
+    score.negative += i16::from(evidence.small_dimensions && decorative_image_name(dom, image)) * 3;
+    score.negative += i16::from(
+        evidence.tracking_dimensions
+            && (!evidence.descriptive || decorative_image_name(dom, image)),
+    ) * 10;
+    score.negative += i16::from(evidence.profile_context) * 4;
+    score.negative += i16::from(evidence.avatar_context) * 8;
+    score.negative += i16::from(evidence.logo_or_icon_context) * 5;
     score.negative += i16::from(contains_role_token(
-        &names,
+        &image_context_name(dom, image),
         &["favicon", "logo", "integration"],
     )) * 3;
-    score.negative += i16::from(related) * 24;
-    score.negative += i16::from(card_grid) * 2;
-    score.negative += i16::from(profile && repetitions >= 2) * 8;
-    score.negative += if repetitions >= 3 {
+    score.negative += i16::from(evidence.related_context) * 24;
+    score.negative += i16::from(evidence.card_grid_context) * 2;
+    score.negative += i16::from(evidence.profile_context && evidence.repetitions >= 2) * 8;
+    score.negative += if evidence.repetitions >= 3 {
         4
-    } else if repetitions == 2 {
+    } else if evidence.repetitions == 2 {
         2
     } else {
         0
@@ -297,6 +335,26 @@ fn image_context_name(dom: &Dom, image: NodeId) -> String {
         }
     }
     name.to_ascii_lowercase()
+}
+
+fn is_lead_position(dom: &Dom, image: NodeId, before_first_paragraph: bool) -> bool {
+    if !before_first_paragraph {
+        return false;
+    }
+    let container = dom
+        .ancestors(image)
+        .find(|&ancestor| matches!(dom.tag(ancestor), Some(Tag::Figure | Tag::Picture)))
+        .unwrap_or(image);
+    let mut previous = previous_element_sibling(dom, container);
+    let mut preceding = 0;
+    while let Some(sibling) = previous {
+        preceding += 1;
+        if preceding > 4 {
+            return false;
+        }
+        previous = previous_element_sibling(dom, sibling);
+    }
+    true
 }
 
 fn has_strong_peripheral_role(dom: &Dom, image: NodeId) -> bool {
@@ -324,6 +382,14 @@ fn has_strong_peripheral_role(dom: &Dom, image: NodeId) -> bool {
             "integration",
         ],
     )
+}
+
+fn has_adjacent_lead_peripheral_role(dom: &Dom, image: NodeId) -> bool {
+    has_strong_peripheral_role(dom, image)
+        || contains_role_token(
+            &image_context_name(dom, image),
+            &["icon", "badge", "sprite"],
+        )
 }
 
 fn contains_role_token(value: &str, patterns: &[&str]) -> bool {
@@ -357,14 +423,16 @@ fn sole_descendant_image(dom: &Dom, root: NodeId) -> Option<NodeId> {
 fn primary_image_resource(dom: &Dom, image: NodeId) -> Option<String> {
     let source = [AttrName::Src, AttrName::DataSrc]
         .into_iter()
-        .find_map(|attribute| valid_image_attribute(dom.attr(image, attribute)))
+        .find_map(|attribute| non_placeholder_image_attribute(dom.attr(image, attribute)))
+        .map(str::to_owned)
+        .or_else(|| best_responsive_source(dom, image))
         .or_else(|| {
             [AttrName::Srcset, AttrName::DataSrcset]
                 .into_iter()
                 .find_map(|attribute| dom.attr(image, attribute).and_then(best_srcset_candidate))
-                .map(|candidate| candidate.url)
+                .map(|candidate| candidate.url.to_owned())
         })?;
-    let resource = image_resource(source);
+    let resource = image_resource(&source);
     let resource = resource.split('#').next().unwrap_or(resource.as_ref());
     let identity = if resource.contains("X-Amz-Signature=")
         || resource.contains("X-Amz-Credential=")
@@ -489,14 +557,37 @@ fn dimensions_from_url(source: &str) -> [Option<u32>; 2] {
 }
 
 fn has_responsive_candidate(dom: &Dom, node: NodeId) -> bool {
-    dom.attr(node, AttrName::Srcset)
-        .or_else(|| dom.attr(node, AttrName::DataSrcset))
-        .is_some_and(|srcset| {
+    [AttrName::Srcset, AttrName::DataSrcset]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .any(|srcset| {
             parse_srcset(srcset).into_iter().any(|candidate| {
-                matches!(candidate.descriptor, SrcsetDescriptor::Width(width) if width > 32)
-                    || matches!(candidate.descriptor, SrcsetDescriptor::Density(_))
+                !is_placeholder_resource(candidate.url)
+                    && (matches!(candidate.descriptor, SrcsetDescriptor::Width(width) if width > 32)
+                        || matches!(candidate.descriptor, SrcsetDescriptor::Density(_)))
             })
         })
+}
+
+fn is_placeholder_resource(source: &str) -> bool {
+    let source = source.trim().to_ascii_lowercase();
+    if matches!(source.as_str(), "null" | "undefined") {
+        return true;
+    }
+    let path = source
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(&source)
+        .trim_end_matches('/');
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    let stem = basename.rsplit_once('.').map_or(basename, |(stem, _)| stem);
+    matches!(
+        basename,
+        "blank.gif" | "spacer.gif" | "transparent.gif" | "pixel.gif"
+    ) || matches!(
+        stem,
+        "placeholder" | "grey-placeholder" | "image-placeholder" | "photo-placeholder"
+    )
 }
 
 fn source_has_responsive_or_lazy_image(dom: &Dom, node: NodeId) -> bool {
@@ -506,10 +597,14 @@ fn source_has_responsive_or_lazy_image(dom: &Dom, node: NodeId) -> bool {
     [AttrName::Srcset, AttrName::DataSrcset]
         .into_iter()
         .filter_map(|attribute| valid_image_attribute(dom.attr(node, attribute)))
-        .any(|value| !parse_srcset(value).is_empty())
+        .any(|value| {
+            parse_srcset(value)
+                .into_iter()
+                .any(|candidate| !is_placeholder_resource(candidate.url))
+        })
         || [AttrName::Src, AttrName::DataSrc]
             .into_iter()
-            .any(|attribute| valid_image_attribute(dom.attr(node, attribute)).is_some())
+            .any(|attribute| non_placeholder_image_attribute(dom.attr(node, attribute)).is_some())
 }
 
 fn is_svg_description_element(dom: &Dom, node: NodeId) -> bool {
@@ -524,9 +619,12 @@ fn is_svg_description_element(dom: &Dom, node: NodeId) -> bool {
 fn has_lazy_candidate(dom: &Dom, node: NodeId) -> bool {
     dom.attrs(node).iter().any(|attribute| {
         attribute.name.local.as_ref().starts_with("data-")
-            && valid_image_attribute(Some(attribute.value.as_ref())).is_some()
-            && (crate::constants::has_image_src(attribute.value.as_ref())
-                || crate::constants::has_image_srcset(attribute.value.as_ref()))
+            && ((crate::constants::has_image_src(attribute.value.as_ref())
+                && non_placeholder_image_attribute(Some(attribute.value.as_ref())).is_some())
+                || (crate::constants::has_image_srcset(attribute.value.as_ref())
+                    && parse_srcset(attribute.value.as_ref())
+                        .into_iter()
+                        .any(|candidate| !is_placeholder_resource(candidate.url))))
     })
 }
 
@@ -565,6 +663,8 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         .filter(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Source)))
         .collect();
     for node in responsive_nodes {
+        clean_srcset_attribute(dom, node, AttrName::Srcset);
+        clean_srcset_attribute(dom, node, AttrName::DataSrcset);
         if valid_image_attribute(dom.attr(node, AttrName::Srcset)).is_none()
             && let Some(value) =
                 valid_image_attribute(dom.attr(node, AttrName::DataSrcset)).map(str::to_owned)
@@ -598,12 +698,77 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     // sole figure caption can still make the image meaningful.
     for &image in nodes.iter() {
         if dom.parent(image).is_some()
-            && image_has_orphan_placeholder_source(dom, image)
+            && has_image_source_evidence(dom, image)
+            && !has_usable_image_source(dom, image)
             && !has_meaningful_image_description(dom, image)
         {
             dom.detach(image);
         }
     }
+}
+
+fn clean_srcset_attribute(dom: &mut Dom, node: NodeId, attribute: AttrName) {
+    let Some(value) = dom.attr(node, attribute) else {
+        return;
+    };
+    let retained = parse_srcset(value)
+        .into_iter()
+        .filter(|candidate| !is_placeholder_resource(candidate.url))
+        .map(format_srcset_candidate)
+        .collect::<Vec<_>>();
+    if retained.is_empty() {
+        dom.remove_attr(node, attribute);
+    } else {
+        dom.set_attr(node, attribute, &retained.join(", "));
+    }
+}
+
+fn format_srcset_candidate(candidate: SrcsetCandidate<'_>) -> String {
+    match candidate.descriptor {
+        SrcsetDescriptor::Width(width) => format!("{} {width}w", candidate.url),
+        SrcsetDescriptor::Density(density) => format!("{} {density}x", candidate.url),
+        SrcsetDescriptor::None => candidate.url.to_owned(),
+    }
+}
+
+fn has_image_source_evidence(dom: &Dom, image: NodeId) -> bool {
+    [
+        AttrName::Src,
+        AttrName::DataSrc,
+        AttrName::Srcset,
+        AttrName::DataSrcset,
+    ]
+    .into_iter()
+    .any(|attribute| dom.attr(image, attribute).is_some())
+        || dom
+            .ancestors(image)
+            .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))
+            .is_some_and(|picture| {
+                dom.descendants(picture)
+                    .any(|node| dom.tag(node) == Some(Tag::Source))
+            })
+}
+
+fn has_usable_image_source(dom: &Dom, image: NodeId) -> bool {
+    [AttrName::Src, AttrName::DataSrc]
+        .into_iter()
+        .any(|attribute| non_placeholder_image_attribute(dom.attr(image, attribute)).is_some())
+        || [AttrName::Srcset, AttrName::DataSrcset]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(image, attribute))
+            .any(|value| {
+                parse_srcset(value)
+                    .into_iter()
+                    .any(|candidate| !is_placeholder_resource(candidate.url))
+            })
+        || dom
+            .ancestors(image)
+            .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Picture))
+            .is_some_and(|picture| {
+                dom.descendants(picture)
+                    .filter(|&node| dom.tag(node) == Some(Tag::Source))
+                    .any(|source| source_has_responsive_or_lazy_image(dom, source))
+            })
 }
 
 fn best_responsive_source(dom: &Dom, image: NodeId) -> Option<String> {
@@ -615,35 +780,64 @@ fn best_responsive_source(dom: &Dom, image: NodeId) -> Option<String> {
             dom.descendants(picture)
                 .filter(|&node| dom.tag(node) == Some(Tag::Source)),
         ) {
-            if let Some(candidate) = valid_image_attribute(
-                dom.attr(node, AttrName::DataSrcset)
-                    .or_else(|| dom.attr(node, AttrName::Srcset)),
-            )
-            .and_then(best_srcset_candidate)
+            if let Some(candidate) = [AttrName::DataSrcset, AttrName::Srcset]
+                .into_iter()
+                .filter_map(|attribute| dom.attr(node, attribute))
+                .filter_map(|value| valid_image_attribute(Some(value)))
+                .find_map(best_non_placeholder_srcset_candidate)
             {
                 return Some(candidate.url.to_owned());
             }
-            if let Some(src) = valid_image_attribute(
-                dom.attr(node, AttrName::DataSrc)
-                    .or_else(|| dom.attr(node, AttrName::Src)),
-            ) {
+            if let Some(src) =
+                first_usable_image_attribute(dom, node, [AttrName::DataSrc, AttrName::Src])
+            {
                 return Some(src.to_owned());
             }
         }
     }
 
-    dom.attr(image, AttrName::Srcset)
-        .and_then(best_srcset_candidate)
+    [AttrName::Srcset, AttrName::DataSrcset]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(image, attribute))
+        .filter_map(|value| valid_image_attribute(Some(value)))
+        .find_map(best_non_placeholder_srcset_candidate)
         .map(|candidate| candidate.url.to_owned())
         .or_else(|| {
             let replace = dom.attr(image, AttrName::Src).is_none()
                 || image_has_placeholder_source(dom, image);
             replace
-                .then(|| {
-                    valid_image_attribute(dom.attr(image, AttrName::DataSrc)).map(str::to_owned)
-                })
+                .then(|| first_usable_image_attribute(dom, image, [AttrName::DataSrc]))
                 .flatten()
+                .map(str::to_owned)
         })
+}
+
+fn best_non_placeholder_srcset_candidate(srcset: &str) -> Option<SrcsetCandidate<'_>> {
+    parse_srcset(srcset)
+        .into_iter()
+        .filter(|candidate| !is_placeholder_resource(candidate.url))
+        .reduce(|best, candidate| {
+            if candidate_is_better(&candidate, &best) {
+                candidate
+            } else {
+                best
+            }
+        })
+}
+
+fn non_placeholder_image_attribute(value: Option<&str>) -> Option<&str> {
+    valid_image_attribute(value).filter(|source| !is_placeholder_resource(source))
+}
+
+fn first_usable_image_attribute(
+    dom: &Dom,
+    node: NodeId,
+    attributes: impl IntoIterator<Item = AttrName>,
+) -> Option<&str> {
+    attributes
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .find_map(|value| non_placeholder_image_attribute(Some(value)))
 }
 
 fn parse_srcset(srcset: &str) -> Vec<SrcsetCandidate<'_>> {
@@ -961,39 +1155,24 @@ fn has_direct_meaningful_description(dom: &Dom, image: NodeId) -> bool {
 }
 
 fn valid_image_attribute(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null"))
+    value.filter(|value| {
+        let value = value.trim();
+        !value.is_empty()
+            && !value.eq_ignore_ascii_case("null")
+            && !value.eq_ignore_ascii_case("undefined")
+    })
 }
 
 fn image_has_placeholder_source(dom: &Dom, image: NodeId) -> bool {
     dom.attr(image, AttrName::Src).is_none_or(|source| {
         let source = source.to_ascii_lowercase();
-        source.contains("placeholder")
+        is_placeholder_resource(&source)
+            || source.contains("placeholder")
             || source.contains("blank.gif")
             || source.contains("spacer.gif")
             || source.contains("transparent.gif")
             || crate::constants::parse_b64_data_url(&source)
                 .is_some_and(|(end, _)| source.len().saturating_sub(end) < 133)
-    })
-}
-
-fn image_has_orphan_placeholder_source(dom: &Dom, image: NodeId) -> bool {
-    dom.attr(image, AttrName::Src).is_some_and(|source| {
-        let path = source
-            .split(['?', '#'])
-            .next()
-            .unwrap_or(source)
-            .trim_end_matches('/');
-        let basename = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-        let stem = basename
-            .rsplit_once('.')
-            .map_or(basename.as_str(), |(stem, _)| stem);
-        matches!(
-            basename.as_str(),
-            "blank.gif" | "spacer.gif" | "transparent.gif"
-        ) || matches!(
-            stem,
-            "placeholder" | "grey-placeholder" | "image-placeholder" | "photo-placeholder"
-        )
     })
 }
 
@@ -1159,6 +1338,73 @@ mod tests {
             dom.attr(source, AttrName::Srcset),
             Some("small.webp 400w, large.webp 1200w")
         );
+    }
+
+    #[test]
+    fn repetition_identity_prefers_a_real_responsive_source_over_a_placeholder() {
+        let dom = Dom::parse_document(
+            r#"<main><img src="pixel.gif" srcset="map-small.png 800w, map-large.png 1600w" alt="Map"></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(
+            primary_image_resource(&dom, image).as_deref(),
+            Some("map-large.png")
+        );
+    }
+
+    #[test]
+    fn responsive_normalization_skips_placeholder_candidates() {
+        let (dom, root) = normalized(
+            r#"<picture><source srcset="pixel.gif 1600w, map.png 800w"><img src="fallback.jpg" alt="Map"></picture>"#,
+        );
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+    }
+
+    #[test]
+    fn lazy_normalization_replaces_a_pixel_source_with_a_real_data_source() {
+        let (dom, root) =
+            normalized(r#"<img src="pixel.gif" data-src="map.png" alt="Map of the survey area">"#);
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+    }
+
+    #[test]
+    fn lazy_normalization_replaces_an_undefined_source_with_a_real_data_source() {
+        let (dom, root) =
+            normalized(r#"<img src="undefined" data-src="map.png" alt="Map of the survey area">"#);
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+    }
+
+    #[test]
+    fn responsive_normalization_tries_the_next_srcset_attribute() {
+        let (dom, root) = normalized(
+            r#"<picture><source data-srcset="broken nope" srcset="map.png 800w"><img src="fallback.jpg" alt="Map"></picture>"#,
+        );
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+    }
+
+    #[test]
+    fn removes_placeholder_candidates_from_active_srcsets() {
+        let (dom, root) = normalized(
+            r#"<picture><source srcset="pixel.gif 1600w, map.webp 800w"><img src="pixel.gif" srcset="transparent.gif 2x, map.jpg 1x" alt="Survey map"></picture>"#,
+        );
+        let source = dom.first_descendant_by_tag(root, Tag::Source).unwrap();
+        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        assert_eq!(dom.attr(source, AttrName::Srcset), Some("map.webp 800w"));
+        assert_eq!(dom.attr(image, AttrName::Srcset), Some("map.jpg 1x"));
+        assert_eq!(dom.attr(image, AttrName::Src), Some("map.webp"));
+    }
+
+    #[test]
+    fn removes_an_undescribed_image_with_only_placeholder_sources() {
+        let (dom, root) =
+            normalized(r#"<main><img src="pixel.gif" srcset="transparent.gif 2x"></main>"#);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_none());
     }
 
     #[test]
@@ -1456,6 +1702,7 @@ mod tests {
         for html in [
             r#"<main><figure><img src="lead.jpg" srcset="lead.jpg 1200w" alt=""><figcaption>Detailed lead diagram</figcaption></figure><article><p>Article body.</p></article></main>"#,
             r#"<main><picture><source srcset="lead.webp 1200w"><img src="lead.jpg" alt="Detailed lead diagram"></picture><article><p>Article body.</p></article></main>"#,
+            r#"<main><figure><img src="lead.jpg" width="1200" height="700" alt="Detailed lead diagram"><figcaption>Detailed lead diagram</figcaption></figure><article><p>Article body.</p></article></main>"#,
         ] {
             let dom = Dom::parse_document(html).unwrap();
             let article = dom
@@ -1463,6 +1710,16 @@ mod tests {
                 .unwrap();
             let lead = adjacent_lead_media(&dom, article).expect(html);
             assert!(matches!(dom.tag(lead), Some(Tag::Figure | Tag::Picture)));
+        }
+        for html in [
+            r#"<main><figure class="author"><img src="author.jpg" width="800" alt="Portrait of the author"></figure><article><p>Article body.</p></article></main>"#,
+            r#"<main><img class="site-logo" src="logo.svg" width="800" alt="Site logo"><article><p>Article body.</p></article></main>"#,
+        ] {
+            let dom = Dom::parse_document(html).unwrap();
+            let article = dom
+                .first_descendant_by_tag(dom.root(), Tag::Article)
+                .unwrap();
+            assert!(adjacent_lead_media(&dom, article).is_none(), "{html}");
         }
     }
 }
