@@ -19,17 +19,18 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
         }
         let (label, source) = match dom.tag(node) {
             Some(Tag::Iframe) => {
-                let source = dom
-                    .attr(node, AttrName::Src)
-                    .and_then(safe_uri)
-                    .map(str::to_owned);
+                let source = media_source(dom, node);
                 let youtube = source.as_deref().is_some_and(is_youtube);
                 (
-                    if youtube {
-                        "YouTube video"
-                    } else {
-                        "Embedded content"
-                    },
+                    media_label(
+                        dom,
+                        node,
+                        if youtube {
+                            "YouTube video"
+                        } else {
+                            "Embedded content"
+                        },
+                    ),
                     source.map(|source| {
                         if youtube {
                             canonical_youtube(&source)
@@ -39,8 +40,8 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
                     }),
                 )
             }
-            Some(Tag::Video) => ("Video", media_source(dom, node)),
-            Some(Tag::Audio) => ("Audio", media_source(dom, node)),
+            Some(Tag::Video) => (media_label(dom, node, "Video"), media_source(dom, node)),
+            Some(Tag::Audio) => (media_label(dom, node, "Audio"), media_source(dom, node)),
             Some(Tag::Object | Tag::Embed) => {
                 dom.detach(node);
                 continue;
@@ -48,18 +49,33 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
             _ => continue,
         };
         let Some(source) = source else {
+            if let Some(fallback) = media_fallback_link(dom, node) {
+                dom.insert_before(node, fallback);
+            }
             dom.detach(node);
             continue;
         };
         let Ok(link) = dom.create_html_element(Tag::A) else {
             continue;
         };
-        let Ok(text) = dom.create_text(label) else {
+        let Ok(text) = dom.create_text(&label) else {
             continue;
         };
         dom.set_attr(link, AttrName::Href, &source);
         dom.append_child(link, text);
-        dom.replace_with(node, link);
+        if let Some(fallback) = media_fallback_link(dom, node) {
+            let Ok(container) = dom.create_html_element(Tag::Span) else {
+                continue;
+            };
+            dom.append_child(container, link);
+            if let Ok(space) = dom.create_text(" ") {
+                dom.append_child(container, space);
+            }
+            dom.append_child(container, fallback);
+            dom.replace_with(node, container);
+        } else {
+            dom.replace_with(node, link);
+        }
     }
 }
 
@@ -70,23 +86,50 @@ fn is_statically_hidden(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn media_source(dom: &Dom, node: NodeId) -> Option<String> {
-    dom.attr(node, AttrName::Src)
-        .and_then(safe_uri)
-        .map(str::to_owned)
-        .or_else(|| {
-            dom.descendants(node)
-                .filter(|&child| dom.tag(child) == Some(Tag::Source))
-                .find_map(|source| {
-                    dom.attr(source, AttrName::Src)
-                        .and_then(safe_uri)
-                        .map(str::to_owned)
-                })
+    let direct_source = |node| {
+        [AttrName::Src, AttrName::DataSrc]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(node, attribute))
+            .find_map(|value| safe_uri(value).map(str::to_owned))
+    };
+    direct_source(node).or_else(|| {
+        dom.descendants(node)
+            .filter(|&child| dom.tag(child) == Some(Tag::Source))
+            .find_map(direct_source)
+    })
+}
+
+fn media_label(dom: &Dom, node: NodeId, fallback: &str) -> String {
+    [AttrName::AriaLabel, AttrName::Title]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .find_map(normalize_media_label)
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn media_fallback_link(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    dom.descendants(node)
+        .filter(|&child| dom.tag(child) == Some(Tag::A))
+        .find(|&link| {
+            dom.attr(link, AttrName::Href)
+                .and_then(safe_uri)
+                .is_some_and(|_| dom.has_non_whitespace_text(link))
         })
+}
+
+fn normalize_media_label(value: &str) -> Option<String> {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let value = value.chars().take(200).collect::<String>();
+    (!value.is_empty()).then_some(value)
 }
 
 fn safe_uri(value: &str) -> Option<&str> {
     let value = value.trim_matches(|ch: char| ch.is_ascii_whitespace() || ch.is_control());
-    if value.is_empty() || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("null")
+        || value.eq_ignore_ascii_case("undefined")
+        || value.chars().any(char::is_control)
+    {
         return None;
     }
     let colon = value
@@ -153,6 +196,25 @@ mod tests {
     }
 
     #[test]
+    fn uses_media_titles_without_copying_player_fallback_text() {
+        let mut dom = Dom::parse_fragment(
+            r#"<figure><iframe src="https://video.example.test/embed/42" title="Interview with the bridge engineer">Opaque player chrome</iframe><figcaption><a href="/transcript">Read the complete interview transcript</a></figcaption></figure>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        let markdown = dom_to_markdown(&dom, root, 0);
+        assert!(
+            markdown.contains(
+                "[Interview with the bridge engineer](https://video.example.test/embed/42)"
+            )
+        );
+        assert!(markdown.contains("[Read the complete interview transcript](/transcript)"));
+        assert!(!markdown.contains("Opaque player chrome"));
+    }
+
+    #[test]
     fn removes_unsafe_or_empty_media() {
         let mut dom = Dom::parse_fragment(r#"<iframe src="javascript:bad()"></iframe><video src="data:text/html,bad"></video><audio></audio><object data="movie.swf"></object>"#, Tag::Div).unwrap();
         let root = dom.root();
@@ -186,6 +248,66 @@ mod tests {
         let root = dom.root();
         normalize(&mut dom, root);
         assert_eq!(dom_to_markdown(&dom, root, 0), "[Video](safe.mp4)\n");
+    }
+
+    #[test]
+    fn recovers_safe_data_sources_after_unsafe_sources() {
+        let mut dom = Dom::parse_fragment(
+            r#"<iframe src="javascript:bad" data-src="/frame"></iframe><video src="javascript:bad"><source src="javascript:bad" data-src="movie.mp4"></video>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "[Embedded content](/frame)[Video](movie.mp4)\n"
+        );
+    }
+
+    #[test]
+    fn skips_sentinel_sources_when_recovering_media() {
+        let mut dom = Dom::parse_fragment(
+            r#"<iframe src="null" data-src="/frame"></iframe><audio src="undefined" data-src="sound.mp3"></audio>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "[Embedded content](/frame)[Audio](sound.mp3)\n"
+        );
+    }
+
+    #[test]
+    fn prefers_an_accessible_media_label_over_a_generic_title() {
+        let mut dom = Dom::parse_fragment(
+            r#"<iframe src="/frame" title="Video player" aria-label="Bridge engineer interview"></iframe>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "[Bridge engineer interview](/frame)\n"
+        );
+    }
+
+    #[test]
+    fn preserves_a_safe_fallback_link_inside_native_media() {
+        let mut dom = Dom::parse_fragment(
+            r#"<video src="movie.mp4"><a href="/transcript">Read the transcript</a></video>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        assert_eq!(
+            dom_to_markdown(&dom, root, 0),
+            "[Video](movie.mp4) [Read the transcript](/transcript)\n"
+        );
     }
 
     #[test]
