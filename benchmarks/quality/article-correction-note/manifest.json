@@ -1,0 +1,12 @@
+{
+  "id": "article-correction-note",
+  "category": "news-article",
+  "source_url": "https://example.test/article-correction-note",
+  "page_shape": "article",
+  "must_include": [
+    "The board approved the roof replacement on Tuesday",
+    "Correction: The project covers three buildings"
+  ],
+  "must_exclude": ["Report a problem with this page"],
+  "notes": "A correction note is useful editorial content and must not be dropped as footer chrome."
+}

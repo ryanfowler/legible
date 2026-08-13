@@ -1,0 +1,15 @@
+{
+  "id": "independent-product-review",
+  "category": "blog-post",
+  "source_url": "https://example.test/independent-product-review",
+  "page_shape": "article",
+  "must_include": [
+    "The hinge stayed aligned after daily train trips",
+    "Wet braking required more hand pressure"
+  ],
+  "must_exclude": ["Buy now with our partner code"],
+  "expected": {
+    "headings_h2_min": 2
+  },
+  "notes": "An independent review must keep balanced findings and reject an affiliate purchase card."
+}

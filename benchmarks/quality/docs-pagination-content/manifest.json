@@ -1,0 +1,16 @@
+{
+  "id": "docs-pagination-content",
+  "category": "api-reference",
+  "source_url": "https://example.test/docs-pagination-content",
+  "page_shape": "document",
+  "must_include": [
+    "Pass the returned cursor without modifying it",
+    "A missing next cursor marks the final page"
+  ],
+  "must_exclude": ["Previous documentation page", "Next documentation page"],
+  "expected": {
+    "headings_h2_min": 2,
+    "code_blocks_min": 1
+  },
+  "notes": "API pagination content must remain while documentation previous/next controls are removed."
+}

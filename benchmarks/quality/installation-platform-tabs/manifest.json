@@ -1,0 +1,17 @@
+{
+  "id": "installation-platform-tabs",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/installation-platform-tabs",
+  "page_shape": "document",
+  "must_include": [
+    "Verify the checksum before installation",
+    "brew install northstar",
+    "apt install northstar"
+  ],
+  "must_exclude": ["Download desktop dashboard"],
+  "expected": {
+    "headings_h2_min": 3,
+    "code_blocks_min": 2
+  },
+  "notes": "An installation guide retains source-present platform variants and shared verification steps."
+}

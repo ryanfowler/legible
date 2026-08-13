@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Upload error codes</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/error-code-reference" />
+  </head>
+  <body>
+    <header>API Reference Endpoints Errors Changelog</header>
+    <div class="api-reference-layout">
+      <div class="error-reference-content">
+        <h1>Upload error codes</h1>
+        <h2>UPLOAD_PART_MISSING</h2>
+        <p>
+          A completed upload references a part that the service did not store.
+          Retry only after listing stored parts and sending the missing range.
+        </p>
+        <pre><code>{ "code": "UPLOAD_PART_MISSING", "part": 4 }</code></pre>
+        <h2>UPLOAD_EXPIRED</h2>
+        <p>
+          Create a new upload session. Expired identifiers cannot be restored.
+        </p>
+      </div>
+    </div>
+    <aside>Status dashboard incidents</aside>
+  </body>
+</html>

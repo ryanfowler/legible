@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Request processing architecture</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/architecture-components" />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Request processing architecture</h1>
+        <p>
+          The gateway validates identity before routing and attaches one request
+          identifier.
+        </p>
+        <h2>Components</h2>
+        <ol>
+          <li>Gateway</li>
+          <li>Scheduler</li>
+          <li>Worker pool</li>
+        </ol>
+        <h2>Durability</h2>
+        <p>
+          Workers acknowledge jobs only after durable storage confirms the
+          result record.
+        </p>
+        <h2>Failure boundary</h2>
+        <p>
+          The scheduler can restart without interrupting active worker leases.
+        </p>
+      </article>
+    </main>
+    <aside>Architecture webinar registration</aside>
+  </body>
+</html>

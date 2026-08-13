@@ -1,0 +1,16 @@
+{
+  "id": "article-hero-caption",
+  "category": "news-article",
+  "source_url": "https://example.test/article-hero-caption",
+  "page_shape": "article",
+  "must_include": [
+    "Volunteers replaced the damaged boardwalk",
+    "A heron beside the restored path"
+  ],
+  "must_exclude": ["Download the city news app"],
+  "expected": {
+    "figures_min": 1,
+    "images_min": 1
+  },
+  "notes": "A report must retain a captioned hero image and reject an app-install banner."
+}

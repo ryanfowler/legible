@@ -1,0 +1,17 @@
+{
+  "id": "essay-footnotes",
+  "category": "long-form-essay",
+  "source_url": "https://example.test/essay-footnotes",
+  "page_shape": "article",
+  "must_include": [
+    "A bench changes how strangers share a view",
+    "The first riverside seats appeared in 1912",
+    "The parks ledger lists twenty oak seats"
+  ],
+  "must_exclude": ["Share this essay with your network"],
+  "expected": {
+    "headings_min": 1,
+    "footnotes_min": 1
+  },
+  "notes": "A long-form essay must retain a note reference and its definition."
+}

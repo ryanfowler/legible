@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Package retryqueue</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/go-package-guide" />
+  </head>
+  <body>
+    <header>Jump to standard library Open package menu Index</header>
+    <div class="pkgsite-layout">
+      <div id="pkg-overview">
+        <h1>Package retryqueue</h1>
+        <p>
+          Package retryqueue schedules bounded retry attempts with
+          caller-provided delays.
+        </p>
+        <h2>Configuration</h2>
+        <p>A zero limit disables retries and returns the first error.</p>
+        <h2>Example</h2>
+        <pre><code class="language-go">queue := retryqueue.New(3)
+err := queue.Run(send)</code></pre>
+      </div>
+    </div>
+  </body>
+</html>

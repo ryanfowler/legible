@@ -1,0 +1,15 @@
+{
+  "id": "docs-table-of-contents",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-table-of-contents",
+  "page_shape": "document",
+  "must_include": [
+    "Retention applies when a segment closes",
+    "Legal holds override normal deletion"
+  ],
+  "must_exclude": ["On this page Retention Holds Verification"],
+  "expected": {
+    "headings_h2_min": 3
+  },
+  "notes": "A substantial guide must retain all sections but reject a compact in-page table of contents."
+}

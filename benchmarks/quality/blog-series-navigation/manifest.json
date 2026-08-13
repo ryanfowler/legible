@@ -1,0 +1,18 @@
+{
+  "id": "blog-series-navigation",
+  "category": "blog-post",
+  "source_url": "https://example.test/blog-series-navigation",
+  "page_shape": "article",
+  "must_include": [
+    "The enclosure needs a pressure vent",
+    "Coat the exposed copper after soldering"
+  ],
+  "must_exclude": [
+    "Previous part: choosing a battery",
+    "Next part: radio calibration"
+  ],
+  "expected": {
+    "headings_min": 1
+  },
+  "notes": "A serial tutorial must retain the current article but reject previous and next post navigation."
+}

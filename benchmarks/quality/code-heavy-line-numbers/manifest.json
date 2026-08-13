@@ -1,0 +1,15 @@
+{
+  "id": "code-heavy-line-numbers",
+  "category": "code-heavy",
+  "source_url": "https://example.test/code-heavy-line-numbers",
+  "page_shape": "document",
+  "must_include": [
+    "Read the length prefix before allocating the payload",
+    "fn read_frame(input: &mut &[u8])"
+  ],
+  "must_exclude": ["1 2 3 4 Copy code"],
+  "expected": {
+    "code_blocks_min": 1
+  },
+  "notes": "A syntax highlighter uses a separate presentation gutter that must not pollute source code."
+}

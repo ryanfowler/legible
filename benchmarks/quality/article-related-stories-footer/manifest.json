@@ -1,0 +1,15 @@
+{
+  "id": "article-related-stories-footer",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/article-related-stories-footer",
+  "page_shape": "article",
+  "must_include": [
+    "Three routes will now run after midnight",
+    "Passenger counts doubled during the pilot"
+  ],
+  "must_exclude": ["Related stories from Transit Desk"],
+  "expected": {
+    "links_max": 1
+  },
+  "notes": "A report has repeated related-story cards after the conclusion."
+}

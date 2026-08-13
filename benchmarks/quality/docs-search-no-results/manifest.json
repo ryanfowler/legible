@@ -1,0 +1,15 @@
+{
+  "id": "docs-search-no-results",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/docs-search-no-results",
+  "page_shape": "document",
+  "must_include": [
+    "New records can take up to five seconds to appear",
+    "Use the record API when immediate confirmation is required"
+  ],
+  "must_exclude": ["No matching navigation entries"],
+  "expected": {
+    "headings_min": 1
+  },
+  "notes": "A transient no-results message in the navigation must not displace useful search-consistency documentation."
+}

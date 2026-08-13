@@ -1,0 +1,16 @@
+{
+  "id": "go-package-guide",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/go-package-guide",
+  "page_shape": "document",
+  "must_include": [
+    "Package retryqueue schedules bounded retry attempts",
+    "A zero limit disables retries"
+  ],
+  "must_exclude": ["Jump to standard library", "Open package menu"],
+  "expected": {
+    "headings_h2_min": 2,
+    "code_blocks_min": 1
+  },
+  "notes": "A Go package guide has declaration navigation around useful overview and examples."
+}

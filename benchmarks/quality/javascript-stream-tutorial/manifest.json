@@ -1,0 +1,16 @@
+{
+  "id": "javascript-stream-tutorial",
+  "category": "code-heavy",
+  "source_url": "https://example.test/javascript-stream-tutorial",
+  "page_shape": "document",
+  "must_include": [
+    "Decode each chunk with streaming mode enabled",
+    "decoder.decode(chunk, { stream: true })"
+  ],
+  "must_exclude": ["Run this example in our cloud playground"],
+  "expected": {
+    "headings_min": 1,
+    "code_blocks_min": 2
+  },
+  "notes": "A JavaScript tutorial alternates explanation and code while a playground promotion sits outside the lesson."
+}

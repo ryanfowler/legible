@@ -1,0 +1,12 @@
+{
+  "id": "essay-pullquote",
+  "category": "long-form-essay",
+  "source_url": "https://example.test/essay-pullquote",
+  "page_shape": "article",
+  "must_include": [
+    "Maintenance is a promise about the future",
+    "Repair work makes public systems legible"
+  ],
+  "must_exclude": ["Become a sustaining member"],
+  "notes": "An essay must keep a meaningful pull quote but remove a membership appeal."
+}

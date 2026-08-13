@@ -1,0 +1,13 @@
+{
+  "id": "configuration-option-table",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/configuration-option-table",
+  "page_shape": "document",
+  "must_include": ["Maximum jobs processed at one time", "grace_period"],
+  "must_exclude": ["Recommended training courses"],
+  "expected": {
+    "tables_min": 1,
+    "headings_min": 1
+  },
+  "notes": "A configuration reference must retain a multi-row option table."
+}

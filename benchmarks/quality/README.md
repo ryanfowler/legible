@@ -41,7 +41,12 @@ The report also records words, links, link density, headings, images, code block
 
 The schema supports news, blogs, essays, technical and API documentation, code-heavy pages, reference and academic pages, data tables, link indexes, legacy HTML, recipes, discussions, social threads, product support, modern application markup, inline peripheral UI, responsive duplicates, math, and media embeds.
 
-The committed fixtures are small examples of the schema. They are not a representative corpus by themselves. Add diverse, redistributable cases over time.
+The committed corpus currently includes two curated seed batches:
+
+- 27 article and essay cases cover news, blogs, long-form essays, multi-author reports, images, sidebars, newsletters, related stories, promotions, footnotes, and an access-barrier shell.
+- 30 documentation and technical cases cover language and API references, code-heavy guides, callouts, source-present tabs, navigation trees, indexes, version selectors, and tables.
+
+All cases in these two batches use original, minimized content written for this repository. They do not contain captured third-party pages or private data. Future batches must use the same redistribution and privacy rules.
 
 ## Add a real failure
 
@@ -76,3 +81,5 @@ node scripts/compare-defuddle/index.mjs --all --json target/quality-report.json
 ```
 
 The runner invokes Cargo with `--offline`. After the Node and Rust dependencies are present, a benchmark run uses no network access.
+
+The runner exits with a nonzero status when either extractor has a reliability failure. This rule also applies to an intentional comparator difference. For example, Legible correctly returns `NoContent` for the access-barrier shell, but the pinned Defuddle comparator returns the gate prompt. Inspect `report.json` to distinguish a Legible failure from a recorded comparator failure.

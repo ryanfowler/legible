@@ -1,0 +1,16 @@
+{
+  "id": "breaking-news-timeline",
+  "category": "news-article",
+  "source_url": "https://example.test/breaking-news-timeline",
+  "page_shape": "article",
+  "must_include": [
+    "Rail service resumed at 14:20",
+    "The eastern bridge remains closed"
+  ],
+  "must_exclude": ["Most read across the region"],
+  "expected": {
+    "headings_min": 1,
+    "lists_min": 1
+  },
+  "notes": "A breaking-news timeline must retain ordered updates and reject a popular-story rail."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "command-subcommands-index",
+  "category": "api-reference",
+  "source_url": "https://example.test/command-subcommands-index",
+  "page_shape": "listing",
+  "must_include": ["project create", "project inspect", "project archive"],
+  "must_exclude": ["Account shortcuts"],
+  "expected": {
+    "headings_min": 1,
+    "lists_min": 1,
+    "links_min": 3
+  },
+  "notes": "A command index is useful link-heavy content and must not be cleaned as navigation."
+}

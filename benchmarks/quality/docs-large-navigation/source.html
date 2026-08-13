@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Configure request limits</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link rel="canonical" href="https://example.test/docs-large-navigation" />
+  </head>
+  <body>
+    <header>
+      <nav aria-label="Documentation">
+        <ul>
+          <li>
+            <a href="/guides">Guides</a>
+            <ul>
+              <li><a href="/guides/auth">Authentication guide</a></li>
+              <li><a href="/guides/queues">Queue configuration</a></li>
+              <li><a href="/guides/storage">Storage lifecycle</a></li>
+              <li><a href="/guides/network">Private networking</a></li>
+              <li><a href="/guides/limits">Request limits</a></li>
+              <li><a href="/guides/audit">Audit logging</a></li>
+            </ul>
+          </li>
+          <li>
+            <a href="/sdks">SDKs</a>
+            <ul>
+              <li><a href="/sdks/rust">Rust SDK</a></li>
+              <li><a href="/sdks/go">Go SDK</a></li>
+              <li><a href="/sdks/js">JavaScript SDK</a></li>
+              <li><a href="/sdks/python">Python SDK</a></li>
+              <li><a href="/sdks/java">Java SDK</a></li>
+            </ul>
+          </li>
+          <li>
+            <a href="/reference">Reference</a>
+            <ul>
+              <li><a href="/reference/errors">Error codes</a></li>
+              <li><a href="/reference/events">Event types</a></li>
+              <li><a href="/reference/headers">Request headers</a></li>
+              <li><a href="/reference/regions">Service regions</a></li>
+              <li><a href="/reference/quotas">Default quotas</a></li>
+            </ul>
+          </li>
+          <li><a href="/examples">Examples</a></li>
+          <li><a href="/community">Community</a></li>
+          <li><a href="/changelog">Changelog</a></li>
+        </ul>
+      </nav>
+    </header>
+    <div class="docs-layout">
+      <aside>
+        <nav aria-label="On this page">
+          On this page Overview Defaults Exceptions
+        </nav>
+      </aside>
+      <main>
+        <article>
+          <h1>Configure request limits</h1>
+          <p>
+            Set a separate limit for each route group to isolate public and
+            administrative traffic. A route group collects endpoints that have
+            the same cost and trust boundary. This design prevents an expensive
+            export request from consuming the capacity reserved for health
+            checks or administrative recovery.
+          </p>
+          <p>
+            Choose limits from measured service time instead of request count
+            alone. A route that holds a database transaction for two seconds
+            needs a lower concurrency limit than a route that reads a cached
+            status value. Start below the calculated maximum and increase the
+            value only after queue time and memory use remain stable.
+          </p>
+          <h2>Evaluation order</h2>
+          <p>
+            Limits are evaluated before request body parsing. Rejected uploads
+            therefore use minimal memory. The gateway first checks the global
+            connection ceiling, then the route-group concurrency limit, and
+            finally the caller-specific rate policy. It returns the first
+            applicable rejection and does not reserve capacity in later stages.
+          </p>
+          <p>
+            A request keeps its group reservation until the response body is
+            complete. Streaming responses therefore need a dedicated group when
+            clients can hold connections open for a long time. Background work
+            started by a request must use a separate worker limit.
+          </p>
+          <h2>Defaults</h2>
+          <p>
+            The default group accepts one hundred concurrent requests and a
+            burst of twenty new requests per second. The administrative group
+            accepts ten concurrent requests but does not share capacity with the
+            public group. These defaults suit a small deployment with two
+            gateway processes.
+          </p>
+          <p>
+            Define an explicit group for uploads, exports, and long polling.
+            Record rejection counts by group and response code. If a group
+            rejects traffic while worker and database use remain low, confirm
+            that requests are not retaining reservations after cancellation.
+          </p>
+        </article>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "id": "tabbed-code-source",
+  "category": "code-heavy",
+  "source_url": "https://example.test/tabbed-code-source",
+  "page_shape": "document",
+  "must_include": [
+    "Return a stable status field",
+    "func health(w http.ResponseWriter)",
+    "app.get('/health'"
+  ],
+  "must_exclude": ["Open interactive assistant"],
+  "expected": {
+    "headings_min": 2,
+    "code_blocks_min": 2
+  },
+  "notes": "Tabbed examples are all present in source HTML and must remain available without JavaScript."
+}

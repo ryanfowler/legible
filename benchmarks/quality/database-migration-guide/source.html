@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Migrate the events table</title>
+    <meta name="description" content="Original synthetic benchmark fixture" />
+    <link
+      rel="canonical"
+      href="https://example.test/database-migration-guide"
+    />
+  </head>
+  <body>
+    <nav aria-label="Site navigation">Home Topics Account</nav>
+    <main>
+      <article>
+        <h1>Migrate the events table</h1>
+        <h2>Before you start</h2>
+        <p>
+          Verify replica lag before the final rename and keep the previous table
+          for one release.
+        </p>
+        <p>
+          Record the current row count, table size, and oldest replication
+          replay position. Pause schema changes from other deployments until the
+          migration is complete. The copy process assumes that the source
+          columns and triggers remain stable.
+        </p>
+        <p>
+          Confirm that the application can read from either table version. Ship
+          that compatibility change before you start the copy. A migration is
+          not safe when the deployment and data cutover must occur in one step.
+        </p>
+        <h2>Procedure</h2>
+        <ol>
+          <li>Create the new index without blocking writes.</li>
+          <li>
+            Start a copy worker that reads rows in primary-key order and commits
+            small batches.
+          </li>
+          <li>
+            Mirror new inserts and updates through the existing write path.
+          </li>
+          <li>Compare row counts and checksums for completed key ranges.</li>
+          <li>
+            Stop the copy worker only after it reaches the live write position.
+          </li>
+        </ol>
+        <pre><code>CREATE INDEX CONCURRENTLY events_created_at_idx ON events(created_at);</code></pre>
+        <p>
+          Monitor lock wait time while the index is created. A concurrent build
+          avoids a long write lock, but its final validation still needs a short
+          catalog lock. Cancel and retry during a quieter window if that wait
+          approaches the service timeout.
+        </p>
+        <p>
+          After the copy catches up, compare aggregates for several independent
+          key ranges. A matching total row count cannot detect a missing row
+          that is offset by an unexpected duplicate.
+        </p>
+        <h2>Rollback</h2>
+        <p>
+          Restore the old view and stop the copy worker. Keep mirrored writes
+          enabled until all application instances confirm the old table is
+          active again.
+        </p>
+        <p>
+          Do not delete the new table during the incident. Preserve its copy
+          progress and validation records so the team can identify whether the
+          failure came from schema compatibility, replication delay, or the
+          final routing change.
+        </p>
+      </article>
+    </main>
+    <aside>Database consulting services</aside>
+  </body>
+</html>

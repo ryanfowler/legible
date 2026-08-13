@@ -1,0 +1,15 @@
+{
+  "id": "opinion-counterargument",
+  "category": "long-form-essay",
+  "source_url": "https://example.test/opinion-counterargument",
+  "page_shape": "article",
+  "must_include": [
+    "A precise line can hide an imprecise survey",
+    "Uncertainty labels help readers compare evidence"
+  ],
+  "must_exclude": ["More opinions selected for you"],
+  "expected": {
+    "headings_h2_min": 2
+  },
+  "notes": "An opinion essay includes a substantial counterargument that must remain."
+}

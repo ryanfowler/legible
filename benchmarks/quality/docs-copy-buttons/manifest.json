@@ -1,0 +1,16 @@
+{
+  "id": "docs-copy-buttons",
+  "category": "code-heavy",
+  "source_url": "https://example.test/docs-copy-buttons",
+  "page_shape": "document",
+  "must_include": [
+    "Generate a detached signature for each artifact",
+    "minisign -Sm package.tar.zst"
+  ],
+  "must_exclude": ["Copy command", "Copied to clipboard"],
+  "expected": {
+    "headings_h2_min": 2,
+    "code_blocks_min": 2
+  },
+  "notes": "Code-block button labels must not enter extracted commands."
+}

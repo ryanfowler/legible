@@ -1,0 +1,16 @@
+{
+  "id": "error-code-reference",
+  "category": "api-reference",
+  "source_url": "https://example.test/error-code-reference",
+  "page_shape": "reference",
+  "must_include": [
+    "UPLOAD_PART_MISSING",
+    "Retry only after listing stored parts"
+  ],
+  "must_exclude": ["Status dashboard incidents"],
+  "expected": {
+    "headings_h2_min": 2,
+    "code_blocks_min": 1
+  },
+  "notes": "An error reference must retain exact identifiers, causes, and recovery instructions."
+}

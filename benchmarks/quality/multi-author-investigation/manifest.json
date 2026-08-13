@@ -1,0 +1,9 @@
+{
+  "id": "multi-author-investigation",
+  "category": "news-article",
+  "source_url": "https://example.test/multi-author-investigation",
+  "page_shape": "article",
+  "must_include": ["Samples were collected from twelve shoreline sites"],
+  "must_exclude": ["Follow every reporter"],
+  "notes": "A multi-author investigation must resolve its joint byline as normalized metadata without retaining an author-follow card."
+}

@@ -1,0 +1,16 @@
+{
+  "id": "travel-blog-itinerary",
+  "category": "blog-post",
+  "source_url": "https://example.test/travel-blog-itinerary",
+  "page_shape": "article",
+  "must_include": [
+    "Take the ridge trail before the afternoon heat",
+    "The final bus leaves the village at 18:15"
+  ],
+  "must_exclude": ["Sponsored hotel finder"],
+  "expected": {
+    "headings_h2_min": 2,
+    "lists_min": 1
+  },
+  "notes": "A travel post must retain an itinerary list and practical transit details."
+}

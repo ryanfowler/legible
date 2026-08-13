@@ -1,0 +1,17 @@
+{
+  "id": "database-migration-guide",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/database-migration-guide",
+  "page_shape": "document",
+  "must_include": [
+    "Create the new index without blocking writes",
+    "Verify replica lag before the final rename"
+  ],
+  "must_exclude": ["Database consulting services"],
+  "expected": {
+    "headings_h2_min": 3,
+    "lists_min": 1,
+    "code_blocks_min": 1
+  },
+  "notes": "A migration guide must retain ordered, safety-critical steps and rollback guidance."
+}

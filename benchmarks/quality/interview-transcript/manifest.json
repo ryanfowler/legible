@@ -1,0 +1,12 @@
+{
+  "id": "interview-transcript",
+  "category": "blog-post",
+  "source_url": "https://example.test/interview-transcript",
+  "page_shape": "article",
+  "must_include": [
+    "Interviewer: What makes a street tree resilient",
+    "Arun Bell: Soil volume matters more than trunk size"
+  ],
+  "must_exclude": ["Book a consultation with the guest"],
+  "notes": "An interview must retain speaker labels and long answers without a guest promotion card."
+}

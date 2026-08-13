@@ -1,0 +1,10 @@
+{
+  "id": "paywall-access-shell",
+  "category": "news-article",
+  "source_url": "https://example.test/paywall-access-shell",
+  "page_shape": "article",
+  "must_include": [],
+  "must_exclude": ["Create an account to continue"],
+  "expected_failure": true,
+  "notes": "An access-barrier shell contains no article text and must fail instead of returning the paywall prompt."
+}

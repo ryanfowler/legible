@@ -1,0 +1,15 @@
+{
+  "id": "news-analysis-inline-promo",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/news-analysis-inline-promo",
+  "page_shape": "article",
+  "must_include": [
+    "The revised plan moves freight traffic north",
+    "Noise measurements shaped the final route"
+  ],
+  "must_exclude": ["Unlock the full market briefing"],
+  "expected": {
+    "headings_min": 1
+  },
+  "notes": "A long analysis contains an inline subscription card between useful sections."
+}

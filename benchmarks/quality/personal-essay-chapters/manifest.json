@@ -1,0 +1,17 @@
+{
+  "id": "personal-essay-chapters",
+  "category": "long-form-essay",
+  "source_url": "https://example.test/personal-essay-chapters",
+  "page_shape": "article",
+  "must_include": [
+    "The towpath narrowed after the third lock",
+    "At noon I reached a turning basin",
+    "I reached the stone aqueduct before dusk",
+    "The canal is no longer separate from the landscape"
+  ],
+  "must_exclude": ["Popular walks this month"],
+  "expected": {
+    "headings_h2_min": 3
+  },
+  "notes": "A personal essay uses several titled chapters beside a travel recommendation rail."
+}

@@ -1,0 +1,16 @@
+{
+  "id": "photo-essay-captions",
+  "category": "long-form-essay",
+  "source_url": "https://example.test/photo-essay-captions",
+  "page_shape": "article",
+  "must_include": [
+    "Mechanics inspect the propeller before sunrise",
+    "The empty slip reflects the maintenance lights"
+  ],
+  "must_exclude": ["Browse the commercial image library"],
+  "expected": {
+    "figures_min": 2,
+    "images_min": 2
+  },
+  "notes": "A photo essay relies on informative captions and little prose."
+}

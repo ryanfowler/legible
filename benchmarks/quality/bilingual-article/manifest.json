@@ -1,0 +1,12 @@
+{
+  "id": "bilingual-article",
+  "category": "news-article",
+  "source_url": "https://example.test/bilingual-article",
+  "page_shape": "article",
+  "must_include": [
+    "The new programme begins on Monday",
+    "Listeners selected the topics at two public workshops"
+  ],
+  "must_exclude": ["Choose your edition"],
+  "notes": "A bilingual report must retain translated inline phrases without edition-selector chrome."
+}

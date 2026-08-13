@@ -1,0 +1,16 @@
+{
+  "id": "troubleshooting-decision-tree",
+  "category": "product-support",
+  "source_url": "https://example.test/troubleshooting-decision-tree",
+  "page_shape": "document",
+  "must_include": [
+    "Confirm that DNS resolves from the worker host",
+    "If TLS fails, inspect the certificate name"
+  ],
+  "must_exclude": ["Contact sales for priority support"],
+  "expected": {
+    "headings_h2_min": 3,
+    "code_blocks_min": 1
+  },
+  "notes": "A troubleshooting page has conditional branches that must remain in order."
+}

@@ -1,0 +1,15 @@
+{
+  "id": "article-sponsored-insert",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/article-sponsored-insert",
+  "page_shape": "article",
+  "must_include": [
+    "Sensors recorded temperature at five canopy heights",
+    "The lowest branches warmed first"
+  ],
+  "must_exclude": ["Partner message from North Valley Insurance"],
+  "expected": {
+    "headings_min": 1
+  },
+  "notes": "An article includes a clearly labelled sponsored insert between two evidence sections."
+}

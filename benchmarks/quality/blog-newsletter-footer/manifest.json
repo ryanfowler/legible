@@ -1,0 +1,15 @@
+{
+  "id": "blog-newsletter-footer",
+  "category": "blog-post",
+  "source_url": "https://example.test/blog-newsletter-footer",
+  "page_shape": "article",
+  "must_include": [
+    "A dense foam layer reduced the case resonance",
+    "Lubricating the stabilizers removed the remaining rattle"
+  ],
+  "must_exclude": ["Join forty thousand keyboard readers"],
+  "expected": {
+    "headings_min": 1
+  },
+  "notes": "A technical blog post ends with a newsletter form that is not part of the article."
+}
