@@ -1,0 +1,8 @@
+{
+  "title": "Reliable metadata",
+  "description": "A concise compatibility summary.",
+  "authors": ["Ada Example"],
+  "site_name": "Example Docs",
+  "canonical_url": "https://example.test/guides/metadata",
+  "published_time": "2025-03-04"
+}

@@ -532,6 +532,49 @@ pub(crate) fn select_content_root<'a>(
         }
     }
 
+    // A compact code article can rank only its code wrappers as strong
+    // branches. Keep the article when it has one lead heading and no semantic
+    // subsection that could contain unrelated content.
+    if !branches.is_empty()
+        && candidates.is_authoritative_semantic(dom, selected)
+        && candidates.get(selected).is_some_and(|candidate| {
+            candidate.features.code_block_count > 0
+                && candidate.features.heading_count == 1
+                && candidate.features.link_density <= 0.2
+                && candidate.features.text_chars <= 10_000
+        })
+        && dom.element_children(selected).next().is_some_and(|child| {
+            matches!(
+                dom.tag(child),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            )
+        })
+        && dom.element_children(selected).all(|child| {
+            matches!(
+                dom.tag(child),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P | Tag::Pre)
+            ) || !matches!(
+                dom.tag(child),
+                Some(Tag::Article | Tag::Aside | Tag::Main | Tag::Nav | Tag::Section)
+            ) && dom
+                .descendants(child)
+                .any(|descendant| dom.tag(descendant) == Some(Tag::Pre))
+        })
+        && branches.iter().all(|&branch| {
+            !std::iter::once(branch)
+                .chain(dom.descendants(branch))
+                .any(|node| {
+                    matches!(
+                        dom.tag(node),
+                        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+                    )
+                })
+        })
+    {
+        branches.clear();
+        reason = RootSelectionReason::CompleteAncestor;
+    }
+
     RootSelection {
         node: selected,
         reason,

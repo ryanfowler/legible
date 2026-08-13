@@ -1352,7 +1352,10 @@ fn remove_direct_peripheral_children(
             links = links.saturating_add(sibling_links).min(3);
             end = index + offset + 1;
         }
-        if links >= 2 {
+        if links >= 2
+            && (!has_heading_text(dom, child, "next steps")
+                || has_repeated_link_cards_in_nodes(dom, &children[index + 1..=end]))
+        {
             remove[index..=end].fill(true);
         }
     }
@@ -1447,6 +1450,7 @@ fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
             | "recommended"
             | "recommended reading"
             | "read next"
+            | "next steps"
             | "more stories"
             | "more articles"
             | "more posts"
@@ -1780,17 +1784,25 @@ fn related_heading_signal_in(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
         .unwrap_or(RelatedHeadingSignal::None)
 }
 
+fn heading_text_equals(dom: &Dom, node: NodeId, expected: &str) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+    ) && {
+        let mut text = String::new();
+        dom.append_normalized_text(node, &mut text);
+        text.trim().eq_ignore_ascii_case(expected)
+    }
+}
+
+fn has_heading_text(dom: &Dom, node: NodeId, expected: &str) -> bool {
+    std::iter::once(node)
+        .chain(dom.descendants(node))
+        .any(|descendant| heading_text_equals(dom, descendant, expected))
+}
+
 fn has_academic_related_heading(dom: &Dom, node: NodeId) -> bool {
-    dom.descendants(node).any(|descendant| {
-        matches!(
-            dom.tag(descendant),
-            Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-        ) && {
-            let mut text = String::new();
-            dom.append_normalized_text(descendant, &mut text);
-            text.trim().eq_ignore_ascii_case("related work")
-        }
-    })
+    has_heading_text(dom, node, "related work")
 }
 
 fn linked_short_child_count(dom: &Dom, parent: NodeId) -> usize {
@@ -1821,6 +1833,54 @@ fn has_repeated_link_cards(dom: &Dom, node: NodeId) -> bool {
     })
 }
 
+fn has_repeated_link_cards_in_nodes(dom: &Dom, nodes: &[NodeId]) -> bool {
+    let direct_anchors = |parent| {
+        dom.element_children(parent)
+            .filter(|&child| {
+                dom.tag(child) == Some(Tag::A) && dom.normalized_char_count(child) <= 240
+            })
+            .take(3)
+            .count()
+    };
+    nodes
+        .iter()
+        .filter(|&&node| dom.tag(node) == Some(Tag::A) && dom.normalized_char_count(node) <= 240)
+        .take(3)
+        .count()
+        >= 2
+        || nodes.iter().any(|&container| {
+            matches!(
+                dom.tag(container),
+                Some(Tag::Div | Tag::Ol | Tag::Section | Tag::Ul)
+            ) && direct_anchors(container) >= 2
+        })
+}
+
+fn has_next_steps_card_siblings(dom: &Dom, node: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(dom.descendants(node))
+        .filter(|&heading| heading_text_equals(dom, heading, "next steps"))
+        .any(|heading| {
+            let Some(parent) = dom.parent(heading) else {
+                return false;
+            };
+            let siblings: SmallVec<[NodeId; 16]> = dom.element_children(parent).collect();
+            let Some(start) = siblings.iter().position(|&sibling| sibling == heading) else {
+                return false;
+            };
+            let end = siblings[start + 1..]
+                .iter()
+                .position(|&sibling| {
+                    matches!(
+                        dom.tag(sibling),
+                        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+                    )
+                })
+                .map_or(siblings.len(), |offset| start + 1 + offset);
+            has_repeated_link_cards_in_nodes(dom, &siblings[start + 1..end])
+        })
+}
+
 fn is_related_content(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
     if metrics.links < 2 || has_academic_related_heading(dom, node) {
         return false;
@@ -1833,15 +1893,19 @@ fn is_related_content(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) 
     if heading == RelatedHeadingSignal::None && !named && !related_text_signal(metrics.text) {
         return false;
     }
-    // Preserve the established cleanup behavior for short, explicitly named
-    // related blocks. Academic "Related Work" sections remain excluded.
+    let repeated_cards = has_repeated_link_cards(dom, node);
+    // "Next Steps" is also a common instructional heading. Require card
+    // structure before treating a short section with this heading as related
+    // content. Other explicit related labels keep the established behavior.
     if metrics.short && metrics.link_density >= 0.2 {
+        if has_heading_text(dom, node, "next steps") {
+            return has_next_steps_card_siblings(dom, node);
+        }
         return true;
     }
     if metrics.stats.text_length >= 1_200 {
         return false;
     }
-    let repeated_cards = has_repeated_link_cards(dom, node);
     let non_link_chars = f64::from(metrics.stats.text_length) * (1.0 - metrics.link_density);
     let sparse_text = non_link_chars <= 320.0 && metrics.stats.sentence_end_count <= 7;
 
@@ -2586,6 +2650,53 @@ mod tests {
             "Sponsored",
         ] {
             assert!(!text.contains(clutter), "retained {clutter}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_distinguishes_next_step_cards_from_instructions() {
+        let cards = clean_fragment(
+            r#"<article><p>Primary documentation remains.</p><h2>Next Steps</h2><div class="card-group"><a href="/one">Setup guide</a><a href="/two">Deployment guide</a></div></article>"#,
+        );
+        assert!(cards.contains("Primary documentation"), "{cards}");
+        assert!(!cards.contains("Setup guide"), "{cards}");
+
+        let instructions = clean_fragment(
+            r#"<article><p>Primary documentation remains.</p><section><h2>Next Steps</h2><p>Follow the <a href="/setup">setup procedure</a>.</p><p>Then use the <a href="/deploy">deployment procedure</a>.</p></section></article>"#,
+        );
+        assert!(instructions.contains("Next Steps"), "{instructions}");
+        assert!(instructions.contains("setup procedure"), "{instructions}");
+        assert!(
+            instructions.contains("deployment procedure"),
+            "{instructions}"
+        );
+
+        let unrelated_cards = clean_fragment(
+            r#"<article><div class="card-group"><a href="/one">Earlier card</a><a href="/two">Another card</a></div><p>Primary documentation remains.</p><h2>Next Steps</h2><p>Follow the <a href="/setup">setup procedure</a>.</p><p>Then use the <a href="/deploy">deployment procedure</a>.</p></article>"#,
+        );
+        assert!(unrelated_cards.contains("Next Steps"), "{unrelated_cards}");
+        assert!(
+            unrelated_cards.contains("setup procedure"),
+            "{unrelated_cards}"
+        );
+
+        for list in ["ol", "ul"] {
+            let html = format!(
+                r#"<article><p>Primary documentation remains.</p><section><h2>Next Steps</h2><{list}><li>Open the <a href="/setup">setup guide</a>.</li><li>Run the <a href="/deploy">deployment procedure</a>.</li></{list}></section></article>"#
+            );
+            let instructions = clean_fragment(&html);
+            assert!(
+                instructions.contains("Next Steps"),
+                "{list}: {instructions}"
+            );
+            assert!(
+                instructions.contains("setup guide"),
+                "{list}: {instructions}"
+            );
+            assert!(
+                instructions.contains("deployment procedure"),
+                "{list}: {instructions}"
+            );
         }
     }
 
