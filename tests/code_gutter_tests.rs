@@ -30,8 +30,8 @@ fn strips_line_number_gutters_from_imported_highlighter_fixtures() {
     ];
 
     for directory in fixtures {
-        let source = fs::read_to_string(format!("{directory}/source.xfail.html"))
-            .expect("fixture source exists");
+        let source =
+            fs::read_to_string(format!("{directory}/source.html")).expect("fixture source exists");
         let expected = fs::read_to_string(format!("{directory}/expected.md"))
             .expect("fixture expected output exists");
         let markdown = extract(&source, Some("https://example.test/defuddle-fixture"))

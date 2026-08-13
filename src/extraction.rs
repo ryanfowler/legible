@@ -623,6 +623,26 @@ impl<'a> ContentExtractor<'a> {
                         }
                     }
                 }
+                // A compact semantic article can lose its lead heading when a
+                // syntax-highlighted wrapper wins readability scoring. Promote
+                // to that boundary only when it is small, link-light, and the
+                // omitted prefix is a heading with at most one lead paragraph.
+                if selection.reason == RootSelectionReason::Ranked
+                    && (self.dom.tag(top_id) == Some(Tag::Pre)
+                        || self
+                            .dom
+                            .descendants(top_id)
+                            .any(|node| self.dom.tag(node) == Some(Tag::Pre)))
+                    && let Some(article) = self.dom.ancestors(top_id).take(8).find(|&ancestor| {
+                        matches!(self.dom.tag(ancestor), Some(Tag::Article | Tag::Main))
+                            && self.dom.normalized_char_count(ancestor) <= 10_000
+                    })
+                    && has_compact_code_page_structure(&self.dom, article)
+                    && (has_compact_code_lead(&self.dom, article, top_id)
+                        || has_line_number_table_marker(&self.dom, top_id))
+                {
+                    top_id = article;
+                }
                 if !self.node_data.has(top_id) {
                     initialize_node(
                         &self.dom,
@@ -1936,6 +1956,106 @@ impl<'a> ContentExtractor<'a> {
         self.node_data.clear();
     }
 }
+fn has_line_number_table_marker(dom: &Dom, root: NodeId) -> bool {
+    std::iter::once(root)
+        .chain(dom.descendants(root))
+        .any(|node| {
+            dom.tag(node) == Some(Tag::Table)
+                && [AttrName::Class, AttrName::Id]
+                    .into_iter()
+                    .filter_map(|attribute| dom.attr(node, attribute))
+                    .flat_map(str::split_whitespace)
+                    .any(|token| {
+                        matches!(
+                            token.to_ascii_lowercase().as_str(),
+                            "lntable" | "highlighttable" | "rouge-table" | "rouge-line-table"
+                        )
+                    })
+        })
+}
+
+fn has_compact_code_page_structure(dom: &Dom, ancestor: NodeId) -> bool {
+    let mut headings = std::iter::once(ancestor)
+        .chain(dom.descendants(ancestor))
+        .filter(|&node| {
+            matches!(
+                dom.tag(node),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            )
+        });
+    if headings.next().is_none() || headings.next().is_some() {
+        return false;
+    }
+    if !dom.element_children(ancestor).next().is_some_and(|child| {
+        matches!(
+            dom.tag(child),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        )
+    }) {
+        return false;
+    }
+    if !dom.element_children(ancestor).all(|child| {
+        matches!(
+            dom.tag(child),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P | Tag::Pre)
+        ) || !matches!(
+            dom.tag(child),
+            Some(Tag::Article | Tag::Aside | Tag::Main | Tag::Nav | Tag::Section)
+        ) && dom
+            .descendants(child)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::Pre))
+    }) {
+        return false;
+    }
+
+    let text_chars = dom.normalized_char_count(ancestor).max(1);
+    let link_chars: usize = dom
+        .descendants(ancestor)
+        .filter(|&node| dom.tag(node) == Some(Tag::A))
+        .map(|node| dom.normalized_char_count(node))
+        .sum();
+    link_chars.saturating_mul(5) <= text_chars
+}
+
+fn has_compact_code_lead(dom: &Dom, ancestor: NodeId, selected: NodeId) -> bool {
+    let mut branch = selected;
+    for parent in dom.ancestors(selected) {
+        if parent == ancestor {
+            break;
+        }
+        branch = parent;
+    }
+
+    let mut previous = dom.prev_sibling(branch);
+    let mut substantive = SmallVec::<[NodeId; 2]>::new();
+    while let Some(node) = previous {
+        if dom.is_element(node) {
+            substantive.push(node);
+            if substantive.len() > 2 {
+                return false;
+            }
+        } else if dom
+            .text_node(node)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return false;
+        }
+        previous = dom.prev_sibling(node);
+    }
+    substantive.reverse();
+    matches!(
+        substantive.as_slice(),
+        [heading]
+            if matches!(dom.tag(*heading), Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4))
+    ) || matches!(
+        substantive.as_slice(),
+        [heading, lead]
+            if matches!(dom.tag(*heading), Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4))
+                && dom.tag(*lead) == Some(Tag::P)
+                && dom.normalized_char_count(*lead) <= 240
+    )
+}
+
 fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bool {
     let mut sibling = dom.next_sibling(candidate);
     let mut intervening_elements = 0_u8;
