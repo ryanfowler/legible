@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Inline boundaries</title>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>Inline boundaries</h1>
+        <p>
+          This article explains how a serializer should retain readable boundaries when a page
+          splits visible text across links, labels, and formatting elements.
+        </p>
+        <div class="action-links">
+          <a href="/home">Home</a><a href="/journal">Journal</a><a href="/careers">Careers</a>
+        </div>
+        <p><strong>Move anything</strong><span>Drag the headline out of place.</span></p>
+        <p>Use <code>DES AAPL</code><span>or</span><code>TOP</code> when you search.</p>
+        <p>left<a href="/empty"></a><a href="/blank"><span></span></a>right.</p>
+        <section class="card-grid">
+          <div class="card">
+            <h2>Card title</h2>
+            <p>Card description remains a separate block from the title.</p>
+          </div>
+          <div class="card">
+            <h2>Next tile</h2>
+            <p>The next tile keeps its own block boundary.</p>
+          </div>
+        </section>
+      </article>
+    </main>
+  </body>
+</html>

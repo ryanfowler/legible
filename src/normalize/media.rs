@@ -188,7 +188,7 @@ mod tests {
         normalize(&mut dom, root);
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
-            "[YouTube video](https://www.youtube.com/watch?v=abc)[Video](movie.mp4)[Audio](sound.mp3)[Embedded content](/frame)\n"
+            "[YouTube video](https://www.youtube.com/watch?v=abc) [Video](movie.mp4) [Audio](sound.mp3) [Embedded content](/frame)\n"
         );
         let html = crate::dom::render_html(&dom, root, 0);
         assert!(!html.contains("srcdoc"));
@@ -234,7 +234,7 @@ mod tests {
         normalize(&mut dom, root);
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
-            "[Embedded content](https://notyoutube.com/embed/id)[Embedded content](https://example.test/youtube.com/embed/id)\n"
+            "[Embedded content](https://notyoutube.com/embed/id) [Embedded content](https://example.test/youtube.com/embed/id)\n"
         );
     }
 
@@ -261,7 +261,7 @@ mod tests {
         normalize(&mut dom, root);
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
-            "[Embedded content](/frame)[Video](movie.mp4)\n"
+            "[Embedded content](/frame) [Video](movie.mp4)\n"
         );
     }
 
@@ -276,7 +276,7 @@ mod tests {
         normalize(&mut dom, root);
         assert_eq!(
             dom_to_markdown(&dom, root, 0),
-            "[Embedded content](/frame)[Audio](sound.mp3)\n"
+            "[Embedded content](/frame) [Audio](sound.mp3)\n"
         );
     }
 
