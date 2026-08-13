@@ -83,6 +83,16 @@ impl DiscussionBuilder {
 
     /// Imports rich primary-post content into its canonical body wrapper.
     pub(super) fn append_primary_body(&mut self, source: &Dom, body: NodeId) -> bool {
+        self.append_primary_body_filtered(source, body, |_| true)
+    }
+
+    /// Imports primary content while omitting known peripheral top-level nodes.
+    pub(super) fn append_primary_body_filtered(
+        &mut self,
+        source: &Dom,
+        body: NodeId,
+        mut retain: impl FnMut(NodeId) -> bool,
+    ) -> bool {
         let Some(primary) = self.primary_article() else {
             return false;
         };
@@ -90,7 +100,7 @@ impl DiscussionBuilder {
             return false;
         };
         self.dom.set_attr(content, AttrName::DataLegibleBody, "");
-        import_children(source, body, &mut self.dom, content)
+        self.import_filtered_children(source, body, content, &mut retain)
     }
 
     /// Sets the heading used for the reply section.
@@ -116,6 +126,18 @@ impl DiscussionBuilder {
         author: Option<&str>,
         time: Option<&str>,
         body: Option<NodeId>,
+    ) -> Option<()> {
+        self.append_reply_filtered(source, depth, author, time, body, |_| true)
+    }
+
+    pub(super) fn append_reply_filtered(
+        &mut self,
+        source: &Dom,
+        depth: usize,
+        author: Option<&str>,
+        time: Option<&str>,
+        body: Option<NodeId>,
+        mut retain: impl FnMut(NodeId) -> bool,
     ) -> Option<()> {
         let depth = depth.min(MAX_REPLY_DEPTH);
         if self.retained_at_depth.len() > depth {
@@ -150,7 +172,7 @@ impl DiscussionBuilder {
         let content = create_element(&mut self.dom, item, Tag::Div)?;
         self.dom
             .set_attr(content, AttrName::DataLegibleReplyBody, "");
-        if !import_children(source, body, &mut self.dom, content) {
+        if !self.import_filtered_children(source, body, content, &mut retain) {
             return None;
         }
         self.retained_at_depth.push(Some(ReplyFrame {
@@ -229,6 +251,25 @@ impl DiscussionBuilder {
             }
         }
         Some(())
+    }
+
+    fn import_filtered_children(
+        &mut self,
+        source: &Dom,
+        source_root: NodeId,
+        destination: NodeId,
+        retain: &mut impl FnMut(NodeId) -> bool,
+    ) -> bool {
+        for child in source.children(source_root) {
+            if !retain(child) {
+                continue;
+            }
+            let Ok(child) = self.dom.import_subtree(source, child) else {
+                return false;
+            };
+            self.dom.append_child(destination, child);
+        }
+        true
     }
 }
 

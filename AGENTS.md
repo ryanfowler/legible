@@ -58,6 +58,7 @@ The extraction pipeline flows through these stages:
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
 | `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
+| `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
