@@ -1,4 +1,4 @@
-TorontoFull-time
+Toronto Full-time
 
 Connect directly with founders of the best YC-funded startups.
 

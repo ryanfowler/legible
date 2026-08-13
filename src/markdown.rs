@@ -4,6 +4,7 @@
 //! Rust call stack.
 
 use smallvec::SmallVec;
+use std::collections::HashMap;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
@@ -31,10 +32,11 @@ impl Default for MarkdownConfig {
 }
 
 trait MarkdownTree {
-    type Node: Copy + Eq;
+    type Node: Copy + Eq + std::hash::Hash;
 
     fn first_child(&self, node: Self::Node) -> Option<Self::Node>;
     fn next_sibling(&self, node: Self::Node) -> Option<Self::Node>;
+    fn parent(&self, node: Self::Node) -> Option<Self::Node>;
     fn tag(&self, node: Self::Node) -> Option<Tag>;
     fn text_node(&self, node: Self::Node) -> Option<&str>;
     fn is_comment(&self, node: Self::Node) -> bool;
@@ -91,6 +93,9 @@ impl MarkdownTree for Dom {
     fn next_sibling(&self, node: NodeId) -> Option<NodeId> {
         self.next_sibling(node)
     }
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.parent(node)
+    }
     fn tag(&self, node: NodeId) -> Option<Tag> {
         self.tag(node)
     }
@@ -144,6 +149,7 @@ enum Task<N> {
     Siblings(N, Mode),
     InlineRun(N, RunKind),
     FormatChildren(N, RunKind),
+    MarkTextBoundary,
     Close(Close<N>),
     ListItems(N, i32, u32),
     ListItem(N, ListMarker),
@@ -197,6 +203,8 @@ struct MarkdownSerializer<'a, T: MarkdownTree> {
     list_depth: usize,
     table_rows: SmallVec<[usize; 4]>,
     table_gfm: SmallVec<[bool; 4]>,
+    visible_content: HashMap<T::Node, bool>,
+    formatting_ancestor: HashMap<T::Node, bool>,
     config: MarkdownConfig,
 }
 
@@ -211,6 +219,8 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             list_depth: 0,
             table_rows: SmallVec::new(),
             table_gfm: SmallVec::new(),
+            visible_content: HashMap::new(),
+            formatting_ancestor: HashMap::new(),
             config,
         }
     }
@@ -239,6 +249,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 }
                 Task::InlineRun(id, kind) => self.inline_run(id, kind),
                 Task::FormatChildren(id, kind) => self.format_children(id, kind),
+                Task::MarkTextBoundary => self.out.mark_inline_boundary(),
                 Task::Close(close) => self.close(close),
                 Task::ListItems(id, start, index) => self.list_items(id, start, index),
                 Task::ListItem(id, marker) => self.list_item(id, marker),
@@ -276,6 +287,85 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             }
         }
         false
+    }
+
+    fn has_visible_inline_content(&mut self, root: T::Node) -> bool {
+        if let Some(&visible) = self.visible_content.get(&root) {
+            return visible;
+        }
+
+        let mut nodes = SmallVec::<[(T::Node, bool); 32]>::new();
+        nodes.push((root, false));
+        while let Some((node, visited)) = nodes.pop() {
+            if self.visible_content.contains_key(&node) {
+                continue;
+            }
+            if visited {
+                let mut visible = self
+                    .dom
+                    .text_node(node)
+                    .is_some_and(has_visible_inline_text);
+                if !visible && self.dom.tag(node) != Some(Tag::Template) {
+                    let mut child = self.dom.first_child(node);
+                    while let Some(current) = child {
+                        visible |= self.visible_content.get(&current).copied().unwrap_or(false);
+                        child = self.dom.next_sibling(current);
+                    }
+                }
+                self.visible_content.insert(node, visible);
+            } else {
+                nodes.push((node, true));
+                if self.dom.tag(node) != Some(Tag::Template) {
+                    let mut child = self.dom.first_child(node);
+                    while let Some(current) = child {
+                        if !self.visible_content.contains_key(&current) {
+                            nodes.push((current, false));
+                        }
+                        child = self.dom.next_sibling(current);
+                    }
+                }
+            }
+        }
+        self.visible_content.get(&root).copied().unwrap_or(false)
+    }
+
+    fn has_formatting_ancestor(&mut self, node: T::Node) -> bool {
+        if let Some(&formatting) = self.formatting_ancestor.get(&node) {
+            return formatting;
+        }
+
+        let mut path = SmallVec::<[T::Node; 16]>::new();
+        let mut ancestor = self.dom.parent(node);
+        let mut formatting = false;
+        while let Some(id) = ancestor {
+            if let Some(&cached) = self.formatting_ancestor.get(&id) {
+                formatting = cached;
+                break;
+            }
+            path.push(id);
+            if matches!(
+                self.dom.tag(id),
+                Some(Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Code | Tag::Sub | Tag::Sup)
+            ) {
+                formatting = true;
+                break;
+            }
+            ancestor = self.dom.parent(id);
+        }
+        self.formatting_ancestor.insert(node, formatting);
+        for id in path {
+            self.formatting_ancestor.insert(id, formatting);
+        }
+        formatting
+    }
+
+    fn inline_container(&mut self, id: T::Node) {
+        let boundary = self.has_visible_inline_content(id) && !self.has_formatting_ancestor(id);
+        if boundary {
+            self.out.mark_inline_boundary();
+            self.tasks.push(Task::MarkTextBoundary);
+        }
+        self.push_children(id, Mode::Inline);
     }
 
     fn push_children(&mut self, id: T::Node, mode: Mode) {
@@ -384,13 +474,16 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             Tag::Ul | Tag::Ol => self.list(id, tag == Tag::Ol),
             Tag::Pre => self.code_block(id),
             Tag::A => {
-                if self.config.links
+                let linked = self.config.links
                     && self
                         .dom
                         .attr(id, AttrName::Href)
                         .and_then(|href| safe_destination(href, DestinationKind::Link))
-                        .is_some()
-                {
+                        .is_some();
+                if linked {
+                    if self.has_visible_inline_content(id) && !self.has_formatting_ancestor(id) {
+                        self.out.mark_inline_boundary();
+                    }
                     self.out.open_marker("[");
                     self.tasks.push(Task::Close(Close::Link(id)));
                 }
@@ -401,6 +494,8 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             Tag::Strong | Tag::B => self.format(id, RunKind::Strong),
             Tag::Em | Tag::I => self.format(id, RunKind::Emphasis),
             Tag::Code => self.code_span(id),
+            Tag::Span => self.inline_container(id),
+            Tag::Sub | Tag::Sup => self.push_children(id, Mode::Inline),
             Tag::Table => {
                 self.out.ensure_blank_line();
                 self.table_rows.push(0);
@@ -417,8 +512,15 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
 
     fn format(&mut self, id: T::Node, kind: RunKind) {
         let marker = kind.marker().expect("formatting element has a marker");
+        let boundary = self.has_visible_inline_content(id);
+        if boundary {
+            self.out.mark_inline_boundary();
+        }
         self.out.open_marker(marker);
         self.tasks.push(Task::Close(Close::Marker(kind)));
+        if boundary {
+            self.tasks.push(Task::MarkTextBoundary);
+        }
         if let Some(child) = self.dom.first_child(id) {
             self.tasks.push(Task::FormatChildren(child, kind));
         }
@@ -500,14 +602,24 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             return;
         }
 
-        let marker = kind.marker().expect("formatting run has a marker");
-        self.out.open_marker(marker);
-        self.tasks.push(Task::Close(Close::Marker(kind)));
         let mut nodes = SmallVec::<[T::Node; 4]>::new();
         let mut current = Some(first);
         while let Some(id) = current.filter(|&id| self.run_kind(id) == Some(kind)) {
             nodes.push(id);
             current = self.dom.next_sibling(id);
+        }
+        let boundary = nodes
+            .iter()
+            .copied()
+            .any(|id| self.has_visible_inline_content(id));
+        let marker = kind.marker().expect("formatting run has a marker");
+        if boundary {
+            self.out.mark_inline_boundary();
+        }
+        self.out.open_marker(marker);
+        self.tasks.push(Task::Close(Close::Marker(kind)));
+        if boundary {
+            self.tasks.push(Task::MarkTextBoundary);
         }
         for id in nodes.into_iter().rev() {
             if let Some(child) = self.dom.first_child(id) {
@@ -752,6 +864,10 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         self.out.mark_list_item_content();
         let fence_len = scan.longest_backtick_run + 1;
         let pad = scan.starts_with_backtick || scan.ends_with_backtick;
+        if scan.has_content {
+            self.out.mark_inline_boundary();
+            self.out.prepare_inline_boundary(scan.first_char);
+        }
         self.out.markup_repeat('`', fence_len);
         if pad {
             self.out.verbatim(" ");
@@ -769,6 +885,10 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             self.out.verbatim(" ");
         }
         self.out.markup_repeat('`', fence_len);
+        if !writer.empty {
+            self.out.last_text_char = writer.last_char;
+            self.out.mark_inline_boundary();
+        }
     }
 
     fn code_block(&mut self, id: T::Node) {
@@ -858,7 +978,10 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                 let marker = kind.marker().expect("formatting close has a marker");
                 self.out.close_marker(marker, marker);
             }
-            Close::TableCellSeparator => self.out.markup(" | "),
+            Close::TableCellSeparator => {
+                self.out.markup(" | ");
+                self.out.last_text_char = None;
+            }
             Close::TableRow => {
                 self.out.markup(" |");
                 self.out.newline();
@@ -896,6 +1019,9 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                     }
                     self.out.markup(")");
                     self.out.pending_space = trailing_space;
+                    if self.has_visible_inline_content(id) && !self.has_formatting_ancestor(id) {
+                        self.out.mark_inline_boundary();
+                    }
                 }
             }
             Close::Quote => {
@@ -935,6 +1061,8 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
 struct Output {
     value: String,
     pending_space: bool,
+    last_text_char: Option<char>,
+    inline_boundary: bool,
     line_start: bool,
     trailing_newlines: usize,
     prefixes: SmallVec<[Prefix; 8]>,
@@ -966,6 +1094,8 @@ impl Output {
         Self {
             value: String::with_capacity(capacity.max(512)),
             pending_space: false,
+            last_text_char: None,
+            inline_boundary: false,
             line_start: true,
             trailing_newlines: 0,
             prefixes: SmallVec::new(),
@@ -1026,7 +1156,7 @@ impl Output {
             if prepared {
                 self.flush_space();
             } else {
-                self.prepare_text();
+                self.prepare_text(ch);
                 prepared = true;
             }
 
@@ -1050,6 +1180,7 @@ impl Output {
                 self.value.push('\\');
             }
             self.value.push(ch);
+            self.last_text_char = Some(ch);
         }
     }
 
@@ -1069,7 +1200,7 @@ impl Output {
             if prepared {
                 self.flush_space();
             } else {
-                self.prepare_text();
+                self.prepare_text(bytes[index] as char);
                 prepared = true;
             }
             self.ascii_text_run(text, &mut index);
@@ -1099,6 +1230,8 @@ impl Output {
                 self.value.push_str(&text[digits_start..*index]);
                 self.line_text_state = LineTextState::Digits;
                 if *index == bytes.len() || bytes[*index].is_ascii_whitespace() {
+                    self.last_text_char =
+                        bytes.get(index.saturating_sub(1)).copied().map(char::from);
                     return;
                 }
                 self.line_text_state = LineTextState::Other;
@@ -1119,13 +1252,35 @@ impl Output {
             *index += 1;
         }
         self.value.push_str(&text[copy_start..*index]);
+        self.last_text_char = bytes.get(index.saturating_sub(1)).copied().map(char::from);
     }
 
-    fn prepare_text(&mut self) {
+    fn prepare_text(&mut self, first: char) {
+        self.prepare_inline_boundary(Some(first));
         self.prefix();
         self.flush_space();
         self.open_pending_markers();
         self.mark_list_item_content();
+    }
+
+    fn prepare_inline_boundary(&mut self, first: Option<char>) {
+        if !self.inline_boundary {
+            return;
+        }
+        self.inline_boundary = false;
+        if self.pending_space || self.line_start {
+            return;
+        }
+        if let (Some(previous), Some(first)) = (self.last_text_char, first)
+            && is_word_like(previous)
+            && is_word_like(first)
+        {
+            self.pending_space = true;
+        }
+    }
+
+    fn mark_inline_boundary(&mut self) {
+        self.inline_boundary = true;
     }
 
     fn push_ascii_text_byte(&mut self, byte: u8, escape_line_marker: bool) {
@@ -1269,6 +1424,8 @@ impl Output {
 
     fn newline(&mut self) {
         self.pending_space = false;
+        self.last_text_char = None;
+        self.inline_boundary = false;
         if self.line_start {
             let prefix_start = self.value.len();
             for prefix in &self.prefixes {
@@ -1403,6 +1560,7 @@ struct CollapsedText {
     starts_with_backtick: bool,
     ends_with_backtick: bool,
     has_content: bool,
+    first_char: Option<char>,
     pending_whitespace: bool,
 }
 
@@ -1416,6 +1574,7 @@ impl CollapsedText {
             }
             if !self.has_content {
                 self.starts_with_backtick = !self.pending_whitespace && ch == '`';
+                self.first_char = Some(ch);
                 self.has_content = true;
             }
             self.ends_with_backtick = ch == '`';
@@ -1434,6 +1593,7 @@ impl CollapsedText {
 struct CollapsedTextWriter {
     empty: bool,
     pending_whitespace: bool,
+    last_char: Option<char>,
 }
 
 impl Default for CollapsedTextWriter {
@@ -1441,6 +1601,7 @@ impl Default for CollapsedTextWriter {
         Self {
             empty: true,
             pending_whitespace: false,
+            last_char: None,
         }
     }
 }
@@ -1457,6 +1618,7 @@ impl CollapsedTextWriter {
             }
             out.push(ch);
             self.empty = false;
+            self.last_char = Some(ch);
             self.pending_whitespace = false;
         }
     }
@@ -1465,6 +1627,10 @@ impl CollapsedTextWriter {
 fn decimal_len(value: i32) -> usize {
     debug_assert!(value > 0);
     value.ilog10() as usize + 1
+}
+
+fn is_word_like(value: char) -> bool {
+    value.is_alphanumeric()
 }
 
 #[cfg(test)]
@@ -1574,7 +1740,7 @@ mod tests {
             markdown(
                 "<p><strong>one</strong><b>two</b><em>three</em><i>four</i><code>a</code><code>b</code></p>"
             ),
-            "**onetwo***threefour*`ab`\n"
+            "**onetwo** *threefour* `ab`\n"
         );
         assert_eq!(
             markdown("<p>before <b></b><i> </i> after</p>"),
@@ -1583,6 +1749,32 @@ mod tests {
         assert_eq!(
             markdown("<p><abbr>abbr</abbr> <del>deleted</del> H<sub>2</sub>O x<sup>2</sup></p>"),
             "abbr deleted H2O x2\n"
+        );
+    }
+
+    #[test]
+    fn inserts_spaces_at_word_boundaries_between_inline_nodes() {
+        assert_eq!(
+            markdown(concat!(
+                "<p><strong>Move anything</strong><span>Drag the headline out of place.</span></p>",
+                "<p><a href=\"/home\">Home</a><a href=\"/journal\">Journal</a><a href=\"/careers\">Careers</a></p>",
+                "<p>Use <code>DES AAPL</code><span>or</span><code>TOP</code>.</p>",
+                "<p>Keep foo<span>!</span>bar and <a href=\"/search?q=one+two\">results</a> together.</p>",
+                "<p>foo<span></span>bar and <strong>joined<span>text</span></strong>.</p>",
+                "<p>H<sub>2<span>x</span></sub>O remains compact.</p>",
+                "<div><span>Card title</span><span>Card description</span></div>",
+                "<div>Next tile</div>",
+            )),
+            concat!(
+                "**Move anything** Drag the headline out of place.\n\n",
+                "[Home](/home) [Journal](/journal) [Careers](/careers)\n\n",
+                "Use `DES AAPL` or `TOP`.\n\n",
+                "Keep foo\\!bar and [results](/search?q=one+two) together.\n\n",
+                "foobar and **joinedtext**.\n\n",
+                "H2xO remains compact.\n\n",
+                "Card title Card description\n\n",
+                "Next tile\n",
+            )
         );
     }
 

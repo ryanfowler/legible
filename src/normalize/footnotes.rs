@@ -836,7 +836,7 @@ mod tests {
         assert!(output.contains("Notes introduction."));
         assert!(!output.contains("[^intro]"));
         assert!(
-            output.contains("[ordinary link](#details)*intervening prose*unmatched annotation")
+            output.contains("[ordinary link](#details) *intervening prose* unmatched annotation")
         );
         assert!(output.contains("[the appendix reference](appendix.html#_ftnref7)"));
         assert!(output.contains("[email](mailto:user@example.test#fn1)"));
