@@ -280,6 +280,9 @@ impl<'a> ContentExtractor<'a> {
                 self.page_kind = result.kind;
             }
         }
+        if self.page_kind == PageKind::Unknown {
+            self.page_kind = PageKind::detect(&self.dom);
+        }
         self.page_title = self
             .metadata
             .title
@@ -1715,7 +1718,14 @@ impl<'a> ContentExtractor<'a> {
         self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
         if self.strategy.conditional_cleanup() && self.page_kind.uses_article_cleanup() {
             let before = self.diagnostic_element_count(root);
-            heuristic_cleanup(&mut self.dom, root, &mut self.node_data, text_buffer, nodes);
+            heuristic_cleanup(
+                &mut self.dom,
+                root,
+                self.page_kind,
+                &mut self.node_data,
+                text_buffer,
+                nodes,
+            );
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 

@@ -55,7 +55,7 @@ The extraction pipeline flows through these stages:
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
-| `page_kind.rs` | Internal page categories that control cleanup policy |
+| `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
 | `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
 | `constants.rs` | Regex patterns, config flags, matching helpers |

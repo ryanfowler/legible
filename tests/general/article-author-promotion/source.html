@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head><title>Breaking the WAL</title></head>
+<body>
+<main>
+  <aside class="article-toc">
+    <section class="authors">
+      <a class="author author-link" href="/author/carl-sverre/">
+        <picture><img src="carl.jpg" alt="Carl Sverre"></picture>
+        <span>Carl Sverre</span><span>Senior Software Engineer</span>
+      </a>
+    </section>
+    <section class="news">
+      <div>The latest from Antithesis</div>
+      <div>The latest</div>
+      <p>Monthly reliability and distributed systems news, curated for teams building critical software.</p>
+      <form aria-label="Email signup"><input type="email"></form>
+    </section>
+  </aside>
+  <article>
+    <h1>Breaking the WAL</h1>
+    <p>A write-ahead log records each change before the database applies it. This order lets the database recover after an unexpected stop.</p>
+    <p>Our test splits the log at every valid record boundary. It confirms that recovery returns the last complete state.</p>
+    <p>The workload writes records and checkpoints the database at the same time. Each assertion checks committed data and verifies the complete file structure.</p>
+    <p>The corrected release completes every run without a failed assertion. The earlier release reproduces the failure under the same controlled workload.</p>
+  </article>
+</main>
+</body>
+</html>
