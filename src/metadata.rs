@@ -564,7 +564,26 @@ fn collect_structured_candidates(
         );
     }
     if let Some(item) = primary_general.filter(|_| !use_article) {
-        add_json_string(out, |set| &mut set.title, item.get("name"), 90);
+        let headline = item.get("headline").and_then(Value::as_str);
+        let name = item.get("name").and_then(Value::as_str);
+        match (name, headline) {
+            (Some(name), Some(headline)) if name != headline => {
+                let headline_matches = text_similarity(headline, document_title) > 0.75;
+                let name_matches = text_similarity(name, document_title) > 0.75;
+                if headline_matches || !name_matches {
+                    out.add(|set| &mut set.title, headline, MetadataSource::JsonLd, 94);
+                    out.add(|set| &mut set.title, name, MetadataSource::JsonLd, 88);
+                } else {
+                    out.add(|set| &mut set.title, name, MetadataSource::JsonLd, 90);
+                    out.add(|set| &mut set.title, headline, MetadataSource::JsonLd, 88);
+                }
+            }
+            (Some(name), _) => out.add(|set| &mut set.title, name, MetadataSource::JsonLd, 90),
+            (_, Some(headline)) => {
+                out.add(|set| &mut set.title, headline, MetadataSource::JsonLd, 94)
+            }
+            _ => {}
+        }
         add_json_string(out, |set| &mut set.description, item.get("description"), 88);
         if let Some(authors) = item.get("author") {
             collect_json_names(authors, &mut |name| {

@@ -60,6 +60,31 @@ pub(crate) struct ContentExtractor<'a> {
     specialized_identity: Option<&'static str>,
     page_kind: PageKind,
 }
+
+#[derive(Default)]
+struct TitleHeadingPlan {
+    preferred: Option<NodeId>,
+    brand_headings: SmallVec<[NodeId; 2]>,
+}
+
+fn remove_title_brand_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingPlan) {
+    let Some(preferred) = plan.preferred else {
+        return;
+    };
+    if preferred != root && !dom.ancestors(preferred).any(|ancestor| ancestor == root) {
+        return;
+    }
+    let headings: SmallVec<[NodeId; 2]> = dom
+        .element_descendants_snapshot_with_depth(root)
+        .into_iter()
+        .map(|(node, _)| node)
+        .filter(|node| plan.brand_headings.contains(node))
+        .collect();
+    for heading in headings {
+        dom.detach(heading);
+    }
+}
+
 struct BestAttempt {
     content: FrozenContent,
     quality: ExtractionQuality,
@@ -386,6 +411,13 @@ impl<'a> ContentExtractor<'a> {
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
+        let title_plan = title_heading_plan(
+            &self.dom,
+            &self.page_title,
+            &self.structured_title,
+            self.metadata.site_name.as_deref(),
+            self.source_uri.as_ref(),
+        );
         for strategy in ExtractionStrategy::ORDER {
             if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
                 continue;
@@ -676,6 +708,7 @@ impl<'a> ContentExtractor<'a> {
                 };
                 self.create_container(top_id, &siblings).unwrap_or(top_id)
             };
+            remove_title_brand_headings(&mut self.dom, content_id, &title_plan);
             if let Some(lead_media) = lead_media
                 && lead_media != content_id
                 && self.dom.parent(lead_media).is_some()
@@ -1287,8 +1320,17 @@ impl<'a> ContentExtractor<'a> {
             .dom
             .element_descendants_snapshot_with_depth(self.dom.root());
         let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
+        let title_plan = title_heading_plan(
+            &self.dom,
+            &self.page_title,
+            &self.structured_title,
+            self.metadata.site_name.as_deref(),
+            self.source_uri.as_ref(),
+        );
         let mut excluded_depth = None;
-        let mut remove_title = true;
+        let retain_preferred_title =
+            title_plan.preferred.is_some() && !title_plan.brand_headings.is_empty();
+        let mut remove_title = !retain_preferred_title;
         for (id, depth) in initial_nodes {
             if let Some(root_depth) = excluded_depth {
                 if depth > root_depth {
@@ -1344,11 +1386,17 @@ impl<'a> ContentExtractor<'a> {
                     continue;
                 }
             }
-            let duplicates_title = if remove_title && has_primary_heading_semantics(&self.dom, id) {
+            let duplicates_title = if has_primary_heading_semantics(&self.dom, id) {
                 let heading = get_inner_text(&self.dom, id, text_buffer);
-                heading_matches_page_title(&self.page_title, heading)
+                let matches_title = heading_matches_page_title(&self.page_title, heading)
                     && (!self.metadata.title_from_content_heading
-                        || heading_matches_page_title(&self.structured_title, heading))
+                        || heading_matches_page_title(&self.structured_title, heading));
+                matches_title
+                    && if retain_preferred_title {
+                        title_plan.preferred != Some(id)
+                    } else {
+                        remove_title
+                    }
             } else {
                 false
             };
@@ -2107,6 +2155,165 @@ fn dom_text_candidate(dom: &Dom, node: NodeId) -> bool {
     dom.tag(node) == Some(Tag::A)
         && dom.has_non_whitespace_text(node)
         && dom.normalized_char_count(node) < 100
+}
+
+fn title_heading_plan(
+    dom: &Dom,
+    page_title: &str,
+    structured_title: &str,
+    site_name: Option<&str>,
+    source_uri: Option<&Url>,
+) -> TitleHeadingPlan {
+    let headings: Vec<_> = dom
+        .element_descendants_snapshot_with_depth(dom.root())
+        .into_iter()
+        .map(|(node, _)| node)
+        .filter(|&node| has_primary_heading_semantics(dom, node))
+        .filter(|&node| is_probably_visible(dom, node))
+        .collect();
+    let brand_headings: SmallVec<[NodeId; 2]> = headings
+        .iter()
+        .copied()
+        .filter(|&heading| is_linked_site_brand_heading(dom, heading, site_name, source_uri))
+        .collect();
+    let preferred = headings
+        .iter()
+        .copied()
+        .filter(|heading| !brand_headings.contains(heading))
+        .filter_map(|heading| {
+            let text = get_inner_text_owned(dom, heading);
+            let matches_page_title = heading_matches_page_title(page_title, &text);
+            let matches_structured_title = heading_matches_page_title(structured_title, &text);
+            (matches_page_title || matches_structured_title).then_some((
+                heading,
+                title_heading_score(dom, heading, matches_page_title, matches_structured_title),
+            ))
+        })
+        .max_by_key(|(_, score)| *score)
+        .map(|(heading, _)| heading);
+
+    TitleHeadingPlan {
+        preferred,
+        brand_headings,
+    }
+}
+
+fn title_heading_score(
+    dom: &Dom,
+    heading: NodeId,
+    matches_page_title: bool,
+    matches_structured_title: bool,
+) -> i32 {
+    let mut score = i32::from(matches_page_title) * 40
+        + i32::from(matches_structured_title) * 20
+        + i32::from(dom.tag(heading) == Some(Tag::H1)) * 8;
+    let mut current = Some(heading);
+    while let Some(node) = current {
+        score += match dom.tag(node) {
+            Some(Tag::Article) => 32,
+            Some(Tag::Main) => 24,
+            _ => 0,
+        };
+        if has_primary_content_marker(dom, node) {
+            score += 28;
+            break;
+        }
+        current = dom.parent(node);
+    }
+    score
+}
+
+fn is_linked_site_brand_heading(
+    dom: &Dom,
+    heading: NodeId,
+    site_name: Option<&str>,
+    source_uri: Option<&Url>,
+) -> bool {
+    let link = dom
+        .descendants(heading)
+        .find(|&node| dom.tag(node) == Some(Tag::A))
+        .or_else(|| {
+            dom.ancestors(heading)
+                .find(|&node| dom.tag(node) == Some(Tag::A))
+        });
+    let Some(link) = link else { return false };
+    let heading_text = get_inner_text_owned(dom, heading);
+    let matches_site_name = site_name.is_some_and(|site| {
+        metadata::text_similarity(site, &heading_text) > 0.9
+            && metadata::text_similarity(&heading_text, site) > 0.9
+    });
+    let has_brand_token = [heading, link]
+        .into_iter()
+        .chain(dom.ancestors(heading).take(4))
+        .filter_map(|node| {
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .find_map(|attribute| dom.attr(node, attribute))
+        })
+        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "brand" | "branding" | "logo" | "masthead" | "wordmark" | "sitetitle"
+            )
+        });
+    if dom.ancestors(heading).any(|node| {
+        matches!(
+            dom.tag(node),
+            Some(Tag::Header | Tag::Footer | Tag::Nav | Tag::Aside)
+        )
+    }) {
+        return false;
+    }
+    let root_link = source_uri.is_some_and(|source| {
+        dom.attr(link, AttrName::Href)
+            .is_some_and(|href| is_site_root_link(source, href))
+    });
+    has_brand_token || (matches_site_name && root_link)
+}
+
+fn is_site_root_link(source: &Url, href: &str) -> bool {
+    let Ok(target) = source.join(href) else {
+        return false;
+    };
+    if source.scheme() != target.scheme()
+        || source.host_str() != target.host_str()
+        || source.port_or_known_default() != target.port_or_known_default()
+        || target.query().is_some()
+        || target.fragment().is_some()
+    {
+        return false;
+    }
+    let current_path = source.path().trim_end_matches('/');
+    let target_path = target.path().trim_end_matches('/');
+    target_path != current_path
+        && (target_path.is_empty()
+            || target_path == "/"
+            || current_path
+                .strip_prefix(target_path)
+                .is_some_and(|remainder| remainder.starts_with('/')))
+}
+
+fn has_primary_content_marker(dom: &Dom, node: NodeId) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+    .any(|token| {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "articlecontent"
+                | "articlebody"
+                | "entrycontent"
+                | "econtent"
+                | "maincontent"
+                | "postcontent"
+                | "postbody"
+        )
+    })
 }
 
 fn heading_matches_page_title(page_title: &str, heading: &str) -> bool {
