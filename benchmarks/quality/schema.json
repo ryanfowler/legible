@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ryanfowler/legible/benchmarks/quality/schema.json",
+  "title": "Legible extraction quality fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "category",
+    "source_url",
+    "page_shape",
+    "must_include",
+    "must_exclude",
+    "notes"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "category": {
+      "enum": [
+        "news-article",
+        "blog-post",
+        "long-form-essay",
+        "technical-documentation",
+        "api-reference",
+        "code-heavy",
+        "reference",
+        "academic",
+        "data-table",
+        "link-index",
+        "legacy-html",
+        "recipe",
+        "discussion",
+        "social-thread",
+        "product-support",
+        "application-markup",
+        "inline-peripheral-ui",
+        "responsive-duplicate",
+        "math",
+        "media-embed"
+      ]
+    },
+    "source_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "page_shape": {
+      "enum": [
+        "article",
+        "document",
+        "reference",
+        "listing",
+        "discussion",
+        "thread",
+        "application",
+        "recipe",
+        "media"
+      ]
+    },
+    "must_include": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "must_exclude": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^(headings(?:_h[1-6])?|lists|code_blocks|tables|figures|images|footnotes|links|math|reply_items|reply_depth)_(min|max)$": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "expected_failure": {
+      "type": "boolean",
+      "default": false
+    },
+    "notes": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

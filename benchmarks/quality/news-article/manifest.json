@@ -1,0 +1,18 @@
+{
+  "id": "news-article",
+  "category": "news-article",
+  "source_url": "https://news.example.test/city/river-restoration",
+  "page_shape": "article",
+  "must_include": [
+    "The project will restore two kilometres of riverbank",
+    "Construction starts in September"
+  ],
+  "must_exclude": ["Subscribe to the morning newsletter", "Trending stories"],
+  "expected": {
+    "headings_min": 1,
+    "figures_min": 1,
+    "images_min": 1,
+    "links_max": 1
+  },
+  "notes": "A news article must retain its report and captioned lead image while it rejects navigation and newsletter clutter."
+}

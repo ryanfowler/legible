@@ -1,0 +1,17 @@
+{
+  "id": "link-index",
+  "category": "link-index",
+  "source_url": "https://community.example.test/resources",
+  "page_shape": "listing",
+  "must_include": [
+    "Accessibility field guide",
+    "Practical checks for keyboard and screen-reader support",
+    "Incident response handbook"
+  ],
+  "must_exclude": ["Cookie preferences", "Follow us on social media"],
+  "expected": {
+    "lists_min": 1,
+    "links_min": 3
+  },
+  "notes": "A link-heavy resource index is useful content. The extractor must not reject it as navigation."
+}
