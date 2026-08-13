@@ -1,0 +1,16 @@
+{
+  "id": "app-jsonld-region",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-jsonld-region",
+  "page_shape": "application",
+  "must_include": [
+    "Regional failover handbook",
+    "Move writes only after replica health is green",
+    "Confirm the new primary before draining connections"
+  ],
+  "must_exclude": ["Dashboard overview", "Recent activity"],
+  "expected": {
+    "headings_min": 2
+  },
+  "notes": "An Article articleBody hint should identify useful prose inside an application shell."
+}

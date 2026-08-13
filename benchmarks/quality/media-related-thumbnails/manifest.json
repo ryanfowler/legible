@@ -1,0 +1,20 @@
+{
+  "id": "media-related-thumbnails",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/media-related-thumbnails",
+  "page_shape": "article",
+  "must_include": [
+    "Flood sensor mounted below the bridge deck",
+    "The new sensor reports water level every minute"
+  ],
+  "must_exclude": [
+    "Read the upstream forecast",
+    "Meet the sensor team",
+    "Related thumbnail"
+  ],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "Several plausible related-card thumbnails must not compete with the article figure."
+}

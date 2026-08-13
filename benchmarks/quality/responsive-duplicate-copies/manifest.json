@@ -1,0 +1,15 @@
+{
+  "id": "responsive-duplicate-copies",
+  "category": "responsive-duplicate",
+  "source_url": "https://example.test/responsive-duplicate-copies",
+  "page_shape": "article",
+  "must_include": [
+    "The observatory measured a clear transit",
+    "The second instrument confirmed the timing"
+  ],
+  "must_exclude": ["Mobile navigation", "Desktop related stories"],
+  "expected": {
+    "headings_h1_max": 1
+  },
+  "notes": "Equivalent desktop and mobile article copies should not duplicate useful prose."
+}

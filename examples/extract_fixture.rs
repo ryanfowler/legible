@@ -1,5 +1,33 @@
-use legible::extract;
+use legible::{Error, extract};
 use std::{env, fs, process::ExitCode};
+
+fn error_variant(error: &Error) -> &'static str {
+    match error {
+        Error::TooManyElements(..) => "TooManyElements",
+        Error::NoContent => "NoContent",
+        Error::NoBody => "NoBody",
+        Error::InvalidUrl(..) => "InvalidUrl",
+        Error::ContentRootNotFound => "ContentRootNotFound",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_variant;
+    use legible::Error;
+
+    #[test]
+    fn error_variants_do_not_include_payloads() {
+        let invalid_url = url::Url::parse("not a URL").unwrap_err();
+        let cases = [
+            (Error::TooManyElements(12, 10), "TooManyElements"),
+            (Error::InvalidUrl(invalid_url), "InvalidUrl"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error_variant(&error), expected);
+        }
+    }
+}
 
 fn main() -> ExitCode {
     let mut arguments = env::args_os().skip(1).peekable();
@@ -78,7 +106,7 @@ fn main() -> ExitCode {
                         "error": {
                             "kind": "extraction",
                             "message": error.to_string(),
-                            "variant": format!("{error:?}"),
+                            "variant": error_variant(&error),
                         },
                     })
                 );

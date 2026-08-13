@@ -1,0 +1,9 @@
+{
+  "id": "metadata-byline-mixed",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-byline-mixed",
+  "page_shape": "article",
+  "must_include": ["The new controls reduce fan power"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "One byline container contains author, date, and section, which must resolve into separate fields."
+}

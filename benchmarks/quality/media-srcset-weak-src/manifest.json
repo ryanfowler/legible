@@ -1,0 +1,18 @@
+{
+  "id": "media-srcset-weak-src",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-srcset-weak-src",
+  "page_shape": "article",
+  "must_include": [
+    "Detailed map of the coastal transect",
+    "The team sampled eight stations"
+  ],
+  "must_exclude": ["Tiny placeholder", "Recommended map pack"],
+  "must_include_image_sources": ["https://example.test/transect-1600.png"],
+  "must_exclude_image_sources": ["https://example.test/pixel.gif"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A meaningful srcset must outweigh a weak placeholder src without retaining related thumbnails."
+}

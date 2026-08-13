@@ -1,0 +1,9 @@
+{
+  "id": "metadata-jsonld-stale-title",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-jsonld-stale-title",
+  "page_shape": "article",
+  "must_include": ["The atlas documents forty local terms"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "A JSON-LD headline that agrees with content must beat a stale document title."
+}

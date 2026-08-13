@@ -1,0 +1,15 @@
+{
+  "id": "app-accessibility-duplicate",
+  "category": "responsive-duplicate",
+  "source_url": "https://example.test/app-accessibility-duplicate",
+  "page_shape": "application",
+  "must_include": [
+    "The release uses signed artifacts",
+    "Verification runs before installation"
+  ],
+  "must_exclude": ["Screen reader duplicate marker"],
+  "expected": {
+    "headings_h1_max": 1
+  },
+  "notes": "Accessibility-only duplicate prose must not appear beside the visible copy."
+}

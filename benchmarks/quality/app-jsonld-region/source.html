@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Operations dashboard</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": "Regional failover handbook",
+        "articleBody": "Move writes only after replica health is green. Confirm the new primary before draining connections."
+      }
+    </script>
+  </head>
+  <body>
+    <nav>Dashboard overview Recent activity</nav>
+    <div id="application">
+      <section class="widget">Healthy regions: three</section>
+      <article data-document-id="failover">
+        <h1>Regional failover handbook</h1>
+        <p>
+          Move writes only after replica health is green and replication delay
+          is stable.
+        </p>
+        <h2>Drain</h2>
+        <p>
+          Confirm the new primary before draining connections from the prior
+          region.
+        </p>
+      </article>
+    </div>
+  </body>
+</html>

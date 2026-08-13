@@ -1,0 +1,21 @@
+{
+  "id": "app-hidden-junk-negative",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-hidden-junk-negative",
+  "page_shape": "application",
+  "must_include": [
+    "Visible maintenance schedule",
+    "The database window starts at 02:00 UTC",
+    "Read traffic remains available"
+  ],
+  "must_exclude": [
+    "Hidden keyword directory",
+    "Casino bonus archive",
+    "Thousands of generated links"
+  ],
+  "expected": {
+    "headings_h1_max": 1,
+    "links_max": 1
+  },
+  "notes": "A hidden high-volume junk region must not win the relaxed-visibility retry."
+}

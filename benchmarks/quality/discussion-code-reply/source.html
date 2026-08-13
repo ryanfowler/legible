@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Atomic state review</title>
+  </head>
+  <body>
+    <main>
+      <h1>Atomic state review</h1>
+      <p>The discussion documents a concurrency bug and its verified repair.</p>
+      <ol>
+        <li>
+          <article>
+            <strong>Imani</strong>
+            <p>
+              Imani isolated the race between state publication and the worker
+              wakeup.
+            </p>
+            <pre><code class="language-rust">state.compare_exchange(OLD, READY, Ordering::Acquire, Ordering::Relaxed)?;</code></pre>
+            <button>Copy code</button>
+          </article>
+        </li>
+        <li>
+          <article>
+            <strong>Ren</strong>
+            <p>
+              The ordering must be Acquire because the next read consumes the
+              published buffer.
+            </p>
+            <button>Run in playground</button>
+          </article>
+        </li>
+      </ol>
+    </main>
+  </body>
+</html>

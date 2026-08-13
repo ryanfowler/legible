@@ -1,0 +1,9 @@
+{
+  "id": "metadata-multiple-h1",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-multiple-h1",
+  "page_shape": "article",
+  "must_include": ["The approved work reconnects two channels"],
+  "must_exclude": ["More environmental reporting"],
+  "notes": "Multiple visible H1 elements require content-proximity evidence."
+}

@@ -1,0 +1,17 @@
+{
+  "id": "media-caption-evidence",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-caption-evidence",
+  "page_shape": "article",
+  "must_include": [
+    "Sediment layers visible in the river bank",
+    "The exposed bank records three flood periods"
+  ],
+  "must_exclude": ["Related geology course", "Course thumbnail"],
+  "expected": {
+    "figures_min": 1,
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A useful caption can support a weakly described image but cannot rescue a related card."
+}

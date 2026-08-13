@@ -1,0 +1,18 @@
+{
+  "id": "app-accordion-content",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-accordion-content",
+  "page_shape": "document",
+  "must_include": [
+    "Backup restoration guide",
+    "Verify the archive signature",
+    "Restore into an isolated database",
+    "Compare row counts"
+  ],
+  "must_exclude": ["Expand all panels", "Was this helpful"],
+  "expected": {
+    "headings_min": 2,
+    "lists_min": 1
+  },
+  "notes": "Source-present accordion sections contain the complete procedure and must remain extractable."
+}

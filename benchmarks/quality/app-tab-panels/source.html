@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Service setup</title>
+  </head>
+  <body>
+    <nav role="tablist">
+      Select a platform <button>Linux</button><button>Windows</button
+      ><button>macOS</button>
+    </nav>
+    <main>
+      <h1>Configure the Linux service</h1>
+      <p>
+        The source includes the complete Linux procedure for production hosts.
+      </p>
+      <section role="tabpanel">
+        <h2>Unit file</h2>
+        <p>Set Restart to on-failure and use a dedicated service account.</p>
+        <pre><code>[Service]
+Restart=on-failure</code></pre>
+      </section>
+      <section role="tabpanel" hidden>
+        <h2>Windows duplicate procedure</h2>
+        <p>Install the same agent through the service manager.</p>
+      </section>
+      <section role="tabpanel" hidden>
+        <h2>macOS duplicate procedure</h2>
+        <p>Install the same agent through launch services.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "id": "discussion-one-level-replies",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-one-level-replies",
+  "page_shape": "discussion",
+  "must_include": [
+    "Morgan proposed a bounded queue",
+    "Lee measured the peak backlog",
+    "Sam confirmed the memory limit"
+  ],
+  "reply_markers": ["Morgan", "Lee", "Sam"],
+  "must_exclude": ["Reply button", "Community guidelines"],
+  "expected": {
+    "reply_items_min": 3,
+    "reply_depth_min": 2
+  },
+  "notes": "A one-level reply must remain nested under the comment that it answers."
+}

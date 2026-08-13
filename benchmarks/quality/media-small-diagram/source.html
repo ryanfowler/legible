@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Lock ordering</title>
+  </head>
+  <body>
+    <header>
+      <img
+        src="/docs-logo.png"
+        width="120"
+        height="30"
+        alt="Documentation logo"
+      />
+    </header>
+    <main>
+      <article>
+        <h1>Lock ordering</h1>
+        <figure>
+          <img
+            src="/lock-order.png"
+            width="180"
+            height="120"
+            alt="Small diagram of lock ordering A before B"
+          />
+          <figcaption>Small diagram of lock ordering A before B</figcaption>
+        </figure>
+        <p>
+          The ordering prevents the circular wait by requiring every worker to
+          acquire A before B.
+        </p>
+        <p>Release locks in reverse order after the shared update completes.</p>
+      </article>
+    </main>
+    <aside>Training card</aside>
+  </body>
+</html>

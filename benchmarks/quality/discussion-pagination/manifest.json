@@ -1,0 +1,22 @@
+{
+  "id": "discussion-pagination",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/discussion-pagination",
+  "page_shape": "discussion",
+  "must_include": [
+    "Rae identified the first regression",
+    "Sol verified the final patch"
+  ],
+  "reply_markers": ["Rae", "Sol"],
+  "must_exclude": [
+    "Previous page",
+    "Page 2 of 8",
+    "Next page",
+    "Related threads"
+  ],
+  "expected": {
+    "reply_items_min": 2,
+    "reply_items_max": 2
+  },
+  "notes": "Pagination and related-thread controls after the replies must not become reply content."
+}

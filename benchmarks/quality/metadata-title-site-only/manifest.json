@@ -1,0 +1,9 @@
+{
+  "id": "metadata-title-site-only",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-title-site-only",
+  "page_shape": "article",
+  "must_include": ["The restored service adds two departures"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "A site-only document title must lose to the visible article heading."
+}

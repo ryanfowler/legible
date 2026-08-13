@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   aggregateReport,
@@ -10,6 +10,7 @@ import {
   discoverFixtures,
   fixtureOutputDirectory,
   formatHumanReport,
+  formatMarkdownSummary,
 } from "./lib.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,7 @@ Options:
   --fixture-root PATH   Use another quality fixture root.
   --output PATH         Write per-fixture artifacts and report.json here.
   --json PATH           Also write the aggregate JSON report to PATH.
+  --summary PATH        Also write a compact Markdown summary to PATH.
   --help                Show this help.
 
 DEFUDDLE_COMMAND and DEFUDDLE_ARGS can replace the pinned local Defuddle wrapper.`;
@@ -38,6 +40,7 @@ function parseArguments(arguments_) {
     fixtureRoot: defaultFixtureRoot,
     outputRoot: defaultOutputRoot,
     jsonPath: null,
+    summaryPath: null,
   };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -63,6 +66,9 @@ function parseArguments(arguments_) {
         break;
       case "--json":
         options.jsonPath = resolve(value());
+        break;
+      case "--summary":
+        options.summaryPath = resolve(value());
         break;
       case "--help":
       case "-h":
@@ -249,22 +255,33 @@ function packageVersion() {
   return `npm:defuddle@${packageJson.dependencies.defuddle}`;
 }
 
-function gitRevision() {
+function gitRevision(summaryPath) {
   try {
     const commit = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: repository,
       encoding: "utf8",
     }).trim();
+    const relativeSummary = summaryPath
+      ? relative(repository, summaryPath)
+      : null;
+    const excludedSummary =
+      relativeSummary &&
+      relativeSummary !== "" &&
+      !relativeSummary.startsWith("..")
+        ? relativeSummary
+        : null;
+    const pathspec = ["--", "."];
+    if (excludedSummary) pathspec.push(`:(exclude)${excludedSummary}`);
     const status = execFileSync(
       "git",
-      ["status", "--porcelain", "--untracked-files=all"],
+      ["status", "--porcelain", "--untracked-files=all", ...pathspec],
       { cwd: repository, encoding: "utf8" },
     );
     if (!status) return { commit, dirty: false, diff_sha256: null };
 
     const hash = createHash("sha256");
     hash.update(
-      execFileSync("git", ["diff", "--binary", "HEAD"], {
+      execFileSync("git", ["diff", "--binary", "HEAD", ...pathspec], {
         cwd: repository,
       }),
     );
@@ -274,7 +291,7 @@ function gitRevision() {
       { cwd: repository, encoding: "utf8" },
     )
       .split("\0")
-      .filter(Boolean)
+      .filter((path) => path && path !== excludedSummary)
       .sort();
     for (const path of untracked) {
       hash.update(path);
@@ -342,7 +359,7 @@ async function main() {
   }
 
   const report = aggregateReport(results, {
-    legible: gitRevision(),
+    legible: gitRevision(options.summaryPath),
     defuddle: defuddleCommand
       ? `external:${defuddleCommand}`
       : packageVersion(),
@@ -350,6 +367,10 @@ async function main() {
   const reportPath = join(options.outputRoot, "report.json");
   writeJson(reportPath, report);
   if (options.jsonPath) writeJson(options.jsonPath, report);
+  if (options.summaryPath) {
+    mkdirSync(dirname(options.summaryPath), { recursive: true });
+    writeFileSync(options.summaryPath, formatMarkdownSummary(report));
+  }
   console.log(formatHumanReport(report));
   console.log(`\nWrote comparison artifacts to ${options.outputRoot}`);
 

@@ -1,0 +1,22 @@
+{
+  "id": "discussion-three-level-thread",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-three-level-thread",
+  "page_shape": "discussion",
+  "must_include": [
+    "Initial report from Dana",
+    "First nested reply from Jules",
+    "Deep reply from Priya"
+  ],
+  "reply_markers": ["Dana", "Jules", "Priya"],
+  "must_exclude": [
+    "Report this comment",
+    "Related discussions",
+    "Sign in to reply"
+  ],
+  "expected": {
+    "reply_items_min": 3,
+    "reply_depth_min": 3
+  },
+  "notes": "Three levels of reply nesting are user-visible semantics and must survive extraction."
+}

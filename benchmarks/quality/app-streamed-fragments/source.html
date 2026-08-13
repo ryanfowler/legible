@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Streamed deployment guide</title>
+  </head>
+  <body>
+    <div id="root">
+      <main>
+        <h1>Streamed deployment guide</h1>
+        <p>The server emitted this guide in source-present fragments.</p>
+        <section id="step-a">
+          <h2>Build</h2>
+          <p>Prepare the immutable artifact and record its digest.</p>
+        </section>
+        <!--$?--><template id="B:0"></template><!--/$-->
+      </main>
+      <div hidden id="S:0">
+        <section id="step-b" data-streamed-fragment>
+          <h2>Release</h2>
+          <ol>
+            <li>Promote the verified release to one region.</li>
+            <li>Compare health metrics before global rollout.</li>
+          </ol>
+        </section>
+      </div>
+      <script>
+        self.__next_f = ["Hydration boundary", "Chunk loading"];
+        $RC("B:0", "S:0");
+      </script>
+    </div>
+  </body>
+</html>

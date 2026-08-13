@@ -1,0 +1,15 @@
+{
+  "id": "app-access-barrier",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-access-barrier",
+  "page_shape": "application",
+  "must_include": [],
+  "must_exclude": [
+    "Subscribe to read this report",
+    "Create an account",
+    "Already subscribed"
+  ],
+  "expected_failure": true,
+  "expected_error": "NoContent",
+  "notes": "An access barrier without source-present content must return a structured extraction failure."
+}

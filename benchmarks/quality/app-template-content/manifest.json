@@ -1,0 +1,17 @@
+{
+  "id": "app-template-content",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-template-content",
+  "page_shape": "application",
+  "must_include": [
+    "Template-backed recovery guide",
+    "Stop writes before the snapshot",
+    "Verify the restored checksum"
+  ],
+  "must_exclude": ["Loading recovery guide", "Open account menu"],
+  "expected": {
+    "headings_min": 2,
+    "lists_min": 1
+  },
+  "notes": "Useful source-present template content must remain measurable even when the visible application shell is incomplete."
+}

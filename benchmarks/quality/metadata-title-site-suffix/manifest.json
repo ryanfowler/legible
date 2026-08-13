@@ -1,0 +1,9 @@
+{
+  "id": "metadata-title-site-suffix",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-title-site-suffix",
+  "page_shape": "article",
+  "must_include": ["The new sensors report each minute"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "The document title contains a site suffix that must not become part of the article title."
+}

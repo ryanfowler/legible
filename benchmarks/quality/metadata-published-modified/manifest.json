@@ -1,0 +1,9 @@
+{
+  "id": "metadata-published-modified",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-published-modified",
+  "page_shape": "article",
+  "must_include": ["The updated report confirms stable quality"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "Published and modified dates are separate unambiguous metadata fields."
+}

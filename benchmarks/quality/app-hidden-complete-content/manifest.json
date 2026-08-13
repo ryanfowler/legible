@@ -1,0 +1,12 @@
+{
+  "id": "app-hidden-complete-content",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-hidden-complete-content",
+  "page_shape": "application",
+  "must_include": [
+    "The complete server report contains all migration stages",
+    "Operators verified the final checksum"
+  ],
+  "must_exclude": ["Loading report", "Open report viewer"],
+  "notes": "A relaxed-visibility retry should recover complete server-rendered content behind an incomplete visible shell."
+}

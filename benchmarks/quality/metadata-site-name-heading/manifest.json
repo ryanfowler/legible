@@ -1,0 +1,9 @@
+{
+  "id": "metadata-site-name-heading",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-site-name-heading",
+  "page_shape": "article",
+  "must_include": ["The coordinated arrivals cut the wait"],
+  "must_exclude": [],
+  "notes": "A site name embedded in visible branding must not become part of the article title."
+}

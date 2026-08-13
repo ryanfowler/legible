@@ -1,0 +1,18 @@
+{
+  "id": "media-svg-chart-icon",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-svg-chart-icon",
+  "page_shape": "document",
+  "must_include": [
+    "Requests per second",
+    "Monday",
+    "Tuesday",
+    "Decorative search icon must not appear"
+  ],
+  "must_exclude": ["Search icon path", "Open chart menu"],
+  "expected": {
+    "tables_min": 1,
+    "images_max": 0
+  },
+  "notes": "A chart-like SVG should become accessible content while a decorative SVG icon stays out."
+}

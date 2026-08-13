@@ -1,0 +1,9 @@
+{
+  "id": "metadata-section-byline",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-section-byline",
+  "page_shape": "article",
+  "must_include": ["The proxy retains prepared statements"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "A nearby category label must resolve separately from the person in a compact byline."
+}

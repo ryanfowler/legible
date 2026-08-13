@@ -1,0 +1,20 @@
+{
+  "id": "social-thread-media-links",
+  "category": "social-thread",
+  "source_url": "https://example.test/social-thread-media-links",
+  "page_shape": "thread",
+  "must_include": [
+    "Lena shared the field diagram",
+    "Open the full resolution diagram",
+    "Mateo confirmed the cable labels"
+  ],
+  "reply_markers": ["Lena", "Mateo"],
+  "must_exclude": ["Suggested accounts", "Promoted post", "Repost"],
+  "expected": {
+    "reply_items_min": 2,
+    "reply_items_max": 2,
+    "images_min": 1,
+    "links_min": 1
+  },
+  "notes": "A social thread keeps a meaningful image and link while it rejects social controls and recommendations."
+}

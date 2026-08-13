@@ -1,0 +1,17 @@
+{
+  "id": "discussion-only",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-only",
+  "page_shape": "discussion",
+  "must_include": [
+    "Asha asks whether the checksum is portable",
+    "Ben confirms the byte order",
+    "Cleo provides the cross-platform result"
+  ],
+  "reply_markers": ["Asha", "Ben", "Cleo"],
+  "must_exclude": ["Create a new topic", "Popular discussions"],
+  "expected": {
+    "reply_items_min": 3
+  },
+  "notes": "A discussion-only page has no article body but still contains meaningful primary content."
+}

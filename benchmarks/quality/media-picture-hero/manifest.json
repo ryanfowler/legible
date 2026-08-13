@@ -1,0 +1,17 @@
+{
+  "id": "media-picture-hero",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-picture-hero",
+  "page_shape": "article",
+  "must_include": [
+    "Ice core prepared for analysis",
+    "The core preserves a continuous climate record"
+  ],
+  "must_exclude": ["Laboratory products", "Product thumbnail"],
+  "expected": {
+    "figures_min": 1,
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A picture-based hero with responsive sources should remain one representative figure."
+}

@@ -1,0 +1,9 @@
+{
+  "id": "metadata-placeholder-tags",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-placeholder-tags",
+  "page_shape": "article",
+  "must_include": ["The study compares two sensor methods"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "Placeholder and site-boilerplate tags must not survive beside real topical values."
+}

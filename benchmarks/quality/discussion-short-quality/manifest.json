@@ -1,0 +1,16 @@
+{
+  "id": "discussion-short-quality",
+  "category": "social-thread",
+  "source_url": "https://example.test/discussion-short-quality",
+  "page_shape": "thread",
+  "must_include": [
+    "The fix is in version 4.2",
+    "Confirmed on the stable channel"
+  ],
+  "reply_markers": ["Ivo", "Jo"],
+  "must_exclude": ["Follow author", "Trending now"],
+  "expected": {
+    "reply_items_min": 2
+  },
+  "notes": "Two concise, high-value replies must not fail only because prose length is short."
+}

@@ -1,0 +1,11 @@
+{
+  "id": "app-javascript-shell",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-javascript-shell",
+  "page_shape": "application",
+  "must_include": [],
+  "must_exclude": ["Enable JavaScript to continue", "Reload application"],
+  "expected_failure": true,
+  "expected_error": "NoContent",
+  "notes": "An enable-JavaScript shell has no useful source content and must fail."
+}

@@ -16,13 +16,15 @@ benchmarks/quality/<fixture-id>/
 
 `schema.json` defines the manifest fields and category names. The fixture directory name and the manifest `id` must match. `source.html` must contain all input for the test. The runner does not fetch `source_url`.
 
-Use `must_include` for known useful phrases. Use `must_exclude` for known clutter. The runner removes Markdown formatting and link destinations before phrase checks. It then normalizes Unicode, letter case, and whitespace. Use `expected` for minimum or maximum counts. Supported features include total headings, each heading level, lists, code blocks, tables, figures, images, footnotes, links, math expressions, reply items, and reply nesting depth. Reply metrics measure list-encoded replies. Use them only for discussion or thread fixtures that use that convention.
+Use `must_include` for known useful phrases. Use `must_exclude` for known clutter. The runner removes Markdown formatting and link destinations before phrase checks. It then normalizes Unicode, letter case, and whitespace. Use `expected` for minimum or maximum counts. Supported features include total headings, each heading level, lists, code blocks, tables, figures, images, footnotes, links, math expressions, reply items, and reply nesting depth. Reply metrics measure ordered-list-encoded replies. Use them only for discussion or thread fixtures that use that convention.
+
+Use `must_include_image_sources` and `must_exclude_image_sources` when the selected image resource is part of the behavior under test. Values must match the Markdown image destination exactly. Set `reply_markers` to distinct reply metadata text when a fixture has reply structure limits. Reply metrics count only ordered-list items that contain one of those markers. Rich lists inside replies do not affect the metrics.
 
 Add `reference.md` only when a complete, manually adjudicated result adds value. The runner converts the reference and result to visible Markdown text. It removes link destinations before it applies Unicode normalization, lowercase conversion, and sequences of Unicode letters or numbers. It uses token multiplicity to calculate precision, recall, and F1.
 
 Add `metadata.json` for normalized metadata fields that have an unambiguous value. The runner compares only the fields in that file. It normalizes strings and string arrays before comparison.
 
-Set `expected_failure` only when extraction must return a structured extraction error. The runner does not score quality dimensions for a correct expected failure. A panic, tool invocation error, unexpected failure, unexpected success, or non-deterministic result is a reliability failure.
+Set `expected_failure` only when extraction must return a structured extraction error. Set `expected_error` to the required public error variant, such as `NoContent`. The runner does not score quality dimensions for a correct expected failure. A wrong error variant, panic, tool invocation error, unexpected failure, unexpected success, or non-deterministic result is a reliability failure.
 
 ## Quality dimensions
 
@@ -41,12 +43,16 @@ The report also records words, links, link density, headings, images, code block
 
 The schema supports news, blogs, essays, technical and API documentation, code-heavy pages, reference and academic pages, data tables, link indexes, legacy HTML, recipes, discussions, social threads, product support, modern application markup, inline peripheral UI, responsive duplicates, math, and media embeds.
 
-The committed corpus currently includes two curated seed batches:
+The committed corpus includes these curated batches:
 
 - 27 article and essay cases cover news, blogs, long-form essays, multi-author reports, images, sidebars, newsletters, related stories, promotions, footnotes, and an access-barrier shell.
-- 30 documentation and technical cases cover language and API references, code-heavy guides, callouts, source-present tabs, navigation trees, indexes, version selectors, and tables.
+- 31 documentation and technical cases cover language and API references, code-heavy guides, callouts, source-present tabs, navigation trees, indexes, version selectors, and tables.
+- 16 discussion and social-thread cases cover flat and nested replies, deleted parents, rich reply bodies, short threads, link-heavy threads, and reply-like clutter.
+- 15 application and responsive-markup cases cover streamed fragments, source-present templates, hidden content, duplicate views, tabs, accordions, loading shells, access barriers, and empty client shells.
+- 16 image and media cases cover lead images, responsive and lazy sources, captions, avatars, thumbnails, diagrams, SVG charts, duplicates, and embed fallbacks.
+- 20 metadata-conflict cases cover title, author, date, canonical URL, representative image, tag, language, and section resolution.
 
-All cases in these two batches use original, minimized content written for this repository. They do not contain captured third-party pages or private data. Future batches must use the same redistribution and privacy rules.
+All cases in these batches use original, minimized content written for this repository. They do not contain captured third-party pages or private data. Future batches must use the same redistribution and privacy rules.
 
 ## Add a real failure
 
@@ -78,7 +84,12 @@ Then run one fixture or all fixtures:
 node scripts/compare-defuddle/index.mjs --fixture technical-doc
 node scripts/compare-defuddle/index.mjs --all
 node scripts/compare-defuddle/index.mjs --all --json target/quality-report.json
+node scripts/compare-defuddle/index.mjs --all --summary benchmarks/quality/BASELINE.md
 ```
+
+Use `--summary` to write a compact category-level baseline. The summary includes
+the fixture count, extractor revisions, quality dimensions, and reliability. It
+does not include large per-fixture artifacts.
 
 The runner invokes Cargo with `--offline`. After the Node and Rust dependencies are present, a benchmark run uses no network access.
 

@@ -31,6 +31,7 @@ Write a machine-readable report to another path:
 
 ```bash
 node scripts/compare-defuddle/index.mjs --all --json target/quality-report.json
+node scripts/compare-defuddle/index.mjs --all --summary benchmarks/quality/BASELINE.md
 ```
 
 The runner always writes per-fixture Markdown, one `result.json` record per fixture, and an aggregate `report.json` under `target/quality-comparison/`. Use `--output` to select another artifact directory. Use `--fixture-root` for a compatible local corpus.

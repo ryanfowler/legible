@@ -1,0 +1,9 @@
+{
+  "id": "metadata-twitter-og-conflict",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-twitter-og-conflict",
+  "page_shape": "article",
+  "must_include": ["The crew mapped the complete canyon"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "Conflicting social titles must be resolved through agreement with visible content."
+}

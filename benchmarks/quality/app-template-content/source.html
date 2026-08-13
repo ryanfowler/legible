@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Template-backed recovery guide</title>
+  </head>
+  <body>
+    <div id="application-shell">
+      <p>Loading recovery guide</p>
+      <button>Open account menu</button>
+    </div>
+    <template id="recovery-content">
+      <main>
+        <h1>Template-backed recovery guide</h1>
+        <p>
+          The server includes the complete recovery procedure in this
+          source-present template.
+        </p>
+        <h2>Procedure</h2>
+        <ol>
+          <li>Stop writes before the snapshot is attached.</li>
+          <li>Restore into an isolated workspace.</li>
+          <li>Verify the restored checksum before traffic resumes.</li>
+        </ol>
+      </main>
+    </template>
+  </body>
+</html>

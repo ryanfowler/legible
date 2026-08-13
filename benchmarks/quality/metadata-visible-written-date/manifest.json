@@ -1,0 +1,9 @@
+{
+  "id": "metadata-visible-written-date",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-visible-written-date",
+  "page_shape": "article",
+  "must_include": ["Published August 13, 2026"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "A clear visible written date must remain available without a time element."
+}

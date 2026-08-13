@@ -1,0 +1,9 @@
+{
+  "id": "metadata-canonical-conflict",
+  "category": "news-article",
+  "source_url": "https://example.test/preview?document=bridge-audit",
+  "page_shape": "article",
+  "must_include": ["Inspectors completed the bearing review"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "An explicit canonical link must resolve against a conflicting supplied source URL."
+}

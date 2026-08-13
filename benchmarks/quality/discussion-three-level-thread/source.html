@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Worker timeout investigation</title>
+  </head>
+  <body>
+    <main>
+      <h1>Worker timeout investigation</h1>
+      <p>The thread records the investigation and the final fix.</p>
+      <ol>
+        <li>
+          <article>
+            <strong>Dana</strong>
+            <p>
+              Initial report from Dana: workers stop acknowledging messages
+              after a network change.
+            </p>
+          </article>
+          <ol>
+            <li>
+              <article>
+                <strong>Jules</strong>
+                <p>
+                  First nested reply from Jules: the connection pool keeps stale
+                  sockets.
+                </p>
+              </article>
+              <ol>
+                <li>
+                  <article>
+                    <strong>Priya</strong>
+                    <p>
+                      Deep reply from Priya: expiring idle sockets restores
+                      acknowledgements.
+                    </p>
+                    <button>Report this comment</button>
+                  </article>
+                </li>
+              </ol>
+            </li>
+          </ol>
+        </li>
+      </ol>
+    </main>
+    <aside>Related discussions</aside>
+    <footer>Sign in to reply</footer>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "id": "app-loading-shell",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-loading-shell",
+  "page_shape": "application",
+  "must_include": [
+    "Static incident summary",
+    "The gateway recovered after certificate rotation",
+    "No requests were lost"
+  ],
+  "must_exclude": ["Loading chart", "Skeleton title", "Please wait"],
+  "notes": "A loading skeleton around real static content must not replace the incident report."
+}
