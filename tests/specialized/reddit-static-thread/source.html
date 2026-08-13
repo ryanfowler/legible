@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><title>Static Reddit thread</title></head><body>
+  <div id="header">reddit navigation and sign in</div>
+  <div id="siteTable" class="sitetable nestedlisting">
+    <div class="thing link" data-fullname="t3_abc">
+      <p class="title"><a class="title" href="https://example.test/post">A parser that keeps comments</a></p>
+      <p class="tagline"><a class="author">alice</a> <time>August 13, 2026</time></p>
+      <div class="usertext-body"><div class="md">
+        <p>This post describes a static extraction problem.</p>
+        <ul><li>Keep nested replies.</li><li>Keep rich content.</li></ul>
+      </div></div>
+      <div class="midcol"><button>upvote</button><span class="score">42</span></div>
+    </div>
+    <div class="thing comment" data-fullname="t1_one">
+      <div class="entry"><p class="tagline"><a class="author">bob</a> <time>one hour ago</time></p>
+        <div class="usertext-body"><div class="md"><p>The body should survive.</p><blockquote><p>It has useful markup.</p></blockquote></div></div>
+      </div>
+      <div class="child">
+        <div class="thing comment" data-fullname="t1_two">
+          <p class="tagline"><a class="author">carol</a> <time>half an hour ago</time></p>
+          <div class="usertext-body"><div class="md"><p>A nested reply with <code>code</code>.</p></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="thing comment deleted" data-fullname="t1_deleted">
+      <p class="tagline"><span class="author">[deleted]</span></p>
+      <div class="child">
+        <div class="thing comment" data-fullname="t1_survivor">
+          <div class="usertext-body"><div class="md"><p>The child of a deleted comment remains.</p></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <footer>Related posts and login prompts</footer>
+</body></html>
