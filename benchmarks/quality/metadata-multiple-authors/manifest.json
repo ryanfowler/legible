@@ -1,0 +1,9 @@
+{
+  "id": "metadata-multiple-authors",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-multiple-authors",
+  "page_shape": "article",
+  "must_include": ["The survey combines aerial and street data"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "Two clearly identified people must remain distinct metadata authors."
+}

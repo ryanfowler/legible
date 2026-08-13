@@ -1,0 +1,16 @@
+{
+  "id": "media-responsive-duplicates",
+  "category": "responsive-duplicate",
+  "source_url": "https://example.test/media-responsive-duplicates",
+  "page_shape": "article",
+  "must_include": [
+    "Restored mural on the station wall",
+    "Conservators stabilized the original paint"
+  ],
+  "must_exclude": ["Mobile image duplicate", "Related art print"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "Desktop and mobile variants of the same image should collapse to one useful representation."
+}

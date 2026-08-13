@@ -1,0 +1,18 @@
+{
+  "id": "discussion-deleted-parent",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-deleted-parent",
+  "page_shape": "discussion",
+  "must_include": [
+    "This comment was deleted",
+    "Noor preserved the diagnostic trace",
+    "Emil found the failing request"
+  ],
+  "reply_markers": ["Deleted comment", "Noor", "Emil"],
+  "must_exclude": ["Restore comment", "More replies"],
+  "expected": {
+    "reply_items_min": 3,
+    "reply_depth_min": 3
+  },
+  "notes": "A deleted parent remains as a structural placeholder so useful descendants keep their nesting."
+}

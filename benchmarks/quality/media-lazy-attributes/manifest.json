@@ -1,0 +1,20 @@
+{
+  "id": "media-lazy-attributes",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-lazy-attributes",
+  "page_shape": "article",
+  "must_include": [
+    "New pedestrian bridge at dusk",
+    "The bridge opened after the final load test"
+  ],
+  "must_exclude": ["Travel deal thumbnail", "Open gallery"],
+  "must_include_image_sources": ["https://example.test/bridge-1280.jpg"],
+  "must_exclude_image_sources": [
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP"
+  ],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "Lazy image attributes should reveal the meaningful content image and reject a nearby card."
+}

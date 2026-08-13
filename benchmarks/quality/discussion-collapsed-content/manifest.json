@@ -1,0 +1,18 @@
+{
+  "id": "discussion-collapsed-content",
+  "category": "application-markup",
+  "source_url": "https://example.test/discussion-collapsed-content",
+  "page_shape": "discussion",
+  "must_include": [
+    "Ari explained the collapsed branch",
+    "Bo reproduced the parsing error",
+    "Cy supplied the corrected sample"
+  ],
+  "reply_markers": ["Ari", "Bo", "Cy"],
+  "must_exclude": ["Show hidden replies", "Collapse thread"],
+  "expected": {
+    "reply_items_min": 3,
+    "reply_depth_min": 2
+  },
+  "notes": "Source-present reply content inside a collapsed wrapper must remain available to extraction."
+}

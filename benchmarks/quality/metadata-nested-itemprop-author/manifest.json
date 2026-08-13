@@ -1,0 +1,9 @@
+{
+  "id": "metadata-nested-itemprop-author",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-nested-itemprop-author",
+  "page_shape": "article",
+  "must_include": ["The pass proves bounds before loop entry"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "A nested itemprop name must provide the author name without capturing the full byline."
+}

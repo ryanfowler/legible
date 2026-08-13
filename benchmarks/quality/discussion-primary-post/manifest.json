@@ -1,0 +1,22 @@
+{
+  "id": "discussion-primary-post",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-primary-post",
+  "page_shape": "discussion",
+  "must_include": [
+    "Design proposal for bounded retries",
+    "The primary proposal caps retries at four",
+    "Uma tested the timeout interaction"
+  ],
+  "reply_markers": ["Uma", "Wei"],
+  "must_exclude": [
+    "Bookmark topic",
+    "Subscribe to updates",
+    "Similar proposals"
+  ],
+  "expected": {
+    "headings_h1_min": 1,
+    "reply_items_min": 2
+  },
+  "notes": "A primary post and its replies must remain one coherent extracted discussion."
+}

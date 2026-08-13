@@ -1,0 +1,11 @@
+{
+  "id": "app-empty-shell",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-empty-shell",
+  "page_shape": "application",
+  "must_include": [],
+  "must_exclude": ["Loading workspace", "Open navigation", "Sign in"],
+  "expected_failure": true,
+  "expected_error": "NoContent",
+  "notes": "An interactive application shell with no real content must return a structured extraction failure."
+}

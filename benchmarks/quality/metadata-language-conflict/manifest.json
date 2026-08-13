@@ -1,0 +1,9 @@
+{
+  "id": "metadata-language-conflict",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-language-conflict",
+  "page_shape": "article",
+  "must_include": ["Les nouvelles stations ouvrent lundi"],
+  "must_exclude": [],
+  "notes": "A specific article-language signal must resolve a conflicting document language."
+}

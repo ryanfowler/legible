@@ -1,0 +1,18 @@
+{
+  "id": "discussion-code-reply",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-code-reply",
+  "page_shape": "discussion",
+  "must_include": [
+    "Imani isolated the race",
+    "compare_exchange",
+    "The ordering must be Acquire"
+  ],
+  "reply_markers": ["Imani", "Ren"],
+  "must_exclude": ["Copy code", "Run in playground"],
+  "expected": {
+    "reply_items_min": 2,
+    "code_blocks_min": 1
+  },
+  "notes": "A code-heavy reply keeps its fenced code block and explanatory prose."
+}

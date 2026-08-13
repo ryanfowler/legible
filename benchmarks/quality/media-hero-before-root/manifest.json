@@ -1,0 +1,17 @@
+{
+  "id": "media-hero-before-root",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-hero-before-root",
+  "page_shape": "article",
+  "must_include": [
+    "Survey team crossing the restored wetland",
+    "The wetland survey recorded twelve returning species"
+  ],
+  "must_exclude": ["Related habitat card", "Newsletter thumbnail"],
+  "expected": {
+    "figures_min": 1,
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A meaningful hero immediately before a narrow article root should join the extracted article."
+}

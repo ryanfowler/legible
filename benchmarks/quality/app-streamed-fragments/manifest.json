@@ -1,0 +1,17 @@
+{
+  "id": "app-streamed-fragments",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-streamed-fragments",
+  "page_shape": "application",
+  "must_include": [
+    "Streamed deployment guide",
+    "Prepare the immutable artifact",
+    "Promote the verified release"
+  ],
+  "must_exclude": ["Chunk loading", "Hydration boundary"],
+  "expected": {
+    "headings_min": 2,
+    "lists_min": 1
+  },
+  "notes": "React-style streamed fragments in the source must form one useful document."
+}

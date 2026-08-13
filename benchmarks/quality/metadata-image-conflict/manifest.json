@@ -1,0 +1,9 @@
+{
+  "id": "metadata-image-conflict",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-image-conflict",
+  "page_shape": "article",
+  "must_include": ["The final phase plants native bank species"],
+  "must_exclude": ["Site logo"],
+  "notes": "A representative hero supported by visible and OpenGraph evidence must beat a logo and avatar."
+}

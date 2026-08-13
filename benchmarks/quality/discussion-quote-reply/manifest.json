@@ -1,0 +1,17 @@
+{
+  "id": "discussion-quote-reply",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-quote-reply",
+  "page_shape": "discussion",
+  "must_include": [
+    "Taylor described the original invariant",
+    "The counter never moves backward",
+    "Quinn separated clock time from sequence order"
+  ],
+  "reply_markers": ["Taylor", "Quinn"],
+  "must_exclude": ["Quote reply", "Share comment"],
+  "expected": {
+    "reply_items_min": 2
+  },
+  "notes": "A blockquote inside a reply must remain distinct from the reply author's response."
+}

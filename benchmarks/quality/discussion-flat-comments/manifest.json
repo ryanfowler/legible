@@ -1,0 +1,24 @@
+{
+  "id": "discussion-flat-comments",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-flat-comments",
+  "page_shape": "discussion",
+  "must_include": [
+    "Dana — August 10",
+    "Jules — August 11",
+    "Priya — August 12",
+    "The cache fix passed the overnight load test",
+    "The retry path works across all three service regions",
+    "The rollout record links every alert to an owner"
+  ],
+  "reply_markers": [
+    "Dana — August 10",
+    "Jules — August 11",
+    "Priya — August 12"
+  ],
+  "must_exclude": ["Vote up", "Report this comment", "Sign in to reply"],
+  "expected": {
+    "reply_items_min": 3
+  },
+  "notes": "Flat comments retain author and timestamp context while controls stay outside the result."
+}

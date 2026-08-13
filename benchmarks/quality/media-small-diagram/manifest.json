@@ -1,0 +1,16 @@
+{
+  "id": "media-small-diagram",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-small-diagram",
+  "page_shape": "document",
+  "must_include": [
+    "Small diagram of lock ordering A before B",
+    "The ordering prevents the circular wait"
+  ],
+  "must_exclude": ["Documentation logo", "Training card"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A small but described technical diagram must survive size-based negative evidence."
+}

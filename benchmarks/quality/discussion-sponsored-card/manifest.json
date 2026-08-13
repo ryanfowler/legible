@@ -1,0 +1,21 @@
+{
+  "id": "discussion-sponsored-card",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/discussion-sponsored-card",
+  "page_shape": "discussion",
+  "must_include": [
+    "Nia measured the query plan",
+    "Pavel removed the redundant join"
+  ],
+  "reply_markers": ["Nia", "Pavel"],
+  "must_exclude": [
+    "Sponsored database training",
+    "Start free course",
+    "Promoted by DataCo"
+  ],
+  "expected": {
+    "reply_items_min": 2,
+    "reply_items_max": 2
+  },
+  "notes": "A promoted reply-like card between comments must not count as discussion content."
+}

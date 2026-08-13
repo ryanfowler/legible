@@ -6,5 +6,6 @@
   "must_include": [],
   "must_exclude": ["Create an account to continue"],
   "expected_failure": true,
+  "expected_error": "NoContent",
   "notes": "An access-barrier shell contains no article text and must fail instead of returning the paywall prompt."
 }

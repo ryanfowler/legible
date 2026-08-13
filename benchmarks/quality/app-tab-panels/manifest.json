@@ -1,0 +1,20 @@
+{
+  "id": "app-tab-panels",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-tab-panels",
+  "page_shape": "document",
+  "must_include": [
+    "Configure the Linux service",
+    "Set Restart to on-failure",
+    "The source includes the complete Linux procedure"
+  ],
+  "must_exclude": [
+    "Windows duplicate procedure",
+    "macOS duplicate procedure",
+    "Select a platform"
+  ],
+  "expected": {
+    "code_blocks_min": 1
+  },
+  "notes": "One useful source-present tab panel should win while duplicate inactive panels stay out."
+}

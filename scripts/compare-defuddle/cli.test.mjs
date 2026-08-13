@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,6 +35,7 @@ test("accepts expected extraction failures but rejects comparator panics", () =>
       must_include: [],
       must_exclude: ["Unexpected content"],
       expected_failure: true,
+      expected_error: "NoContent",
       notes: "Exercise structured expected-failure handling.",
     }),
   );
@@ -71,4 +73,70 @@ test("accepts expected extraction failures but rejects comparator panics", () =>
   assert.equal(report.aggregate.defuddle.panic_count, 1);
   assert.equal(existsSync(join(fixtureOutput, "legible.md")), false);
   assert.equal(existsSync(join(fixtureOutput, "defuddle.md")), false);
+});
+
+test("keeps revision hashing stable across custom summary writes", () => {
+  const root = mkdtempSync(join(tmpdir(), "legible-quality-summary-"));
+  const fixtureDirectory = join(root, "empty-page");
+  const outputDirectory = join(root, "output");
+  const repository = dirname(dirname(scriptDirectory));
+  const summaryPath = join(
+    repository,
+    `.quality-summary-test-${process.pid}.md`,
+  );
+  mkdirSync(fixtureDirectory);
+  writeFileSync(
+    join(fixtureDirectory, "manifest.json"),
+    JSON.stringify({
+      id: "empty-page",
+      category: "application-markup",
+      source_url: "https://example.test/empty",
+      page_shape: "application",
+      must_include: [],
+      must_exclude: [],
+      expected_failure: true,
+      expected_error: "NoContent",
+      notes: "Exercise stable custom summary hashing.",
+    }),
+  );
+  writeFileSync(join(fixtureDirectory, "source.html"), "<html></html>");
+  const arguments_ = [
+    indexPath,
+    "--all",
+    "--fixture-root",
+    root,
+    "--output",
+    outputDirectory,
+    "--summary",
+    summaryPath,
+  ];
+  const environment = {
+    ...process.env,
+    DEFUDDLE_COMMAND: process.execPath,
+    DEFUDDLE_ARGS: JSON.stringify(["-e", "console.log('{}')"]),
+  };
+  try {
+    for (let run = 0; run < 2; run += 1) {
+      assert.throws(() =>
+        execFileSync(process.execPath, arguments_, {
+          encoding: "utf8",
+          env: environment,
+          stdio: "pipe",
+        }),
+      );
+      const revision = JSON.parse(
+        readFileSync(join(outputDirectory, "report.json"), "utf8"),
+      ).revisions.legible;
+      if (run === 0) {
+        writeFileSync(join(root, "revision.json"), JSON.stringify(revision));
+      } else {
+        assert.deepEqual(
+          revision,
+          JSON.parse(readFileSync(join(root, "revision.json"), "utf8")),
+        );
+      }
+    }
+  } finally {
+    rmSync(summaryPath, { force: true });
+  }
 });

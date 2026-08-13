@@ -1,0 +1,17 @@
+{
+  "id": "media-figure-peripheral-card",
+  "category": "inline-peripheral-ui",
+  "source_url": "https://example.test/media-figure-peripheral-card",
+  "page_shape": "media",
+  "must_include": [
+    "Cross-section of the new seawall foundation",
+    "The piles reach the dense gravel layer"
+  ],
+  "must_exclude": ["Image-only peripheral card", "Buy the engineering poster"],
+  "expected": {
+    "figures_min": 1,
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A meaningful low-prose figure must survive while an image-only peripheral card is removed."
+}

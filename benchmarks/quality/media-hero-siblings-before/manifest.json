@@ -1,0 +1,16 @@
+{
+  "id": "media-hero-siblings-before",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-hero-siblings-before",
+  "page_shape": "article",
+  "must_include": [
+    "Aerial view of the completed solar field",
+    "The array reached its full rated output"
+  ],
+  "must_exclude": ["Sponsor logo", "Conference promotion"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A lead image several siblings before a narrow root should survive when its caption and position are strong."
+}

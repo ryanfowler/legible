@@ -87,6 +87,7 @@ function isEscaped(value, index) {
 
 function scanMarkdownLinks(markdown) {
   const visible = [];
+  const imageSources = [];
   let links = 0;
   let images = 0;
   let linkedCharacters = 0;
@@ -122,13 +123,20 @@ function scanMarkdownLinks(markdown) {
     visible.push(label);
     if (image) {
       images += 1;
+      imageSources.push(markdown.slice(labelEnd + 2, destinationEnd));
     } else {
       links += 1;
       linkedCharacters += label.length;
     }
     index = destinationEnd;
   }
-  return { text: visible.join(""), links, images, linkedCharacters };
+  return {
+    text: visible.join(""),
+    links,
+    images,
+    imageSources,
+    linkedCharacters,
+  };
 }
 
 function countInlineMath(lines) {
@@ -256,11 +264,11 @@ function markdownStructure(markdown) {
     }
     if (/^\[\^[^\]]+\]:/u.test(line)) footnotes += 1;
 
-    const listItem = line.match(/^(\s*)(?:[-+*]|\d+[.)])\s+\S/u);
+    const listItem = line.match(/^(\s*)(?:(\d+)[.)]|[-+*])\s+\S/u);
     const isListItem = listItem !== null;
     if (isListItem && !inList) lists += 1;
     inList = isListItem || (inList && /^\s{2,}\S/u.test(line));
-    if (listItem) {
+    if (listItem?.[2]) {
       const indent = [...listItem[1]].reduce(
         (width, character) => width + (character === "\t" ? 4 : 1),
         0,
@@ -306,6 +314,39 @@ function markdownStructure(markdown) {
   };
 }
 
+function replyStructure(markdown, markers) {
+  if (!markers?.length) return null;
+  const markerTokens = markers.map(tokenize);
+  const containsMarker = (value) => {
+    const tokens = tokenize(markdownVisibleText(value));
+    return markerTokens.some((marker) =>
+      tokens.some((_, start) =>
+        marker.every((token, offset) => tokens[start + offset] === token),
+      ),
+    );
+  };
+  let replyItems = 0;
+  let replyDepth = 0;
+  const lines = markdown.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const item = lines[index].match(/^(\s*)\d+[.)](?:\s+(.*))?$/u);
+    if (!item) continue;
+    const indent = [...item[1]].reduce(
+      (width, character) => width + (character === "\t" ? 4 : 1),
+      0,
+    );
+    const block = [item[2] ?? ""];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      if (/^\s*\d+[.)](?:\s+.*)?$/u.test(lines[cursor])) break;
+      if (lines[cursor].trim()) block.push(lines[cursor]);
+    }
+    if (!containsMarker(block.join("\n"))) continue;
+    replyItems += 1;
+    replyDepth = Math.max(replyDepth, Math.floor(indent / 3) + 1);
+  }
+  return { reply_items: replyItems, reply_depth: replyDepth };
+}
+
 export function outputMetrics(markdown, details = {}) {
   const linkScan = scanMarkdownLinks(markdown);
   const structure = markdownStructure(markdown);
@@ -317,6 +358,7 @@ export function outputMetrics(markdown, details = {}) {
       : 0,
     headings: structure.headings,
     images: linkScan.images,
+    image_sources: linkScan.imageSources,
     code_blocks: structure.code_blocks,
     tables: Math.max(details.tables ?? 0, structure.tables),
     figures: details.figures ?? 0,
@@ -432,6 +474,7 @@ function metadataScores(actual, expected) {
 
 export function scoreExtraction(extraction, fixture) {
   const expectedFailure = fixture.manifest.expected_failure ?? false;
+  const expectedError = fixture.manifest.expected_error ?? null;
   const success = extraction.success === true;
   const markdown = success ? extraction.markdown : "";
   const normalized = normalizeText(markdownVisibleText(markdown));
@@ -442,12 +485,35 @@ export function scoreExtraction(extraction, fixture) {
     normalized.includes(normalizeText(phrase)),
   );
   const metrics = outputMetrics(markdown, extraction);
+  const explicitReplies = replyStructure(
+    markdown,
+    fixture.manifest.reply_markers,
+  );
+  if (explicitReplies) Object.assign(metrics, explicitReplies);
   const structureChecks = Object.entries(fixture.manifest.expected ?? {}).map(
     ([name, limit]) => {
       const match = name.match(/^(.*)_(min|max)$/u);
       const actual = metrics[match[1]];
       return match[2] === "min" ? actual >= limit : actual <= limit;
     },
+  );
+  const requiredImageSources =
+    fixture.manifest.must_include_image_sources ?? [];
+  const excludedImageSources =
+    fixture.manifest.must_exclude_image_sources ?? [];
+  const imageSourcesMissing = requiredImageSources.filter(
+    (source) => !metrics.image_sources.includes(source),
+  );
+  const imageSourcesFound = excludedImageSources.filter((source) =>
+    metrics.image_sources.includes(source),
+  );
+  structureChecks.push(
+    ...requiredImageSources.map((source) =>
+      metrics.image_sources.includes(source),
+    ),
+    ...excludedImageSources.map(
+      (source) => !metrics.image_sources.includes(source),
+    ),
   );
   const metadata = metadataScores(
     extraction.metadata,
@@ -460,18 +526,21 @@ export function scoreExtraction(extraction, fixture) {
     expectedFailure &&
     !success &&
     extraction.failure_kind === "extraction" &&
-    extraction.deterministic === true;
+    extraction.deterministic === true &&
+    (expectedError === null ||
+      extraction.error_details?.variant === expectedError);
   const reliabilityPass = expectedFailure
     ? correctExpectedFailure
     : success && extraction.deterministic === true;
   const configuredScore = (value) => {
-    if (correctExpectedFailure || value === null) return null;
+    if (expectedFailure || value === null) return null;
     return success ? value : 0;
   };
   return {
     success,
     error: extraction.error ?? null,
     failure_kind: extraction.failure_kind ?? null,
+    error_variant: extraction.error_details?.variant ?? null,
     panic: extraction.failure_kind === "panic",
     deterministic: extraction.deterministic ?? null,
     reliability_pass: reliabilityPass,
@@ -493,7 +562,7 @@ export function scoreExtraction(extraction, fixture) {
         : structureChecks.filter(Boolean).length / structureChecks.length,
     ),
     metadata_score: configuredScore(metadata.score),
-    reference: correctExpectedFailure
+    reference: expectedFailure
       ? null
       : success || reference === null
         ? reference
@@ -503,6 +572,8 @@ export function scoreExtraction(extraction, fixture) {
     structure: Object.fromEntries(
       STRUCTURE_NAMES.map((name) => [name, metrics[name]]),
     ),
+    image_sources_missing: imageSourcesMissing,
+    excluded_image_sources_found: imageSourcesFound,
     metadata_mismatches: metadata.mismatches,
     words: metrics.words,
     links: metrics.links,
@@ -667,6 +738,72 @@ export function formatHumanReport(report) {
     "",
     `Largest Legible wins: ${formatComparisons(report.largest_legible_wins)}`,
     `Largest Legible regressions: ${formatComparisons(report.largest_legible_regressions)}`,
+  );
+  return lines.join("\n");
+}
+
+function formatSummaryRevision(revision) {
+  if (typeof revision === "string") return revision;
+  if (!revision || typeof revision !== "object") return "unknown";
+  const suffix = revision.dirty
+    ? ` (dirty corpus ${revision.diff_sha256 ?? "unknown"})`
+    : "";
+  return `${revision.commit ?? "unknown"}${suffix}`;
+}
+
+function summaryRow(label, summary) {
+  return `| ${label} | ${formatScore(summary.required_content_score)} | ${formatScore(summary.noise_score)} | ${formatScore(summary.structure_score)} | ${formatScore(summary.metadata_score)} | ${formatScore(summary.reference_f1)} | ${formatScore(summary.reliability_rate)} |`;
+}
+
+export function formatMarkdownSummary(report) {
+  const lines = [
+    "# Extraction quality baseline",
+    "",
+    "> This curated corpus measures specific extraction cases. It is not an absolute measure of all web pages.",
+    "",
+    `- Fixtures: ${report.fixture_count}`,
+    `- Legible revision: \`${formatSummaryRevision(report.revisions.legible)}\``,
+    `- Defuddle revision: \`${report.revisions.defuddle}\``,
+    "",
+    "## Aggregate results",
+    "",
+    "| Extractor | Content recall | Noise rejection | Structural fidelity | Metadata accuracy | Reference F1 | Reliability |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    summaryRow("Legible", report.aggregate.legible),
+    summaryRow("Defuddle", report.aggregate.defuddle),
+    "",
+    "## Results by category",
+    "",
+    "| Category | Fixtures | Extractor | Content recall | Noise rejection | Structural fidelity | Metadata accuracy | Reference F1 | Reliability |",
+    "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ];
+  for (const [category, result] of Object.entries(report.by_category)) {
+    for (const [label, summary] of [
+      ["Legible", result.legible],
+      ["Defuddle", result.defuddle],
+    ]) {
+      lines.push(
+        `| ${category} | ${result.fixture_count} | ${label} | ${formatScore(summary.required_content_score)} | ${formatScore(summary.noise_score)} | ${formatScore(summary.structure_score)} | ${formatScore(summary.metadata_score)} | ${formatScore(summary.reference_f1)} | ${formatScore(summary.reliability_rate)} |`,
+      );
+    }
+  }
+  const reliabilityFailures = report.results
+    .filter((result) => !result.legible.reliability_pass)
+    .map((result) => result.fixture);
+  const comparatorReliabilityFailures = report.results
+    .filter((result) => !result.defuddle.reliability_pass)
+    .map((result) => result.fixture);
+  const comparatorGaps = report.largest_legible_regressions.map(
+    (item) => `${item.fixture} (${item.delta.toFixed(3)})`,
+  );
+  lines.push(
+    "",
+    "## Current gaps",
+    "",
+    `- Largest comparator gaps: ${comparatorGaps.join(", ") || "none"}`,
+    `- Legible reliability failures: ${reliabilityFailures.join(", ") || "none"}`,
+    `- Defuddle reliability failures: ${comparatorReliabilityFailures.join(", ") || "none"}`,
+    "",
   );
   return lines.join("\n");
 }

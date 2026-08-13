@@ -1,0 +1,9 @@
+{
+  "id": "metadata-organization-person",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-organization-person",
+  "page_shape": "article",
+  "must_include": ["The model combines wave and sediment records"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "Explicit structured data may identify both an individual and an organization author."
+}

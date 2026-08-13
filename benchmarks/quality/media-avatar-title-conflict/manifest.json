@@ -1,0 +1,16 @@
+{
+  "id": "media-avatar-title-conflict",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-avatar-title-conflict",
+  "page_shape": "article",
+  "must_include": [
+    "A restored turbine beside the powerhouse",
+    "The turbine returned to service after balancing"
+  ],
+  "must_exclude": ["Portrait of author Dana Chen", "Follow Dana"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "An author avatar near the title must not displace a representative content image."
+}

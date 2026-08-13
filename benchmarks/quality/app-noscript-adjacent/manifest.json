@@ -1,0 +1,13 @@
+{
+  "id": "app-noscript-adjacent",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-noscript-adjacent",
+  "page_shape": "application",
+  "must_include": [
+    "Static export instructions",
+    "Download the signed export",
+    "Validate the manifest before import"
+  ],
+  "must_exclude": ["Enable enhanced viewer", "Client renderer starting"],
+  "notes": "Useful static prose near noscript content should survive preparation without duplicating client shell text."
+}

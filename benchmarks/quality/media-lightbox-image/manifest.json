@@ -1,0 +1,16 @@
+{
+  "id": "media-lightbox-image",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-lightbox-image",
+  "page_shape": "article",
+  "must_include": [
+    "Microscope view of the repaired circuit trace",
+    "The repaired trace passed continuity testing"
+  ],
+  "must_exclude": ["Open image controls", "Gallery advertisement"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "A useful image wrapped by a lightbox button must remain without player controls."
+}

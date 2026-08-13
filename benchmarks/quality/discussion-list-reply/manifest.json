@@ -1,0 +1,23 @@
+{
+  "id": "discussion-list-reply",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-list-reply",
+  "page_shape": "discussion",
+  "must_include": [
+    "Mina",
+    "Owen",
+    "Mina proposed three checks",
+    "Validate the schema",
+    "Replay the failed batch",
+    "Compare the final checksum",
+    "The checklist also needs an owner"
+  ],
+  "reply_markers": ["Mina", "Owen"],
+  "must_exclude": ["Add reaction", "Thread options"],
+  "expected": {
+    "reply_items_min": 2,
+    "reply_items_max": 2,
+    "lists_min": 2
+  },
+  "notes": "A semantic list within a reply must not be confused with the outer reply list."
+}

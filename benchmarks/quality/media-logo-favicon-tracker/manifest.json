@@ -1,0 +1,16 @@
+{
+  "id": "media-logo-favicon-tracker",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-logo-favicon-tracker",
+  "page_shape": "article",
+  "must_include": [
+    "Thermal image of the tested battery module",
+    "The module remained below sixty degrees"
+  ],
+  "must_exclude": ["North Lab logo", "Site favicon", "Tracking pixel"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1
+  },
+  "notes": "Logos, favicon-like images, and tracking pixels must not survive beside the article image."
+}

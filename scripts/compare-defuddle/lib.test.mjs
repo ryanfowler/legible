@@ -7,6 +7,7 @@ import {
   aggregateReport,
   comparisonResult,
   discoverFixtures,
+  formatMarkdownSummary,
   markdownVisibleText,
   normalizeText,
   outputMetrics,
@@ -92,14 +93,15 @@ $x + y$`;
     link_density: 4 / markdown.length,
     headings: 1,
     images: 1,
+    image_sources: ["image.png"],
     code_blocks: 1,
     tables: 1,
     figures: 0,
     lists: 1,
     footnotes: 1,
     math: 1,
-    reply_items: 2,
-    reply_depth: 1,
+    reply_items: 0,
+    reply_depth: 0,
     headings_h1: 1,
     headings_h2: 0,
     headings_h3: 0,
@@ -138,19 +140,99 @@ content
   assert.equal(metrics.headings, 1);
 });
 
-test("counts heading levels and list-encoded reply structure", () => {
+test("counts heading levels and ordered-list reply structure", () => {
   const metrics = outputMetrics(`# Thread
 
 ## Replies
 
-- first
-  - nested
-    - deep
-- second`);
+1. first
+   1. nested
+      1. deep
+1. second`);
   assert.equal(metrics.headings_h1, 1);
   assert.equal(metrics.headings_h2, 1);
   assert.equal(metrics.reply_items, 4);
   assert.equal(metrics.reply_depth, 3);
+});
+
+test("does not count a rich bullet list as replies", () => {
+  const metrics = outputMetrics(`1. Dana
+   - Read the specification
+   - Inspect the implementation
+1. Jules`);
+  assert.equal(metrics.reply_items, 2);
+  assert.equal(metrics.reply_depth, 1);
+});
+
+test("uses explicit reply markers instead of an ordered rich list", () => {
+  const result = scoreExtraction(
+    {
+      success: true,
+      deterministic: true,
+      markdown: `1. **Dana**
+   1. Prepare the archive
+      1. Verify its digest
+1. **Jules**`,
+    },
+    fixture({
+      manifest: {
+        must_include: ["Dana", "Jules"],
+        must_exclude: [],
+        reply_markers: ["Dana", "Jules"],
+        expected: { reply_items_min: 2, reply_items_max: 2 },
+      },
+    }),
+  );
+  assert.equal(result.reply_items, 2);
+  assert.equal(result.reply_depth, 1);
+  assert.equal(result.structure_score, 1);
+});
+
+test("finds continuation-line markers with exact token boundaries", () => {
+  const result = scoreExtraction(
+    {
+      success: true,
+      deterministic: true,
+      markdown: `1.
+   **Moderator notice**
+1. **Bo**
+1. A bounded procedure`,
+    },
+    fixture({
+      manifest: {
+        must_include: ["Moderator notice", "Bo"],
+        must_exclude: [],
+        reply_markers: ["Moderator notice", "Bo"],
+        expected: { reply_items_min: 2, reply_items_max: 2 },
+      },
+    }),
+  );
+  assert.equal(result.reply_items, 2);
+  assert.equal(result.structure_score, 1);
+});
+
+test("checks exact retained image sources", () => {
+  const result = scoreExtraction(
+    {
+      success: true,
+      deterministic: true,
+      markdown: "![Map](https://example.test/placeholder.gif)",
+    },
+    fixture({
+      manifest: {
+        expected: { images_min: 1 },
+        must_include_image_sources: ["https://example.test/map.png"],
+        must_exclude_image_sources: ["https://example.test/placeholder.gif"],
+      },
+    }),
+  );
+  assert.equal(result.structure_score, 1 / 3);
+  assert.deepEqual(result.image_sources_missing, [
+    "https://example.test/map.png",
+  ]);
+  assert.deepEqual(result.excluded_image_sources_found, [
+    "https://example.test/placeholder.gif",
+  ]);
 });
 
 test("distinguishes inline math from currency", () => {
@@ -210,9 +292,10 @@ test("treats a deterministic expected extraction failure as not applicable", () 
       failure_kind: "extraction",
       deterministic: true,
       error: "No content",
+      error_details: { variant: "NoContent" },
     },
     fixture({
-      manifest: { expected_failure: true },
+      manifest: { expected_failure: true, expected_error: "NoContent" },
       reference: "Required phrase",
       expectedMetadata: { title: "Sample title" },
     }),
@@ -233,10 +316,46 @@ test("rejects a tool failure for an expected-failure fixture", () => {
       deterministic: true,
       error: "thread 'main' panicked",
     },
-    fixture({ manifest: { expected_failure: true } }),
+    fixture({
+      manifest: { expected_failure: true, expected_error: "NoContent" },
+    }),
   );
   assert.equal(result.reliability_pass, false);
   assert.equal(result.panic, true);
+});
+
+test("rejects the wrong extraction error variant", () => {
+  const result = scoreExtraction(
+    {
+      success: false,
+      failure_kind: "extraction",
+      deterministic: true,
+      error: "No body",
+      error_details: { variant: "NoBody" },
+    },
+    fixture({
+      manifest: { expected_failure: true, expected_error: "NoContent" },
+    }),
+  );
+  assert.equal(result.reliability_pass, false);
+  assert.equal(result.error_variant, "NoBody");
+});
+
+test("excludes an unexpected success from expected-failure quality scores", () => {
+  const result = scoreExtraction(
+    { success: true, deterministic: true, markdown: "Gate text" },
+    fixture({
+      manifest: { expected_failure: true, expected_error: "NoContent" },
+      reference: "Expected no result",
+      expectedMetadata: { title: "Expected no result" },
+    }),
+  );
+  assert.equal(result.reliability_pass, false);
+  assert.equal(result.required_content_score, null);
+  assert.equal(result.noise_score, null);
+  assert.equal(result.structure_score, null);
+  assert.equal(result.metadata_score, null);
+  assert.equal(result.reference, null);
 });
 
 test("enforces the committed manifest schema", () => {
@@ -297,4 +416,66 @@ test("builds a stable aggregate with comparison rankings", () => {
   assert.equal(report.by_category["technical-documentation"].fixture_count, 1);
   assert.equal(report.largest_legible_wins[0].fixture, "sample");
   assert.ok(Math.abs(report.largest_legible_wins[0].delta - 1 / 3) < 1e-12);
+});
+
+test("formats a compact deterministic Markdown summary", () => {
+  const sample = fixture();
+  const result = comparisonResult(
+    sample,
+    { success: true, deterministic: true, markdown: "Required phrase" },
+    { success: true, deterministic: true, markdown: "Other phrase" },
+  );
+  const report = aggregateReport([result], {
+    legible: { commit: "abc123", dirty: false, diff_sha256: null },
+    defuddle: "npm:defuddle@0.19.2",
+  });
+  const summary = formatMarkdownSummary(report);
+  assert.match(summary, /This curated corpus/u);
+  assert.match(summary, /Fixtures: 1/u);
+  assert.match(summary, /Legible revision: `abc123`/u);
+  assert.match(summary, /npm:defuddle@0\.19\.2/u);
+  assert.match(summary, /technical-documentation/u);
+  assert.match(summary, /Largest comparator gaps: none/u);
+  assert.match(summary, /Legible reliability failures: none/u);
+  assert.match(summary, /Defuddle reliability failures: none/u);
+});
+
+test("puts the baseline-excluding worktree hash in the summary", () => {
+  const report = aggregateReport([], {
+    legible: {
+      commit: "abc123",
+      dirty: true,
+      diff_sha256: "stable-corpus-hash",
+    },
+    defuddle: "npm:defuddle@0.19.2",
+  });
+  const summary = formatMarkdownSummary(report);
+  assert.match(summary, /abc123 \(dirty corpus stable-corpus-hash\)/u);
+});
+
+test("lists reliability failures for both extractors", () => {
+  const sample = fixture();
+  const result = comparisonResult(
+    sample,
+    {
+      success: false,
+      failure_kind: "tool",
+      deterministic: true,
+      error: "Legible tool failed",
+    },
+    {
+      success: false,
+      failure_kind: "tool",
+      deterministic: true,
+      error: "Defuddle tool failed",
+    },
+  );
+  const summary = formatMarkdownSummary(
+    aggregateReport([result], {
+      legible: "abc123",
+      defuddle: "npm:defuddle@0.19.2",
+    }),
+  );
+  assert.match(summary, /Legible reliability failures: sample/u);
+  assert.match(summary, /Defuddle reliability failures: sample/u);
 });

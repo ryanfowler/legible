@@ -1,0 +1,20 @@
+{
+  "id": "media-embed-fallback",
+  "category": "media-embed",
+  "source_url": "https://example.test/media-embed-fallback",
+  "page_shape": "media",
+  "must_include": [
+    "Interview with the bridge engineer",
+    "Read the complete interview transcript",
+    "The engineer explains the staged load test"
+  ],
+  "must_exclude": [
+    "Player settings",
+    "Autoplay next video",
+    "Opaque player chrome"
+  ],
+  "expected": {
+    "links_min": 1
+  },
+  "notes": "A media embed should retain useful title, fallback, and transcript text without opaque player chrome."
+}

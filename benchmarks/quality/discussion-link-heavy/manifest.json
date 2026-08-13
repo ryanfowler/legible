@@ -1,0 +1,20 @@
+{
+  "id": "discussion-link-heavy",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-link-heavy",
+  "page_shape": "discussion",
+  "must_include": [
+    "Kim linked the protocol specification",
+    "The report explains why the older decoder rejects the extension frame",
+    "Read the wire format",
+    "Inspect the reference implementation",
+    "Review the interoperability report"
+  ],
+  "reply_markers": ["Kim", "Lou"],
+  "must_exclude": ["Developer jobs", "Partner links", "Sponsored SDK"],
+  "expected": {
+    "reply_items_min": 2,
+    "links_min": 3
+  },
+  "notes": "A developer thread with several relevant links must not be classified as navigation."
+}

@@ -1,0 +1,19 @@
+{
+  "id": "media-comment-avatars",
+  "category": "discussion",
+  "source_url": "https://example.test/media-comment-avatars",
+  "page_shape": "discussion",
+  "must_include": [
+    "Diagram of the retry state machine",
+    "Niko explains the terminal state",
+    "Orla confirms the transition"
+  ],
+  "reply_markers": ["Niko", "Orla"],
+  "must_exclude": ["Avatar for Niko", "Avatar for Orla", "Report comment"],
+  "expected": {
+    "images_min": 1,
+    "images_max": 1,
+    "reply_items_min": 2
+  },
+  "notes": "Repeated reply avatars must be removed while a diagram inside the discussion remains."
+}

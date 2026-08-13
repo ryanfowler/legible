@@ -1,0 +1,18 @@
+{
+  "id": "discussion-moderator-notice",
+  "category": "discussion",
+  "source_url": "https://example.test/discussion-moderator-notice",
+  "page_shape": "discussion",
+  "must_include": [
+    "Moderator note: keep test data anonymous",
+    "Sora replaced the production sample",
+    "Vic confirmed the minimized case"
+  ],
+  "reply_markers": ["Moderator notice", "Sora", "Vic"],
+  "must_exclude": ["Ban user", "Lock topic", "Report reply"],
+  "expected": {
+    "reply_items_min": 3,
+    "reply_depth_min": 2
+  },
+  "notes": "A useful moderator notice remains in the conversation while moderation controls do not."
+}

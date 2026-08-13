@@ -1,0 +1,9 @@
+{
+  "id": "metadata-og-h1-conflict",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-og-h1-conflict",
+  "page_shape": "article",
+  "must_include": ["The archive includes oral histories"],
+  "must_exclude": ["Subscribe for updates"],
+  "notes": "A visible content heading must beat a stale OpenGraph title."
+}

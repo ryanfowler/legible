@@ -1,0 +1,9 @@
+{
+  "id": "metadata-avatar-alt-author",
+  "category": "news-article",
+  "source_url": "https://example.test/metadata-avatar-alt-author",
+  "page_shape": "article",
+  "must_include": ["The pilot separates three material streams"],
+  "must_exclude": ["Portrait of guest photographer Leo Park"],
+  "notes": "Avatar alt text near a byline must not become author metadata."
+}

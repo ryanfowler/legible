@@ -1,0 +1,21 @@
+{
+  "id": "app-navigation-tree",
+  "category": "application-markup",
+  "source_url": "https://example.test/app-navigation-tree",
+  "page_shape": "document",
+  "must_include": [
+    "Compact retention policy",
+    "Records remain available for ninety days",
+    "Legal holds pause deletion"
+  ],
+  "must_exclude": [
+    "Workspace settings",
+    "Team members",
+    "Billing plans",
+    "Audit navigation"
+  ],
+  "expected": {
+    "headings_min": 2
+  },
+  "notes": "A large application navigation tree beside short useful content must not win extraction."
+}

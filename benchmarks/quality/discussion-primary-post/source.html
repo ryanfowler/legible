@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Design proposal for bounded retries</title>
+  </head>
+  <body>
+    <header><button>Bookmark topic</button></header>
+    <main>
+      <article>
+        <h1>Design proposal for bounded retries</h1>
+        <p><strong>Casey</strong> <time>August 7, 2026</time></p>
+        <p>
+          The primary proposal caps retries at four and records one terminal
+          failure reason.
+        </p>
+      </article>
+      <section>
+        <h2>Replies</h2>
+        <ol>
+          <li>
+            <article>
+              <strong>Uma</strong>
+              <p>
+                Uma tested the timeout interaction with a slow upstream service.
+              </p>
+            </article>
+          </li>
+          <li>
+            <article>
+              <strong>Wei</strong>
+              <p>
+                The cap prevents duplicate work while the terminal reason
+                remains observable.
+              </p>
+            </article>
+          </li>
+        </ol>
+      </section>
+    </main>
+    <aside>Subscribe to updates</aside>
+    <footer>Similar proposals</footer>
+  </body>
+</html>

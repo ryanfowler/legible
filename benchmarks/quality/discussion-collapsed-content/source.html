@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Collapsed branch</title>
+  </head>
+  <body>
+    <main>
+      <h1>Collapsed branch</h1>
+      <p>
+        The server response contains the full discussion even though the client
+        starts with a collapsed branch.
+      </p>
+      <ol>
+        <li>
+          <article>
+            <strong>Ari</strong>
+            <p>
+              Ari explained the collapsed branch and why the default view hides
+              it.
+            </p>
+            <button>Collapse thread</button>
+          </article>
+          <ol class="collapsed" aria-hidden="true">
+            <li>
+              <article>
+                <strong>Bo</strong>
+                <p>
+                  Bo reproduced the parsing error with the archived request
+                  payload.
+                </p>
+              </article>
+            </li>
+            <li>
+              <article>
+                <strong>Cy</strong>
+                <p>
+                  Cy supplied the corrected sample and confirmed the parser
+                  result.
+                </p>
+              </article>
+            </li>
+          </ol>
+        </li>
+      </ol>
+    </main>
+    <button>Show hidden replies</button>
+  </body>
+</html>
