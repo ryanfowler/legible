@@ -1,0 +1,18 @@
+{
+  "id": "technical-doc",
+  "category": "technical-documentation",
+  "source_url": "https://docs.example.test/client/configuration",
+  "page_shape": "document",
+  "must_include": [
+    "Set the retry limit before you create the client",
+    "retry_limit = 3",
+    "Timeout in milliseconds"
+  ],
+  "must_exclude": ["Download our desktop app", "Documentation navigation"],
+  "expected": {
+    "headings_h2_min": 2,
+    "code_blocks_min": 1,
+    "tables_min": 1
+  },
+  "notes": "A documentation page must retain ordered instructions, source code, and a data table while it rejects the documentation shell."
+}

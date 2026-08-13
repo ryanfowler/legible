@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Configure the client</title>
+  </head>
+  <body>
+    <div class="documentation-layout">
+      <nav aria-label="Documentation navigation">
+        Documentation navigation
+        <a href="/install">Install</a>
+        <a href="/configuration">Configuration</a>
+      </nav>
+      <main>
+        <article>
+          <h1>Configure the client</h1>
+          <p>
+            Set the retry limit before you create the client. The client uses
+            the same value for each request in the queue.
+          </p>
+          <h2>Example</h2>
+          <pre><code class="language-toml">retry_limit = 3
+timeout_ms = 5000</code></pre>
+          <h2>Settings</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Meaning</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>retry_limit</code></td>
+                <td>Maximum request attempts</td>
+              </tr>
+              <tr>
+                <td><code>timeout_ms</code></td>
+                <td>Timeout in milliseconds</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>Restart the worker after you change a configuration file.</p>
+        </article>
+      </main>
+      <aside><a href="/download">Download our desktop app</a></aside>
+    </div>
+  </body>
+</html>

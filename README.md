@@ -157,13 +157,17 @@ Legible does not fetch URLs.
 fixtures with semantic assertions in `expected.json`. Add focused positive and
 negative cases for each extraction heuristic.
 
-Run the optional maintainer comparison tool with:
+Install and run the optional quality comparison tool with:
 
 ```bash
-node scripts/compare-defuddle/index.mjs
+npm --prefix scripts/compare-defuddle ci
+cargo fetch
+node scripts/compare-defuddle/index.mjs --all
 ```
 
-See `scripts/compare-defuddle/README.md` for optional Defuddle comparison.
+The tool scores Legible and a pinned Defuddle release against independent quality
+fixtures. See `benchmarks/quality/README.md` for the fixture format and
+`scripts/compare-defuddle/README.md` for runner options.
 
 Run the compatibility performance suite with:
 
