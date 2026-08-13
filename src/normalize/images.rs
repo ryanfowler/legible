@@ -5,6 +5,12 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use url::form_urlencoded;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageVariant {
+    Mobile,
+    Desktop,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SrcsetDescriptor {
     Width(u32),
@@ -193,8 +199,11 @@ struct ImageRoleEvidence {
     small_dimensions: bool,
     tracking_dimensions: bool,
     profile_context: bool,
+    author_media_context: bool,
     avatar_context: bool,
     related_context: bool,
+    promotional_context: bool,
+    media_control_context: bool,
     logo_or_icon_context: bool,
     card_grid_context: bool,
     repetitions: u16,
@@ -217,8 +226,9 @@ impl ImageRoleEvidence {
             .max()
             .is_some_and(|size| size >= 200);
         let names = image_context_name(dom, image);
+        let structural_names = image_structural_context_name(dom, image);
         Self {
-            descriptive: has_direct_meaningful_description(dom, image),
+            descriptive: has_meaningful_image_description(dom, image),
             captioned: has_figure_caption(dom, image),
             responsive: has_responsive_candidate(dom, image) || has_lazy_candidate(dom, image),
             meaningful_dimensions,
@@ -235,6 +245,13 @@ impl ImageRoleEvidence {
                     "profile", "bio",
                 ],
             ),
+            author_media_context: contains_role_token(
+                &names,
+                &["author", "authors", "byline", "profile", "bio"],
+            ) && contains_role_token(
+                &names,
+                &["avatar", "headshot", "image", "photo", "portrait"],
+            ),
             avatar_context: contains_role_token(&names, &["avatar", "avatars"]),
             related_context: contains_role_token(
                 &names,
@@ -247,6 +264,23 @@ impl ImageRoleEvidence {
                     "tout",
                 ],
             ),
+            promotional_context: contains_role_token(
+                &structural_names,
+                &[
+                    "ad",
+                    "ads",
+                    "advert",
+                    "advertisement",
+                    "advertorial",
+                    "marketing",
+                    "promo",
+                    "promotion",
+                    "promotional",
+                    "sponsor",
+                    "sponsored",
+                ],
+            ),
+            media_control_context: has_media_control_context(dom, image),
             logo_or_icon_context: contains_role_token(
                 &names,
                 &["favicon", "logo", "icon", "badge", "sprite", "integration"],
@@ -301,6 +335,7 @@ fn image_role_score(
             && (!evidence.descriptive || decorative_image_name(dom, image)),
     ) * 10;
     score.negative += i16::from(evidence.profile_context) * 4;
+    score.negative += i16::from(evidence.author_media_context) * 12;
     score.negative += i16::from(evidence.avatar_context) * 8;
     score.negative += i16::from(evidence.logo_or_icon_context) * 5;
     score.negative += i16::from(contains_role_token(
@@ -308,6 +343,8 @@ fn image_role_score(
         &["favicon", "logo", "integration"],
     )) * 3;
     score.negative += i16::from(evidence.related_context) * 24;
+    score.negative += i16::from(evidence.promotional_context) * 24;
+    score.negative += i16::from(evidence.media_control_context) * 24;
     score.negative += i16::from(evidence.card_grid_context) * 2;
     score.negative += i16::from(evidence.profile_context && evidence.repetitions >= 2) * 8;
     score.negative += if evidence.repetitions >= 3 {
@@ -337,6 +374,63 @@ fn image_context_name(dom: &Dom, image: NodeId) -> String {
     name.to_ascii_lowercase()
 }
 
+fn image_structural_context_name(dom: &Dom, image: NodeId) -> String {
+    let mut name = String::new();
+    for node in std::iter::once(image).chain(dom.ancestors(image).take(6)) {
+        if let Some(tag) = dom.qual_name(node) {
+            name.push(' ');
+            name.push_str(tag.local.as_ref());
+        }
+        for attribute in [AttrName::Class, AttrName::Id, AttrName::Role] {
+            if let Some(value) = dom.attr(node, attribute) {
+                name.push(' ');
+                name.push_str(value);
+            }
+        }
+    }
+    name.to_ascii_lowercase()
+}
+
+fn has_media_control_context(dom: &Dom, image: NodeId) -> bool {
+    let names = image_structural_context_name(dom, image);
+    let list_context = dom
+        .ancestors(image)
+        .any(|ancestor| matches!(dom.tag(ancestor), Some(Tag::Li | Tag::Ol | Tag::Ul)));
+    let list_control_marker = list_context
+        && dom
+            .ancestors(image)
+            .chain(std::iter::once(image))
+            .take(6)
+            .any(|node| {
+                dom.attrs(node).iter().any(|attribute| {
+                    let name = attribute.name.local.as_ref();
+                    name.starts_with("data-")
+                        && (contains_role_token(
+                            name,
+                            &["carousel", "gallery", "lightbox", "slide", "thumbnail"],
+                        ) || contains_role_token(
+                            attribute.value.as_ref(),
+                            &["carousel", "gallery", "lightbox", "slide", "thumbnail"],
+                        ))
+                })
+            });
+    list_control_marker
+        || contains_role_token(
+            &names,
+            &[
+                "carousel",
+                "gallery",
+                "lightbox",
+                "slideshow",
+                "slider",
+                "swiper",
+                "thumb",
+                "thumbnail",
+                "zoom",
+            ],
+        )
+}
+
 fn is_lead_position(dom: &Dom, image: NodeId, before_first_paragraph: bool) -> bool {
     if !before_first_paragraph {
         return false;
@@ -358,7 +452,7 @@ fn is_lead_position(dom: &Dom, image: NodeId, before_first_paragraph: bool) -> b
 }
 
 fn has_strong_peripheral_role(dom: &Dom, image: NodeId) -> bool {
-    let names = image_context_name(dom, image);
+    let names = image_structural_context_name(dom, image);
     contains_role_token(
         &names,
         &[
@@ -377,6 +471,17 @@ fn has_strong_peripheral_role(dom: &Dom, image: NodeId) -> bool {
             "more-stories",
             "more_articles",
             "tout",
+            "ad",
+            "ads",
+            "advert",
+            "advertisement",
+            "advertorial",
+            "marketing",
+            "promo",
+            "promotion",
+            "promotional",
+            "sponsor",
+            "sponsored",
             "favicon",
             "logo",
             "integration",
@@ -940,29 +1045,26 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
         if dom.parent(image).is_none() {
             continue;
         }
-        let current_container = image_container(dom, image);
+        let current_container = image_group_container(dom, image);
         let Some(previous_container) = previous_element_sibling(dom, current_container) else {
             continue;
         };
-        let Some(previous_image) = single_image(dom, previous_container) else {
+        let Some(previous_image) = single_media_image(dom, previous_container) else {
             continue;
         };
-        let previous_removal = if is_image_only_wrapper(dom, previous_container, previous_image) {
-            previous_container
-        } else {
-            previous_image
-        };
+        let previous_removal = media_group_removal(dom, previous_container, previous_image);
+        let current_removal = media_group_removal(dom, current_container, image);
         if !likely_duplicate(dom, previous_image, image) {
             continue;
         }
         let remove = if lightbox_links_to(dom, previous_image, image) {
             previous_removal
         } else if lightbox_links_to(dom, image, previous_image) {
-            current_container
-        } else if image_quality(dom, image) > image_quality(dom, previous_image) {
+            current_removal
+        } else if better_image(dom, previous_image, image) {
             previous_removal
         } else {
-            current_container
+            current_removal
         };
         dom.detach(remove);
     }
@@ -984,7 +1086,7 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
         if images.len() != 2 || !likely_duplicate(dom, images[0], images[1]) {
             continue;
         }
-        let remove = if image_quality(dom, images[1]) > image_quality(dom, images[0]) {
+        let remove = if better_image(dom, images[0], images[1]) {
             image_container_within(dom, images[0], figure)
         } else {
             image_container_within(dom, images[1], figure)
@@ -995,6 +1097,9 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
 
 fn likely_duplicate(dom: &Dom, first: NodeId, second: NodeId) -> bool {
     if same_image_url(dom, first, second) {
+        return same_image_url_duplicate(dom, first, second);
+    }
+    if same_responsive_variant_group(dom, first, second) {
         return true;
     }
     if lightbox_links_to(dom, first, second) || lightbox_links_to(dom, second, first) {
@@ -1006,8 +1111,28 @@ fn likely_duplicate(dom: &Dom, first: NodeId, second: NodeId) -> bool {
             || responsive_quality(dom, first) != responsive_quality(dom, second))
 }
 
-fn image_quality(dom: &Dom, image: NodeId) -> (bool, Option<(u8, u32)>, u64) {
+fn same_image_url_duplicate(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    let first_figure = dom
+        .ancestors(first)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure));
+    let second_figure = dom
+        .ancestors(second)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure));
+    if first_figure.is_some() && second_figure.is_some() && first_figure != second_figure {
+        return match (
+            figure_caption_text(dom, first),
+            figure_caption_text(dom, second),
+        ) {
+            (Some(first), Some(second)) => first == second,
+            _ => true,
+        };
+    }
+    true
+}
+
+fn image_quality(dom: &Dom, image: NodeId) -> (bool, bool, Option<(u8, u32)>, u64) {
     let real = !is_hydration_placeholder(dom, image);
+    let descriptive = has_meaningful_image_description(dom, image);
     let responsive = responsive_quality(dom, image).max(next_image_width(dom, image));
     let declared_width = dom
         .attr(image, AttrName::Width)
@@ -1017,7 +1142,29 @@ fn image_quality(dom: &Dom, image: NodeId) -> (bool, Option<(u8, u32)>, u64) {
         .attr(image, AttrName::Height)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
-    (real, responsive, declared_width * declared_height)
+    (
+        real,
+        descriptive,
+        responsive,
+        declared_width * declared_height,
+    )
+}
+
+fn better_image(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    let first_quality = image_quality(dom, first);
+    let second_quality = image_quality(dom, second);
+    if first_quality != second_quality {
+        return second_quality > first_quality;
+    }
+    image_variant_preference(dom, second) > image_variant_preference(dom, first)
+}
+
+fn image_variant_preference(dom: &Dom, image: NodeId) -> u8 {
+    match image_variant_identity(dom, image).map(|(_, variant)| variant) {
+        Some(ImageVariant::Desktop) => 2,
+        None => 1,
+        Some(ImageVariant::Mobile) => 0,
+    }
 }
 
 fn responsive_quality(dom: &Dom, image: NodeId) -> Option<(u8, u32)> {
@@ -1040,6 +1187,88 @@ fn image_container(dom: &Dom, image: NodeId) -> NodeId {
         }
     }
     container
+}
+
+fn image_group_container(dom: &Dom, image: NodeId) -> NodeId {
+    if let Some(figure) = dom.ancestors(image).find(|&ancestor| {
+        dom.tag(ancestor) == Some(Tag::Figure)
+            && dom
+                .descendants(ancestor)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .take(2)
+                .count()
+                == 1
+    }) {
+        return figure;
+    }
+    image_container(dom, image)
+}
+
+fn is_media_group_container(dom: &Dom, node: NodeId) -> bool {
+    if dom.tag(node) != Some(Tag::Figure)
+        || dom
+            .descendants(node)
+            .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
+            .take(2)
+            .count()
+            != 1
+    {
+        return false;
+    }
+    dom.descendants(node).all(|descendant| {
+        if dom.text_node(descendant).is_some() {
+            return dom
+                .ancestors(descendant)
+                .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figcaption));
+        }
+        let in_caption = dom
+            .ancestors(descendant)
+            .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figcaption));
+        match dom.tag(descendant) {
+            Some(Tag::Img | Tag::Picture | Tag::Source | Tag::A | Tag::Div | Tag::Span) => true,
+            Some(Tag::Figcaption) => true,
+            Some(
+                Tag::B
+                | Tag::Br
+                | Tag::Code
+                | Tag::Em
+                | Tag::I
+                | Tag::Kbd
+                | Tag::Mark
+                | Tag::P
+                | Tag::Q
+                | Tag::Samp
+                | Tag::Small
+                | Tag::Strong
+                | Tag::Sub
+                | Tag::Sup
+                | Tag::U,
+            ) => in_caption,
+            _ => false,
+        }
+    })
+}
+
+fn media_group_removal(dom: &Dom, container: NodeId, image: NodeId) -> NodeId {
+    if is_media_group_container(dom, container) {
+        container
+    } else {
+        image_container(dom, image)
+    }
+}
+
+fn single_media_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    if dom.tag(node) == Some(Tag::Img) {
+        return Some(node);
+    }
+    if matches!(dom.tag(node), Some(Tag::Figure | Tag::Picture)) {
+        let mut images = dom
+            .descendants(node)
+            .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img));
+        let image = images.next()?;
+        return images.next().is_none().then_some(image);
+    }
+    single_image(dom, node)
 }
 
 fn image_container_within(dom: &Dom, image: NodeId, boundary: NodeId) -> NodeId {
@@ -1102,8 +1331,106 @@ fn same_meaningful_alt(dom: &Dom, first: NodeId, second: NodeId) -> bool {
             .is_some_and(|second| first.eq_ignore_ascii_case(second.trim()))
 }
 
+fn same_responsive_variant_group(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    let Some((first_base, first_variant)) = image_variant_identity(dom, first) else {
+        return false;
+    };
+    let Some((second_base, second_variant)) = image_variant_identity(dom, second) else {
+        return false;
+    };
+    first_variant != second_variant
+        && first_base.eq_ignore_ascii_case(&second_base)
+        && same_media_description(dom, first, second)
+}
+
+fn same_media_description(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    same_meaningful_alt(dom, first, second) || same_figure_caption(dom, first, second)
+}
+
+fn same_figure_caption(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    figure_caption_text(dom, first)
+        .is_some_and(|first| figure_caption_text(dom, second).is_some_and(|second| first == second))
+}
+
+fn figure_caption_text(dom: &Dom, image: NodeId) -> Option<String> {
+    let figure = dom
+        .ancestors(image)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))?;
+    let caption = dom.descendants(figure).find(|&node| {
+        dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node)
+    })?;
+    let mut text = String::new();
+    dom.append_normalized_text(caption, &mut text);
+    let text = text.trim();
+    (!text.is_empty()).then_some(text.to_owned())
+}
+
+fn image_variant_identity(dom: &Dom, image: NodeId) -> Option<(String, ImageVariant)> {
+    image_urls(dom, image)
+        .into_iter()
+        .find_map(image_variant_resource)
+}
+
+fn image_variant_resource(url: &str) -> Option<(String, ImageVariant)> {
+    let resource = image_resource(url);
+    let path = resource
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(resource.as_ref());
+    let (directory, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+
+    let mut variant = None;
+    let mut base_tokens = Vec::new();
+    for token in stem.split(|character: char| !character.is_ascii_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(candidate) = image_variant_marker(token) {
+            variant = Some(candidate);
+        } else {
+            base_tokens.push(token.to_ascii_lowercase());
+        }
+    }
+    let variant = variant?;
+    if base_tokens.is_empty() {
+        return None;
+    }
+    let base = if directory.is_empty() {
+        base_tokens.join("-")
+    } else {
+        format!(
+            "{}/{}",
+            directory.to_ascii_lowercase(),
+            base_tokens.join("-")
+        )
+    };
+    Some((base, variant))
+}
+
+fn image_variant_marker(token: &str) -> Option<ImageVariant> {
+    let token = token.to_ascii_lowercase();
+    for (name, variant) in [
+        ("mobile", ImageVariant::Mobile),
+        ("desktop", ImageVariant::Desktop),
+    ] {
+        let Some(suffix) = token.strip_prefix(name) else {
+            continue;
+        };
+        let valid_suffix = suffix.is_empty()
+            || suffix.bytes().all(|byte| byte.is_ascii_digit())
+            || suffix.strip_prefix('v').is_some_and(|version| {
+                !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if valid_suffix {
+            return Some(variant);
+        }
+    }
+    None
+}
+
 fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
-    if has_direct_meaningful_description(dom, image) {
+    if has_direct_meaningful_description(dom, image) || has_nearby_explanatory_text(dom, image) {
         return true;
     }
     dom.ancestors(image)
@@ -1118,6 +1445,87 @@ fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
                     dom.tag(node) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(node)
                 })
         })
+}
+
+fn has_nearby_explanatory_text(dom: &Dom, image: NodeId) -> bool {
+    let names = image_context_name(dom, image);
+    if dom.tag(image) != Some(Tag::Img)
+        || !has_usable_image_source(dom, image)
+        || has_strong_peripheral_role(dom, image)
+        || has_media_control_context(dom, image)
+        || contains_role_token(&names, &["badge", "favicon", "logo", "sprite"])
+        || contains_role_token(&names, &["icon"])
+            && !contains_role_token(
+                &names,
+                &[
+                    "chart",
+                    "diagram",
+                    "figure",
+                    "hero",
+                    "illustration",
+                    "photo",
+                    "screenshot",
+                ],
+            )
+    {
+        return false;
+    }
+    let mut media_child = image;
+    for ancestor in dom.ancestors(image).take(4) {
+        let children: SmallVec<[NodeId; 6]> = dom.element_children(ancestor).collect();
+        if children.len() > 4 {
+            media_child = ancestor;
+            continue;
+        }
+        let Some(position) = children.iter().position(|&child| {
+            child == media_child || dom.descendants(child).any(|descendant| descendant == image)
+        }) else {
+            media_child = ancestor;
+            continue;
+        };
+        if position > 0 && is_explanatory_text(dom, children[position - 1])
+            || position + 1 < children.len() && is_explanatory_text(dom, children[position + 1])
+        {
+            return true;
+        }
+        media_child = ancestor;
+    }
+    false
+}
+
+fn is_explanatory_text(dom: &Dom, node: NodeId) -> bool {
+    let mut text = String::new();
+    dom.append_normalized_text(node, &mut text);
+    let text = text.trim();
+    if text.len() < 12 || text.split_whitespace().count() < 3 {
+        return false;
+    }
+    let semantic_tag = matches!(
+        dom.tag(node),
+        Some(
+            Tag::Blockquote
+                | Tag::Caption
+                | Tag::Figcaption
+                | Tag::H1
+                | Tag::H2
+                | Tag::H3
+                | Tag::H4
+                | Tag::H5
+                | Tag::H6
+                | Tag::P
+        )
+    );
+    let named_context = [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "caption" | "description" | "feature" | "figure" | "summary" | "text"
+            )
+        });
+    semantic_tag || named_context
 }
 
 fn has_figure_caption(dom: &Dom, image: NodeId) -> bool {
@@ -1474,6 +1882,72 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_adjacent_mobile_and_desktop_figures() {
+        let (dom, root) = normalized(
+            r#"<main><figure><img src="charts/uncertainty-Mobilev1.svg" alt="Fractal uncertainty"></figure><figure><img src="charts/uncertainty-Desktopv1.svg" alt="Fractal uncertainty"></figure></main>"#,
+        );
+        let images: SmallVec<[NodeId; 2]> = dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            dom.attr(images[0], AttrName::Src),
+            Some("charts/uncertainty-Desktopv1.svg")
+        );
+    }
+
+    #[test]
+    fn duplicate_figure_media_does_not_remove_unique_siblings() {
+        let (dom, root) = normalized(
+            r#"<main><figure><img src="charts/uncertainty-Mobilev1.svg" alt="Fractal uncertainty"><video src="walkthrough.mp4"></video><p>The video explains the complete topology.</p></figure><figure><img src="charts/uncertainty-Desktopv1.svg" alt="Fractal uncertainty"></figure></main>"#,
+        );
+        let images: SmallVec<[NodeId; 2]> = dom
+            .descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            dom.attr(images[0], AttrName::Src),
+            Some("charts/uncertainty-Desktopv1.svg")
+        );
+        assert!(dom.first_descendant_by_tag(root, Tag::Video).is_some());
+        assert!(dom_to_markdown(&dom, root, 0).contains("complete topology"));
+    }
+
+    #[test]
+    fn keeps_distinct_mobile_and_desktop_figures_without_shared_description() {
+        let (dom, root) = normalized(
+            r#"<main><figure><img src="charts/latency-Mobile.svg" alt="Latency on mobile"></figure><figure><img src="charts/latency-Desktop.svg" alt="Latency on desktop"></figure></main>"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn keeps_same_url_figures_with_distinct_captions() {
+        let (dom, root) = normalized(
+            r#"<main><figure><img src="shared.jpg" alt="Product view"><figcaption>Front view of the product.</figcaption></figure><figure><img src="shared.jpg" alt="Product view"><figcaption>Rear view of the product.</figcaption></figure></main>"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            2
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Figcaption))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn deduplicates_nextjs_optimizer_variants_and_keeps_the_largest() {
         let (dom, root) = normalized(
             r#"<p><img src="/_next/image?url=%2Fphoto.jpg&amp;w=32&amp;q=20" alt="Photo"></p><p><img src="/_next/image?url=%2Fphoto.jpg&amp;w=1600&amp;q=85" alt="Photo"></p>"#,
@@ -1600,6 +2074,39 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn nearby_explanatory_text_protects_a_product_screenshot() {
+        let mut dom = Dom::parse_document(
+            r#"<main><section class="product-screenshot"><img class="icon" src="workspace.png"><p>The workspace screenshot shows the complete review flow.</p></section></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_some());
+    }
+
+    #[test]
+    fn nearby_prose_does_not_protect_an_action_icon() {
+        let mut dom = Dom::parse_document(
+            r#"<main><section><img class="action-icon" src="action.svg"><p>The next section explains the complete review flow.</p></section></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_none());
+    }
+
+    #[test]
+    fn nearby_prose_does_not_protect_peripheral_images() {
+        let mut dom = Dom::parse_document(
+            r#"<main><section class="author-photo"><img src="author.jpg" alt="Portrait of the author"><p>The author explains the complete review flow.</p></section><section class="promo"><img src="promo.jpg" alt="Try the complete review platform"><p>The platform explains the complete review flow.</p></section><section class="advert"><img src="advert.jpg" alt="A complete review platform"><p>The platform explains the complete review flow.</p></section><section class="sponsored"><img src="sponsored.jpg" alt="A complete review platform"><p>The platform explains the complete review flow.</p></section></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_none());
     }
 
     #[test]

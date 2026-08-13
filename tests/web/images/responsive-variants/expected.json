@@ -1,0 +1,12 @@
+{
+  "must_contain": [
+    "Desktopv1.svg",
+    "measurement-comparison.svg",
+    "latency-Mobile.svg",
+    "latency-Desktop.svg",
+    "one explanatory figure"
+  ],
+  "must_not_contain": ["Mobilev1.svg"],
+  "must_occur_once": ["Desktopv1.svg"],
+  "images_min": 4
+}

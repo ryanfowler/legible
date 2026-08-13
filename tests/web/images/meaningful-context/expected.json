@@ -1,0 +1,15 @@
+{
+  "must_contain": [
+    "workspace-review.png",
+    "review-topology.svg"
+  ],
+  "must_not_contain": [
+    "people/author.jpg",
+    "people/author-photo.jpg",
+    "promotions/trial.jpg",
+    "advertising/sidebar.jpg",
+    "sponsored/partner.jpg",
+    "related/next.jpg"
+  ],
+  "images_min": 2
+}
