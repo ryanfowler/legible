@@ -217,6 +217,33 @@ mod tests {
     }
 
     #[test]
+    fn svg_chart_replacement_preserves_id_and_class_hints() {
+        let html = r#"<main>
+            <svg id="chosen-chart" class="benchmark-chart">
+                <title>Release scores</title>
+                <g><text>Alpha</text><text>10</text></g>
+                <g><text>Beta</text><text>20</text></g>
+            </svg>
+            <p>Unrelated content outside the chart.</p>
+        </main>"#;
+        let by_id = Extractor::builder()
+            .content_root(ContentHint::Id("chosen-chart".into()))
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(by_id.text().contains("Release scores"));
+        assert!(!by_id.text().contains("Unrelated content"));
+
+        let by_class = Extractor::builder()
+            .content_root(ContentHint::Class("benchmark-chart".into()))
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert!(by_class.text().contains("Release scores"));
+        assert!(!by_class.text().contains("Unrelated content"));
+    }
+
+    #[test]
     fn duplicate_class_hints_keep_automatic_quality_selection() {
         let html = "<main><div class='entry'><p>Short note.</p></div><div class='entry'><p>This is the substantial article. It contains enough useful detail to make the preferred content clear. The second paragraph continues the explanation with practical context.</p><p>More relevant details complete the article.</p></div></main>";
         let page = Extractor::builder()

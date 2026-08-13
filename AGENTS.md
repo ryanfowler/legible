@@ -49,7 +49,8 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
-| `normalize.rs` / `normalize/` | Ordered semantic passes for math, media, callouts, images, headings, lists, code, figures, footnotes, tables, and wrappers |
+| `normalize.rs` / `normalize/` | Ordered semantic passes for math, SVG charts, media, callouts, images, headings, lists, code, figures, footnotes, tables, and wrappers |
+| `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
