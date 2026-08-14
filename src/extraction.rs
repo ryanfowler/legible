@@ -1960,6 +1960,7 @@ impl<'a> ContentExtractor<'a> {
 
             if !self.options.keep_classes
                 && !crate::document::code_class_is_semantic_evidence(&self.dom, id)
+                && !crate::document::figure_class_is_semantic_evidence(&self.dom, id)
                 && let Some(classes) = self.dom.attr(id, AttrName::Class)
             {
                 class_buffer.clear();

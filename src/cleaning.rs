@@ -500,6 +500,7 @@ fn parse_rank_text(text: &str) -> Option<u32> {
         .flatten()
 }
 
+#[cfg(test)]
 pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.clear();
     nodes.extend(
@@ -881,6 +882,7 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
             .attr(id, AttrName::Id)
             .is_some_and(|value| value.starts_with("legible-content"))
             || crate::document::code_class_is_semantic_evidence(dom, id)
+            || crate::document::figure_class_is_semantic_evidence(dom, id)
         {
             continue;
         }
@@ -982,6 +984,7 @@ pub(crate) fn hard_cleanup(
             .into_iter()
             .map(|(node, _)| node),
     );
+    let (media_sources, _) = crate::document::media_cleanup_evidence(dom, nodes);
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_none() {
             continue;
@@ -1084,7 +1087,8 @@ pub(crate) fn hard_cleanup(
             Tag::Input | Tag::Textarea | Tag::Select | Tag::Button | Tag::Datalist | Tag::Option
         ) && !content_checkbox;
         let disallowed_embed = matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe)
-            && !has_allowed_media(dom, node, allowed_media);
+            && !has_allowed_media(dom, node, allowed_media)
+            && !media_sources[node.index()];
         if hidden || tracking_image || executable || control || disallowed_embed {
             if hidden && utility_visibility {
                 preserve_media_from_hidden_variant(dom, node);

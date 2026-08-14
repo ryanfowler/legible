@@ -44,6 +44,9 @@
 mod builder;
 mod code;
 mod compiler;
+mod figures;
+mod images;
+mod media;
 pub(crate) mod stats;
 mod text;
 mod uri;
@@ -57,6 +60,20 @@ pub(crate) use code::{
     multiline_content as code_multiline_content,
 };
 pub(crate) use compiler::{CompileContext, compile_document};
+pub(crate) use figures::class_is_semantic_evidence as figure_class_is_semantic_evidence;
+pub(crate) fn media_cleanup_evidence(
+    dom: &crate::dom::Dom,
+    nodes: &[crate::dom::NodeId],
+) -> (Vec<bool>, Vec<Option<crate::dom::NodeId>>) {
+    media::cleanup_evidence(dom, nodes)
+}
+
+pub(crate) fn selected_image_sources_for_cleanup(
+    dom: &crate::dom::Dom,
+    nodes: &[crate::dom::NodeId],
+) -> Vec<Option<Box<str>>> {
+    images::analyze(dom, nodes, None).sources
+}
 pub(crate) use stats::DocumentStats;
 pub(crate) use uri::{DestinationKind, safe_destination};
 

@@ -18,10 +18,10 @@ use smallvec::SmallVec;
 /// Normalizes retained markup into a predictable tree for all serializers.
 ///
 /// The order preserves information that later, more general passes can hide.
-/// Images resolve lazy and responsive sources before figure processing. Heading
-/// and list roles become native HTML before wrapper cleanup. Code and figure
-/// detection run while source classes are still available. Table normalization
-/// runs last because it can replace complete structural subtrees.
+/// Image cleanup keeps responsive source markup for semantic compilation.
+/// Heading and list roles become native HTML before wrapper cleanup. Code and
+/// figure evidence stays available until the compiler consumes it. Table
+/// normalization runs last because it can replace complete subtrees.
 #[cfg(test)]
 fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     preserve_semantics_before_cleanup(dom, root);
@@ -43,21 +43,20 @@ pub(crate) fn normalize_after_cleanup(
     root: NodeId,
     nodes: &mut Vec<NodeId>,
 ) -> NormalizationStats {
-    images::normalize(dom, root, nodes);
+    images::deduplicate_selected(dom, root, nodes);
     headings::normalize(dom, root);
     lists::normalize(dom, root);
-    normalize_figures(dom, root);
     normalize_repeated_table_listings(dom, root);
     NormalizationStats {
         flattened_layout_tables: tables::normalize_layout_tables(dom, root),
     }
 }
 
-/// Captures semantic source data that hard cleanup would otherwise remove.
+/// Captures or protects semantic source data that hard cleanup would otherwise remove.
 pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
     math::normalize(dom, root);
     svg::normalize(dom, root);
-    media::normalize(dom, root);
+    media::prepare(dom, root);
     callouts::normalize(dom, root);
     footnotes::normalize(dom, root);
 }
@@ -111,60 +110,6 @@ pub(crate) use math::accessible_math_nodes;
 pub(crate) fn finish_normalization(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     simplify_nested_elements(dom, root, nodes);
     remove_empty_nodes(dom, root, nodes);
-}
-
-fn normalize_figures(dom: &mut Dom, root: NodeId) {
-    let nodes = dom.element_descendants_snapshot_with_depth(root);
-    for (wrapper, _) in nodes.into_iter().rev() {
-        if dom.parent(wrapper).is_none()
-            || !matches!(dom.tag(wrapper), Some(Tag::Div | Tag::P | Tag::Section))
-        {
-            continue;
-        }
-        let named_as_figure = [AttrName::Class, AttrName::Id]
-            .into_iter()
-            .filter_map(|attribute| dom.attr(wrapper, attribute))
-            .any(|value| {
-                value.split_whitespace().any(|token| {
-                    matches!(
-                        token.to_ascii_lowercase().as_str(),
-                        "figure" | "image-with-caption" | "media-with-caption"
-                    )
-                })
-            });
-        if !named_as_figure
-            || dom
-                .descendants(wrapper)
-                .any(|node| dom.tag(node) == Some(Tag::Figure))
-        {
-            continue;
-        }
-        let images: SmallVec<[NodeId; 2]> = dom
-            .descendants(wrapper)
-            .filter(|&node| dom.tag(node) == Some(Tag::Img))
-            .collect();
-        if images.len() != 1 {
-            continue;
-        }
-        let caption = dom.descendants(wrapper).find(|&node| {
-            dom.tag(node) == Some(Tag::Figcaption)
-                || [AttrName::Class, AttrName::Id]
-                    .into_iter()
-                    .filter_map(|attribute| dom.attr(node, attribute))
-                    .any(|value| {
-                        value.split_whitespace().any(|token| {
-                            matches!(
-                                token.to_ascii_lowercase().as_str(),
-                                "caption" | "figcaption" | "image-caption"
-                            )
-                        })
-                    })
-        });
-        if let Some(caption) = caption {
-            dom.rename_html(wrapper, Tag::Figure);
-            dom.rename_html(caption, Tag::Figcaption);
-        }
-    }
 }
 
 fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
@@ -572,32 +517,43 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
 
     #[test]
     fn does_not_create_nested_figures() {
-        let (dom, root) = normalized(
+        for html in [
             r#"<div class="image-with-caption"><figure><img src="plot.png"><figcaption>Plot</figcaption></figure></div>"#,
-        );
-        assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Figure))
-                .count(),
-            1
-        );
+            r#"<div class="image-with-caption"><div class="image-with-caption"><img src="plot.png"><p class="caption">Plot</p></div></div>"#,
+        ] {
+            let (dom, root) = normalized(html);
+            let document = crate::document::compile_document(
+                &dom,
+                root,
+                &crate::document::CompileContext::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                document
+                    .debug_tree()
+                    .lines()
+                    .filter(|line| line.trim() == "Figure")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
     fn normalizes_captioned_image_wrapper() {
         let (dom, root) = normalized(
-            r#"<div class="image-with-caption"><img src="plot.png" alt="Plot"><p class="caption">Result plot</p></div>"#,
+            r#"<div class="image-with-caption"><div><img src="plot.png" alt="Plot"><p class="caption">Result plot</p></div></div>"#,
         );
-        assert!(
-            dom.descendants(root)
-                .any(|node| dom.tag(node) == Some(Tag::Figure))
-        );
-        assert!(
-            dom.descendants(root)
-                .any(|node| dom.tag(node) == Some(Tag::Figcaption))
-        );
+        let document = crate::document::compile_document(
+            &dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        assert!(document.debug_tree().starts_with("Figure\n"));
+        assert!(document.debug_tree().contains("  Figcaption\n"));
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "![Plot](plot.png)\n\nResult plot\n"
         );
     }
@@ -605,7 +561,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
     #[test]
     fn uses_srcset_when_src_is_missing() {
         let (dom, root) = normalized(r#"<img srcset="small.jpg 1x, large.jpg 2x" alt="Photo">"#);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![Photo](large.jpg)\n");
+        assert_eq!(semantic_markdown(&dom, root), "![Photo](large.jpg)\n");
     }
 
     #[test]
@@ -613,17 +569,17 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         let (dom, root) = normalized(
             r#"<picture><source><source data-srcset="hero.webp 1x, hero-large.webp 2x"><img src="blank.gif" alt="Hero"></picture>"#,
         );
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![Hero](hero-large.webp)\n");
+        assert_eq!(semantic_markdown(&dom, root), "![Hero](hero-large.webp)\n");
 
         let (dom, root) = normalized(
             r#"<picture><source data-src="null"><source data-src="hero.jpg"><img src="placeholder.gif" alt="Hero"></picture>"#,
         );
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![Hero](hero.jpg)\n");
+        assert_eq!(semantic_markdown(&dom, root), "![Hero](hero.jpg)\n");
 
         let (dom, root) = normalized(
             r#"<picture data-src="parent.jpg"><img width="1" src="blank.gif" alt="Parent"></picture>"#,
         );
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![Parent](parent.jpg)\n");
+        assert_eq!(semantic_markdown(&dom, root), "![Parent](parent.jpg)\n");
     }
 
     #[test]
