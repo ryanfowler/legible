@@ -34,14 +34,17 @@ impl PageKind {
 
         let mut role_headings = 0_u8;
         let mut profile_fields = 0_u8;
+        let mut text = String::new();
         for node in dom.descendants(root).filter(|&node| {
             matches!(
                 dom.tag(node),
                 Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::Dt)
             )
         }) {
-            let mut text = String::new();
-            dom.append_normalized_text(node, &mut text);
+            text.clear();
+            // Job profile labels are short. Bound the scan so malformed nested
+            // headings do not rescan the remainder of the document.
+            dom.append_normalized_text_limited(node, &mut text, 64);
             let text = text
                 .trim()
                 .trim_end_matches(':')
@@ -68,5 +71,20 @@ impl PageKind {
     /// Returns whether article-oriented relevance cleanup is appropriate.
     pub(crate) fn uses_article_cleanup(self) -> bool {
         matches!(self, Self::Unknown | Self::JobListing)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_wrapped_job_profile_labels() {
+        let dom = Dom::parse_document(
+            "<main class='job'><h2><span>About the role</span></h2><h3>Qualifications</h3></main>",
+        )
+        .unwrap();
+
+        assert_eq!(PageKind::detect(&dom), PageKind::JobListing);
     }
 }

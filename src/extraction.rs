@@ -2156,7 +2156,8 @@ fn title_heading_plan(
     // each node's nearest marked ancestor path once instead of walking that
     // path again for every matching heading. Keep the cheaper direct walk for
     // ordinary documents.
-    let context_scores = snapshot.iter().any(|&(_, depth)| depth > 64).then(|| {
+    let deeply_nested = snapshot.iter().any(|&(_, depth)| depth > 64);
+    let context_scores = deeply_nested.then(|| {
         let mut scores = vec![0_i32; dom.len()];
         let root_score = title_heading_context_score(dom, root, 0);
         for &(node, _) in &snapshot {
@@ -2182,10 +2183,64 @@ fn title_heading_plan(
         .descendants(root)
         .any(|node| dom.tag(node) == Some(Tag::A));
     let brand_headings: SmallVec<[NodeId; 2]> = if has_link {
+        // Resolve linked descendants and ancestors in two linear passes for a
+        // deep tree. A descendant scan per heading becomes quadratic after
+        // HTML repair nests many unclosed headings. Keep direct scans for
+        // ordinary shallow documents to avoid two dense temporary arrays.
+        let linked_contexts = deeply_nested.then(|| {
+            let mut descendant_links = vec![None; dom.len()];
+            for &(node, _) in snapshot.iter().rev() {
+                let subtree_link = if dom.tag(node) == Some(Tag::A) {
+                    Some(node)
+                } else {
+                    descendant_links[node.index()]
+                };
+                if let Some(link) = subtree_link
+                    && let Some(parent) = dom.parent(node)
+                {
+                    descendant_links[parent.index()] = Some(link);
+                }
+            }
+            let mut ancestor_links = vec![None; dom.len()];
+            let mut in_document_chrome = vec![false; dom.len()];
+            for &(node, _) in &snapshot {
+                if let Some(parent) = dom.parent(node) {
+                    ancestor_links[node.index()] = if dom.tag(parent) == Some(Tag::A) {
+                        Some(parent)
+                    } else {
+                        ancestor_links[parent.index()]
+                    };
+                    in_document_chrome[node.index()] = in_document_chrome[parent.index()]
+                        || matches!(
+                            dom.tag(parent),
+                            Some(Tag::Header | Tag::Footer | Tag::Nav | Tag::Aside)
+                        );
+                }
+            }
+            (descendant_links, ancestor_links, in_document_chrome)
+        });
         headings
             .iter()
             .copied()
-            .filter(|&heading| is_linked_site_brand_heading(dom, heading, site_name, source_uri))
+            .filter(|&heading| {
+                let (link, in_document_chrome) = linked_contexts.as_ref().map_or_else(
+                    || (linked_heading_context(dom, heading), None),
+                    |(descendants, ancestors, chrome)| {
+                        (
+                            descendants[heading.index()].or(ancestors[heading.index()]),
+                            Some(chrome[heading.index()]),
+                        )
+                    },
+                );
+                is_linked_site_brand_heading(
+                    dom,
+                    heading,
+                    link,
+                    in_document_chrome,
+                    site_name,
+                    source_uri,
+                )
+            })
             .collect()
     } else {
         SmallVec::new()
@@ -2250,25 +2305,24 @@ fn title_heading_context_score(dom: &Dom, node: NodeId, parent_score: i32) -> i3
     }
 }
 
-fn is_linked_site_brand_heading(
-    dom: &Dom,
-    heading: NodeId,
-    site_name: Option<&str>,
-    source_uri: Option<&Url>,
-) -> bool {
-    let link = dom
-        .descendants(heading)
+fn linked_heading_context(dom: &Dom, heading: NodeId) -> Option<NodeId> {
+    dom.descendants(heading)
         .find(|&node| dom.tag(node) == Some(Tag::A))
         .or_else(|| {
             dom.ancestors(heading)
                 .find(|&node| dom.tag(node) == Some(Tag::A))
-        });
+        })
+}
+
+fn is_linked_site_brand_heading(
+    dom: &Dom,
+    heading: NodeId,
+    link: Option<NodeId>,
+    in_document_chrome: Option<bool>,
+    site_name: Option<&str>,
+    source_uri: Option<&Url>,
+) -> bool {
     let Some(link) = link else { return false };
-    let heading_text = get_inner_text_owned(dom, heading);
-    let matches_site_name = site_name.is_some_and(|site| {
-        metadata::text_similarity(site, &heading_text) > 0.9
-            && metadata::text_similarity(&heading_text, site) > 0.9
-    });
     let has_brand_token = [heading, link]
         .into_iter()
         .chain(dom.ancestors(heading).take(4))
@@ -2284,19 +2338,31 @@ fn is_linked_site_brand_heading(
                 "brand" | "branding" | "logo" | "masthead" | "wordmark" | "sitetitle"
             )
         });
-    if dom.ancestors(heading).any(|node| {
-        matches!(
-            dom.tag(node),
-            Some(Tag::Header | Tag::Footer | Tag::Nav | Tag::Aside)
-        )
+    if in_document_chrome.unwrap_or_else(|| {
+        dom.ancestors(heading).any(|node| {
+            matches!(
+                dom.tag(node),
+                Some(Tag::Header | Tag::Footer | Tag::Nav | Tag::Aside)
+            )
+        })
     }) {
         return false;
     }
+    if has_brand_token {
+        return true;
+    }
+    let Some(site_name) = site_name else {
+        return false;
+    };
+    let heading_text =
+        get_inner_text_owned_limited(dom, heading, heading_text_limit(site_name, ""));
+    let matches_site_name = metadata::text_similarity(site_name, &heading_text) > 0.9
+        && metadata::text_similarity(&heading_text, site_name) > 0.9;
     let root_link = source_uri.is_some_and(|source| {
         dom.attr(link, AttrName::Href)
             .is_some_and(|href| is_site_root_link(source, href))
     });
-    has_brand_token || (matches_site_name && root_link)
+    matches_site_name && root_link
 }
 
 fn is_site_root_link(source: &Url, href: &str) -> bool {
@@ -3019,6 +3085,31 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     fn recognizes_title_prefix_with_whitespace_before_separator() {
         assert!(heading_matches_page_title("Article | Example", "Article"));
         assert!(!heading_matches_page_title("Different title", "Article"));
+    }
+
+    #[test]
+    fn finds_linked_brand_headings_without_subtree_rescans() {
+        let wrappers = "<div>".repeat(70);
+        let closing = "</div>".repeat(70);
+        let html = format!(
+            r#"{wrappers}<header><h1 class="brand"><a href="/">Header brand</a></h1></header><h1 class="brand"><span><a href="/">Example</a></span></h1><main><h1><span>Article title</span></h1></main>{closing}"#,
+        );
+        let dom = Dom::parse_document(&html).unwrap();
+        let source = Url::parse("https://example.com/article").unwrap();
+        let plan = title_heading_plan(
+            &dom,
+            "Article title | Example",
+            "Article title",
+            Some("Example"),
+            Some(&source),
+        );
+
+        assert_eq!(plan.brand_headings.len(), 1);
+        assert_eq!(
+            dom.attr(plan.brand_headings[0], AttrName::Class),
+            Some("brand")
+        );
+        assert!(plan.preferred.is_some());
     }
 
     #[test]
