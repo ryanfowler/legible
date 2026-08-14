@@ -1360,27 +1360,10 @@ impl<'a> ContentExtractor<'a> {
             if self.page_byline.is_none() && !self.metadata.has_source_author {
                 build_match_string(&self.dom, id, match_buffer);
                 if is_valid_byline(&self.dom, id, match_buffer, text_buffer) {
-                    let mut names = Vec::new();
-                    self.dom
-                        .collect_attr_contains(id, AttrName::ItemProp, "name", &mut names);
-                    let name = names.first().copied().or_else(|| {
-                        let has_timestamp_separator = self
-                            .dom
-                            .descendants(id)
-                            .filter_map(|node| self.dom.text_node(node))
-                            .any(|text| text.split_whitespace().any(|token| token == "@"));
-                        if !has_timestamp_separator {
-                            return None;
-                        }
-                        let mut links = self
-                            .dom
-                            .descendants(id)
-                            .filter(|&node| dom_text_candidate(&self.dom, node));
-                        let link = links.next()?;
-                        links.next().is_none().then_some(link)
-                    });
                     self.page_byline =
-                        Some(get_inner_text(&self.dom, name.unwrap_or(id), text_buffer).to_owned());
+                        Some(metadata::byline_name(&self.dom, id).unwrap_or_else(|| {
+                            get_inner_text(&self.dom, id, text_buffer).to_owned()
+                        }));
                     remove_after_scoring.push(id);
                     excluded_depth = Some(depth);
                     continue;
@@ -2149,12 +2132,6 @@ fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bo
         sibling = dom.next_sibling(node);
     }
     false
-}
-
-fn dom_text_candidate(dom: &Dom, node: NodeId) -> bool {
-    dom.tag(node) == Some(Tag::A)
-        && dom.has_non_whitespace_text(node)
-        && dom.normalized_char_count(node) < 100
 }
 
 fn title_heading_plan(
