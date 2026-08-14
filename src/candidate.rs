@@ -1,7 +1,7 @@
 //! Internal content-root candidates.
 
 use crate::constants::split_word_tokens;
-use crate::dom::{AttrName, Dom, NodeId, NodeLink, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeLink, NodeStateStore, Tag};
 use crate::scoring::has_static_hidden_marker;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -101,7 +101,7 @@ impl Candidate {
 }
 
 /// A deduplicated candidate collection indexed by stable DOM node ID.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct CandidateSet {
     candidates: Vec<Candidate>,
     positions: Vec<usize>,
@@ -137,7 +137,13 @@ impl CandidateContext {
 }
 
 impl CandidateSet {
+    #[cfg(test)]
     pub(crate) fn discover_semantic(dom: &Dom) -> Self {
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        Self::discover_semantic_from_snapshot(dom, &snapshot)
+    }
+
+    pub(crate) fn discover_semantic_from_snapshot(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Self {
         let mut candidates = Self {
             candidates: Vec::new(),
             positions: vec![usize::MAX; dom.len()],
@@ -148,7 +154,7 @@ impl CandidateSet {
         }
 
         let mut generic_clutter_depth = None;
-        for (node, depth) in dom.element_descendants_snapshot_with_depth(dom.root()) {
+        for &(node, depth) in snapshot {
             if generic_clutter_depth.is_some_and(|root_depth| depth <= root_depth) {
                 generic_clutter_depth = None;
             }
@@ -237,10 +243,9 @@ impl CandidateSet {
                 .is_some_and(|roles| matches_role(roles, "article") || matches_role(roles, "main"))
     }
 
-    pub(crate) fn ranking_context(&self, dom: &Dom) -> CandidateContext {
+    pub(crate) fn ranking_context(&self, dom: &Dom, store: &NodeStateStore) -> CandidateContext {
         let mut readability_in_subtree = vec![false; dom.len()];
         let mut authoritative_count = vec![0_u32; dom.len()];
-        let mut has_text = vec![false; dom.len()];
         for candidate in &self.candidates {
             readability_in_subtree[candidate.node.index()] =
                 candidate.has_source(CandidateSource::Readability);
@@ -249,25 +254,21 @@ impl CandidateSet {
             }
         }
 
-        let nodes: Vec<_> = dom.descendants(dom.root()).collect();
-        for &node in &nodes {
-            has_text[node.index()] = dom
-                .text_node(node)
-                .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()));
-        }
-        for &node in nodes.iter().rev() {
+        let nodes = dom.element_descendants_snapshot_with_depth(dom.root());
+        for &(node, _) in nodes.iter().rev() {
             if let Some(parent) = dom.parent(node) {
                 readability_in_subtree[parent.index()] |= readability_in_subtree[node.index()];
                 authoritative_count[parent.index()] = authoritative_count[parent.index()]
                     .saturating_add(authoritative_count[node.index()]);
-                has_text[parent.index()] |= has_text[node.index()];
             }
         }
 
         // NodeLink uses a u32 sentinel, so this index is half the size of
         // Vec<Option<NodeId>> on targets where NodeId has no niche.
         let mut nearest_authoritative_ancestor = vec![NodeLink::NONE; dom.len()];
-        for (node, _) in dom.element_descendants_snapshot_with_depth(dom.root()) {
+        // `nodes` already records DOM order. Reuse it for nearest-ancestor
+        // propagation instead of taking a second element snapshot.
+        for &(node, _) in &nodes {
             if let Some(parent) = dom.parent(node) {
                 nearest_authoritative_ancestor[node.index()] =
                     if self.is_authoritative_semantic(dom, parent) {
@@ -288,7 +289,12 @@ impl CandidateSet {
             let Some(parent) = nearest_authoritative_ancestor[candidate.node.index()].get() else {
                 continue;
             };
-            if is_article && has_text[candidate.node.index()] {
+            if is_article
+                && dom.parent(candidate.node).is_some()
+                && store
+                    .get_stats(candidate.node)
+                    .is_some_and(|stats| stats.has_non_whitespace)
+            {
                 article_peer_count[parent.index()] += 1;
                 article_peer_score[parent.index()] += candidate.readability_score;
             }
