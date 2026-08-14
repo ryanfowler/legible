@@ -112,6 +112,27 @@ fn bench_extract(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_extract_markdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("extract_markdown");
+    for (size, name, kind, bytes) in [
+        ("small", "prose", "prose", 4_000),
+        ("medium", "prose", "prose", 50_000),
+        ("medium", "reference", "reference", 50_000),
+        ("large", "prose", "prose", 500_000),
+        ("large", "malformed", "malformed", 250_000),
+    ] {
+        let html = benchmark_page(kind, bytes);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
+            b.iter(|| {
+                let page = extract(black_box(html), Some("https://example.com")).unwrap();
+                page.markdown()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_lazy_outputs(c: &mut Criterion) {
     let mut group = c.benchmark_group("lazy_output");
     for (kind, bytes) in [("short", 4_000), ("long", 250_000), ("reference", 50_000)] {
@@ -201,6 +222,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_extract,
+    bench_extract_markdown,
     bench_lazy_outputs,
     bench_complex_pages,
     bench_large_compatibility_fixtures,

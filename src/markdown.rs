@@ -1356,6 +1356,27 @@ impl Output {
         let bytes = text.as_bytes();
 
         while *index < bytes.len() && !bytes[*index].is_ascii_whitespace() {
+            // Once the line state is `Other`, ordinary prose cannot affect any
+            // Markdown construct. Copy it as one slice instead of processing
+            // every byte through the escape and line-state checks.
+            if matches!(self.line_text_state, LineTextState::Other) {
+                let start = *index;
+                while *index < bytes.len()
+                    && !bytes[*index].is_ascii_whitespace()
+                    && !matches!(
+                        bytes[*index],
+                        b'!' | b'\\' | b'`' | b'*' | b'_' | b'[' | b']' | b'<' | b'>' | b'|'
+                    )
+                {
+                    *index += 1;
+                }
+                if start != *index {
+                    self.value.push_str(&text[start..*index]);
+                    self.last_text_char = Some(bytes[*index - 1] as char);
+                    continue;
+                }
+            }
+
             let byte = bytes[*index];
             let escape = self.should_escape_char(byte as char, &text[*index..], next_text_char);
             if byte == b'#' && matches!(self.line_text_state, LineTextState::Start) && !escape {

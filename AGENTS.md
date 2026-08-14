@@ -145,4 +145,4 @@ The internal `fuzzing` feature exposes retained-DOM validation only to fuzz targ
 
 `benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input. See `benches/README.md` for baseline commands and regression guardrails.
 
-Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks.
+Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.

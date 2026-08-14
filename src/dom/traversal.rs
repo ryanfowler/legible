@@ -237,15 +237,37 @@ impl Dom {
             let Some(text) = self.text_node(id) else {
                 continue;
             };
-            for c in text.chars() {
-                if c.is_whitespace() {
-                    pending_whitespace |= !out.is_empty();
-                } else {
-                    if pending_whitespace {
-                        out.push(' ');
-                        pending_whitespace = false;
+            if text.is_ascii() {
+                let bytes = text.as_bytes();
+                let mut index = 0;
+                while index < bytes.len() {
+                    let start = index;
+                    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                        index += 1;
                     }
-                    out.push(c);
+                    if start != index {
+                        if pending_whitespace {
+                            out.push(' ');
+                            pending_whitespace = false;
+                        }
+                        out.push_str(&text[start..index]);
+                    }
+                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                        pending_whitespace |= !out.is_empty();
+                        index += 1;
+                    }
+                }
+            } else {
+                for c in text.chars() {
+                    if c.is_whitespace() {
+                        pending_whitespace |= !out.is_empty();
+                    } else {
+                        if pending_whitespace {
+                            out.push(' ');
+                            pending_whitespace = false;
+                        }
+                        out.push(c);
+                    }
                 }
             }
         }
@@ -272,28 +294,62 @@ impl Dom {
             let Some(text) = self.text_node(id) else {
                 continue;
             };
-            for c in text.chars() {
-                if remaining == 0 {
-                    return;
+            if text.is_ascii() {
+                let bytes = text.as_bytes();
+                let mut index = 0;
+                while index < bytes.len() {
+                    let start = index;
+                    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                        index += 1;
+                    }
+                    if start != index {
+                        if pending_whitespace {
+                            if remaining == 0 {
+                                return;
+                            }
+                            out.push(' ');
+                            remaining -= 1;
+                            pending_whitespace = false;
+                        }
+                        let take = (index - start).min(remaining);
+                        out.push_str(&text[start..start + take]);
+                        remaining -= take;
+                        if take != index - start {
+                            return;
+                        }
+                    }
+                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                        pending_whitespace |= !out.is_empty();
+                        index += 1;
+                    }
+                    if remaining == 0 {
+                        return;
+                    }
                 }
-                if c.is_whitespace() {
-                    pending_whitespace |= !out.is_empty();
-                } else {
-                    if pending_whitespace {
+            } else {
+                for c in text.chars() {
+                    if remaining == 0 {
+                        return;
+                    }
+                    if c.is_whitespace() {
+                        pending_whitespace |= !out.is_empty();
+                    } else {
+                        if pending_whitespace {
+                            if remaining == 0 {
+                                return;
+                            }
+                            out.push(' ');
+                            remaining -= 1;
+                            pending_whitespace = false;
+                        }
                         if remaining == 0 {
                             return;
                         }
-                        out.push(' ');
+                        out.push(c);
                         remaining -= 1;
-                        pending_whitespace = false;
-                    }
-                    if remaining == 0 {
-                        return;
-                    }
-                    out.push(c);
-                    remaining -= 1;
-                    if remaining == 0 {
-                        return;
+                        if remaining == 0 {
+                            return;
+                        }
                     }
                 }
             }
