@@ -2351,7 +2351,7 @@ mod tests {
     }
 
     #[test]
-    fn extracted_page_uses_the_final_cleaned_dom() {
+    fn extracted_page_renders_the_semantic_document() {
         let html = "<html><head><title>Test</title></head><body><article><p>This is enough article text for extraction and Markdown output.</p><p><a href=\"javascript:alert(1)\">Unsafe link</a></p></article></body></html>";
         let page = crate::extract(html, Some("https://example.com")).unwrap();
         let markdown = page.markdown();

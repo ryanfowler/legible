@@ -10,7 +10,7 @@ fuzz_target!(|data: &[u8]| {
     let Some(body) = input(data) else { return };
     let html = article_document(body.as_ref());
 
-    // Render Markdown and normalized text from the final cleaned DOM.
+    // Render each output from the retained semantic document.
     let Some(page) = parse_article(&html) else {
         return;
     };

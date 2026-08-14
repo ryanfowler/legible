@@ -54,7 +54,7 @@ fuzz_target!(|data: &[u8]| {
     let text = page.text();
     let html = page.html();
     let safe_html = page.safe_html();
-    assert!(page.validate_dom());
+    assert!(page.validate_document());
     assert_eq!(page.text_length(), text.chars().count());
     assert!(page.word_count() <= page.text_length());
     assert_eq!(page.word_count() == 0, text.is_empty());

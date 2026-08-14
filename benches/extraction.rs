@@ -4,6 +4,9 @@ use std::hint::black_box;
 
 // Criterion benchmarks compile as a separate crate. Include the private DOM module so
 // the parser benchmark measures the same parser that extraction uses.
+#[allow(unused_imports)]
+#[path = "../src/document/mod.rs"]
+mod document;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/dom/mod.rs"]
 mod dom;
@@ -61,6 +64,32 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
     html
 }
 
+fn normalized_fragment(kind: &str, target_bytes: usize) -> String {
+    let mut html = String::with_capacity(target_bytes + 256);
+    let mut index = 0;
+    while html.len() < target_bytes {
+        match kind {
+            "reference" => html.push_str(&format!(
+                "<section><h2>Method {index}</h2><p>This method parses a representative input value.</p><pre><code class='language-rust' data-language='rust'>let value_{index} = parse(input);</code></pre><table><tr><th>Field</th><th>Value</th></tr><tr><td>index</td><td>{index}</td></tr></table></section>"
+            )),
+            "code" => html.push_str(&format!(
+                "<section><h2>Example {index}</h2><pre><code class='language-rust' data-language='rust'>fn example_{index}() {{\n    println!(\"value {index}\");\n}}\n</code></pre></section>"
+            )),
+            "tables" => html.push_str(&format!(
+                "<section><h2>Dataset {index}</h2><table><thead><tr><th>Name</th><th>Value</th><th>Status</th></tr></thead><tbody><tr><td>entry-{index}</td><td>{index}</td><td>ready</td></tr><tr><td>alternate-{index}</td><td>{}</td><td>complete</td></tr></tbody></table></section>", index + 1
+            )),
+            "listing" => html.push_str(&format!(
+                "<article><h2><a href='/entry/{index}'>Entry {index}</a></h2><p>This entry contains useful summary text and stable benchmark content.</p></article>"
+            )),
+            _ => html.push_str(&format!(
+                "<section><h2>Section {index}</h2><p>This paragraph contains representative normalized prose and punctuation.</p><p>A second paragraph measures semantic compilation.</p></section>"
+            )),
+        }
+        index += 1;
+    }
+    html
+}
+
 fn bench_extract(c: &mut Criterion) {
     let mut group = c.benchmark_group("extract");
     for (size, name, kind, bytes, url) in [
@@ -108,6 +137,39 @@ fn bench_extract(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
             b.iter(|| extract(black_box(html), Some(url)).unwrap())
         });
+    }
+    group.finish();
+}
+
+fn bench_document_compile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("document_compile");
+    for (name, kind, bytes) in [
+        ("simple-prose", "prose", 4_000),
+        ("long-prose", "prose", 250_000),
+        ("highlighted-code", "code", 100_000),
+        ("table-heavy", "tables", 100_000),
+        ("documentation", "reference", 100_000),
+        ("listing", "listing", 100_000),
+    ] {
+        let html = normalized_fragment(kind, bytes);
+        let dom = dom::Dom::parse_fragment(&html, dom::Tag::Div).unwrap();
+        let root = dom.root();
+        let context = document::CompileContext::new(Some(
+            url::Url::parse("https://example.com/docs/page").unwrap(),
+        ));
+        let semantic_nodes = document::compile_document(&dom, root, &context)
+            .unwrap()
+            .len();
+        group.throughput(Throughput::Elements(dom.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new(name, format!("dom-{}-ir-{semantic_nodes}", dom.len())),
+            &dom,
+            |b, dom| {
+                b.iter(|| {
+                    document::compile_document(black_box(dom), root, black_box(&context)).unwrap()
+                })
+            },
+        );
     }
     group.finish();
 }
@@ -222,6 +284,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_extract,
+    bench_document_compile,
     bench_extract_markdown,
     bench_lazy_outputs,
     bench_complex_pages,

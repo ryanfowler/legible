@@ -1,22 +1,26 @@
 # Semantic IR migration baseline
 
-This note records the behavior baseline for the semantic document migration. Stage A does not change a production output path.
+This note records the historical behavior baseline and the current status of the semantic document migration.
 
 ## Revision
 
 The migration baseline is `main` at `a97e49c460a0ef0e8e4ed271ef2b3f417c7b6184`.
 
-## Current output contracts
+## Baseline output contracts
 
-`ExtractedPage` retains a compact cleaned DOM fragment. It renders each output on demand.
+At the recorded baseline, `ExtractedPage` retained a compact cleaned DOM fragment. It rendered each output on demand.
 
-- `markdown()` returns CommonMark and GFM output. It does not emit raw HTML. It filters unsupported link and image URI schemes.
-- `text()` returns normalized plain text. `text_length()` counts its Unicode scalar values. `word_count()` uses the same normalized DOM walk.
-- `html()` returns extracted markup from the retained DOM. It is not sanitized.
-- `safe_html()` copies and sanitizes the retained fragment before it renders HTML.
-- Repeated render calls are deterministic.
+- `markdown()` returned CommonMark and GFM output. It did not emit raw HTML. It filtered unsupported link and image URI schemes.
+- `text()` returned normalized plain text. `text_length()` counted its Unicode scalar values. `word_count()` used the same normalized DOM walk.
+- `html()` returned extracted markup from the retained DOM. It was not sanitized.
+- `safe_html()` copied and sanitized the retained fragment before it rendered HTML.
+- Repeated render calls were deterministic.
 
-The raw `html()` shape is compatibility-sensitive. Unit tests require source attributes to remain in `html()` while `safe_html()` removes active content. A later switch to canonical semantic HTML must be a documented contract change.
+The raw `html()` shape was compatibility-sensitive. Unit tests required source attributes to remain in `html()` while `safe_html()` removed active content. The semantic renderer migration deliberately replaced this contract.
+
+## Current migration status
+
+`ExtractedPage` now retains only the semantic `Document`. The final normalized compact DOM fragment is compiled once and then dropped. Markdown, normalized text, and canonical semantic HTML render lazily from the document. `safe_html()` is a compatibility alias for canonical `html()` output.
 
 ## Quality baseline
 
@@ -104,7 +108,7 @@ The initial IR vocabulary comes from existing normalization and rendering behavi
 | Meaningful media | `src/normalize/media.rs` | `tests/web/media` and the quality corpus media categories |
 | Discussions | Shared specialized discussion builder and adapters | `tests/general/barrier-discussion` and all 12 fixtures under `tests/specialized` |
 
-The crate-private IR also includes table spans and alignment because the current DOM Markdown and HTML paths retain that source meaning. It includes typed figures, footnotes, math, and callouts because normalization already identifies those concepts. It does not include arbitrary HTML elements, classes, IDs, styles, or attribute bags.
+The crate-private IR also includes table spans and alignment because the baseline DOM renderers retained that source meaning. It includes typed figures, footnotes, math, and callouts because normalization already identifies those concepts. It does not include arbitrary HTML elements, classes, IDs, styles, or attribute bags.
 
 ## Fixture coverage
 
@@ -116,4 +120,4 @@ The current first-party extraction suites contain:
 - 12 specialized extraction fixtures;
 - Mozilla Readability compatibility fixtures under `tests/readability-js/test/test-pages`.
 
-A Stage A unit test extracts every `source.html` below `tests/`. Every successful extraction compiles to the IR and passes IR validation. Fixtures with `expected.error` remain expected extraction failures.
+A unit test extracts every `source.html` below `tests/`. Every successful extraction compiles to the IR and passes IR validation. Fixtures with `expected.error` remain expected extraction failures.

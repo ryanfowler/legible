@@ -14,6 +14,25 @@ fn short_content_fallback_does_not_import_synthetic_html() {
 }
 
 #[test]
+fn canonical_output_preserves_semantic_media_kinds() {
+    let page = extract(
+        r#"<main><p>This guide includes representative media with enough text for stable extraction.</p><video src="/demo.mp4" title="Demo video"></video><audio><source src="/sample.mp3"></audio></main>"#,
+        Some("https://example.com/guides/page"),
+    )
+    .unwrap();
+    let html = page.html();
+
+    assert!(
+        html.contains(r#"<video controls src="https://example.com/demo.mp4"></video>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<audio controls src="https://example.com/sample.mp3"></audio>"#),
+        "{html}"
+    );
+}
+
+#[test]
 fn canonical_output_preserves_metadata_and_rewrites_urls() {
     let html = r#"<!doctype html><html lang="fr"><head>
         <title>Exact article</title>
