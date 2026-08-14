@@ -1,7 +1,6 @@
 //! Semantic normalization for retained content.
 
 mod callouts;
-mod code;
 mod footnotes;
 mod headings;
 mod images;
@@ -37,8 +36,8 @@ pub(crate) struct NormalizationStats {
 /// Normalizes semantic structures that hard cleanup does not remove.
 ///
 /// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
-/// already converted code, math, media, callouts, and footnotes. Cleanup does not
-/// create new source structures for those types.
+/// already converted math, media, callouts, and footnotes. Code stays in its
+/// source shape until semantic compilation.
 pub(crate) fn normalize_after_cleanup(
     dom: &mut Dom,
     root: NodeId,
@@ -60,7 +59,6 @@ pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
     svg::normalize(dom, root);
     media::normalize(dom, root);
     callouts::normalize(dom, root);
-    code::normalize(dom, root);
     footnotes::normalize(dom, root);
 }
 
@@ -357,13 +355,23 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     nodes.extend(dom.descendants(root));
 
     // Whitespace-only syntax token elements contain significant code text.
-    // Record preformatted ancestry in one preorder pass so empty-node cleanup
-    // does not need an ancestor scan for each element.
+    // Record code ancestry in one preorder pass so empty-node cleanup does not
+    // need an ancestor scan for each element. Multiline orphan code remains in
+    // source form until the semantic compiler consumes it.
     let mut in_preformatted_code = vec![false; dom.len()];
+    let multiline_content = crate::document::code_multiline_content(dom, nodes);
+    let mut multiline_code = vec![false; dom.len()];
     let mut has_text = vec![false; dom.len()];
     for &node in nodes.iter() {
+        multiline_code[node.index()] = crate::document::is_multiline_code_with_evidence(
+            dom,
+            node,
+            multiline_content[node.index()],
+        );
         in_preformatted_code[node.index()] = dom.parent(node).is_some_and(|parent| {
-            dom.tag(parent) == Some(Tag::Pre) || in_preformatted_code[parent.index()]
+            dom.tag(parent) == Some(Tag::Pre)
+                || multiline_code[parent.index()]
+                || in_preformatted_code[parent.index()]
         });
     }
     for &node in nodes.iter().rev() {
@@ -414,6 +422,20 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
 mod tests {
     use super::*;
     use crate::markdown::dom_to_markdown;
+
+    fn semantic_markdown(dom: &Dom, root: NodeId) -> String {
+        let document = crate::document::compile_document(
+            dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        crate::render::markdown::render_markdown(
+            &document,
+            0,
+            crate::render::markdown::MarkdownConfig::default(),
+        )
+    }
 
     fn normalized(html: &str) -> (Dom, NodeId) {
         let mut dom = Dom::parse_fragment(html, Tag::Div).unwrap();
@@ -479,8 +501,19 @@ mod tests {
 <span>}</span></pre></div>"#,
         );
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "```rust\nfn main() {\n}\n```\n"
+        );
+    }
+
+    #[test]
+    fn keeps_presentation_code_tables_for_semantic_compilation() {
+        let (dom, root) = normalized(
+            r#"<table role="presentation" class="highlighttable"><tr><td class="linenos"><pre>1</pre></td><td><pre class="language-rust"><code>fn main() {}</code></pre></td></tr></table>"#,
+        );
+        assert_eq!(
+            semantic_markdown(&dom, root),
+            "```rust\nfn main() {}\n```\n"
         );
     }
 
@@ -504,9 +537,12 @@ mod tests {
             r#"<code><span>first
 second</span></code><div class="language-rust"><div class="highlight"><pre><code><span>fn main() {}</span></code></pre></div></div>"#,
         );
-        let markdown = dom_to_markdown(&dom, root, 0);
-        assert!(markdown.contains("```\nfirst\nsecond\n```"));
-        assert!(markdown.contains("```rust\nfn main() {}\n```"));
+        let markdown = semantic_markdown(&dom, root);
+        assert!(markdown.contains("```\nfirst\nsecond\n```"), "{markdown}");
+        assert!(
+            markdown.contains("```rust\nfn main() {}\n```"),
+            "{markdown}"
+        );
     }
 
     #[test]
