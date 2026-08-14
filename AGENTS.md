@@ -14,6 +14,7 @@ cargo doc --open       # Generate and view documentation
 cargo bench --bench extraction # Run compatibility performance benchmarks
 cargo +nightly fuzz run <target> # Run a fuzz target (requires nightly + cargo-fuzz)
 prettier -w .          # Format other files
+node scripts/compare-extractors/performance.mjs  # Compare extractors
 ```
 
 ## Design Philosophy
@@ -110,7 +111,7 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 
 `tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html` and `expected.md`. It can also have `metadata.json`. Use `expected.error` for a fixture that must fail with a named public error variant. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. `tests/defuddle/` contains exact Markdown compatibility fixtures. Each fixture has `source.html` and `expected.md`. A fixture can also have `metadata.json`. The top-level fixture directory identifies the likely owning pipeline layer. `tests/web/` contains capability fixtures with semantic assertions in `expected.json`. Add positive and negative capability cases without making every output an exact snapshot. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite.
 
-`benchmarks/quality/` contains independent extraction-quality fixtures. Install dependencies with `npm --prefix scripts/compare-defuddle ci` and `cargo fetch`. Run all quality fixtures with `node scripts/compare-defuddle/index.mjs --all`, or use `--fixture <id>` for one case. The runner invokes Cargo offline. Defuddle output is comparison data, not ground truth.
+`benchmarks/quality/` contains independent extraction-quality fixtures. Install dependencies with `npm --prefix scripts/compare-extractors ci` and `cargo fetch`. Run all quality fixtures with `node scripts/compare-extractors/index.mjs --all`, or use `--fixture <id>` for one case. The runner invokes Cargo offline. Third-party extractor output is comparison data, not ground truth.
 
 Default extraction must return `Error::NoContent` for empty, head-only, and image-only documents.
 
