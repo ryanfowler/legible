@@ -1747,16 +1747,23 @@ impl<'a> ContentExtractor<'a> {
             nodes,
         );
         self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
-        if self.strategy.conditional_cleanup() && self.page_kind.uses_article_cleanup() {
+        if self.page_kind.uses_article_cleanup() {
+            if self.strategy.conditional_cleanup() {
+                let before = self.diagnostic_element_count(root);
+                heuristic_cleanup(
+                    &mut self.dom,
+                    root,
+                    self.page_kind,
+                    &mut self.node_data,
+                    text_buffer,
+                    nodes,
+                );
+                self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
+            }
+            // Global chrome is high-confidence cleanup. Apply it to every
+            // extraction strategy, including broad and fallback attempts.
             let before = self.diagnostic_element_count(root);
-            heuristic_cleanup(
-                &mut self.dom,
-                root,
-                self.page_kind,
-                &mut self.node_data,
-                text_buffer,
-                nodes,
-            );
+            remove_global_chrome(&mut self.dom, root, &mut self.node_data);
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 
