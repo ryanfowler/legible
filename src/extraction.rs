@@ -338,11 +338,9 @@ impl<'a> ContentExtractor<'a> {
         if let Some(diagnostics) = &mut self.metadata_diagnostics {
             diagnostics.complete_with_fallbacks(&self.metadata);
         }
-        let extracted_dom = self
-            .dom
-            .copy_children_as_fragment(content.content_root)
-            .map_err(|_| Error::NoContent)?;
-        let extracted_root = extracted_dom.root();
+        // The extraction result already owns a compact fragment. Keep that
+        // fragment instead of copying every retained node a second time.
+        let extracted_root = content.content_root;
         let diagnostics = self
             .diagnostic_attempts
             .take()
@@ -356,7 +354,7 @@ impl<'a> ContentExtractor<'a> {
             .retain_structured_data
             .then(|| self.structured_data.retained_items());
         Ok(ExtractedPage::new(
-            extracted_dom,
+            self.dom,
             extracted_root,
             self.metadata,
             content.text_length,

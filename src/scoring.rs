@@ -30,23 +30,54 @@ fn stats_for_text(text: &str) -> NodeStats {
     // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
     // Unicode whitespace tables in the hot loop.
     if text.is_ascii() {
-        for &byte in text.as_bytes() {
-            if byte.is_ascii_whitespace() {
-                s.has_sentence_break |= dot;
-                dot = false;
-                if !prev {
-                    text_length += 1;
-                    prev = true
+        let bytes = text.as_bytes();
+        // Keep the normalization-dependent state in one loop. Use memchr's
+        // vectorized searches for independent punctuation counts instead of
+        // testing each punctuation byte in the stateful hot loop.
+        comma_count = memchr::memchr_iter(b',', bytes).count();
+        sentence_end_count = memchr::memchr3_iter(b'.', b'!', b'?', bytes).count();
+        s.has_alphanumeric = bytes.iter().any(u8::is_ascii_alphanumeric);
+        let has_control_whitespace = memchr::memchr3(b'\t', b'\n', b'\r', bytes).is_some()
+            || memchr::memchr2(0x0b, 0x0c, bytes).is_some();
+        if !has_control_whitespace {
+            // Normal HTML text uses spaces between words. Iterate only those
+            // separators. This avoids a branch and state update for every
+            // letter in prose.
+            let mut spaces = 0;
+            let mut non_whitespace_runs = 0;
+            for index in memchr::memchr_iter(b' ', bytes) {
+                spaces += 1;
+                if index > 0 && bytes[index - 1] != b' ' {
+                    s.has_sentence_break |= bytes[index - 1] == b'.';
                 }
-            } else {
-                s.has_non_whitespace = true;
-                s.has_alphanumeric |= byte.is_ascii_alphanumeric();
-                word_count += usize::from(prev);
-                dot = byte == b'.';
-                comma_count += usize::from(byte == b',');
-                sentence_end_count += usize::from(matches!(byte, b'.' | b'!' | b'?'));
-                text_length += 1;
-                prev = false
+                if index + 1 < bytes.len() && bytes[index + 1] != b' ' {
+                    non_whitespace_runs += 1;
+                }
+            }
+            s.has_non_whitespace = spaces != bytes.len();
+            if s.has_non_whitespace {
+                word_count = non_whitespace_runs + usize::from(bytes.first() != Some(&b' '));
+                text_length = bytes.len() - spaces + word_count.saturating_sub(1);
+                dot = bytes.last() == Some(&b'.');
+                // `text_length` already excludes a trailing separator.
+                prev = false;
+            }
+        } else {
+            for &byte in bytes {
+                if byte.is_ascii_whitespace() {
+                    s.has_sentence_break |= dot;
+                    dot = false;
+                    if !prev {
+                        text_length += 1;
+                        prev = true
+                    }
+                } else {
+                    s.has_non_whitespace = true;
+                    word_count += usize::from(prev);
+                    dot = byte == b'.';
+                    text_length += 1;
+                    prev = false
+                }
             }
         }
     } else {
@@ -1127,6 +1158,17 @@ mod tests {
         assert!(unicode.starts_with_whitespace);
         assert!(unicode.ends_with_whitespace);
         assert!(unicode.has_sentence_end);
+
+        let spaces_only = stats_for_text("   ");
+        assert_eq!(spaces_only.text_length, 0);
+        assert_eq!(spaces_only.word_count, 0);
+        assert!(!spaces_only.has_non_whitespace);
+
+        let space_separated = stats_for_text("  Alpha  beta.  ");
+        assert_eq!(space_separated.text_length, 11);
+        assert_eq!(space_separated.word_count, 2);
+        assert!(space_separated.has_sentence_break);
+        assert!(!space_separated.ends_with_dot);
     }
 
     #[test]
