@@ -1811,11 +1811,7 @@ impl<'a> ContentExtractor<'a> {
 
         // Normalization is separate from relevance cleanup. Serializers receive
         // stable code, figure, image, footnote, and table structures.
-        let normalization = normalize_after_cleanup(&mut self.dom, root, nodes);
-        if self.diagnostic_attempts.is_some() {
-            self.diagnostic_normalization.flattened_layout_tables =
-                normalization.flattened_layout_tables;
-        }
+        normalize_after_cleanup(&mut self.dom, root, nodes);
 
         // Single traversal collects both paragraphs and line breaks,
         // replacing two separate filters over `descendants`.
@@ -1961,6 +1957,7 @@ impl<'a> ContentExtractor<'a> {
             if !self.options.keep_classes
                 && !crate::document::code_class_is_semantic_evidence(&self.dom, id)
                 && !crate::document::figure_class_is_semantic_evidence(&self.dom, id)
+                && !crate::document::table_class_is_semantic_evidence(&self.dom, id)
                 && let Some(classes) = self.dom.attr(id, AttrName::Class)
             {
                 class_buffer.clear();
@@ -2025,19 +2022,17 @@ impl<'a> ContentExtractor<'a> {
         if self.diagnostic_attempts.is_none() {
             return;
         }
-        let flattened_layout_tables = self.diagnostic_normalization.flattened_layout_tables;
+        let (flattened_layout_tables, semantic_tables) =
+            crate::document::table_normalization_counts(&self.dom, root);
         let mut counts = NormalizationCountsInfo {
             code_blocks: crate::document::source_code_block_count(&self.dom, root),
             flattened_layout_tables,
+            tables: semantic_tables,
             ..NormalizationCountsInfo::default()
         };
         for node in self.dom.descendants(root) {
-            match self.dom.tag(node) {
-                Some(Tag::Img) => counts.images += 1,
-                Some(Tag::Table) if !crate::document::is_code_gutter_table(&self.dom, node) => {
-                    counts.tables += 1;
-                }
-                _ => {}
+            if self.dom.tag(node) == Some(Tag::Img) {
+                counts.images += 1;
             }
             counts.footnote_references +=
                 usize::from(self.dom.attr(node, AttrName::DataFootnoteRef).is_some());

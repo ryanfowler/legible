@@ -8,48 +8,31 @@ mod lists;
 mod math;
 mod media;
 mod svg;
-mod tables;
 
-use crate::cleaning::{repeated_listing_start, simplify_nested_elements};
+use crate::cleaning::simplify_nested_elements;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::is_element_without_content;
-use smallvec::SmallVec;
 
 /// Normalizes retained markup into a predictable tree for all serializers.
 ///
 /// The order preserves information that later, more general passes can hide.
 /// Image cleanup keeps responsive source markup for semantic compilation.
-/// Heading and list roles become native HTML before wrapper cleanup. Code and
-/// figure evidence stays available until the compiler consumes it. Table
-/// normalization runs last because it can replace complete subtrees.
+/// Heading roles become native HTML before wrapper cleanup. Code, figure,
+/// list, and table evidence stays available until the compiler consumes it.
 #[cfg(test)]
 fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     preserve_semantics_before_cleanup(dom, root);
     normalize_after_cleanup(dom, root, nodes);
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NormalizationStats {
-    pub(crate) flattened_layout_tables: usize,
-}
-
 /// Normalizes semantic structures that hard cleanup does not remove.
 ///
 /// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
-/// already converted math, media, callouts, and footnotes. Code stays in its
-/// source shape until semantic compilation.
-pub(crate) fn normalize_after_cleanup(
-    dom: &mut Dom,
-    root: NodeId,
-    nodes: &mut Vec<NodeId>,
-) -> NormalizationStats {
+/// already converted math, media, callouts, and footnotes. Code, list, and
+/// table structures stay in their source shape until semantic compilation.
+pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     images::deduplicate_selected(dom, root, nodes);
     headings::normalize(dom, root);
-    lists::normalize(dom, root);
-    normalize_repeated_table_listings(dom, root);
-    NormalizationStats {
-        flattened_layout_tables: tables::normalize_layout_tables(dom, root),
-    }
 }
 
 /// Captures or protects semantic source data that hard cleanup would otherwise remove.
@@ -94,7 +77,7 @@ pub(crate) fn collect_external_footnotes(dom: &Dom) -> footnotes::Definitions {
 /// author-provided semantics. The retained fragment runs the full pipeline.
 pub(crate) fn normalize_scoring_structure(dom: &mut Dom, root: NodeId) {
     headings::normalize_roles(dom, root);
-    lists::normalize(dom, root);
+    lists::normalize_for_scoring(dom, root);
 }
 
 pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
@@ -110,173 +93,6 @@ pub(crate) use math::accessible_math_nodes;
 pub(crate) fn finish_normalization(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     simplify_nested_elements(dom, root, nodes);
     remove_empty_nodes(dom, root, nodes);
-}
-
-fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
-    let tables: SmallVec<[(NodeId, u32); 8]> = dom
-        .descendants(root)
-        .filter(|&node| dom.tag(node) == Some(Tag::Table))
-        .filter_map(|node| repeated_listing_start(dom, node).map(|start| (node, start)))
-        .collect();
-    for (table, start) in tables.into_iter().rev() {
-        if dom.parent(table).is_none() {
-            continue;
-        }
-        let rows: SmallVec<[NodeId; 32]> = dom
-            .table_descendants(table)
-            .into_iter()
-            .filter(|&node| dom.tag(node) == Some(Tag::Tr))
-            .collect();
-        let Ok(container) = dom.create_html_element(Tag::Div) else {
-            continue;
-        };
-        let Ok(list) = dom.create_html_element(Tag::Ol) else {
-            continue;
-        };
-        if start != 1 {
-            dom.set_attr(list, AttrName::Start, &start.to_string());
-        }
-        dom.append_child(container, list);
-        let mut current_item = None;
-        let mut expects_metadata = false;
-        let mut buffer = String::new();
-
-        for row in rows {
-            remove_listing_controls(dom, row, &mut buffer);
-            let cells: SmallVec<[NodeId; 8]> = dom
-                .element_children(row)
-                .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
-                .collect();
-            let rank = cells.first().is_some_and(|&cell| {
-                let text = crate::cleaning::get_table_inner_text(dom, cell, &mut buffer);
-                let digits = text.trim().strip_suffix('.').unwrap_or(text.trim());
-                !digits.is_empty()
-                    && digits.len() <= 6
-                    && digits.bytes().all(|byte| byte.is_ascii_digit())
-            });
-            if rank {
-                let Ok(item) = dom.create_html_element(Tag::Li) else {
-                    continue;
-                };
-                dom.append_child(list, item);
-                move_meaningful_cells(dom, &cells[1..], item);
-                current_item = Some(item);
-                expects_metadata = true;
-                continue;
-            }
-            if !crate::cleaning::has_table_content(dom, row) {
-                continue;
-            }
-            if expects_metadata && let Some(item) = current_item {
-                if let Ok(line_break) = dom.create_html_element(Tag::Br) {
-                    dom.append_child(item, line_break);
-                }
-                if let Ok(metadata) = dom.create_html_element(Tag::Small) {
-                    dom.append_child(item, metadata);
-                    move_meaningful_cells(dom, &cells, metadata);
-                }
-                expects_metadata = false;
-            } else if let Ok(paragraph) = dom.create_html_element(Tag::P) {
-                dom.append_child(container, paragraph);
-                move_meaningful_cells(dom, &cells, paragraph);
-            }
-        }
-        dom.replace_with(table, container);
-    }
-}
-
-fn move_meaningful_cells(dom: &mut Dom, cells: &[NodeId], destination: NodeId) {
-    let mut inserted = false;
-    for &cell in cells {
-        let meaningful = crate::cleaning::has_table_content(dom, cell)
-            || dom
-                .table_descendants(cell)
-                .into_iter()
-                .any(|node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture)));
-        if !meaningful {
-            continue;
-        }
-        if inserted && let Ok(space) = dom.create_text(" ") {
-            dom.append_child(destination, space);
-        }
-        dom.move_children(cell, destination);
-        inserted = true;
-    }
-}
-
-fn remove_listing_controls(dom: &mut Dom, row: NodeId, buffer: &mut String) {
-    let anchors: SmallVec<[NodeId; 8]> = dom
-        .table_descendants(row)
-        .into_iter()
-        .filter(|&node| dom.tag(node) == Some(Tag::A))
-        .collect();
-    for anchor in anchors {
-        let text = crate::cleaning::get_table_inner_text(dom, anchor, buffer).to_ascii_lowercase();
-        let empty = text.is_empty();
-        let action_label = matches!(
-            text.as_str(),
-            "hide" | "vote" | "delete" | "share" | "login" | "sign in" | "subscribe"
-        );
-        let action_url = dom.attr(anchor, AttrName::Href).is_some_and(|href| {
-            let href = href.to_ascii_lowercase();
-            href.contains("action=")
-                || href.contains("how=")
-                || href.starts_with("vote?")
-                || href.starts_with("hide?")
-                || href.starts_with("delete?")
-                || href.contains("/vote?")
-                || href.contains("/hide?")
-                || href.contains("/delete?")
-        });
-        let has_media = dom.table_descendants(anchor).into_iter().any(|node| {
-            matches!(
-                dom.tag(node),
-                Some(Tag::Img | Tag::Picture | Tag::Audio | Tag::Video)
-            )
-        });
-        if empty && action_url && !has_media || action_label && action_url {
-            if action_label && action_url {
-                let previous = dom.prev_sibling(anchor).and_then(|node| {
-                    let text = dom.text_node(node)?;
-                    let trimmed = text.trim_end();
-                    let retained = trimmed.trim_end_matches(is_control_separator_character);
-                    (retained.len() != trimmed.len())
-                        .then(|| (node, retained.trim_end().to_owned()))
-                });
-                let next = dom.next_sibling(anchor).and_then(|node| {
-                    let text = dom.text_node(node)?;
-                    let trimmed = text.trim_start();
-                    let retained = trimmed.trim_start_matches(is_control_separator_character);
-                    (retained.len() != trimmed.len())
-                        .then(|| (node, retained.trim_start().to_owned()))
-                });
-                if previous.is_some() || next.is_some() {
-                    if let Some((node, retained)) = previous {
-                        if retained.is_empty() {
-                            dom.detach(node);
-                        } else {
-                            dom.set_text(node, &retained);
-                        }
-                    }
-                    if let Some((node, retained)) = next {
-                        if retained.is_empty() {
-                            dom.detach(node);
-                        } else {
-                            dom.set_text(node, &retained);
-                        }
-                    }
-                    if let Ok(space) = dom.create_text(" ") {
-                        dom.insert_before(anchor, space);
-                    }
-                }
-            }
-            dom.detach(anchor);
-        }
-    }
-}
-
-fn is_control_separator_character(character: char) -> bool {
-    matches!(character, '|' | '·' | '-' | '–' | '—' | '•')
 }
 
 fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
@@ -587,36 +403,39 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         let (dom, root) = normalized(
             r#"<table><tr><td>31.</td><td><a href='vote?how=up'></a></td><td><a href='/one'>First result</a> <a href='/one'><img src='one.jpg' alt='Preview'></a></td></tr><tr><td></td><td></td><td>10 points | <a href='hide?id=1'>hide</a> | <a href='/one/comments'>2 comments</a></td></tr><tr><td colspan='3'></td></tr><tr><td>32.</td><td><a href='vote?how=up'></a></td><td><a href='/two'>Second result</a></td></tr><tr><td></td><td></td><td>20 points | <a href='hide?id=2'>hide</a></td></tr><tr><td colspan='3'></td></tr><tr><td>33.</td><td></td><td><a href='/three'>Third result</a></td></tr><tr><td></td><td></td><td>30 points</td></tr><tr><td colspan='3'></td></tr></table><table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>A</td><td>1</td></tr></tbody></table><table><tr><td>1.</td><td><a href='/team/a'>Team A</a></td><td>30</td></tr><tr><td>2.</td><td><a href='/team/b'>Team B</a></td><td>28</td></tr><tr><td>3.</td><td><a href='/team/c'>Team C</a></td><td>25</td></tr><tr><td>4.</td><td><a href='/team/d'>Team D</a></td><td>22</td></tr><tr><td>5.</td><td><a href='/team/e'>Team E</a></td><td>20</td></tr><tr><td>6.</td><td><a href='/team/f'>Team F</a></td><td>18</td></tr></table>"#,
         );
+        let document = crate::document::compile_document(
+            &dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        let tree = document.debug_tree();
         assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Ol))
+            tree.lines()
+                .filter(|line| line.starts_with("List("))
                 .count(),
             1
         );
         assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Li))
+            tree.lines()
+                .filter(|line| line.trim() == "ListItem")
                 .count(),
             3
         );
         assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Table))
+            tree.lines()
+                .filter(|line| line.starts_with("Table("))
                 .count(),
             2
         );
         assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+            tree.lines()
+                .filter(|line| line.trim_start().starts_with("Image("))
                 .count(),
             1
         );
-        let list = dom
-            .descendants(root)
-            .find(|&node| dom.tag(node) == Some(Tag::Ol))
-            .unwrap();
-        assert_eq!(dom.attr(list, AttrName::Start), Some("31"));
-        let markdown = dom_to_markdown(&dom, root, 0);
+        assert!(tree.contains("List(kind=Ordered, start=Some(31))"));
+        let markdown = semantic_markdown(&dom, root);
         assert!(markdown.starts_with("31. "));
         assert!(!markdown.contains("hide"));
         assert!(!markdown.contains(" |  | "));
@@ -628,19 +447,26 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         let (dom, root) = normalized(
             r#"<table><tr><td>1.</td><td><a href='/one'>One</a><table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody><tr><td>A</td><td>B</td></tr></tbody></table></td></tr><tr><td></td><td>First metadata</td></tr><tr><td>2.</td><td><a href='/two'>Two</a></td></tr><tr><td></td><td>Second metadata</td></tr><tr><td>3.</td><td><a href='/three'>Three</a></td></tr><tr><td></td><td>Third metadata</td></tr><tr><td>4.</td><td><a href='/four'>Four</a></td></tr><tr><td></td><td>Fourth metadata</td></tr><tr><td>5.</td><td><a href='/five'>Five</a></td></tr><tr><td></td><td>Fifth metadata</td></tr><tr><td>6.</td><td><a href='/six'>Six</a></td></tr><tr><td></td><td>Sixth metadata</td></tr></table>"#,
         );
+        let document = crate::document::compile_document(
+            &dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        let tree = document.debug_tree();
         assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Ol))
+            tree.lines()
+                .filter(|line| line.starts_with("List("))
                 .count(),
             1
         );
         assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Table))
+            tree.lines()
+                .filter(|line| line.trim_start().starts_with("Table("))
                 .count(),
             1
         );
-        let markdown = dom_to_markdown(&dom, root, 0);
+        let markdown = semantic_markdown(&dom, root);
         assert!(markdown.contains("One"));
         assert!(markdown.contains("| Field | Value |"), "{markdown}");
     }
