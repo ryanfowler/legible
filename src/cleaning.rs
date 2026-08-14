@@ -177,21 +177,39 @@ fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStor
         .any(|node| is_directly_protected(dom, node, store))
 }
 
-fn protected_subtree_mask(
+fn protected_masks(
     dom: &Dom,
     root: NodeId,
     store: &crate::dom::NodeStateStore,
-) -> Vec<bool> {
+) -> (Vec<bool>, Vec<bool>) {
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    let mut protected = vec![false; dom.len()];
-    for &(node, _) in snapshot.iter().rev() {
-        let mut value = is_directly_protected(dom, node, store);
-        for child in dom.element_children(node) {
-            value |= protected[child.index()];
-        }
-        protected[node.index()] = value;
+    let mut directly_protected = vec![false; dom.len()];
+    directly_protected[root.index()] = is_directly_protected(dom, root, store);
+    for &(node, _) in &snapshot {
+        directly_protected[node.index()] = is_directly_protected(dom, node, store);
     }
-    protected
+    let mut contains_protected = vec![false; dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        let mut value = directly_protected[node.index()];
+        for child in dom.element_children(node) {
+            value |= contains_protected[child.index()];
+        }
+        contains_protected[node.index()] = value;
+    }
+
+    // Most callers need to know whether the candidate itself or one of its
+    // ancestors is protected. Cache that path state too. Without this index,
+    // deeply repaired markup makes the same ancestor walk once per candidate.
+    let mut protected_path = vec![false; dom.len()];
+    let root_protected = directly_protected[root.index()];
+    for &(node, _) in &snapshot {
+        let parent_protected = dom
+            .parent(node)
+            .filter(|&parent| parent != root)
+            .map_or(root_protected, |parent| protected_path[parent.index()]);
+        protected_path[node.index()] = parent_protected || directly_protected[node.index()];
+    }
+    (contains_protected, protected_path)
 }
 
 fn has_protected_ancestor(
@@ -1160,10 +1178,10 @@ pub(crate) fn heuristic_cleanup(
         store.clear_stats();
     }
     let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
-    let protected_subtrees = snapshot
+    let protected_masks = snapshot
         .iter()
-        .any(|&(_, depth)| depth > 128)
-        .then(|| protected_subtree_mask(dom, root, store));
+        .any(|&(_, depth)| depth > 64)
+        .then(|| protected_masks(dom, root, store));
 
     // Keep only outermost candidates. A classifier can inspect the complete
     // subtree once instead of rescanning every nested wrapper.
@@ -1190,8 +1208,12 @@ pub(crate) fn heuristic_cleanup(
     }
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_none()
-            || is_protected_content(dom, node, store)
-            || has_protected_ancestor(dom, node, root, store)
+            || protected_masks
+                .as_ref()
+                .is_some_and(|(_, path)| path[node.index()])
+            || protected_masks.is_none()
+                && (is_protected_content(dom, node, store)
+                    || has_protected_ancestor(dom, node, root, store))
         {
             continue;
         }
@@ -1216,15 +1238,13 @@ pub(crate) fn heuristic_cleanup(
             .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
             .take(4)
             .count();
-        let protected = if let Some(protected_subtrees) = &protected_subtrees {
-            protected_subtrees
-                .get(node.index())
-                .copied()
-                .unwrap_or(false)
-        } else {
-            dom.descendants(node)
-                .any(|descendant| is_protected_content(dom, descendant, store))
-        };
+        let protected = protected_masks.as_ref().map_or_else(
+            || {
+                dom.descendants(node)
+                    .any(|descendant| is_protected_content(dom, descendant, store))
+            },
+            |(subtrees, _)| subtrees[node.index()],
+        );
         let link_density = get_link_density_cached(dom, node, stats.text_length, store);
         let short = stats.text_length < 350 || stats.text_length * 5 < root_length;
 

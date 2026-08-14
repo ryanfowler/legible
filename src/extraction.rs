@@ -2149,15 +2149,37 @@ fn title_heading_plan(
     site_name: Option<&str>,
     source_uri: Option<&Url>,
 ) -> TitleHeadingPlan {
-    let headings: Vec<_> = dom
-        .element_descendants_snapshot_with_depth(dom.root())
-        .into_iter()
-        .map(|(node, _)| node)
+    let root = dom.root();
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+
+    // A heading can be deeply nested in repaired HTML. Compute the score of
+    // each node's nearest marked ancestor path once instead of walking that
+    // path again for every matching heading. Keep the cheaper direct walk for
+    // ordinary documents.
+    let context_scores = snapshot.iter().any(|&(_, depth)| depth > 64).then(|| {
+        let mut scores = vec![0_i32; dom.len()];
+        let root_score = title_heading_context_score(dom, root, 0);
+        for &(node, _) in &snapshot {
+            let parent_score = dom.parent(node).map_or(0, |parent| {
+                if parent == root {
+                    root_score
+                } else {
+                    scores[parent.index()]
+                }
+            });
+            scores[node.index()] = title_heading_context_score(dom, node, parent_score);
+        }
+        scores
+    });
+
+    let headings: Vec<_> = snapshot
+        .iter()
+        .map(|&(node, _)| node)
         .filter(|&node| has_primary_heading_semantics(dom, node))
         .filter(|&node| is_probably_visible(dom, node))
         .collect();
     let has_link = dom
-        .descendants(dom.root())
+        .descendants(root)
         .any(|node| dom.tag(node) == Some(Tag::A));
     let brand_headings: SmallVec<[NodeId; 2]> = if has_link {
         headings
@@ -2179,7 +2201,13 @@ fn title_heading_plan(
             let matches_structured_title = heading_matches_page_title(structured_title, &text);
             (matches_page_title || matches_structured_title).then_some((
                 heading,
-                title_heading_score(dom, heading, matches_page_title, matches_structured_title),
+                i32::from(matches_page_title) * 40
+                    + i32::from(matches_structured_title) * 20
+                    + i32::from(dom.tag(heading) == Some(Tag::H1)) * 8
+                    + context_scores.as_ref().map_or_else(
+                        || title_heading_score(dom, heading),
+                        |scores| scores[heading.index()],
+                    ),
             ))
         })
         .max_by_key(|(_, score)| *score)
@@ -2191,15 +2219,8 @@ fn title_heading_plan(
     }
 }
 
-fn title_heading_score(
-    dom: &Dom,
-    heading: NodeId,
-    matches_page_title: bool,
-    matches_structured_title: bool,
-) -> i32 {
-    let mut score = i32::from(matches_page_title) * 40
-        + i32::from(matches_structured_title) * 20
-        + i32::from(dom.tag(heading) == Some(Tag::H1)) * 8;
+fn title_heading_score(dom: &Dom, heading: NodeId) -> i32 {
+    let mut score = 0;
     let mut current = Some(heading);
     while let Some(node) = current {
         score += match dom.tag(node) {
@@ -2214,6 +2235,19 @@ fn title_heading_score(
         current = dom.parent(node);
     }
     score
+}
+
+fn title_heading_context_score(dom: &Dom, node: NodeId, parent_score: i32) -> i32 {
+    let own_score = match dom.tag(node) {
+        Some(Tag::Article) => 32,
+        Some(Tag::Main) => 24,
+        _ => 0,
+    };
+    if has_primary_content_marker(dom, node) {
+        own_score + 28
+    } else {
+        parent_score + own_score
+    }
 }
 
 fn is_linked_site_brand_heading(

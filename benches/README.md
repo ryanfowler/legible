@@ -16,6 +16,7 @@ The suite measures these workloads:
 - listing and malformed pages
 - metadata-heavy pages
 - large Guardian and Wikipedia compatibility fixtures
+- end-to-end raw HTML to Markdown extraction
 - lazy Markdown, text, and HTML rendering
 - deeply nested parser input
 
@@ -34,7 +35,7 @@ Use the same machine, Rust toolchain, and power mode for comparisons.
 - Do not merge a regression greater than 15% without a documented reason.
 - Doubling generated input size should take less than 2.5 times as long.
 - Deeply nested parser inputs must remain linear and must not overflow the stack.
-- Extraction benchmarks must not render Markdown, HTML, or text. Output rendering stays lazy.
+- Extraction-only benchmarks must not render Markdown, HTML, or text. The end-to-end Markdown group measures rendering explicitly. Output rendering stays lazy.
 - A normalization change must not add a repeated full-document scan for each code block, equation, table, or image.
 
 Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline.
