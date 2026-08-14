@@ -152,6 +152,7 @@ impl Dom {
             })
         }
     }
+    #[allow(dead_code)]
     pub(crate) fn retain_attrs(
         &mut self,
         node: NodeId,

@@ -20,10 +20,11 @@ fn extraction_preserves_code_whitespace_across_token_spans() {
 
     let page =
         extract(html, Some("https://example.test/code-whitespace")).expect("article extracts");
-    assert_eq!(
-        page.html().matches("<span>").count(),
-        11,
-        "normalization keeps syntax token markup in the retained HTML"
+    let canonical_html = page.html();
+    assert!(canonical_html.contains("<pre><code>"));
+    assert!(
+        !canonical_html.contains("<span>"),
+        "canonical HTML removes syntax token implementation markup"
     );
     let markdown = page.markdown();
     let code = markdown

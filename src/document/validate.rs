@@ -152,6 +152,7 @@ fn validate_kind(
         | NodeKind::Image(_)
         | NodeKind::HardBreak
         | NodeKind::FootnoteReference(_)
+        | NodeKind::TaskMarker(_)
         | NodeKind::InlineMath(_)
         | NodeKind::DisplayMath(_)
         | NodeKind::Media(_)
@@ -194,7 +195,6 @@ fn valid_child(parent: &NodeKind, child: &NodeKind) -> bool {
         NodeKind::Paragraph => is_inline(child) || matches!(child, NodeKind::DisplayMath(_)),
         NodeKind::Heading { .. }
         | NodeKind::TableCaption
-        | NodeKind::Summary
         | NodeKind::DefinitionTerm
         | NodeKind::Emphasis
         | NodeKind::Strong
@@ -206,6 +206,7 @@ fn valid_child(parent: &NodeKind, child: &NodeKind) -> bool {
         | NodeKind::Image(_)
         | NodeKind::HardBreak
         | NodeKind::FootnoteReference(_)
+        | NodeKind::TaskMarker(_)
         | NodeKind::InlineMath(_)
         | NodeKind::DisplayMath(_)
         | NodeKind::Media(_)
@@ -214,7 +215,9 @@ fn valid_child(parent: &NodeKind, child: &NodeKind) -> bool {
         NodeKind::Figure => {
             !requires_special_parent(child) || matches!(child, NodeKind::Figcaption)
         }
-        NodeKind::BlockQuote
+        NodeKind::BlockGroup
+        | NodeKind::Summary
+        | NodeKind::BlockQuote
         | NodeKind::Figcaption
         | NodeKind::ListItem
         | NodeKind::TableCell(_)
@@ -236,6 +239,7 @@ fn is_inline(kind: &NodeKind) -> bool {
             | NodeKind::Image(_)
             | NodeKind::HardBreak
             | NodeKind::FootnoteReference(_)
+            | NodeKind::TaskMarker(_)
             | NodeKind::InlineMath(_)
             | NodeKind::Media(_)
     )

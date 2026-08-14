@@ -1,4 +1,6 @@
-//! Sanitized HTML output.
+//! Legacy sanitized HTML output used by differential tests.
+
+#![allow(dead_code)]
 
 use crate::dom::{Dom, NodeId, render_html};
 

@@ -6,18 +6,15 @@
 #![allow(dead_code)]
 
 mod builder;
-#[cfg(test)]
 mod compiler;
+pub(crate) mod stats;
 mod text;
 mod uri;
 mod validate;
 
-pub(crate) use builder::BuildError;
-#[cfg(test)]
-pub(crate) use builder::DocumentBuilder;
-#[cfg(test)]
+pub(crate) use builder::{BuildError, DocumentBuilder};
 pub(crate) use compiler::{CompileContext, compile_document};
-#[cfg(test)]
+pub(crate) use stats::DocumentStats;
 pub(crate) use uri::{DestinationKind, safe_destination};
 
 use std::fmt;
@@ -41,7 +38,9 @@ pub(crate) struct Document {
 }
 
 impl Document {
-    pub(crate) fn roots(&self) -> impl ExactSizeIterator<Item = DocumentNodeId> + '_ {
+    pub(crate) fn roots(
+        &self,
+    ) -> impl ExactSizeIterator<Item = DocumentNodeId> + DoubleEndedIterator + '_ {
         self.roots.iter().copied()
     }
 
@@ -52,8 +51,22 @@ impl Document {
     pub(crate) fn children(&self, parent: DocumentNodeId) -> Children<'_> {
         Children {
             document: self,
-            next: self.node(parent).and_then(|node| node.first_child),
+            next: self.first_child(parent),
         }
+    }
+
+    pub(crate) fn first_child(&self, parent: DocumentNodeId) -> Option<DocumentNodeId> {
+        self.node(parent).and_then(|node| node.first_child)
+    }
+
+    pub(crate) fn next_sibling(&self, node: DocumentNodeId) -> Option<DocumentNodeId> {
+        self.node(node).and_then(|node| node.next_sibling)
+    }
+
+    pub(crate) fn footnote(&self, id: FootnoteId) -> Option<&FootnoteDefinition> {
+        self.footnotes
+            .get(id.index())
+            .filter(|definition| definition.id == id)
     }
 
     pub(crate) fn footnotes(&self) -> &[FootnoteDefinition] {
@@ -106,7 +119,11 @@ impl DocumentNode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum NodeKind {
     Paragraph,
-    Heading { level: u8 },
+    /// A semantic block boundary with no more specific meaning.
+    BlockGroup,
+    Heading {
+        level: u8,
+    },
     BlockQuote,
     CodeBlock(CodeBlock),
     List(List),
@@ -134,6 +151,7 @@ pub(crate) enum NodeKind {
     Image(Image),
     HardBreak,
     FootnoteReference(FootnoteId),
+    TaskMarker(TaskMarker),
     InlineMath(MathValue),
     DisplayMath(MathValue),
     Media(Media),
@@ -210,6 +228,12 @@ pub(crate) enum CalloutKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TaskMarker {
+    pub(crate) checked: bool,
+    pub(crate) fallback_label: Option<Box<str>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MathValue {
     pub(crate) source: Box<str>,
     pub(crate) format: MathFormat,
@@ -240,6 +264,10 @@ pub(crate) enum MediaKind {
 pub(crate) struct FootnoteId(u32);
 
 impl FootnoteId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+
     pub(crate) fn from_index(index: usize) -> Result<Self, BuildError> {
         u32::try_from(index)
             .map(Self)
@@ -473,6 +501,12 @@ fn write_kind(output: &mut String, kind: &NodeKind) {
         NodeKind::InlineCode(value) => write!(output, "InlineCode({value:?})").unwrap(),
         NodeKind::FootnoteReference(id) => write!(output, "FootnoteReference({})", id.0).unwrap(),
         NodeKind::FootnoteDefinition(id) => write!(output, "FootnoteDefinition({})", id.0).unwrap(),
+        NodeKind::TaskMarker(marker) => write!(
+            output,
+            "TaskMarker(checked={}, fallback={:?})",
+            marker.checked, marker.fallback_label
+        )
+        .unwrap(),
         NodeKind::InlineMath(value) | NodeKind::DisplayMath(value) => write!(
             output,
             "{}(source={:?}, format={:?}, fallback={:?})",

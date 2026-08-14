@@ -6,7 +6,8 @@ use url::Url;
 use super::{
     BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document, DocumentBuilder,
     DocumentNodeId, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media,
-    MediaKind, NodeKind, Table, TableAlignment, TableCell, ValidationError, safe_destination,
+    MediaKind, NodeKind, Table, TableAlignment, TableCell, TaskMarker, ValidationError,
+    safe_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
@@ -62,12 +63,35 @@ pub(crate) fn compile_document(
 ) -> Result<Document, CompileError> {
     let mut block_descendants = vec![false; dom.len()];
     let mut meaningful_content = vec![false; dom.len()];
-    let mut nodes: Vec<_> = dom.descendants(root).collect();
-    nodes.push(root);
+    let mut visible_text_content = vec![false; dom.len()];
+    let mut first_visible = vec![None; dom.len()];
+    let mut last_visible = vec![None; dom.len()];
+    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
     for &node in nodes.iter().rev() {
+        if let Some(text) = dom.text_node(node) {
+            first_visible[node.index()] = text.chars().find(|character| !character.is_whitespace());
+            last_visible[node.index()] = text
+                .chars()
+                .rev()
+                .find(|character| !character.is_whitespace());
+        } else {
+            for child in dom.children(node) {
+                first_visible[node.index()] =
+                    first_visible[node.index()].or(first_visible[child.index()]);
+                if last_visible[child.index()].is_some() {
+                    last_visible[node.index()] = last_visible[child.index()];
+                }
+            }
+        }
         block_descendants[node.index()] = dom.children(node).any(|child| {
             dom.tag(child).is_some_and(is_block_tag) || block_descendants[child.index()]
         });
+        visible_text_content[node.index()] = dom
+            .text_node(node)
+            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
+            || dom
+                .children(node)
+                .any(|child| visible_text_content[child.index()]);
         meaningful_content[node.index()] = dom
             .text_node(node)
             .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
@@ -79,6 +103,16 @@ pub(crate) fn compile_document(
             || dom
                 .children(node)
                 .any(|child| meaningful_content[child.index()]);
+    }
+
+    let mut nearest_list_item = vec![None; dom.len()];
+    for &node in &nodes {
+        nearest_list_item[node.index()] = if dom.tag(node) == Some(Tag::Li) {
+            Some(node)
+        } else {
+            dom.parent(node)
+                .and_then(|parent| nearest_list_item[parent.index()])
+        };
     }
 
     let mut builder = DocumentBuilder::with_capacity(dom.len());
@@ -104,6 +138,12 @@ pub(crate) fn compile_document(
     while let Some(Task { node, scope }) = tasks.pop() {
         if let Some(text) = dom.text_node(node) {
             let whitespace_only = text.chars().all(char::is_whitespace);
+            if !whitespace_only
+                && !text.chars().next().is_some_and(char::is_whitespace)
+                && inline_word_boundary_before(dom, node, &first_visible, &last_visible)
+            {
+                builder.append_prose(scope.parent, " ")?;
+            }
             let structural_parent = scope.parent.is_some_and(|parent| {
                 Some(parent) == scope.list
                     || Some(parent) == scope.table
@@ -201,6 +241,28 @@ pub(crate) fn compile_document(
             )?;
             continue;
         }
+        if tag == Tag::Input
+            && dom
+                .attr(node, AttrName::Type)
+                .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
+        {
+            builder.append(
+                scope.parent,
+                NodeKind::TaskMarker(TaskMarker {
+                    checked: dom.attr(node, AttrName::Checked).is_some(),
+                    fallback_label: (!nearest_list_item[node.index()]
+                        .is_some_and(|item| visible_text_content[item.index()]))
+                    .then(|| {
+                        dom.attr(node, AttrName::AriaLabel)
+                            .or_else(|| dom.attr(node, AttrName::Title))
+                    })
+                    .flatten()
+                    .filter(|label| !label.trim().is_empty())
+                    .map(Into::into),
+                }),
+            )?;
+            continue;
+        }
         if tag == Tag::Img {
             let alt = dom.attr_by_local_name(node, "alt").unwrap_or_default();
             let source = dom.attr(node, AttrName::Src).and_then(|source| {
@@ -224,14 +286,17 @@ pub(crate) fn compile_document(
         }
 
         let mut next_scope = scope;
+        let parent_is_block_group = scope
+            .parent
+            .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
         let semantic = match tag {
             Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
-            Tag::P if block_descendants[node.index()] => None,
+            Tag::P if block_descendants[node.index()] => Some(NodeKind::BlockGroup),
             Tag::P | Tag::Address | Tag::Caption => Some(NodeKind::Paragraph),
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
                 if block_descendants[node.index()] =>
             {
-                None
+                Some(NodeKind::BlockGroup)
             }
             Tag::H1 => Some(NodeKind::Heading { level: 1 }),
             Tag::H2 => Some(NodeKind::Heading { level: 2 }),
@@ -275,7 +340,12 @@ pub(crate) fn compile_document(
             Tag::Dd if scope.definition_list.is_some() => Some(NodeKind::DefinitionDescription),
             Tag::Dt | Tag::Dd => Some(NodeKind::Paragraph),
             Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
-                if block_descendants[node.index()] || !meaningful_content[node.index()] =>
+                if block_descendants[node.index()] =>
+            {
+                Some(NodeKind::BlockGroup)
+            }
+            Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
+                if !meaningful_content[node.index()] =>
             {
                 None
             }
@@ -320,10 +390,22 @@ pub(crate) fn compile_document(
                     })
                 })
             }
+            _ if is_block_tag(tag)
+                && !(tag == Tag::Div
+                    && parent_is_block_group
+                    && dom.children(node).count() == 1) =>
+            {
+                Some(NodeKind::BlockGroup)
+            }
             _ => None,
         };
 
         let Some(kind) = semantic else {
+            if !is_block_tag(tag)
+                && inline_word_boundary_before(dom, node, &first_visible, &last_visible)
+            {
+                builder.append_prose(scope.parent, " ")?;
+            }
             let mut transparent_scope = scope;
             if !is_block_tag(tag) && !meaningful_content[node.index()] {
                 transparent_scope.preserve_isolated_whitespace = true;
@@ -336,7 +418,9 @@ pub(crate) fn compile_document(
             NodeKind::TableCell(cell) => Some((cell.colspan, cell.rowspan)),
             _ => None,
         };
-        let semantic_parent = if scope.parent.is_some()
+        let semantic_parent = if matches!(kind, NodeKind::Figcaption) {
+            scope.figure
+        } else if scope.parent.is_some()
             && scope.parent == scope.list
             && !matches!(kind, NodeKind::ListItem | NodeKind::FootnoteDefinition(_))
         {
@@ -432,6 +516,19 @@ fn push_figure_children(dom: &Dom, node: NodeId, scope: Scope, tasks: &mut Vec<T
             .rev()
             .map(|child| Task { node: child, scope }),
     );
+}
+
+fn inline_word_boundary_before(
+    dom: &Dom,
+    node: NodeId,
+    first_visible: &[Option<char>],
+    last_visible: &[Option<char>],
+) -> bool {
+    first_visible[node.index()].is_some_and(char::is_alphanumeric)
+        && dom.prev_sibling(node).is_some_and(|previous| {
+            last_visible[previous.index()].is_some_and(char::is_alphanumeric)
+                && dom.tag(previous).is_some_and(|tag| !is_block_tag(tag))
+        })
 }
 
 fn meaningful_inline_separator(dom: &Dom, node: NodeId, block_descendants: &[bool]) -> bool {
@@ -697,7 +794,7 @@ mod tests {
         html.push_str("deep");
         html.push_str(&"</div>".repeat(DEPTH));
         let document = compile(&html, None);
-        assert_eq!(document.len(), 1);
+        assert_eq!(document.len(), 2);
         document.validate().unwrap();
     }
 }

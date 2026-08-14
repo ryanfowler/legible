@@ -62,7 +62,7 @@ The extraction pipeline flows through these stages:
 | `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
-| `markdown.rs` / `text.rs` | Format renderers from cleaned DOM |
+| `render/markdown.rs` / `render/text.rs` / `render/html.rs` | Stack-safe format renderers from the semantic document |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
@@ -75,7 +75,7 @@ These invariants are costly to violate:
 - **No `RefCell` after parse.** Parser-only interior mutability stays in `dom/parse.rs`.
 - **Snapshot before mutation.** Collect preorder snapshots when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots when a pass skips text nodes and removed subtrees.
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
-- **Lazy rendering.** `ExtractedPage` owns the cleaned DOM. Render HTML, Markdown, and text lazily. Defer normalized text metrics until a text or metric method needs them. The public `extract` function must not eagerly render output.
+- **Lazy rendering.** During the IR migration, `ExtractedPage` owns the semantic document and temporarily retains the cleaned DOM for parity checks. Render HTML, Markdown, and text lazily from the semantic document. Defer normalized text metrics until a text or metric method needs them. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
@@ -105,7 +105,7 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 ## Documentation
 
 - Keep `README.md` and the public Rust API docs consistent.
-- State that `ExtractedPage::html()` is not sanitized. Do not describe cleaned HTML as safe HTML.
+- State that `ExtractedPage::html()` is canonical semantic HTML. `safe_html()` is a compatibility alias for the same output.
 - Write all documentation and explanatory text in ASD-STE100 Simplified Technical English. Use short sentences, active voice, and consistent terms.
 
 ## Testing

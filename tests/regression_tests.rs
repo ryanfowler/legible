@@ -8,12 +8,13 @@ fn short_content_fallback_does_not_import_synthetic_html() {
     )
     .unwrap();
 
-    assert!(page.html().contains("id=\"legible-content\""));
+    assert!(page.html().contains("<p>This is a short article.</p>"));
     assert!(!page.html().contains("<html>"));
+    assert!(!page.html().contains("legible-content"));
 }
 
 #[test]
-fn exact_output_preserves_metadata_and_rewrites_urls() {
+fn canonical_output_preserves_metadata_and_rewrites_urls() {
     let html = r#"<!doctype html><html lang="fr"><head>
         <title>Exact article</title>
         <meta property="article:published_time" content="2024-06-01T12:30:00Z">
@@ -32,10 +33,6 @@ fn exact_output_preserves_metadata_and_rewrites_urls() {
     );
     assert_eq!(
         page.html(),
-        r#"<div id="legible-content" class="page"><article><p>
-        <a href="https://example.com/story?x=1&amp;y=2">A relative link</a>
-        <img src="https://example.com/large.jpg" srcset="https://example.com/news/small.jpg 1x, https://example.com/large.jpg 2x" alt="Photo">
-        This paragraph has enough useful article text for deterministic extraction.
-        </p></article></div>"#
+        r#"<div><div><p><a href="https://example.com/story?x=1&amp;y=2">A relative link</a> <img src="https://example.com/large.jpg" alt="Photo"> This paragraph has enough useful article text for deterministic extraction. </p></div></div>"#
     );
 }

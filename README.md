@@ -3,9 +3,9 @@
 [![Crates.io](https://img.shields.io/crates/v/legible.svg)](https://crates.io/crates/legible)
 [![Documentation](https://docs.rs/legible/badge.svg)](https://docs.rs/legible)
 
-Legible extracts relevant content and metadata from HTML. It stores a cleaned DOM
-subtree. It renders Markdown, HTML, or normalized text only when you request that
-format.
+Legible extracts relevant content and metadata from HTML. It compiles selected HTML
+into a semantic document. It renders Markdown, canonical HTML, or normalized text
+from that document only when you request the format.
 
 Legible uses general semantic candidates, source-relative quality checks, and
 conservative fallbacks. Mozilla Readability is an important algorithmic ancestor,
@@ -141,13 +141,12 @@ Both options are disabled by default.
 
 ## Security
 
-`ExtractedPage::safe_html()` removes active elements, event handlers, inline styles,
-unsafe form actions, and unsupported URI schemes. Use it for normal downstream
-display. `ExtractedPage::html()` remains unsanitized for compatibility. Do not insert
-raw HTML into an untrusted page.
+`ExtractedPage::html()` returns canonical semantic HTML. The semantic document cannot
+contain active source elements, event handlers, arbitrary source attributes, or
+unsupported URI schemes. `ExtractedPage::safe_html()` is an alias for the same output.
 
-Markdown output contains no raw HTML. It removes links and images that use unsupported
-URI schemes. Sanitize any HTML that you later create from the Markdown.
+Markdown output contains no raw HTML. The semantic compiler rejects links and media
+that use unsupported URI schemes. Sanitize HTML that you create from other sources.
 
 Legible does not fetch URLs.
 
