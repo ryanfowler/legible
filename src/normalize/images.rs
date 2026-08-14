@@ -1,4 +1,3 @@
-use crate::cleaning::fix_lazy_images;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -758,46 +757,19 @@ fn decorative_image_name(dom: &Dom, node: NodeId) -> bool {
         })
 }
 
-pub(super) fn normalize(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    fix_lazy_images(dom, root, nodes);
-
-    // Lazy loaders also place responsive values on `picture` sources. Promote
-    // those attributes without discarding the source element or its metadata.
-    let responsive_nodes: SmallVec<[NodeId; 32]> = dom
-        .descendants(root)
-        .filter(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Source)))
-        .collect();
-    for node in responsive_nodes {
-        clean_srcset_attribute(dom, node, AttrName::Srcset);
-        clean_srcset_attribute(dom, node, AttrName::DataSrcset);
-        if valid_image_attribute(dom.attr(node, AttrName::Srcset)).is_none()
-            && let Some(value) =
-                valid_image_attribute(dom.attr(node, AttrName::DataSrcset)).map(str::to_owned)
-        {
-            dom.set_attr(node, AttrName::Srcset, &value);
-        }
-        if valid_image_attribute(dom.attr(node, AttrName::Src)).is_none()
-            && let Some(value) =
-                valid_image_attribute(dom.attr(node, AttrName::DataSrc)).map(str::to_owned)
-        {
-            dom.set_attr(node, AttrName::Src, &value);
-        }
-    }
+/// Removes local hydration duplicates while source implementation evidence is intact.
+///
+/// Source selection is not performed here. The semantic compiler chooses one
+/// responsive or lazy resource and discards the implementation wrappers.
+pub(super) fn deduplicate_selected(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    let selected_sources = crate::document::selected_image_sources_for_cleanup(dom, &source_nodes);
     nodes.clear();
     nodes.extend(
         dom.descendants(root)
             .filter(|&node| dom.tag(node) == Some(Tag::Img)),
     );
-
-    // Resolve one useful concrete URL for Markdown. Keep every original
-    // `srcset` and the complete `picture` structure for HTML rendering.
-    for &image in nodes.iter() {
-        if let Some(source) = best_responsive_source(dom, image) {
-            dom.set_attr(image, AttrName::Src, &source);
-        }
-    }
-
-    deduplicate(dom, nodes);
+    deduplicate(dom, nodes, &selected_sources);
 
     // An unresolved placeholder has no visual content. Accessible text or a
     // sole figure caption can still make the image meaningful.
@@ -809,30 +781,6 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         {
             dom.detach(image);
         }
-    }
-}
-
-fn clean_srcset_attribute(dom: &mut Dom, node: NodeId, attribute: AttrName) {
-    let Some(value) = dom.attr(node, attribute) else {
-        return;
-    };
-    let retained = parse_srcset(value)
-        .into_iter()
-        .filter(|candidate| !is_placeholder_resource(candidate.url))
-        .map(format_srcset_candidate)
-        .collect::<Vec<_>>();
-    if retained.is_empty() {
-        dom.remove_attr(node, attribute);
-    } else {
-        dom.set_attr(node, attribute, &retained.join(", "));
-    }
-}
-
-fn format_srcset_candidate(candidate: SrcsetCandidate<'_>) -> String {
-    match candidate.descriptor {
-        SrcsetDescriptor::Width(width) => format!("{} {width}w", candidate.url),
-        SrcsetDescriptor::Density(density) => format!("{} {density}x", candidate.url),
-        SrcsetDescriptor::None => candidate.url.to_owned(),
     }
 }
 
@@ -1037,7 +985,7 @@ fn candidate_is_better(candidate: &SrcsetCandidate<'_>, current: &SrcsetCandidat
     }
 }
 
-fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
+fn deduplicate(dom: &mut Dom, nodes: &[NodeId], selected_sources: &[Option<Box<str>>]) {
     // Adjacent wrappers are strong hydration evidence. The pair must also
     // share a source, a meaningful description plus quality evidence, or a
     // lightbox destination.
@@ -1054,7 +1002,7 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
         };
         let previous_removal = media_group_removal(dom, previous_container, previous_image);
         let current_removal = media_group_removal(dom, current_container, image);
-        if !likely_duplicate(dom, previous_image, image) {
+        if !likely_duplicate(dom, previous_image, image, selected_sources) {
             continue;
         }
         let remove = if lightbox_links_to(dom, previous_image, image) {
@@ -1083,7 +1031,7 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
             .descendants(figure)
             .filter(|&node| dom.tag(node) == Some(Tag::Img) && dom.parent(node).is_some())
             .collect();
-        if images.len() != 2 || !likely_duplicate(dom, images[0], images[1]) {
+        if images.len() != 2 || !likely_duplicate(dom, images[0], images[1], selected_sources) {
             continue;
         }
         let remove = if better_image(dom, images[0], images[1]) {
@@ -1095,8 +1043,13 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId]) {
     }
 }
 
-fn likely_duplicate(dom: &Dom, first: NodeId, second: NodeId) -> bool {
-    if same_image_url(dom, first, second) {
+fn likely_duplicate(
+    dom: &Dom,
+    first: NodeId,
+    second: NodeId,
+    selected_sources: &[Option<Box<str>>],
+) -> bool {
+    if same_image_url(first, second, selected_sources) {
         return same_image_url_duplicate(dom, first, second);
     }
     if same_responsive_variant_group(dom, first, second) {
@@ -1169,6 +1122,7 @@ fn image_variant_preference(dom: &Dom, image: NodeId) -> u8 {
 
 fn responsive_quality(dom: &Dom, image: NodeId) -> Option<(u8, u32)> {
     dom.attr(image, AttrName::Srcset)
+        .or_else(|| dom.attr(image, AttrName::DataSrcset))
         .and_then(best_srcset_candidate)
         .map(|candidate| match candidate.descriptor {
             SrcsetDescriptor::Width(width) => (2, width),
@@ -1615,25 +1569,14 @@ fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
     images.next().is_none().then_some(image)
 }
 
-fn same_image_url(dom: &Dom, first: NodeId, second: NodeId) -> bool {
-    // Image normalization has already promoted the best responsive candidate
-    // into `src`. Compare only concrete sources. A shared low-resolution
-    // candidate does not prove that two responsive images are the same.
-    let first_urls: SmallVec<[Cow<'_, str>; 2]> = [AttrName::Src, AttrName::DataSrc]
-        .into_iter()
-        .filter_map(|attribute| dom.attr(first, attribute))
-        .filter(|url| !url.is_empty())
-        .map(image_resource)
-        .collect();
-    let second_urls: SmallVec<[Cow<'_, str>; 2]> = [AttrName::Src, AttrName::DataSrc]
-        .into_iter()
-        .filter_map(|attribute| dom.attr(second, attribute))
-        .filter(|url| !url.is_empty())
-        .map(image_resource)
-        .collect();
-    first_urls
-        .iter()
-        .any(|first_url| second_urls.contains(first_url))
+fn same_image_url(first: NodeId, second: NodeId, selected_sources: &[Option<Box<str>>]) -> bool {
+    match (
+        selected_sources[first.index()].as_deref(),
+        selected_sources[second.index()].as_deref(),
+    ) {
+        (Some(first), Some(second)) => image_resource(first) == image_resource(second),
+        _ => false,
+    }
 }
 
 fn image_urls(dom: &Dom, image: NodeId) -> SmallVec<[&str; 8]> {
@@ -1700,12 +1643,24 @@ fn is_hydration_placeholder(dom: &Dom, image: NodeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::markdown::dom_to_markdown;
+    fn semantic_markdown(dom: &Dom, root: NodeId) -> String {
+        let document = crate::document::compile_document(
+            dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        crate::render::markdown::render_markdown(
+            &document,
+            0,
+            crate::render::markdown::MarkdownConfig::default(),
+        )
+    }
 
     fn normalized(html: &str) -> (Dom, NodeId) {
         let mut dom = Dom::parse_document(html).unwrap();
         let root = dom.body().unwrap();
-        normalize(&mut dom, root, &mut Vec::new());
+        deduplicate_selected(&mut dom, root, &mut Vec::new());
         (dom, root)
     }
 
@@ -1740,10 +1695,11 @@ mod tests {
         let (dom, root) = normalized(
             r#"<picture><source data-srcset="small.webp 400w, large.webp 1200w"><img src="blank.gif" alt="View"></picture>"#,
         );
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![View](large.webp)\n");
+        assert_eq!(semantic_markdown(&dom, root), "![View](large.webp)\n");
         let source = dom.first_descendant_by_tag(root, Tag::Source).unwrap();
+        assert_eq!(dom.attr(source, AttrName::Srcset), None);
         assert_eq!(
-            dom.attr(source, AttrName::Srcset),
+            dom.attr(source, AttrName::DataSrcset),
             Some("small.webp 400w, large.webp 1200w")
         );
     }
@@ -1767,24 +1723,27 @@ mod tests {
         let (dom, root) = normalized(
             r#"<picture><source srcset="pixel.gif 1600w, map.png 800w"><img src="fallback.jpg" alt="Map"></picture>"#,
         );
-        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+        assert_eq!(semantic_markdown(&dom, root), "![Map](map.png)\n");
     }
 
     #[test]
     fn lazy_normalization_replaces_a_pixel_source_with_a_real_data_source() {
         let (dom, root) =
             normalized(r#"<img src="pixel.gif" data-src="map.png" alt="Map of the survey area">"#);
-        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+        assert_eq!(
+            semantic_markdown(&dom, root),
+            "![Map of the survey area](map.png)\n"
+        );
     }
 
     #[test]
     fn lazy_normalization_replaces_an_undefined_source_with_a_real_data_source() {
         let (dom, root) =
             normalized(r#"<img src="undefined" data-src="map.png" alt="Map of the survey area">"#);
-        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+        assert_eq!(
+            semantic_markdown(&dom, root),
+            "![Map of the survey area](map.png)\n"
+        );
     }
 
     #[test]
@@ -1792,8 +1751,7 @@ mod tests {
         let (dom, root) = normalized(
             r#"<picture><source data-srcset="broken nope" srcset="map.png 800w"><img src="fallback.jpg" alt="Map"></picture>"#,
         );
-        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        assert_eq!(dom.attr(image, AttrName::Src), Some("map.png"));
+        assert_eq!(semantic_markdown(&dom, root), "![Map](map.png)\n");
     }
 
     #[test]
@@ -1801,11 +1759,7 @@ mod tests {
         let (dom, root) = normalized(
             r#"<picture><source srcset="pixel.gif 1600w, map.webp 800w"><img src="pixel.gif" srcset="transparent.gif 2x, map.jpg 1x" alt="Survey map"></picture>"#,
         );
-        let source = dom.first_descendant_by_tag(root, Tag::Source).unwrap();
-        let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
-        assert_eq!(dom.attr(source, AttrName::Srcset), Some("map.webp 800w"));
-        assert_eq!(dom.attr(image, AttrName::Srcset), Some("map.jpg 1x"));
-        assert_eq!(dom.attr(image, AttrName::Src), Some("map.webp"));
+        assert_eq!(semantic_markdown(&dom, root), "![Survey map](map.webp)\n");
     }
 
     #[test]
@@ -1820,7 +1774,7 @@ mod tests {
         let (dom, root) = normalized(
             r#"<picture><source media="(max-width: 600px)" srcset="mobile.jpg 2000w"><source srcset="default.jpg 1200w"><img src="fallback.jpg" alt="View"></picture>"#,
         );
-        assert_eq!(dom_to_markdown(&dom, root, 0), "![View](mobile.jpg)\n");
+        assert_eq!(semantic_markdown(&dom, root), "![View](mobile.jpg)\n");
     }
 
     #[test]
@@ -1834,7 +1788,7 @@ mod tests {
                 .count(),
             2
         );
-        assert!(dom_to_markdown(&dom, root, 0).contains("large.jpg"));
+        assert!(semantic_markdown(&dom, root).contains("large.jpg"));
     }
 
     #[test]
@@ -1857,7 +1811,7 @@ mod tests {
         let (dom, root) = normalized(
             r#"<a href="full.jpg"><img src="thumb.jpg" alt="Scene"></a><img src="full.jpg" alt="Scene"><p>Break</p><img src="one.jpg" srcset="one.jpg 1x, one-large.jpg 2x" alt="image"><img src="two.jpg" alt="image">"#,
         );
-        let markdown = dom_to_markdown(&dom, root, 0);
+        let markdown = semantic_markdown(&dom, root);
         assert!(!markdown.contains("thumb.jpg"));
         assert!(markdown.contains("full.jpg"));
         assert!(markdown.contains("one-large.jpg"));
@@ -1876,7 +1830,7 @@ mod tests {
             1
         );
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "![Detailed diagram](large.jpg)\n"
         );
     }
@@ -1912,7 +1866,7 @@ mod tests {
             Some("charts/uncertainty-Desktopv1.svg")
         );
         assert!(dom.first_descendant_by_tag(root, Tag::Video).is_some());
-        assert!(dom_to_markdown(&dom, root, 0).contains("complete topology"));
+        assert!(semantic_markdown(&dom, root).contains("complete topology"));
     }
 
     #[test]
@@ -1987,39 +1941,45 @@ mod tests {
             .collect();
         assert_eq!(images.len(), 1);
         assert_eq!(
-            dom.attr(images[0], AttrName::Src),
-            Some("/_next/image?url=%2Fphoto.jpg&w=1600")
+            semantic_markdown(&dom, root),
+            "![Photo](/_next/image?url=%2Fphoto.jpg&w=1600)\n"
         );
     }
 
     #[test]
     fn shared_low_resolution_candidates_do_not_merge_distinct_images() {
-        let (dom, root) = normalized(
+        for html in [
             r#"<img srcset="shared.jpg 1x, before.jpg 2x" alt="Before"><img srcset="shared.jpg 1x, after.jpg 2x" alt="After">"#,
-        );
-        assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Img))
-                .count(),
-            2
-        );
+            r#"<img src="shared.jpg" srcset="before.jpg 2x" alt="Before"><img src="shared.jpg" srcset="after.jpg 2x" alt="After">"#,
+        ] {
+            let (dom, root) = normalized(html);
+            assert_eq!(
+                dom.descendants(root)
+                    .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                    .count(),
+                2
+            );
+        }
     }
 
     #[test]
     fn retains_the_higher_density_duplicate() {
-        let (dom, root) = normalized(
+        for html in [
             r#"<img src="small.jpg" srcset="small.jpg 1x" alt="Detailed diagram"><img src="small.jpg" srcset="small.jpg 1x, large.jpg 2x" alt="Detailed diagram">"#,
-        );
-        assert_eq!(
-            dom.descendants(root)
-                .filter(|&node| dom.tag(node) == Some(Tag::Img))
-                .count(),
-            1
-        );
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "![Detailed diagram](large.jpg)\n"
-        );
+            r#"<img src="small.jpg" alt="Detailed diagram"><img src="small.jpg" data-srcset="small.jpg 1x, large.jpg 2x" alt="Detailed diagram">"#,
+        ] {
+            let (dom, root) = normalized(html);
+            assert_eq!(
+                dom.descendants(root)
+                    .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                semantic_markdown(&dom, root),
+                "![Detailed diagram](large.jpg)\n"
+            );
+        }
     }
 
     #[test]
@@ -2034,7 +1994,7 @@ mod tests {
             1
         );
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "![Detailed diagram](large.jpg)\n"
         );
     }

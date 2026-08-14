@@ -6,8 +6,7 @@ use url::Url;
 use super::{
     BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document, DocumentBuilder,
     DocumentNodeId, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media,
-    MediaKind, NodeKind, Table, TableAlignment, TableCell, TaskMarker, ValidationError,
-    safe_destination,
+    NodeKind, Table, TableAlignment, TableCell, TaskMarker, ValidationError, safe_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
@@ -69,6 +68,10 @@ pub(crate) fn compile_document(
     let mut last_visible = vec![None; dom.len()];
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
     let multiline_content = super::code::multiline_content(dom, &nodes);
+    let images = super::images::analyze(dom, &nodes, context.base_url.as_ref());
+    let (figures, captions) = super::figures::analyze(dom, &nodes, &images);
+    let media = super::media::analyze(dom, &nodes, context.base_url.as_ref());
+    let (media_separators, text_after_media_separators) = media_separators(dom, root, &media);
     for &node in &nodes {
         code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
             || super::code::is_multiline_orphan_with_evidence(
@@ -108,8 +111,16 @@ pub(crate) fn compile_document(
             .text_node(node)
             .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
             || dom.tag(node).is_some_and(|tag| {
-                matches!(tag, Tag::Br | Tag::Code | Tag::Hr | Tag::Img)
-                    || dom.attr(node, AttrName::DataMath).is_some()
+                matches!(
+                    tag,
+                    Tag::Br
+                        | Tag::Code
+                        | Tag::Hr
+                        | Tag::Img
+                        | Tag::Iframe
+                        | Tag::Video
+                        | Tag::Audio
+                ) || dom.attr(node, AttrName::DataMath).is_some()
                     || dom.attr(node, AttrName::DataFootnoteRef).is_some()
             })
             || dom
@@ -152,7 +163,8 @@ pub(crate) fn compile_document(
             let whitespace_only = text.chars().all(char::is_whitespace);
             if !whitespace_only
                 && !text.chars().next().is_some_and(char::is_whitespace)
-                && inline_word_boundary_before(dom, node, &first_visible, &last_visible)
+                && (inline_word_boundary_before(dom, node, &first_visible, &last_visible)
+                    || text_after_media_separators[node.index()])
             {
                 builder.append_prose(scope.parent, " ")?;
             }
@@ -292,23 +304,47 @@ pub(crate) fn compile_document(
             continue;
         }
         if tag == Tag::Img {
-            let alt = dom.attr_by_local_name(node, "alt").unwrap_or_default();
-            let source = dom.attr(node, AttrName::Src).and_then(|source| {
-                safe_destination(source, context.base_url.as_ref(), DestinationKind::Resource)
-            });
+            let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
+            let source = images.source(node).map(Into::into);
             if let Some(source) = source {
                 builder.append(
                     scope.parent,
-                    NodeKind::Image(Image {
-                        source,
-                        alt: alt.into(),
-                        title: dom.attr(node, AttrName::Title).map(Into::into),
-                        width: positive_u32(dom.attr(node, AttrName::Width)),
-                        height: positive_u32(dom.attr(node, AttrName::Height)),
-                    }),
+                    NodeKind::Image(semantic_image(dom, node, source)),
                 )?;
             } else {
-                builder.append_prose(scope.parent, alt)?;
+                builder.append_prose(scope.parent, &alt)?;
+            }
+            continue;
+        }
+        if tag == Tag::Picture && images.is_synthetic(node) {
+            if let Some(source) = images.source(node).map(Into::into) {
+                builder.append(
+                    scope.parent,
+                    NodeKind::Image(semantic_image(dom, node, source)),
+                )?;
+            }
+            continue;
+        }
+        if matches!(tag, Tag::Iframe | Tag::Video | Tag::Audio) {
+            if let Some(media) = media.item(node) {
+                if media_separators[node.index()] {
+                    builder.append_prose(scope.parent, " ")?;
+                }
+                builder.append(
+                    scope.parent,
+                    NodeKind::Media(Media {
+                        kind: media.kind,
+                        source: media.source.clone(),
+                        title: Some(media.title.clone()),
+                    }),
+                )?;
+                if let Some(fallback) = media.fallback {
+                    builder.append_prose(scope.parent, " ")?;
+                    tasks.push(Task {
+                        node: fallback,
+                        scope,
+                    });
+                }
             }
             continue;
         }
@@ -317,115 +353,101 @@ pub(crate) fn compile_document(
         let parent_is_block_group = scope
             .parent
             .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
-        let semantic = match tag {
-            Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
-            Tag::P if block_descendants[node.index()] => Some(NodeKind::BlockGroup),
-            Tag::P | Tag::Address | Tag::Caption => Some(NodeKind::Paragraph),
-            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
-                if block_descendants[node.index()] =>
-            {
-                Some(NodeKind::BlockGroup)
-            }
-            Tag::H1 => Some(NodeKind::Heading { level: 1 }),
-            Tag::H2 => Some(NodeKind::Heading { level: 2 }),
-            Tag::H3 => Some(NodeKind::Heading { level: 3 }),
-            Tag::H4 => Some(NodeKind::Heading { level: 4 }),
-            Tag::H5 => Some(NodeKind::Heading { level: 5 }),
-            Tag::H6 => Some(NodeKind::Heading { level: 6 }),
-            Tag::Blockquote => dom
-                .attr(node, AttrName::DataCallout)
-                .and_then(callout_kind)
-                .map(|kind| NodeKind::Callout(Callout { kind, title: None }))
-                .or(Some(NodeKind::BlockQuote)),
-            Tag::Ul => Some(NodeKind::List(List {
-                kind: ListKind::Unordered,
-                start: None,
-            })),
-            Tag::Ol => Some(NodeKind::List(List {
-                kind: ListKind::Ordered,
-                start: dom
-                    .attr(node, AttrName::Start)
-                    .and_then(|value| value.parse().ok()),
-            })),
-            Tag::Li if scope.list.is_some() => Some(NodeKind::ListItem),
-            Tag::Table => Some(NodeKind::Table(Table {
-                column_count: Some(0),
-            })),
-            Tag::Tr if scope.table.is_some() => Some(NodeKind::TableRow),
-            Tag::Td | Tag::Th if scope.row.is_some() => Some(NodeKind::TableCell(TableCell {
-                header: tag == Tag::Th,
-                colspan: positive_u32(dom.attr(node, AttrName::ColSpan)).unwrap_or(1),
-                rowspan: positive_u32(dom.attr(node, AttrName::RowSpan)).unwrap_or(1),
-                alignment: dom.attr(node, AttrName::Align).and_then(table_alignment),
-            })),
-            Tag::Figure => Some(NodeKind::Figure),
-            Tag::Figcaption if scope.figure.is_some() => Some(NodeKind::Figcaption),
-            Tag::Details => Some(NodeKind::Details),
-            Tag::Summary => Some(NodeKind::Summary),
-            Tag::Hr => Some(NodeKind::ThematicBreak),
-            Tag::Dl => Some(NodeKind::DefinitionList),
-            Tag::Dt if scope.definition_list.is_some() => Some(NodeKind::DefinitionTerm),
-            Tag::Dd if scope.definition_list.is_some() => Some(NodeKind::DefinitionDescription),
-            Tag::Dt | Tag::Dd => Some(NodeKind::Paragraph),
-            Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
-                if block_descendants[node.index()] =>
-            {
-                Some(NodeKind::BlockGroup)
-            }
-            Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
-                if !meaningful_content[node.index()] =>
-            {
-                None
-            }
-            Tag::Strong | Tag::B => Some(NodeKind::Strong),
-            Tag::Em | Tag::I => Some(NodeKind::Emphasis),
-            Tag::Del => Some(NodeKind::Strikethrough),
-            Tag::Br => Some(NodeKind::HardBreak),
-            Tag::A
-                if scope.link.is_none()
-                    && !block_descendants[node.index()]
-                    && meaningful_content[node.index()]
-                    && normalized_media_kind(dom, node).is_some() =>
-            {
-                dom.attr(node, AttrName::Href).and_then(|source| {
-                    safe_destination(source, context.base_url.as_ref(), DestinationKind::Resource)
-                        .map(|source| {
-                            NodeKind::Media(Media {
-                                kind: normalized_media_kind(dom, node)
-                                    .expect("guard validated media kind"),
-                                source,
-                                title: nonempty(dom.text(node)).map(Into::into),
+        let semantic = if figures[node.index()] {
+            Some(NodeKind::Figure)
+        } else if captions[node.index()] && scope.figure.is_some() {
+            Some(NodeKind::Figcaption)
+        } else {
+            match tag {
+                Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
+                Tag::P if block_descendants[node.index()] => Some(NodeKind::BlockGroup),
+                Tag::P | Tag::Address | Tag::Caption => Some(NodeKind::Paragraph),
+                Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
+                    if block_descendants[node.index()] =>
+                {
+                    Some(NodeKind::BlockGroup)
+                }
+                Tag::H1 => Some(NodeKind::Heading { level: 1 }),
+                Tag::H2 => Some(NodeKind::Heading { level: 2 }),
+                Tag::H3 => Some(NodeKind::Heading { level: 3 }),
+                Tag::H4 => Some(NodeKind::Heading { level: 4 }),
+                Tag::H5 => Some(NodeKind::Heading { level: 5 }),
+                Tag::H6 => Some(NodeKind::Heading { level: 6 }),
+                Tag::Blockquote => dom
+                    .attr(node, AttrName::DataCallout)
+                    .and_then(callout_kind)
+                    .map(|kind| NodeKind::Callout(Callout { kind, title: None }))
+                    .or(Some(NodeKind::BlockQuote)),
+                Tag::Ul => Some(NodeKind::List(List {
+                    kind: ListKind::Unordered,
+                    start: None,
+                })),
+                Tag::Ol => Some(NodeKind::List(List {
+                    kind: ListKind::Ordered,
+                    start: dom
+                        .attr(node, AttrName::Start)
+                        .and_then(|value| value.parse().ok()),
+                })),
+                Tag::Li if scope.list.is_some() => Some(NodeKind::ListItem),
+                Tag::Table => Some(NodeKind::Table(Table {
+                    column_count: Some(0),
+                })),
+                Tag::Tr if scope.table.is_some() => Some(NodeKind::TableRow),
+                Tag::Td | Tag::Th if scope.row.is_some() => Some(NodeKind::TableCell(TableCell {
+                    header: tag == Tag::Th,
+                    colspan: positive_u32(dom.attr(node, AttrName::ColSpan)).unwrap_or(1),
+                    rowspan: positive_u32(dom.attr(node, AttrName::RowSpan)).unwrap_or(1),
+                    alignment: dom.attr(node, AttrName::Align).and_then(table_alignment),
+                })),
+                Tag::Details => Some(NodeKind::Details),
+                Tag::Summary => Some(NodeKind::Summary),
+                Tag::Hr => Some(NodeKind::ThematicBreak),
+                Tag::Dl => Some(NodeKind::DefinitionList),
+                Tag::Dt if scope.definition_list.is_some() => Some(NodeKind::DefinitionTerm),
+                Tag::Dd if scope.definition_list.is_some() => Some(NodeKind::DefinitionDescription),
+                Tag::Dt | Tag::Dd => Some(NodeKind::Paragraph),
+                Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
+                    if block_descendants[node.index()] =>
+                {
+                    Some(NodeKind::BlockGroup)
+                }
+                Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
+                    if !meaningful_content[node.index()] =>
+                {
+                    None
+                }
+                Tag::Strong | Tag::B => Some(NodeKind::Strong),
+                Tag::Em | Tag::I => Some(NodeKind::Emphasis),
+                Tag::Del => Some(NodeKind::Strikethrough),
+                Tag::Br => Some(NodeKind::HardBreak),
+                Tag::A
+                    if scope.link.is_none()
+                        && !block_descendants[node.index()]
+                        && meaningful_content[node.index()] =>
+                {
+                    dom.attr(node, AttrName::Href).and_then(|destination| {
+                        safe_destination(
+                            destination,
+                            context.base_url.as_ref(),
+                            DestinationKind::Link,
+                        )
+                        .map(|destination| {
+                            NodeKind::Link(Link {
+                                destination,
+                                title: dom.attr(node, AttrName::Title).map(Into::into),
                             })
                         })
-                })
-            }
-            Tag::A
-                if scope.link.is_none()
-                    && !block_descendants[node.index()]
-                    && meaningful_content[node.index()] =>
-            {
-                dom.attr(node, AttrName::Href).and_then(|destination| {
-                    safe_destination(
-                        destination,
-                        context.base_url.as_ref(),
-                        DestinationKind::Link,
-                    )
-                    .map(|destination| {
-                        NodeKind::Link(Link {
-                            destination,
-                            title: dom.attr(node, AttrName::Title).map(Into::into),
-                        })
                     })
-                })
+                }
+                _ if is_block_tag(tag)
+                    && !(tag == Tag::Div
+                        && parent_is_block_group
+                        && dom.children(node).count() == 1) =>
+                {
+                    Some(NodeKind::BlockGroup)
+                }
+                _ => None,
             }
-            _ if is_block_tag(tag)
-                && !(tag == Tag::Div
-                    && parent_is_block_group
-                    && dom.children(node).count() == 1) =>
-            {
-                Some(NodeKind::BlockGroup)
-            }
-            _ => None,
         };
 
         let Some(kind) = semantic else {
@@ -458,6 +480,15 @@ pub(crate) fn compile_document(
         };
         let semantic_node = builder.append(semantic_parent, kind)?;
         next_scope.parent = Some(semantic_node);
+        if figures[node.index()]
+            && images.is_synthetic(node)
+            && let Some(source) = images.source(node).map(Into::into)
+        {
+            builder.append(
+                Some(semantic_node),
+                NodeKind::Image(semantic_image(dom, node, source)),
+            )?;
+        }
         match builder.kind_mut(semantic_node) {
             Some(NodeKind::List(_)) => next_scope.list = Some(semantic_node),
             Some(NodeKind::ListItem) => {}
@@ -496,14 +527,14 @@ pub(crate) fn compile_document(
                     analysis.has_rowspan |= rowspan > 1;
                 }
             }
-            Tag::Figure => next_scope.figure = Some(semantic_node),
+            _ if figures[node.index()] => next_scope.figure = Some(semantic_node),
             Tag::Dl => next_scope.definition_list = Some(semantic_node),
             Tag::A => next_scope.link = Some(semantic_node),
             _ => {}
         }
         if !semantic_leaf {
-            if tag == Tag::Figure {
-                push_figure_children(dom, node, next_scope, &mut tasks);
+            if figures[node.index()] {
+                push_figure_children(dom, node, next_scope, &captions, &mut tasks);
             } else {
                 push_children(dom, node, next_scope, &mut tasks);
             }
@@ -521,6 +552,62 @@ pub(crate) fn compile_document(
     Ok(document)
 }
 
+fn media_separators(
+    dom: &Dom,
+    root: NodeId,
+    media: &super::media::MediaAnalysis,
+) -> (Vec<bool>, Vec<bool>) {
+    enum Visit {
+        Node(NodeId),
+        EndBlock,
+    }
+    #[derive(Clone, Copy)]
+    enum PreviousInline {
+        None,
+        Word,
+        Media,
+    }
+
+    let mut before_media = vec![false; dom.len()];
+    let mut after_media = vec![false; dom.len()];
+    let mut previous = PreviousInline::None;
+    let mut tasks = Vec::new();
+    tasks.extend(dom.children_rev(root).map(Visit::Node));
+    while let Some(task) = tasks.pop() {
+        let Visit::Node(node) = task else {
+            previous = PreviousInline::None;
+            continue;
+        };
+        if let Some(text) = dom.text_node(node) {
+            let starts_word = text.chars().next().is_some_and(char::is_alphanumeric);
+            after_media[node.index()] = matches!(previous, PreviousInline::Media) && starts_word;
+            previous = if text.chars().last().is_some_and(char::is_alphanumeric) {
+                PreviousInline::Word
+            } else {
+                PreviousInline::None
+            };
+            continue;
+        }
+        let Some(tag) = dom.tag(node) else {
+            continue;
+        };
+        if media.item(node).is_some() {
+            before_media[node.index()] =
+                matches!(previous, PreviousInline::Word | PreviousInline::Media);
+            previous = PreviousInline::Media;
+            continue;
+        }
+        if is_block_tag(tag) {
+            previous = PreviousInline::None;
+            tasks.push(Visit::EndBlock);
+        } else if matches!(tag, Tag::Br | Tag::Hr | Tag::Img) {
+            previous = PreviousInline::None;
+        }
+        tasks.extend(dom.children_rev(node).map(Visit::Node));
+    }
+    (before_media, after_media)
+}
+
 fn push_children(dom: &Dom, node: NodeId, scope: Scope, tasks: &mut Vec<Task>) {
     tasks.extend(
         dom.children_rev(node)
@@ -528,11 +615,17 @@ fn push_children(dom: &Dom, node: NodeId, scope: Scope, tasks: &mut Vec<Task>) {
     );
 }
 
-fn push_figure_children(dom: &Dom, node: NodeId, scope: Scope, tasks: &mut Vec<Task>) {
+fn push_figure_children(
+    dom: &Dom,
+    node: NodeId,
+    scope: Scope,
+    caption_nodes: &[bool],
+    tasks: &mut Vec<Task>,
+) {
     let mut content = Vec::new();
     let mut captions = Vec::new();
     for child in dom.children(node) {
-        if dom.tag(child) == Some(Tag::Figcaption) {
+        if caption_nodes[child.index()] {
             captions.push(child);
         } else {
             content.push(child);
@@ -579,15 +672,6 @@ fn is_inline_dom_node(dom: &Dom, node: NodeId, block_descendants: &[bool]) -> bo
                     Tag::Head | Tag::Script | Tag::Style | Tag::Template | Tag::Noscript
                 )
         })
-}
-
-fn normalized_media_kind(dom: &Dom, node: NodeId) -> Option<MediaKind> {
-    match dom.attr(node, AttrName::DataLegibleKind)? {
-        "audio" => Some(MediaKind::Audio),
-        "video" => Some(MediaKind::Video),
-        "embedded" => Some(MediaKind::Embedded),
-        _ => None,
-    }
 }
 
 fn is_block_tag(tag: Tag) -> bool {
@@ -640,6 +724,18 @@ fn footnote_id(
     let id = FootnoteId::from_index(footnotes.len())?;
     footnotes.insert(label.to_owned(), id);
     Ok(id)
+}
+
+fn semantic_image(dom: &Dom, node: NodeId, source: Box<str>) -> Image {
+    Image {
+        source,
+        alt: super::images::canonical_label(dom.attr_by_local_name(node, "alt")),
+        title: dom
+            .attr(node, AttrName::Title)
+            .map(|title| super::images::canonical_label(Some(title))),
+        width: positive_u32(dom.attr(node, AttrName::Width)),
+        height: positive_u32(dom.attr(node, AttrName::Height)),
+    }
 }
 
 fn positive_u32(value: Option<&str>) -> Option<u32> {
@@ -780,7 +876,7 @@ mod tests {
     #[test]
     fn compiles_normalized_media_and_rowspan_table_widths() {
         let document = compile(
-            r#"<p><a href="movie.mp4" data-legible-kind="video">Interview recording</a></p><table><tr><td rowspan="2">A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>"#,
+            r#"<p><video src="movie.mp4" aria-label="Interview recording"></video></p><table><tr><td rowspan="2">A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>"#,
             None,
         );
         assert_eq!(
@@ -812,6 +908,42 @@ mod tests {
         assert_eq!(
             document.debug_tree(),
             "Paragraph\n  Text(\"safe labeldiagram\")\n"
+        );
+    }
+
+    #[test]
+    fn image_selection_skips_unsafe_primary_sources() {
+        let document = compile(
+            r#"<img src="javascript:bad()" data-src="safe.jpg" alt=" diagram   label ">"#,
+            Some("https://example.test/article"),
+        );
+        assert_eq!(
+            document.debug_tree(),
+            "Image(source=\"https://example.test/safe.jpg\", alt=\"diagram label\", title=None, width=None, height=None)\n"
+        );
+    }
+
+    #[test]
+    fn compiles_lazy_picture_and_figure_sources_without_img_elements() {
+        let document = compile(
+            r#"<picture data-src="photo.jpg" title="Photo"></picture><figure data-src="chart.png"><figcaption>Chart result</figcaption></figure><div class="image-with-caption"><picture data-src="wrapped.jpg"></picture><p class="caption">Wrapped result</p><p class="caption">Additional note</p></div>"#,
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "Image(source=\"photo.jpg\", alt=\"\", title=Some(\"Photo\"), width=None, height=None)\n",
+                "Figure\n",
+                "  Image(source=\"chart.png\", alt=\"\", title=None, width=None, height=None)\n",
+                "  Figcaption\n",
+                "    Text(\"Chart result\")\n",
+                "Figure\n",
+                "  Image(source=\"wrapped.jpg\", alt=\"\", title=None, width=None, height=None)\n",
+                "  Paragraph\n",
+                "    Text(\"Additional note\")\n",
+                "  Figcaption\n",
+                "    Text(\"Wrapped result\")\n",
+            )
         );
     }
 
