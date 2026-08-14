@@ -151,11 +151,10 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         }
     }
 }
-fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
-    std::iter::once(id).chain(dom.ancestors(id)).any(|node| {
-        dom.attr(node, AttrName::DataFootnote).is_some()
-            || dom.attr(node, AttrName::DataFootnotes).is_some()
-    }) || dom.attr(id, AttrName::DataMath).is_some()
+fn is_directly_protected(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
+    dom.attr(id, AttrName::DataFootnote).is_some()
+        || dom.attr(id, AttrName::DataFootnotes).is_some()
+        || dom.attr(id, AttrName::DataMath).is_some()
         || matches!(
             dom.tag(id),
             Some(
@@ -172,6 +171,29 @@ fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStor
         || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
 }
 
+fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
+    std::iter::once(id)
+        .chain(dom.ancestors(id))
+        .any(|node| is_directly_protected(dom, node, store))
+}
+
+fn protected_subtree_mask(
+    dom: &Dom,
+    root: NodeId,
+    store: &crate::dom::NodeStateStore,
+) -> Vec<bool> {
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    let mut protected = vec![false; dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        let mut value = is_directly_protected(dom, node, store);
+        for child in dom.element_children(node) {
+            value |= protected[child.index()];
+        }
+        protected[node.index()] = value;
+    }
+    protected
+}
+
 fn has_protected_ancestor(
     dom: &Dom,
     id: NodeId,
@@ -183,17 +205,105 @@ fn has_protected_ancestor(
         .any(|ancestor| is_protected_content(dom, ancestor, store))
 }
 
+#[derive(Clone, Copy, Default)]
+struct TableEvidence {
+    has_data_structure: bool,
+    has_nested_table: bool,
+    rows: u32,
+    cols: u32,
+}
+
+fn finish_table_evidence(
+    open: &mut Vec<(u32, NodeId, TableEvidence)>,
+    summaries: &mut [Option<TableEvidence>],
+) {
+    let Some((_, table, evidence)) = open.pop() else {
+        return;
+    };
+    summaries[table.index()] = Some(evidence);
+    if let Some((_, _, parent)) = open.last_mut() {
+        parent.has_nested_table = true;
+        parent.has_data_structure |= evidence.has_data_structure;
+        parent.rows = parent.rows.saturating_add(evidence.rows);
+        parent.cols = parent.cols.max(evidence.cols);
+    }
+}
+
 pub fn mark_data_tables(
     dom: &Dom,
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
     nodes: &mut Vec<NodeId>,
 ) {
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
     nodes.clear();
     nodes.extend(
-        dom.descendants(root)
-            .filter(|&x| dom.tag(x) == Some(Tag::Table)),
+        snapshot
+            .iter()
+            .map(|&(node, _)| node)
+            .filter(|&node| dom.tag(node) == Some(Tag::Table)),
     );
+
+    // Aggregate each table's evidence while one preorder pass visits the
+    // document. Closing a nested table merges its summary into its parent, so
+    // a deeply nested chain does not rescan each inner subtree.
+    let mut summaries = vec![None; dom.len()];
+    let mut open = Vec::new();
+    for &(node, depth) in &snapshot {
+        while open
+            .last()
+            .is_some_and(|(table_depth, _, _)| *table_depth >= depth)
+        {
+            finish_table_evidence(&mut open, &mut summaries);
+        }
+        if dom.tag(node) == Some(Tag::Table) {
+            if let Some((_, _, parent)) = open.last_mut() {
+                parent.has_nested_table = true;
+            }
+            open.push((
+                depth,
+                node,
+                TableEvidence {
+                    has_data_structure: dom.has_attr(node, AttrName::Summary),
+                    ..TableEvidence::default()
+                },
+            ));
+            continue;
+        }
+        let Some((_, _, evidence)) = open.last_mut() else {
+            continue;
+        };
+        match dom.tag(node) {
+            Some(Tag::Caption) if dom.children(node).next().is_some() => {
+                evidence.has_data_structure = true
+            }
+            Some(Tag::Col | Tag::Colgroup | Tag::Tfoot | Tag::Thead | Tag::Th) => {
+                evidence.has_data_structure = true
+            }
+            Some(Tag::Tr) => {
+                evidence.rows = evidence.rows.saturating_add(
+                    dom.attr(node, AttrName::RowSpan)
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1),
+                );
+                let column_count = dom
+                    .element_children(node)
+                    .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
+                    .map(|cell| {
+                        dom.attr(cell, AttrName::ColSpan)
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1)
+                    })
+                    .fold(0_u32, u32::saturating_add);
+                evidence.cols = evidence.cols.max(column_count);
+            }
+            _ => {}
+        }
+    }
+    while !open.is_empty() {
+        finish_table_evidence(&mut open, &mut summaries);
+    }
+
     for &id in nodes.iter() {
         if dom.attr(id, AttrName::Role) == Some("presentation")
             || dom.attr(id, AttrName::DataTable) == Some("0")
@@ -201,55 +311,23 @@ pub fn mark_data_tables(
             store.set_data_table(id, crate::dom::DataTableState::Layout);
             continue;
         }
-
-        // Collect all table evidence in one subtree walk. The previous version
-        // scanned each table up to four times, which made malformed nested
-        // tables disproportionately expensive.
-        let mut has_data_structure = dom.has_attr(id, AttrName::Summary);
-        let mut has_nested_table = false;
-        let mut rows = 0_u32;
-        let mut cols = 0_u32;
-        for descendant in dom.descendants(id) {
-            match dom.tag(descendant) {
-                Some(Tag::Table) => has_nested_table = true,
-                Some(Tag::Caption) if dom.children(descendant).next().is_some() => {
-                    has_data_structure = true
-                }
-                Some(Tag::Col | Tag::Colgroup | Tag::Tfoot | Tag::Thead | Tag::Th) => {
-                    has_data_structure = true
-                }
-                Some(Tag::Tr) => {
-                    rows = rows.saturating_add(
-                        dom.attr(descendant, AttrName::RowSpan)
-                            .and_then(|value| value.parse().ok())
-                            .unwrap_or(1),
-                    );
-                    let column_count = dom
-                        .element_children(descendant)
-                        .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
-                        .map(|cell| {
-                            dom.attr(cell, AttrName::ColSpan)
-                                .and_then(|value| value.parse().ok())
-                                .unwrap_or(1)
-                        })
-                        .fold(0_u32, u32::saturating_add);
-                    cols = cols.max(column_count);
-                }
-                _ => {}
-            }
-        }
-        if has_data_structure {
+        let Some(evidence) = summaries[id.index()] else {
+            continue;
+        };
+        if evidence.has_data_structure {
             store.set_data_table(id, crate::dom::DataTableState::Data);
-        } else if has_nested_table {
+        } else if evidence.has_nested_table {
             store.set_data_table(id, crate::dom::DataTableState::Layout);
         } else if is_repeated_listing_table(dom, id) {
             store.set_data_table(id, crate::dom::DataTableState::Listing);
         } else {
             store.set_data_table(
                 id,
-                if cols == 1
-                    || rows == 1
-                    || rows < 10 && cols <= 4 && rows.saturating_mul(cols) <= 10
+                if evidence.cols == 1
+                    || evidence.rows == 1
+                    || evidence.rows < 10
+                        && evidence.cols <= 4
+                        && evidence.rows.saturating_mul(evidence.cols) <= 10
                 {
                     crate::dom::DataTableState::Layout
                 } else {
@@ -268,6 +346,37 @@ pub(crate) fn is_repeated_listing_table(dom: &Dom, table: NodeId) -> bool {
     repeated_listing_start(dom, table).is_some()
 }
 
+pub(crate) fn get_table_inner_text<'a>(dom: &Dom, root: NodeId, out: &'a mut String) -> &'a str {
+    out.clear();
+    let mut pending_whitespace = false;
+    for node in dom.table_descendants(root) {
+        let Some(text) = dom.text_node(node) else {
+            continue;
+        };
+        for character in text.chars() {
+            if character.is_whitespace() {
+                pending_whitespace |= !out.is_empty();
+            } else {
+                if pending_whitespace {
+                    out.push(' ');
+                    pending_whitespace = false;
+                }
+                out.push(character);
+            }
+        }
+    }
+    out.trim()
+}
+
+pub(crate) fn has_table_content(dom: &Dom, root: NodeId) -> bool {
+    dom.table_descendants(root).into_iter().any(|node| {
+        dom.tag(node) == Some(Tag::Table)
+            || dom
+                .text_node(node)
+                .is_some_and(|text| !text.trim().is_empty())
+    })
+}
+
 pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
     if dom.tag(table) != Some(Tag::Table)
         || dom.has_attr(table, AttrName::Summary)
@@ -281,7 +390,7 @@ pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
                     || value.eq_ignore_ascii_case("treegrid")
             })
         })
-        || dom.descendants(table).any(|node| {
+        || dom.table_descendants(table).into_iter().any(|node| {
             matches!(
                 dom.tag(node),
                 Some(Tag::Caption | Tag::Th | Tag::Thead | Tag::Tfoot)
@@ -292,14 +401,9 @@ pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
     }
 
     let rows: SmallVec<[NodeId; 32]> = dom
-        .descendants(table)
-        .filter(|&node| {
-            dom.tag(node) == Some(Tag::Tr)
-                && dom
-                    .ancestors(node)
-                    .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Table))
-                    == Some(table)
-        })
+        .table_descendants(table)
+        .into_iter()
+        .filter(|&node| dom.tag(node) == Some(Tag::Tr))
         .collect();
     if rows.len() < 6 {
         return None;
@@ -321,11 +425,11 @@ pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
             .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
             .collect();
         let rank = cells.first().and_then(|&cell| {
-            let text = crate::scoring::get_normalized_inner_text(dom, cell, &mut buffer);
+            let text = get_table_inner_text(dom, cell, &mut buffer);
             parse_rank_text(text)
         });
         let Some(rank) = rank else {
-            if dom.has_non_whitespace_text(row) {
+            if has_table_content(dom, row) {
                 if expect_metadata {
                     metadata_rows += 1;
                     expect_metadata = false;
@@ -345,8 +449,9 @@ pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
         ranked_rows += 1;
         expect_metadata = true;
         if dom
-            .descendants(row)
-            .any(|node| dom.tag(node) == Some(Tag::A) && dom.has_non_whitespace_text(node))
+            .table_descendants(row)
+            .into_iter()
+            .any(|node| dom.tag(node) == Some(Tag::A) && has_table_content(dom, node))
         {
             linked_ranked_rows += 1;
         }
@@ -1055,6 +1160,10 @@ pub(crate) fn heuristic_cleanup(
         store.clear_stats();
     }
     let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
+    let protected_subtrees = snapshot
+        .iter()
+        .any(|&(_, depth)| depth > 128)
+        .then(|| protected_subtree_mask(dom, root, store));
 
     // Keep only outermost candidates. A classifier can inspect the complete
     // subtree once instead of rescanning every nested wrapper.
@@ -1107,9 +1216,15 @@ pub(crate) fn heuristic_cleanup(
             .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
             .take(4)
             .count();
-        let protected = dom
-            .descendants(node)
-            .any(|descendant| is_protected_content(dom, descendant, store));
+        let protected = if let Some(protected_subtrees) = &protected_subtrees {
+            protected_subtrees
+                .get(node.index())
+                .copied()
+                .unwrap_or(false)
+        } else {
+            dom.descendants(node)
+                .any(|descendant| is_protected_content(dom, descendant, store))
+        };
         let link_density = get_link_density_cached(dom, node, stats.text_length, store);
         let short = stats.text_length < 350 || stats.text_length * 5 < root_length;
 
@@ -1626,7 +1741,7 @@ fn has_meaningful_heading(dom: &Dom, node: NodeId) -> bool {
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
         ) && {
             let mut heading = String::new();
-            dom.append_normalized_text(descendant, &mut heading);
+            dom.append_normalized_text_limited(descendant, &mut heading, 256);
             !matches!(
                 heading.trim().to_ascii_lowercase().as_str(),
                 "menu" | "navigation" | "sections" | "contents" | "on this page"
@@ -1797,7 +1912,7 @@ fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
             Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
         ) && {
             let mut text = String::new();
-            dom.append_normalized_text(descendant, &mut text);
+            dom.append_normalized_text_limited(descendant, &mut text, 128);
             matches!(
                 text.trim().to_ascii_lowercase().as_str(),
                 "contents" | "on this page"
@@ -1823,7 +1938,7 @@ fn has_pricing_heading(dom: &Dom, node: NodeId) -> bool {
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
         ) && {
             let mut heading = String::new();
-            dom.append_normalized_text(descendant, &mut heading);
+            dom.append_normalized_text_limited(descendant, &mut heading, 256);
             let heading = heading.trim().to_ascii_lowercase();
             heading == "pricing"
                 || heading == "plans"
@@ -1866,7 +1981,7 @@ fn is_within_pricing_region(dom: &Dom, node: NodeId) -> bool {
                         Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
                     ) && {
                         let mut heading = String::new();
-                        dom.append_normalized_text(child, &mut heading);
+                        dom.append_normalized_text_limited(child, &mut heading, 256);
                         let heading = heading.trim().to_ascii_lowercase();
                         heading == "pricing"
                             || heading == "plans"
@@ -2484,7 +2599,7 @@ fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
         return RelatedHeadingSignal::None;
     }
     let mut text = String::new();
-    dom.append_normalized_text(node, &mut text);
+    dom.append_normalized_text_limited(node, &mut text, 128);
     let text = text.trim().to_ascii_lowercase();
     if matches!(
         text.as_str(),
@@ -2721,7 +2836,7 @@ fn is_structural_peripheral_candidate(
             return false;
         }
         let mut text = String::new();
-        dom.append_normalized_text(descendant, &mut text);
+        dom.append_normalized_text_limited(descendant, &mut text, 256);
         let text = text.trim().to_ascii_lowercase();
         text == "collection"
             || text == "company profile"
@@ -2896,7 +3011,7 @@ fn is_audio_controls(metrics: &PeripheralMetrics<'_>) -> bool {
 
 fn is_profile_field_label(dom: &Dom, node: NodeId) -> bool {
     let mut text = String::new();
-    dom.append_normalized_text(node, &mut text);
+    dom.append_normalized_text_limited(node, &mut text, 128);
     let text = text.trim().trim_end_matches(':').trim();
     matches!(
         text.to_ascii_lowercase().as_str(),
@@ -2961,7 +3076,7 @@ fn heading_text_equals(dom: &Dom, node: NodeId, expected: &str) -> bool {
         Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
     ) && {
         let mut text = String::new();
-        dom.append_normalized_text(node, &mut text);
+        dom.append_normalized_text_limited(node, &mut text, 128);
         text.trim().eq_ignore_ascii_case(expected)
     }
 }
@@ -3808,6 +3923,25 @@ mod tests {
         mark_data_tables(&dom, dom.root(), &mut store, &mut tables);
         let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
         assert_eq!(store.is_data_table(table), Some(true));
+    }
+
+    #[test]
+    fn nested_table_evidence_is_aggregated_without_rescanning() {
+        let dom = Dom::parse_fragment(
+            "<table><tr><td>outer</td><td><table><tr><th>Field</th><th>Value</th></tr><tr><td>A</td><td>B</td></tr></table></td></tr></table>",
+            Tag::Div,
+        )
+        .unwrap();
+        let mut store = NodeStateStore::new();
+        let mut tables = Vec::new();
+        mark_data_tables(&dom, dom.root(), &mut store, &mut tables);
+        let table_ids: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Table))
+            .collect();
+        assert_eq!(table_ids.len(), 2);
+        assert_eq!(store.is_data_table(table_ids[0]), Some(true));
+        assert_eq!(store.is_data_table(table_ids[1]), Some(true));
     }
 
     #[test]

@@ -593,6 +593,21 @@ pub fn get_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String) -> &'a str
     dom.append_text(id, out);
     out.trim()
 }
+
+pub fn get_inner_text_limited<'a>(
+    dom: &Dom,
+    id: NodeId,
+    out: &'a mut String,
+    limit: usize,
+) -> &'a str {
+    out.clear();
+    if limit == usize::MAX {
+        dom.append_text(id, out);
+    } else {
+        dom.append_text_limited(id, out, limit);
+    }
+    out.trim()
+}
 pub fn get_normalized_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String) -> &'a str {
     out.clear();
     dom.append_normalized_text(id, out);
@@ -601,6 +616,26 @@ pub fn get_normalized_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String)
 pub fn get_inner_text_owned(dom: &Dom, id: NodeId) -> String {
     let mut out = String::new();
     dom.append_text(id, &mut out);
+    let start = out.len() - out.trim_start().len();
+    let end = out.trim_end().len();
+    if end == 0 {
+        out.clear();
+    } else {
+        out.truncate(end);
+        if start != 0 {
+            out.drain(..start);
+        }
+    }
+    out
+}
+
+pub fn get_inner_text_owned_limited(dom: &Dom, id: NodeId, limit: usize) -> String {
+    let mut out = String::new();
+    if limit == usize::MAX {
+        dom.append_text(id, &mut out);
+    } else {
+        dom.append_text_limited(id, &mut out, limit);
+    }
     let start = out.len() - out.trim_start().len();
     let end = out.trim_end().len();
     if end == 0 {

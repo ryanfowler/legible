@@ -211,6 +211,46 @@ mod tests {
     }
 
     #[test]
+    fn limited_text_scans_stop_at_normalized_character_boundaries() {
+        let dom = Dom::parse_fragment("<p>  one </p><p> two  three </p>", Tag::Div).unwrap();
+        let root = dom.root();
+        let mut text = String::new();
+
+        dom.append_normalized_text_limited(root, &mut text, 0);
+        assert!(text.is_empty());
+        dom.append_normalized_text_limited(root, &mut text, 4);
+        assert_eq!(text, "one ");
+        text.clear();
+        dom.append_normalized_text_limited(root, &mut text, 7);
+        assert_eq!(text, "one two");
+
+        let unicode = Dom::parse_fragment("<p>  日本語 \t世界 </p>", Tag::Div).unwrap();
+        let mut text = String::new();
+        unicode.append_normalized_text_limited(unicode.root(), &mut text, 4);
+        assert_eq!(text, "日本語 ");
+    }
+
+    #[test]
+    fn table_descendants_stop_before_nested_table_contents() {
+        let dom = Dom::parse_fragment(
+            "<table><tr><td>outer</td><td><table><tr><td>inner</td></tr></table></td></tr></table>",
+            Tag::Div,
+        )
+        .unwrap();
+        let outer = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Table))
+            .unwrap();
+        let nodes = dom.table_descendants(outer);
+        assert!(nodes.iter().any(|&node| dom.tag(node) == Some(Tag::Table)));
+        assert!(
+            !nodes
+                .iter()
+                .any(|&node| dom.text_node(node) == Some("inner"))
+        );
+    }
+
+    #[test]
     fn deeply_nested_input_is_stack_safe() {
         const DEPTH: usize = 1_000;
         let mut html = "<div>".repeat(DEPTH);

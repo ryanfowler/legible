@@ -72,31 +72,27 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
 /// A gutter is presentation. It must be removed before the table or wrapper is
 /// flattened, while source numbers remain ordinary code text.
 fn normalize_line_number_gutters(dom: &mut Dom, root: NodeId) {
-    let tables = dom
-        .element_descendants_snapshot_with_depth(root)
-        .into_iter()
-        .map(|(node, _)| node)
+    // Inspect each table's direct structure. This keeps nested tables
+    // independent without skipping an outer table that has its own gutter.
+    let tables: Vec<_> = dom
+        .descendants(root)
         .filter(|&node| dom.tag(node) == Some(Tag::Table))
-        .collect::<Vec<_>>();
+        .collect();
 
     for table in tables.into_iter().rev() {
         if dom.parent(table).is_none() {
             continue;
         }
         let cells = dom
-            .descendants(table)
-            .filter(|&node| {
-                matches!(dom.tag(node), Some(Tag::Td | Tag::Th))
-                    && dom
-                        .ancestors(node)
-                        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Table))
-                        == Some(table)
-            })
+            .table_descendants(table)
+            .into_iter()
+            .filter(|&node| matches!(dom.tag(node), Some(Tag::Td | Tag::Th)))
             .collect::<Vec<_>>();
         let pre_blocks = cells
             .iter()
             .filter_map(|&cell| {
-                dom.descendants(cell)
+                dom.table_descendants(cell)
+                    .into_iter()
                     .find(|&node| dom.tag(node) == Some(Tag::Pre))
             })
             .collect::<Vec<_>>();

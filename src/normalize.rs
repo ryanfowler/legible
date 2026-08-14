@@ -180,14 +180,9 @@ fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
             continue;
         }
         let rows: SmallVec<[NodeId; 32]> = dom
-            .descendants(table)
-            .filter(|&node| {
-                dom.tag(node) == Some(Tag::Tr)
-                    && dom
-                        .ancestors(node)
-                        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Table))
-                        == Some(table)
-            })
+            .table_descendants(table)
+            .into_iter()
+            .filter(|&node| dom.tag(node) == Some(Tag::Tr))
             .collect();
         let Ok(container) = dom.create_html_element(Tag::Div) else {
             continue;
@@ -210,7 +205,7 @@ fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
                 .filter(|&cell| matches!(dom.tag(cell), Some(Tag::Td | Tag::Th)))
                 .collect();
             let rank = cells.first().is_some_and(|&cell| {
-                let text = crate::scoring::get_normalized_inner_text(dom, cell, &mut buffer);
+                let text = crate::cleaning::get_table_inner_text(dom, cell, &mut buffer);
                 let digits = text.trim().strip_suffix('.').unwrap_or(text.trim());
                 !digits.is_empty()
                     && digits.len() <= 6
@@ -226,7 +221,7 @@ fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
                 expects_metadata = true;
                 continue;
             }
-            if !dom.has_non_whitespace_text(row) {
+            if !crate::cleaning::has_table_content(dom, row) {
                 continue;
             }
             if expects_metadata && let Some(item) = current_item {
@@ -250,9 +245,10 @@ fn normalize_repeated_table_listings(dom: &mut Dom, root: NodeId) {
 fn move_meaningful_cells(dom: &mut Dom, cells: &[NodeId], destination: NodeId) {
     let mut inserted = false;
     for &cell in cells {
-        let meaningful = dom.has_non_whitespace_text(cell)
+        let meaningful = crate::cleaning::has_table_content(dom, cell)
             || dom
-                .descendants(cell)
+                .table_descendants(cell)
+                .into_iter()
                 .any(|node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture)));
         if !meaningful {
             continue;
@@ -267,13 +263,12 @@ fn move_meaningful_cells(dom: &mut Dom, cells: &[NodeId], destination: NodeId) {
 
 fn remove_listing_controls(dom: &mut Dom, row: NodeId, buffer: &mut String) {
     let anchors: SmallVec<[NodeId; 8]> = dom
-        .descendants(row)
+        .table_descendants(row)
+        .into_iter()
         .filter(|&node| dom.tag(node) == Some(Tag::A))
         .collect();
     for anchor in anchors {
-        let text = crate::scoring::get_normalized_inner_text(dom, anchor, buffer)
-            .trim()
-            .to_ascii_lowercase();
+        let text = crate::cleaning::get_table_inner_text(dom, anchor, buffer).to_ascii_lowercase();
         let empty = text.is_empty();
         let action_label = matches!(
             text.as_str(),
@@ -290,7 +285,7 @@ fn remove_listing_controls(dom: &mut Dom, row: NodeId, buffer: &mut String) {
                 || href.contains("/hide?")
                 || href.contains("/delete?")
         });
-        let has_media = dom.descendants(anchor).any(|node| {
+        let has_media = dom.table_descendants(anchor).into_iter().any(|node| {
             matches!(
                 dom.tag(node),
                 Some(Tag::Img | Tag::Picture | Tag::Audio | Tag::Video)
@@ -634,6 +629,28 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         assert!(!markdown.contains("hide"));
         assert!(!markdown.contains(" |  | "));
         assert!(markdown.find("First result").unwrap() < markdown.find("Third result").unwrap());
+    }
+
+    #[test]
+    fn normalizes_an_outer_listing_with_a_nested_data_table() {
+        let (dom, root) = normalized(
+            r#"<table><tr><td>1.</td><td><a href='/one'>One</a><table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody><tr><td>A</td><td>B</td></tr></tbody></table></td></tr><tr><td></td><td>First metadata</td></tr><tr><td>2.</td><td><a href='/two'>Two</a></td></tr><tr><td></td><td>Second metadata</td></tr><tr><td>3.</td><td><a href='/three'>Three</a></td></tr><tr><td></td><td>Third metadata</td></tr><tr><td>4.</td><td><a href='/four'>Four</a></td></tr><tr><td></td><td>Fourth metadata</td></tr><tr><td>5.</td><td><a href='/five'>Five</a></td></tr><tr><td></td><td>Fifth metadata</td></tr><tr><td>6.</td><td><a href='/six'>Six</a></td></tr><tr><td></td><td>Sixth metadata</td></tr></table>"#,
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Ol))
+                .count(),
+            1
+        );
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Table))
+                .count(),
+            1
+        );
+        let markdown = dom_to_markdown(&dom, root, 0);
+        assert!(markdown.contains("One"));
+        assert!(markdown.contains("| Field | Value |"), "{markdown}");
     }
 
     #[test]

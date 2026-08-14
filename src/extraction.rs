@@ -1327,6 +1327,7 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
+        let heading_limit = heading_text_limit(&self.page_title, &self.structured_title);
         let mut excluded_depth = None;
         let retain_preferred_title =
             title_plan.preferred.is_some() && !title_plan.brand_headings.is_empty();
@@ -1370,7 +1371,7 @@ impl<'a> ContentExtractor<'a> {
                 }
             }
             let duplicates_title = if has_primary_heading_semantics(&self.dom, id) {
-                let heading = get_inner_text(&self.dom, id, text_buffer);
+                let heading = get_inner_text_limited(&self.dom, id, text_buffer, heading_limit);
                 let matches_title = heading_matches_page_title(&self.page_title, heading)
                     && (!self.metadata.title_from_content_heading
                         || heading_matches_page_title(&self.structured_title, heading));
@@ -2155,17 +2156,25 @@ fn title_heading_plan(
         .filter(|&node| has_primary_heading_semantics(dom, node))
         .filter(|&node| is_probably_visible(dom, node))
         .collect();
-    let brand_headings: SmallVec<[NodeId; 2]> = headings
-        .iter()
-        .copied()
-        .filter(|&heading| is_linked_site_brand_heading(dom, heading, site_name, source_uri))
-        .collect();
+    let has_link = dom
+        .descendants(dom.root())
+        .any(|node| dom.tag(node) == Some(Tag::A));
+    let brand_headings: SmallVec<[NodeId; 2]> = if has_link {
+        headings
+            .iter()
+            .copied()
+            .filter(|&heading| is_linked_site_brand_heading(dom, heading, site_name, source_uri))
+            .collect()
+    } else {
+        SmallVec::new()
+    };
+    let text_limit = heading_text_limit(page_title, structured_title);
     let preferred = headings
         .iter()
         .copied()
         .filter(|heading| !brand_headings.contains(heading))
         .filter_map(|heading| {
-            let text = get_inner_text_owned(dom, heading);
+            let text = get_inner_text_owned_limited(dom, heading, text_limit);
             let matches_page_title = heading_matches_page_title(page_title, &text);
             let matches_structured_title = heading_matches_page_title(structured_title, &text);
             (matches_page_title || matches_structured_title).then_some((
@@ -2298,6 +2307,15 @@ fn has_primary_content_marker(dom: &Dom, node: NodeId) -> bool {
                 | "postbody"
         )
     })
+}
+
+fn heading_text_limit(page_title: &str, structured_title: &str) -> usize {
+    page_title
+        .chars()
+        .count()
+        .max(structured_title.chars().count())
+        .saturating_add(128)
+        .clamp(256, 4_096)
 }
 
 fn heading_matches_page_title(page_title: &str, heading: &str) -> bool {

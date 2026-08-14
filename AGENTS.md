@@ -144,3 +144,5 @@ The internal `fuzzing` feature exposes retained-DOM validation only to fuzz targ
 ## Performance
 
 `benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input. See `benches/README.md` for baseline commands and regression guardrails.
+
+Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks.

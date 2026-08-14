@@ -118,16 +118,8 @@ fn has_layout_name(dom: &Dom, table: NodeId) -> bool {
         })
 }
 
-fn direct_table_descendants(dom: &Dom, root: NodeId) -> SmallVec<[NodeId; 64]> {
-    let mut nodes = SmallVec::new();
-    let mut pending: SmallVec<[NodeId; 64]> = dom.children_rev(root).collect();
-    while let Some(node) = pending.pop() {
-        nodes.push(node);
-        if dom.tag(node) != Some(Tag::Table) {
-            pending.extend(dom.children_rev(node));
-        }
-    }
-    nodes
+fn direct_table_descendants(dom: &Dom, root: NodeId) -> Vec<NodeId> {
+    dom.table_descendants(root)
 }
 
 fn cell_has_block_content(dom: &Dom, cell: NodeId) -> bool {

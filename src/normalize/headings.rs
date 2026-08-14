@@ -7,20 +7,26 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
 
     // Permalink controls are presentation. A normal link in a heading remains
     // content, including a fragment link whose label is not a permalink glyph.
-    for &(heading, _) in &nodes {
-        if dom.parent(heading).is_none() || !is_heading(dom.tag(heading)) {
-            continue;
-        }
-        let links: SmallVec<[NodeId; 4]> = dom
-            .descendants(heading)
-            .filter(|&node| dom.tag(node) == Some(Tag::A) && is_permalink(dom, node))
-            .collect();
-        let removed_permalink = !links.is_empty();
-        for link in links {
-            dom.detach(link);
-        }
-        if removed_permalink {
-            trim_heading_edges(dom, heading);
+    // Skip the per-heading subtree walk when the document has no anchors.
+    let has_anchor = dom
+        .descendants(root)
+        .any(|node| dom.tag(node) == Some(Tag::A));
+    if has_anchor {
+        for &(heading, _) in &nodes {
+            if dom.parent(heading).is_none() || !is_heading(dom.tag(heading)) {
+                continue;
+            }
+            let links: SmallVec<[NodeId; 4]> = dom
+                .descendants(heading)
+                .filter(|&node| dom.tag(node) == Some(Tag::A) && is_permalink(dom, node))
+                .collect();
+            let removed_permalink = !links.is_empty();
+            for link in links {
+                dom.detach(link);
+            }
+            if removed_permalink {
+                trim_heading_edges(dom, heading);
+            }
         }
     }
 
