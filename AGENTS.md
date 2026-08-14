@@ -73,7 +73,7 @@ These invariants are costly to violate:
 - **No `RefCell` after parse.** Parser-only interior mutability stays in `dom/parse.rs`.
 - **Snapshot before mutation.** Collect preorder snapshots when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots when a pass skips text nodes and removed subtrees.
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
-- **Lazy rendering.** `ExtractedPage` owns the cleaned DOM. Render HTML, Markdown, and text lazily. The public `extract` function must not eagerly render output.
+- **Lazy rendering.** `ExtractedPage` owns the cleaned DOM. Render HTML, Markdown, and text lazily. Defer normalized text metrics until a text or metric method needs them. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
@@ -145,4 +145,4 @@ The internal `fuzzing` feature exposes retained-DOM validation only to fuzz targ
 
 `benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input. See `benches/README.md` for baseline commands and regression guardrails.
 
-Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.
+Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text, cached candidate statistics, and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.

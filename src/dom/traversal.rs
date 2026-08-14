@@ -1,4 +1,5 @@
 use super::{Dom, NodeId};
+use smallvec::SmallVec;
 
 #[cfg(test)]
 pub(crate) struct NodeIds {
@@ -147,33 +148,22 @@ impl Dom {
         // Documents usually alternate elements and text nodes. Start near the
         // expected element count and grow once for markup-only documents.
         let mut out = Vec::with_capacity((self.len() / 2).max(16));
-        let Some(mut current) = self.first_child(id) else {
+        let Some(first_child) = self.first_child(id) else {
             return out;
         };
-        let mut depth = 1;
-
-        'preorder: loop {
-            if self.is_element(current) {
-                out.push((current, depth));
+        let mut pending = SmallVec::<[(NodeId, u32); 16]>::new();
+        pending.push((first_child, 1));
+        while let Some((node, depth)) = pending.pop() {
+            if self.is_element(node) {
+                out.push((node, depth));
             }
-            if let Some(child) = self.first_child(current) {
-                current = child;
-                depth += 1;
-                continue;
+            // Keep one continuation per active depth. This stays bounded by
+            // nesting depth instead of buffering every sibling of a wide node.
+            if let Some(sibling) = self.next_sibling(node) {
+                pending.push((sibling, depth));
             }
-            loop {
-                if let Some(sibling) = self.next_sibling(current) {
-                    current = sibling;
-                    break;
-                }
-                let Some(parent) = self.parent(current) else {
-                    break 'preorder;
-                };
-                if parent == id {
-                    break 'preorder;
-                }
-                current = parent;
-                depth -= 1;
+            if let Some(child) = self.first_child(node) {
+                pending.push((child, depth + 1));
             }
         }
         out
