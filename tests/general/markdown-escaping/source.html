@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head><title>Markdown escaping reference</title></head>
+<body>
+<article>
+  <h1>Markdown escaping reference</h1>
+  <p>Ordinary prose keeps write!, version 3.7, issue #15292, and a URL query separator.</p>
+  <p>- item</p>
+  <p>+ item</p>
+  <p>1. item</p>
+  <p>2) item</p>
+  <p># title</p>
+  <p>-- item</p>
+  <p>++ item</p>
+  <p>--- item</p>
+  <p>~~~ code fence</p>
+  <p><span>3.</span><span>7</span> stays a decimal.</p>
+  <p><span>#</span><span>15292</span> stays an issue number.</p>
+  <p><strong></strong>- item</p>
+  <p><em></em># title</p>
+  <p><b></b>1. item</p>
+  <p><span>#</span><span>###### title</span></p>
+  <p><span>~</span><span>~~ code fence</span></p>
+  <p><img src="/image.png?x=1&amp;y=2" alt="Image with query parameters"></p>
+  <p>The supporting note remains attached<sup id="ref-1"><a href="#note-1">1</a></sup> to the paragraph.</p>
+  <ol class="footnotes">
+    <li id="note-1" role="doc-footnote">The note explains why the reference remains canonical.</li>
+  </ol>
+  <p>The final paragraph confirms that the serializer preserves punctuation without changing Markdown structure.</p>
+</article>
+</body>
+</html>

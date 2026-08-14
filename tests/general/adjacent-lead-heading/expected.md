@@ -1,4 +1,4 @@
-# Yes, we recycle old disks and buy new ones\!
+# Yes, we recycle old disks and buy new ones!
 
 Send unwanted disks to the address below. Pack them carefully so that reusable media is not damaged in transit.
 

@@ -143,6 +143,12 @@ enum Mode {
     Inline,
 }
 
+enum InlineNext {
+    Text(char),
+    Boundary,
+    Empty,
+}
+
 #[derive(Clone, Copy)]
 enum Task<N> {
     Node(N, Mode),
@@ -374,9 +380,132 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
         }
     }
 
+    fn next_inline_text_char(&self, node: T::Node) -> Option<char> {
+        let mut current = node;
+        loop {
+            if let Some(sibling) = self.dom.next_sibling(current) {
+                match self.first_inline_text_char(sibling) {
+                    InlineNext::Text(ch) => return Some(ch),
+                    InlineNext::Boundary => return None,
+                    InlineNext::Empty => current = sibling,
+                }
+                continue;
+            }
+            let parent = self.dom.parent(current)?;
+            if matches!(
+                self.dom.tag(parent),
+                Some(
+                    Tag::Address
+                        | Tag::Blockquote
+                        | Tag::Caption
+                        | Tag::Dd
+                        | Tag::Div
+                        | Tag::Dl
+                        | Tag::Dt
+                        | Tag::Figure
+                        | Tag::Figcaption
+                        | Tag::Footer
+                        | Tag::Form
+                        | Tag::H1
+                        | Tag::H2
+                        | Tag::H3
+                        | Tag::H4
+                        | Tag::H5
+                        | Tag::H6
+                        | Tag::Header
+                        | Tag::Hr
+                        | Tag::Main
+                        | Tag::Nav
+                        | Tag::P
+                        | Tag::Pre
+                        | Tag::Section
+                        | Tag::Table
+                        | Tag::Td
+                        | Tag::Th
+                        | Tag::Tr
+                        | Tag::Ul
+                        | Tag::Ol
+                        | Tag::Br
+                )
+            ) {
+                return None;
+            }
+            current = parent;
+        }
+    }
+
+    fn first_inline_text_char(&self, root: T::Node) -> InlineNext {
+        let mut nodes = SmallVec::<[T::Node; 8]>::new();
+        nodes.push(root);
+        while let Some(node) = nodes.pop() {
+            if let Some(text) = self.dom.text_node(node) {
+                if let Some(ch) = text.chars().next() {
+                    return InlineNext::Text(ch);
+                }
+                continue;
+            }
+            if self.dom.is_comment(node) {
+                continue;
+            }
+            let Some(tag) = self.dom.tag(node) else {
+                continue;
+            };
+            if matches!(tag, Tag::Head | Tag::Script | Tag::Style | Tag::Template) {
+                continue;
+            }
+            if matches!(
+                tag,
+                Tag::Address
+                    | Tag::Blockquote
+                    | Tag::Caption
+                    | Tag::Dd
+                    | Tag::Div
+                    | Tag::Dl
+                    | Tag::Dt
+                    | Tag::Figure
+                    | Tag::Figcaption
+                    | Tag::Footer
+                    | Tag::Form
+                    | Tag::H1
+                    | Tag::H2
+                    | Tag::H3
+                    | Tag::H4
+                    | Tag::H5
+                    | Tag::H6
+                    | Tag::Header
+                    | Tag::Hr
+                    | Tag::Main
+                    | Tag::Nav
+                    | Tag::P
+                    | Tag::Pre
+                    | Tag::Section
+                    | Tag::Table
+                    | Tag::Td
+                    | Tag::Th
+                    | Tag::Tr
+                    | Tag::Ul
+                    | Tag::Ol
+                    | Tag::Br
+            ) {
+                return InlineNext::Boundary;
+            }
+            if tag == Tag::Img && self.config.images {
+                return InlineNext::Text('!');
+            }
+            let mut children = SmallVec::<[T::Node; 8]>::new();
+            let mut child = self.dom.first_child(node);
+            while let Some(current) = child {
+                children.push(current);
+                child = self.dom.next_sibling(current);
+            }
+            nodes.extend(children.into_iter().rev());
+        }
+        InlineNext::Empty
+    }
+
     fn node(&mut self, id: T::Node, mode: Mode) {
         if let Some(text) = self.dom.text_node(id) {
-            self.out.text(text);
+            self.out.text(text, self.next_inline_text_char(id));
             return;
         }
         if self.dom.is_comment(id) {
@@ -484,7 +613,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
                     if self.has_visible_inline_content(id) && !self.has_formatting_ancestor(id) {
                         self.out.mark_inline_boundary();
                     }
-                    self.out.open_marker("[");
+                    self.out.open_link();
                     self.tasks.push(Task::Close(Close::Link(id)));
                 }
                 self.push_children(id, Mode::Inline);
@@ -705,10 +834,11 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             self.out.markup(if checked { "[x]" } else { "[ ]" });
             self.out.pending_space = true;
             if let Some(label) = fallback_label {
-                self.out.text(&label);
+                self.out.text(&label, None);
             }
             indent += 4;
         }
+        self.out.begin_list_item_content();
         self.out.prefixes.push(Prefix::ListItem {
             width: indent,
             has_content: false,
@@ -955,7 +1085,7 @@ impl<'a, T: MarkdownTree> MarkdownSerializer<'a, T> {
             .attr(id, AttrName::Src)
             .and_then(|src| safe_destination(src, DestinationKind::Image))
         else {
-            self.out.text(alt);
+            self.out.text(alt, None);
             return;
         };
         self.out.mark_list_item_content();
@@ -1068,13 +1198,16 @@ struct Output {
     prefixes: SmallVec<[Prefix; 8]>,
     markers: SmallVec<[Marker; 4]>,
     line_text_state: LineTextState,
+    hash_run_start: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
 enum LineTextState {
     Start,
-    Digits,
+    Digits(u8),
+    Hashes(u8),
     Other,
+    Tildes(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -1101,10 +1234,12 @@ impl Output {
             prefixes: SmallVec::new(),
             markers: SmallVec::new(),
             line_text_state: LineTextState::Start,
+            hash_run_start: None,
         }
     }
 
     fn finish(mut self) -> String {
+        self.resolve_hash_run(true);
         self.value
             .truncate(self.value.trim_end_matches([' ', '\t', '\r', '\n']).len());
         if !self.value.is_empty() {
@@ -1141,17 +1276,27 @@ impl Output {
         self.pending_space = false;
     }
 
-    fn text(&mut self, text: &str) {
+    fn text(&mut self, text: &str, next_text_char: Option<char>) {
         if text.is_ascii() {
-            self.ascii_text(text);
+            self.ascii_text(text, next_text_char);
             return;
         }
 
         let mut prepared = false;
-        for ch in text.chars() {
+        for (index, ch) in text.char_indices() {
             if ch.is_whitespace() {
+                self.resolve_hash_run(true);
                 self.pending_space |= !self.line_start;
+                if matches!(
+                    self.line_text_state,
+                    LineTextState::Digits(_) | LineTextState::Hashes(_) | LineTextState::Tildes(_)
+                ) {
+                    self.line_text_state = LineTextState::Other;
+                }
                 continue;
+            }
+            if matches!(self.line_text_state, LineTextState::Hashes(_)) && ch != '#' {
+                self.resolve_hash_run(false);
             }
             if prepared {
                 self.flush_space();
@@ -1160,41 +1305,40 @@ impl Output {
                 prepared = true;
             }
 
-            let escape_line_marker = match self.line_text_state {
-                LineTextState::Start if ch.is_ascii_digit() => {
-                    self.line_text_state = LineTextState::Digits;
-                    false
-                }
-                LineTextState::Digits if ch.is_ascii_digit() => false,
-                LineTextState::Start => {
-                    self.line_text_state = LineTextState::Other;
-                    matches!(ch, '-' | '+' | '=' | '~')
-                }
-                LineTextState::Digits => {
-                    self.line_text_state = LineTextState::Other;
-                    matches!(ch, '.' | ')')
-                }
-                LineTextState::Other => false,
-            };
-            if escape_line_marker || markdown_escape(ch) {
+            let escape = self.should_escape_char(ch, &text[index..], next_text_char);
+            if ch == '#' && matches!(self.line_text_state, LineTextState::Start) && !escape {
+                self.hash_run_start = Some(self.value.len());
+            }
+            if escape {
                 self.value.push('\\');
             }
             self.value.push(ch);
             self.last_text_char = Some(ch);
+            self.advance_line_text_state(ch);
         }
     }
 
-    fn ascii_text(&mut self, text: &str) {
+    fn ascii_text(&mut self, text: &str, next_text_char: Option<char>) {
         let bytes = text.as_bytes();
         let mut index = 0;
         let mut prepared = false;
         while index < bytes.len() {
             while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                self.resolve_hash_run(true);
                 self.pending_space |= !self.line_start;
+                if matches!(
+                    self.line_text_state,
+                    LineTextState::Digits(_) | LineTextState::Hashes(_) | LineTextState::Tildes(_)
+                ) {
+                    self.line_text_state = LineTextState::Other;
+                }
                 index += 1;
             }
             if index == bytes.len() {
                 break;
+            }
+            if matches!(self.line_text_state, LineTextState::Hashes(_)) && bytes[index] != b'#' {
+                self.resolve_hash_run(false);
             }
 
             if prepared {
@@ -1203,56 +1347,28 @@ impl Output {
                 self.prepare_text(bytes[index] as char);
                 prepared = true;
             }
-            self.ascii_text_run(text, &mut index);
+            self.ascii_text_run(text, &mut index, next_text_char);
         }
     }
 
     /// Writes one non-whitespace run and leaves `index` at its end.
-    fn ascii_text_run(&mut self, text: &str, index: &mut usize) {
+    fn ascii_text_run(&mut self, text: &str, index: &mut usize, next_text_char: Option<char>) {
         let bytes = text.as_bytes();
 
-        if matches!(
-            self.line_text_state,
-            LineTextState::Start | LineTextState::Digits
-        ) {
-            if matches!(self.line_text_state, LineTextState::Start)
-                && !bytes[*index].is_ascii_digit()
-            {
-                self.line_text_state = LineTextState::Other;
-                let byte = bytes[*index];
-                self.push_ascii_text_byte(byte, matches!(byte, b'-' | b'+' | b'=' | b'~'));
-                *index += 1;
-            } else {
-                let digits_start = *index;
-                while *index < bytes.len() && bytes[*index].is_ascii_digit() {
-                    *index += 1;
-                }
-                self.value.push_str(&text[digits_start..*index]);
-                self.line_text_state = LineTextState::Digits;
-                if *index == bytes.len() || bytes[*index].is_ascii_whitespace() {
-                    self.last_text_char =
-                        bytes.get(index.saturating_sub(1)).copied().map(char::from);
-                    return;
-                }
-                self.line_text_state = LineTextState::Other;
-                let byte = bytes[*index];
-                self.push_ascii_text_byte(byte, matches!(byte, b'.' | b')'));
-                *index += 1;
-            }
-        }
-
-        let mut copy_start = *index;
         while *index < bytes.len() && !bytes[*index].is_ascii_whitespace() {
-            if markdown_escape_byte(bytes[*index]) {
-                self.value.push_str(&text[copy_start..*index]);
-                self.value.push('\\');
-                self.value.push(bytes[*index] as char);
-                copy_start = *index + 1;
+            let byte = bytes[*index];
+            let escape = self.should_escape_char(byte as char, &text[*index..], next_text_char);
+            if byte == b'#' && matches!(self.line_text_state, LineTextState::Start) && !escape {
+                self.hash_run_start = Some(self.value.len());
             }
+            if escape {
+                self.value.push('\\');
+            }
+            self.value.push(byte as char);
+            self.last_text_char = Some(byte as char);
+            self.advance_line_text_state(byte as char);
             *index += 1;
         }
-        self.value.push_str(&text[copy_start..*index]);
-        self.last_text_char = bytes.get(index.saturating_sub(1)).copied().map(char::from);
     }
 
     fn prepare_text(&mut self, first: char) {
@@ -1283,11 +1399,60 @@ impl Output {
         self.inline_boundary = true;
     }
 
-    fn push_ascii_text_byte(&mut self, byte: u8, escape_line_marker: bool) {
-        if escape_line_marker || markdown_escape_byte(byte) {
-            self.value.push('\\');
+    fn should_escape_char(&self, ch: char, remaining: &str, next_text_char: Option<char>) -> bool {
+        let next = remaining[ch.len_utf8()..].chars().next().or(next_text_char);
+        match ch {
+            '!' => next == Some('['),
+            '#' => {
+                matches!(self.line_text_state, LineTextState::Start)
+                    && is_atx_heading_marker(remaining, next_text_char)
+            }
+            '-' | '+' => {
+                matches!(self.line_text_state, LineTextState::Start)
+                    && is_unordered_list_marker(remaining, ch, next_text_char)
+            }
+            '=' => {
+                matches!(self.line_text_state, LineTextState::Start)
+                    && is_setext_underline(remaining)
+            }
+            '~' => {
+                (matches!(self.line_text_state, LineTextState::Start) && is_tilde_fence(remaining))
+                    || matches!(self.line_text_state, LineTextState::Tildes(count) if count >= 2)
+            }
+            '.' | ')' => {
+                matches!(self.line_text_state, LineTextState::Digits(count) if count <= 9)
+                    && next.is_none_or(char::is_whitespace)
+            }
+            _ if ch.is_ascii() => markdown_escape_byte(ch as u8),
+            _ => markdown_escape(ch),
         }
-        self.value.push(byte as char);
+    }
+
+    fn advance_line_text_state(&mut self, ch: char) {
+        self.line_text_state = match self.line_text_state {
+            LineTextState::Start if ch.is_ascii_digit() => LineTextState::Digits(1),
+            LineTextState::Digits(count) if ch.is_ascii_digit() => {
+                LineTextState::Digits(count.saturating_add(1))
+            }
+            LineTextState::Start if ch == '#' => LineTextState::Hashes(1),
+            LineTextState::Hashes(count) if ch == '#' => {
+                LineTextState::Hashes(count.saturating_add(1))
+            }
+            LineTextState::Start if ch == '~' => LineTextState::Tildes(1),
+            LineTextState::Tildes(count) if ch == '~' => {
+                LineTextState::Tildes(count.saturating_add(1))
+            }
+            _ => LineTextState::Other,
+        };
+    }
+
+    fn resolve_hash_run(&mut self, escape: bool) {
+        let Some(start) = self.hash_run_start.take() else {
+            return;
+        };
+        if escape && matches!(self.line_text_state, LineTextState::Hashes(count) if count <= 6) {
+            self.value.insert(start, '\\');
+        }
     }
 
     fn label(&mut self, text: &str) {
@@ -1323,7 +1488,7 @@ impl Output {
     fn destination(&mut self, value: &str) {
         for ch in value.chars() {
             match ch {
-                '\\' | '(' | ')' | '&' => {
+                '\\' | '(' | ')' => {
                     self.value.push('\\');
                     self.value.push(ch);
                 }
@@ -1374,6 +1539,7 @@ impl Output {
     }
 
     fn prepare_markup(&mut self) {
+        self.resolve_hash_run(false);
         self.flush_space();
         self.prefix();
         self.open_pending_markers();
@@ -1381,10 +1547,30 @@ impl Output {
     }
 
     fn open_marker(&mut self, value: &'static str) {
+        self.resolve_hash_run(false);
         self.markers.push(Marker {
             value,
             opened: false,
         });
+    }
+
+    fn open_link(&mut self) {
+        if self.last_text_char == Some('!') && !self.pending_space && self.value.ends_with('!') {
+            let bang_index = self.value.len() - 1;
+            let backslashes = self.value[..bang_index]
+                .bytes()
+                .rev()
+                .take_while(|&byte| byte == b'\\')
+                .count();
+            if backslashes % 2 == 0 {
+                self.value.insert(bang_index, '\\');
+            }
+        }
+        self.open_marker("[");
+    }
+
+    fn begin_list_item_content(&mut self) {
+        self.line_text_state = LineTextState::Start;
     }
 
     fn open_pending_markers(&mut self) {
@@ -1392,6 +1578,7 @@ impl Output {
             if !marker.opened {
                 self.value.push_str(marker.value);
                 marker.opened = true;
+                self.line_text_state = LineTextState::Other;
             }
         }
     }
@@ -1423,6 +1610,7 @@ impl Output {
     }
 
     fn newline(&mut self) {
+        self.resolve_hash_run(true);
         self.pending_space = false;
         self.last_text_char = None;
         self.inline_boundary = false;
@@ -1476,6 +1664,7 @@ impl Output {
     }
 
     fn hard_break(&mut self) {
+        self.resolve_hash_run(true);
         self.pending_space = false;
         self.prefix();
         self.value.push_str("  \n");
@@ -1499,10 +1688,7 @@ fn safe_destination(value: &str, kind: DestinationKind) -> Option<&str> {
         return None;
     }
 
-    let scheme_end = value
-        .bytes()
-        .position(|byte| matches!(byte, b':' | b'/' | b'?' | b'#'));
-    let Some(end) = scheme_end.filter(|&end| value.as_bytes()[end] == b':') else {
+    let Some(end) = scheme_end(value) else {
         return Some(value);
     };
     let scheme = &value[..end];
@@ -1528,17 +1714,85 @@ fn matches_ignore_ascii_case(value: &str, allowed: &[&str]) -> bool {
     allowed.iter().any(|item| value.eq_ignore_ascii_case(item))
 }
 
+fn scheme_end(value: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(ch) = value[offset..].chars().next() {
+        match ch {
+            ':' => return Some(offset),
+            '/' | '?' | '#' => return None,
+            '&' if is_colon_entity(&value[offset..]) => return Some(offset),
+            _ => offset += ch.len_utf8(),
+        }
+    }
+    None
+}
+
+fn is_colon_entity(value: &str) -> bool {
+    if value.starts_with("&colon;") {
+        return true;
+    }
+    let Some(mut value) = value.strip_prefix("&#") else {
+        return false;
+    };
+    let (radix, value_after_prefix) = value
+        .strip_prefix('x')
+        .or_else(|| value.strip_prefix('X'))
+        .map_or((10, value), |value| (16, value));
+    value = value_after_prefix;
+    let digit_len = value
+        .bytes()
+        .take_while(|&byte| match radix {
+            10 => byte.is_ascii_digit(),
+            16 => byte.is_ascii_hexdigit(),
+            _ => false,
+        })
+        .count();
+    digit_len > 0 && u32::from_str_radix(&value[..digit_len], radix) == Ok(':' as u32)
+}
+
+fn is_atx_heading_marker(value: &str, next_text_char: Option<char>) -> bool {
+    let hashes = value.chars().take_while(|&ch| ch == '#').count();
+    if !(1..=6).contains(&hashes) {
+        return false;
+    }
+    value[hashes..]
+        .chars()
+        .next()
+        .or(next_text_char)
+        .is_none_or(char::is_whitespace)
+}
+
+fn is_unordered_list_marker(value: &str, marker: char, next_text_char: Option<char>) -> bool {
+    let count = value.chars().take_while(|&ch| ch == marker).count();
+    let rest = &value[count..];
+    if marker == '-' && count >= 3 && rest.chars().all(char::is_whitespace) {
+        return true;
+    }
+    count == 1
+        && rest
+            .chars()
+            .next()
+            .or(next_text_char)
+            .is_none_or(char::is_whitespace)
+}
+
+fn is_setext_underline(value: &str) -> bool {
+    let count = value.chars().take_while(|&ch| ch == '=').count();
+    count > 0 && value[count..].chars().all(char::is_whitespace)
+}
+
+fn is_tilde_fence(value: &str) -> bool {
+    value.chars().take_while(|&ch| ch == '~').count() >= 3
+}
+
 fn markdown_escape(ch: char) -> bool {
-    matches!(
-        ch,
-        '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#' | '!'
-    )
+    matches!(ch, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|')
 }
 
 fn markdown_escape_byte(byte: u8) -> bool {
     matches!(
         byte,
-        b'\\' | b'`' | b'*' | b'_' | b'[' | b']' | b'<' | b'>' | b'|' | b'#' | b'!'
+        b'\\' | b'`' | b'*' | b'_' | b'[' | b']' | b'<' | b'>' | b'|'
     )
 }
 
@@ -1769,7 +2023,7 @@ mod tests {
                 "**Move anything** Drag the headline out of place.\n\n",
                 "[Home](/home) [Journal](/journal) [Careers](/careers)\n\n",
                 "Use `DES AAPL` or `TOP`.\n\n",
-                "Keep foo\\!bar and [results](/search?q=one+two) together.\n\n",
+                "Keep foo!bar and [results](/search?q=one+two) together.\n\n",
                 "foobar and **joinedtext**.\n\n",
                 "H2xO remains compact.\n\n",
                 "Card title Card description\n\n",
@@ -1808,6 +2062,10 @@ mod tests {
         assert_eq!(
             markdown("<ul><li>One</li><li>Two<ul><li>Nested</li></ul></li></ul>"),
             "- One\n- Two\n  - Nested\n"
+        );
+        assert_eq!(
+            markdown("<ul><li># title</li><li>- item</li><li>1. item</li></ul>"),
+            "- \\# title\n- \\- item\n- 1\\. item\n"
         );
         assert_eq!(
             markdown("<ol start=3><li>Three</li><li>Four</li></ol>"),
@@ -2006,10 +2264,14 @@ mod tests {
             "\\![mail](mailto:a@example.com) \\![tel](tel:123) \\![relative](/x)\n"
         );
         assert_eq!(
+            markdown(r#"<p>!<a href="/bracket">[x]</a></p>"#),
+            "\\![\\[x\\]](/bracket)\n"
+        );
+        assert_eq!(
             markdown(
-                r#"<p><a href="javascript&amp;colon;alert(1)">named</a> <a href="javascript&amp;#58;alert(1)">decimal</a> <a href="javascript&amp;#x3a;alert(1)">hex</a></p><img src="data&amp;colon;image/svg+xml,x" alt="image">"#
+                r#"<p><a href="javascript&amp;colon;alert(1)">named</a> <a href="javascript&amp;#58;alert(1)">decimal</a> <a href="javascript&amp;#x3a;alert(1)">hex</a> <a href="javascript&amp;#X3a;alert(1)">upper</a> <a href="javascript&amp;#x00003A;alert(1)">padded</a> <a href="javascript&amp;#58alert(1)">no-semi</a></p><img src="data&amp;colon;image/svg+xml,x" alt="image"> <img src="data&amp;#58image/svg+xml,x" alt="no-semi-image">"#
             ),
-            "[named](javascript\\&colon;alert\\(1\\)) [decimal](javascript\\&#58;alert\\(1\\)) [hex](javascript\\&#x3a;alert\\(1\\))\n![image](data\\&colon;image/svg+xml,x)\n"
+            "named decimal hex upper padded no-semi\nimage no-semi-image\n"
         );
     }
 
