@@ -41,10 +41,23 @@ struct Scope {
     preserve_isolated_whitespace: bool,
 }
 
-#[derive(Clone, Copy)]
-struct Task {
-    node: NodeId,
-    scope: Scope,
+enum Task {
+    Node {
+        node: NodeId,
+        scope: Scope,
+    },
+    Prose {
+        parent: Option<DocumentNodeId>,
+        text: Box<str>,
+    },
+    HardBreak {
+        parent: Option<DocumentNodeId>,
+    },
+    WrappedChildren {
+        node: NodeId,
+        scope: Scope,
+        kind: NodeKind,
+    },
 }
 
 #[derive(Default)]
@@ -71,6 +84,8 @@ pub(crate) fn compile_document(
     let images = super::images::analyze(dom, &nodes, context.base_url.as_ref());
     let (figures, captions) = super::figures::analyze(dom, &nodes, &images);
     let media = super::media::analyze(dom, &nodes, context.base_url.as_ref());
+    let lists = super::lists::ListAnalysis::analyze(dom, &nodes);
+    let tables = super::tables::TableAnalysis::analyze(dom, &nodes);
     let (media_separators, text_after_media_separators) = media_separators(dom, root, &media);
     for &node in &nodes {
         code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
@@ -130,7 +145,7 @@ pub(crate) fn compile_document(
 
     let mut nearest_list_item = vec![None; dom.len()];
     for &node in &nodes {
-        nearest_list_item[node.index()] = if dom.tag(node) == Some(Tag::Li) {
+        nearest_list_item[node.index()] = if dom.tag(node) == Some(Tag::Li) || lists.is_item(node) {
             Some(node)
         } else {
             dom.parent(node)
@@ -156,10 +171,47 @@ pub(crate) fn compile_document(
         preserve_isolated_whitespace: false,
     };
     let mut tasks = Vec::new();
-    tasks.extend(dom.children_rev(root).map(|node| Task { node, scope }));
+    tasks.extend(
+        dom.children_rev(root)
+            .map(|node| Task::Node { node, scope }),
+    );
 
-    while let Some(Task { node, scope }) = tasks.pop() {
+    while let Some(task) = tasks.pop() {
+        let Task::Node { node, scope } = task else {
+            match task {
+                Task::Prose { parent, text } => {
+                    builder.append_prose(parent, &text)?;
+                }
+                Task::HardBreak { parent } => {
+                    builder.append(parent, NodeKind::HardBreak)?;
+                }
+                Task::WrappedChildren { node, scope, kind } => {
+                    let parent = builder.append(scope.parent, kind)?;
+                    push_children(
+                        dom,
+                        node,
+                        Scope {
+                            parent: Some(parent),
+                            ..scope
+                        },
+                        &mut tasks,
+                    );
+                }
+                Task::Node { .. } => unreachable!(),
+            }
+            continue;
+        };
+        if tables.is_skipped(node) {
+            if tables.emits_separator(node) {
+                builder.append_prose(scope.parent, " ")?;
+            }
+            continue;
+        }
         if let Some(text) = dom.text_node(node) {
+            let text = tables
+                .replacement_text(node)
+                .or_else(|| lists.replacement_text(node))
+                .unwrap_or(text);
             let whitespace_only = text.chars().all(char::is_whitespace);
             if !whitespace_only
                 && !text.chars().next().is_some_and(char::is_whitespace)
@@ -262,6 +314,35 @@ pub(crate) fn compile_document(
             )?;
             continue;
         }
+        if tag == Tag::Table {
+            let table_scope = if scope.parent.is_some() && scope.parent == scope.list {
+                Scope {
+                    parent: Some(builder.append(scope.parent, NodeKind::ListItem)?),
+                    ..scope
+                }
+            } else {
+                scope
+            };
+            match tables.kind(node) {
+                super::tables::TableKind::Layout => {
+                    compile_layout_table(dom, node, table_scope, &tables, &mut tasks);
+                    continue;
+                }
+                super::tables::TableKind::Listing { start } => {
+                    compile_listing_table(
+                        dom,
+                        node,
+                        start,
+                        table_scope,
+                        &tables,
+                        &mut builder,
+                        &mut tasks,
+                    )?;
+                    continue;
+                }
+                super::tables::TableKind::Data => {}
+            }
+        }
         if code_blocks[node.index()]
             && let Some(code) = super::code::recognize_known_block(dom, node, true)
         {
@@ -340,7 +421,7 @@ pub(crate) fn compile_document(
                 )?;
                 if let Some(fallback) = media.fallback {
                     builder.append_prose(scope.parent, " ")?;
-                    tasks.push(Task {
+                    tasks.push(Task::Node {
                         node: fallback,
                         scope,
                     });
@@ -357,6 +438,10 @@ pub(crate) fn compile_document(
             Some(NodeKind::Figure)
         } else if captions[node.index()] && scope.figure.is_some() {
             Some(NodeKind::Figcaption)
+        } else if let Some(list) = lists.container(node) {
+            Some(NodeKind::List(list))
+        } else if lists.is_item(node) && scope.list.is_some() {
+            Some(NodeKind::ListItem)
         } else {
             match tag {
                 Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
@@ -378,16 +463,6 @@ pub(crate) fn compile_document(
                     .and_then(callout_kind)
                     .map(|kind| NodeKind::Callout(Callout { kind, title: None }))
                     .or(Some(NodeKind::BlockQuote)),
-                Tag::Ul => Some(NodeKind::List(List {
-                    kind: ListKind::Unordered,
-                    start: None,
-                })),
-                Tag::Ol => Some(NodeKind::List(List {
-                    kind: ListKind::Ordered,
-                    start: dom
-                        .attr(node, AttrName::Start)
-                        .and_then(|value| value.parse().ok()),
-                })),
                 Tag::Li if scope.list.is_some() => Some(NodeKind::ListItem),
                 Tag::Table => Some(NodeKind::Table(Table {
                     column_count: Some(0),
@@ -493,7 +568,7 @@ pub(crate) fn compile_document(
             Some(NodeKind::List(_)) => next_scope.list = Some(semantic_node),
             Some(NodeKind::ListItem) => {}
             _ => {
-                if !matches!(tag, Tag::Ul | Tag::Ol) {
+                if lists.container(node).is_none() {
                     next_scope.list = scope.list;
                 }
             }
@@ -608,10 +683,154 @@ fn media_separators(
     (before_media, after_media)
 }
 
+fn compile_layout_table(
+    dom: &Dom,
+    table: NodeId,
+    scope: Scope,
+    analysis: &super::tables::TableAnalysis,
+    tasks: &mut Vec<Task>,
+) {
+    let mut ordered = Vec::new();
+    for &caption in analysis.captions(table) {
+        if super::tables::children_are_phrasing(dom, caption) {
+            ordered.push(Task::WrappedChildren {
+                node: caption,
+                scope,
+                kind: NodeKind::Paragraph,
+            });
+        } else {
+            append_child_tasks(dom, caption, scope, &mut ordered);
+        }
+    }
+    for &row in analysis.rows(table) {
+        for &cell in analysis.cells(row) {
+            if !analysis.meaningful_cell(cell) {
+                continue;
+            }
+            if analysis.cell_is_phrasing(cell) {
+                ordered.push(Task::WrappedChildren {
+                    node: cell,
+                    scope,
+                    kind: NodeKind::Paragraph,
+                });
+            } else {
+                append_child_tasks(dom, cell, scope, &mut ordered);
+            }
+        }
+    }
+    tasks.extend(ordered.into_iter().rev());
+}
+
+fn compile_listing_table(
+    dom: &Dom,
+    table: NodeId,
+    start: u32,
+    scope: Scope,
+    analysis: &super::tables::TableAnalysis,
+    builder: &mut DocumentBuilder,
+    tasks: &mut Vec<Task>,
+) -> Result<(), BuildError> {
+    let list = builder.append(
+        scope.parent,
+        NodeKind::List(List {
+            kind: ListKind::Ordered,
+            start: (start != 1).then_some(i64::from(start)),
+        }),
+    )?;
+    let mut ordered = Vec::new();
+    let mut current_item = None;
+    let mut expects_metadata = false;
+    for &row in analysis.rows(table) {
+        let cells = analysis.cells(row);
+        if analysis.row_has_rank(row) {
+            let item = builder.append(Some(list), NodeKind::ListItem)?;
+            append_cell_tasks(
+                dom,
+                &cells[1..],
+                analysis,
+                Scope {
+                    parent: Some(item),
+                    ..scope
+                },
+                &mut ordered,
+            );
+            current_item = Some(item);
+            expects_metadata = true;
+        } else if !analysis.row_has_content(row) {
+            continue;
+        } else if expects_metadata {
+            if let Some(item) = current_item {
+                ordered.push(Task::HardBreak { parent: Some(item) });
+                append_cell_tasks(
+                    dom,
+                    cells,
+                    analysis,
+                    Scope {
+                        parent: Some(item),
+                        ..scope
+                    },
+                    &mut ordered,
+                );
+            }
+            expects_metadata = false;
+        } else {
+            let kind = if cells
+                .iter()
+                .filter(|&&cell| analysis.meaningful_cell(cell))
+                .all(|&cell| analysis.cell_is_phrasing(cell))
+            {
+                NodeKind::Paragraph
+            } else {
+                NodeKind::BlockGroup
+            };
+            let group = builder.append(scope.parent, kind)?;
+            append_cell_tasks(
+                dom,
+                cells,
+                analysis,
+                Scope {
+                    parent: Some(group),
+                    ..scope
+                },
+                &mut ordered,
+            );
+        }
+    }
+    tasks.extend(ordered.into_iter().rev());
+    Ok(())
+}
+
+fn append_cell_tasks(
+    dom: &Dom,
+    cells: &[NodeId],
+    analysis: &super::tables::TableAnalysis,
+    scope: Scope,
+    ordered: &mut Vec<Task>,
+) {
+    let mut inserted = false;
+    for &cell in cells {
+        if !analysis.meaningful_cell(cell) {
+            continue;
+        }
+        if inserted {
+            ordered.push(Task::Prose {
+                parent: scope.parent,
+                text: " ".into(),
+            });
+        }
+        append_child_tasks(dom, cell, scope, ordered);
+        inserted = true;
+    }
+}
+
+fn append_child_tasks(dom: &Dom, node: NodeId, scope: Scope, ordered: &mut Vec<Task>) {
+    ordered.extend(dom.children(node).map(|node| Task::Node { node, scope }));
+}
+
 fn push_children(dom: &Dom, node: NodeId, scope: Scope, tasks: &mut Vec<Task>) {
     tasks.extend(
         dom.children_rev(node)
-            .map(|child| Task { node: child, scope }),
+            .map(|child| Task::Node { node: child, scope }),
     );
 }
 
@@ -636,7 +855,7 @@ fn push_figure_children(
         content
             .into_iter()
             .rev()
-            .map(|child| Task { node: child, scope }),
+            .map(|child| Task::Node { node: child, scope }),
     );
 }
 
@@ -945,6 +1164,141 @@ mod tests {
                 "    Text(\"Wrapped result\")\n",
             )
         );
+    }
+
+    #[test]
+    fn compiles_aria_lists_without_rewriting_the_dom() {
+        let document = compile(
+            r#"<div role="list"><div role="listitem">3. Deploy<div role="list"><div role="listitem">Nested</div></div></div><div role="listitem">4. Publish</div></div>"#,
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "List(kind=Ordered, start=Some(3))\n",
+                "  ListItem\n",
+                "    Text(\"Deploy\")\n",
+                "    List(kind=Unordered, start=None)\n",
+                "      ListItem\n",
+                "        Text(\"Nested\")\n",
+                "  ListItem\n",
+                "    Text(\"Publish\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn native_lists_keep_aria_items_structural() {
+        let document = compile(
+            r#"<ol><div role="listitem"><strong>One</strong> detail</div></ol>"#,
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "List(kind=Ordered, start=None)\n",
+                "  ListItem\n",
+                "    Strong\n",
+                "      Text(\"One\")\n",
+                "    Text(\" detail\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn orphan_aria_items_inside_lists_stay_non_structural() {
+        let document = compile(
+            r#"<ul><li>Outer<div><div role="listitem">Nested orphan</div></div></li></ul>"#,
+            None,
+        );
+        document.validate().unwrap();
+        assert_eq!(
+            document
+                .debug_tree()
+                .lines()
+                .filter(|line| line.trim() == "ListItem")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn compiles_layout_and_data_tables_to_distinct_semantics() {
+        let document = compile(
+            r#"<table role="presentation"><caption><h3>Overview</h3></caption><tr><td><h2>Left</h2><p>Prose</p></td><td>Right</td></tr></table><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table>"#,
+            None,
+        );
+        let tree = document.debug_tree();
+        assert_eq!(
+            tree.lines()
+                .filter(|line| line.starts_with("Table("))
+                .count(),
+            1
+        );
+        assert!(
+            tree.starts_with("Heading(level=3)\n  Text(\"Overview\")\nHeading(level=2)"),
+            "{tree}"
+        );
+        assert!(tree.contains("Table(columns=Some(2))"));
+    }
+
+    #[test]
+    fn listing_fallback_rows_accept_block_content() {
+        let document = compile(
+            r#"<table><tr><td>1.</td><td><a href='/one'>One</a></td></tr><tr><td></td><td>First metadata</td></tr><tr><td>2.</td><td><a href='/two'>Two</a></td></tr><tr><td></td><td>Second metadata</td></tr><tr><td>3.</td><td><a href='/three'>Three</a></td></tr><tr><td></td><td>Third metadata</td></tr><tr><td></td><td><div><p>Trailing explanation</p></div></td></tr></table>"#,
+            None,
+        );
+        document.validate().unwrap();
+        let tree = document.debug_tree();
+        assert!(tree.starts_with("List(kind=Ordered, start=None)"), "{tree}");
+        assert!(tree.contains("BlockGroup\n  Paragraph"), "{tree}");
+    }
+
+    #[test]
+    fn specialized_tables_under_lists_get_item_boundaries() {
+        let native_layout = compile(
+            r#"<ul><table role="presentation"><tr><td>Layout text</td></tr></table></ul>"#,
+            None,
+        );
+        native_layout.validate().unwrap();
+        assert_eq!(
+            native_layout
+                .debug_tree()
+                .lines()
+                .filter(|line| line.trim() == "ListItem")
+                .count(),
+            1
+        );
+
+        let aria_listing = compile(
+            r#"<div role="list"><div role="listitem">Intro</div><table><tr><td>1.</td><td><a href='/one'>One</a></td></tr><tr><td></td><td>First metadata</td></tr><tr><td>2.</td><td><a href='/two'>Two</a></td></tr><tr><td></td><td>Second metadata</td></tr><tr><td>3.</td><td><a href='/three'>Three</a></td></tr><tr><td></td><td>Third metadata</td></tr></table></div>"#,
+            None,
+        );
+        aria_listing.validate().unwrap();
+        let tree = aria_listing.debug_tree();
+        assert!(
+            tree.contains("  ListItem\n    List(kind=Ordered, start=None)"),
+            "{tree}"
+        );
+    }
+
+    #[test]
+    fn deeply_wrapped_layout_table_cells_are_stack_safe() {
+        const DEPTH: usize = 5_000;
+        let wrappers = "<div>".repeat(DEPTH);
+        let closing = "</div>".repeat(DEPTH);
+        let html = format!(
+            "<table role='presentation'><tr><td>{wrappers}Deep value{closing}</td></tr></table>"
+        );
+        let document = compile(&html, None);
+        document.validate().unwrap();
+        assert!(
+            !document
+                .debug_tree()
+                .lines()
+                .any(|line| line.starts_with("Table("))
+        );
+        assert_eq!(document.text(), "Deep value");
     }
 
     #[test]

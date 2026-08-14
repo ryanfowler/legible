@@ -1,7 +1,10 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
 
-pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
+/// Rewrites ARIA lists only in the scoring DOM.
+///
+/// The semantic compiler reads these roles directly from selected content.
+pub(super) fn normalize_for_scoring(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
     let mut normalized_items = SmallVec::<[NodeId; 32]>::new();
 
@@ -103,7 +106,7 @@ mod tests {
     fn normalized(html: &str) -> (Dom, NodeId) {
         let mut dom = Dom::parse_document(html).unwrap();
         let root = dom.body().unwrap();
-        normalize(&mut dom, root);
+        normalize_for_scoring(&mut dom, root);
         (dom, root)
     }
 

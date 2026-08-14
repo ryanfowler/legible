@@ -50,9 +50,9 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
-| `normalize.rs` / `normalize/` | Ordered semantic passes for math, SVG charts, media, callouts, images, headings, lists, figures, footnotes, tables, and wrappers |
+| `normalize.rs` / `normalize/` | Ordered preparation passes for math, SVG charts, media, callouts, images, headings, footnotes, and wrappers |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
-| `normalize/tables.rs` | Layout-table classification and prose flattening |
+| `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
 | `document/` | Public read-only semantic IR plus internal normalized-DOM compiler, source recognition for code, figures, images, and media, validation, and stable test debug output; production pages retain this document instead of a DOM |
@@ -85,6 +85,7 @@ These invariants are costly to violate:
 - **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal. Breadcrumb, subscription, related-content, and document-chrome cleanup must also use structure and document position. Preserve article-contained regions, pricing content, meaningful media, and identity text.
 - **Compile code directly.** The semantic compiler recognizes source code, language hints, line wrappers, and explicit syntax-highlighter gutters without renderer-oriented DOM rewrites. Preserve numeric source code and source-line wrappers.
+- **Compile lists and tables directly.** Keep scoring-time table analysis and ARIA list preparation separate. The semantic compiler emits ordered-list metadata, converts rank-based listings, flattens layout tables, and preserves data-table cells without renderer-oriented DOM rewrites.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Canonicalize discussions once.** Specialized discussion extractors must use the shared builder for primary posts, reply metadata, rich reply bodies, and retained nesting.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
