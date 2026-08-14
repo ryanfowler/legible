@@ -203,6 +203,29 @@ impl Dom {
             }
         }
     }
+    pub(crate) fn append_text_limited(&self, root: NodeId, out: &mut String, limit: usize) {
+        if limit == 0 {
+            return;
+        }
+        if let Some(child) = self.first_child(root)
+            && self.next_sibling(child).is_none()
+            && let Some(text) = self.text_node(child)
+        {
+            append_text_chunk_limited(text, out, limit);
+            return;
+        }
+        let mut remaining = limit;
+        for id in std::iter::once(root).chain(self.descendants(root)) {
+            let Some(text) = self.text_node(id) else {
+                continue;
+            };
+            if remaining == 0 {
+                break;
+            }
+            let taken = append_text_chunk_limited(text, out, remaining);
+            remaining -= taken;
+        }
+    }
     pub(crate) fn text(&self, root: NodeId) -> String {
         let mut s = String::new();
         self.append_text(root, &mut s);
@@ -227,6 +250,73 @@ impl Dom {
             }
         }
     }
+    pub(crate) fn append_normalized_text_limited(
+        &self,
+        root: NodeId,
+        out: &mut String,
+        limit: usize,
+    ) {
+        if limit != usize::MAX
+            && let Some(child) = self.first_child(root)
+            && self.next_sibling(child).is_none()
+            && let Some(text) = self.text_node(child)
+            && text.len() <= limit
+            && text.is_ascii()
+        {
+            append_normalized_text_chunk(text, out);
+            return;
+        }
+        let mut pending_whitespace = false;
+        let mut remaining = limit;
+        for id in std::iter::once(root).chain(self.descendants(root)) {
+            let Some(text) = self.text_node(id) else {
+                continue;
+            };
+            for c in text.chars() {
+                if remaining == 0 {
+                    return;
+                }
+                if c.is_whitespace() {
+                    pending_whitespace |= !out.is_empty();
+                } else {
+                    if pending_whitespace {
+                        if remaining == 0 {
+                            return;
+                        }
+                        out.push(' ');
+                        remaining -= 1;
+                        pending_whitespace = false;
+                    }
+                    if remaining == 0 {
+                        return;
+                    }
+                    out.push(c);
+                    remaining -= 1;
+                    if remaining == 0 {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns descendants up to, but not inside, nested tables.
+    ///
+    /// The nested table node itself remains in the result. This lets callers
+    /// preserve it as content while assigning each table's inner nodes to one
+    /// table walk.
+    pub(crate) fn table_descendants(&self, root: NodeId) -> Vec<NodeId> {
+        let mut nodes = Vec::new();
+        let mut pending: Vec<NodeId> = self.children_rev(root).collect();
+        while let Some(node) = pending.pop() {
+            nodes.push(node);
+            if self.tag(node) != Some(super::Tag::Table) {
+                pending.extend(self.children_rev(node));
+            }
+        }
+        nodes
+    }
+
     pub(crate) fn normalized_char_count(&self, root: NodeId) -> usize {
         let mut count = 0;
         let mut has_text = false;
@@ -340,6 +430,35 @@ impl Dom {
         }
         self.descendants(root)
             .any(|id| self.text_node(id).is_some_and(has_text))
+    }
+}
+
+fn append_text_chunk_limited(text: &str, out: &mut String, limit: usize) -> usize {
+    let mut end = 0;
+    let mut count = 0;
+    for (index, character) in text.char_indices() {
+        if count == limit {
+            break;
+        }
+        end = index + character.len_utf8();
+        count += 1;
+    }
+    out.push_str(&text[..end]);
+    count
+}
+
+fn append_normalized_text_chunk(text: &str, out: &mut String) {
+    let mut pending_whitespace = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_whitespace |= !out.is_empty();
+        } else {
+            if pending_whitespace {
+                out.push(' ');
+                pending_whitespace = false;
+            }
+            out.push(character);
+        }
     }
 }
 
