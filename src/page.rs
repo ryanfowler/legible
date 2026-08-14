@@ -4,6 +4,7 @@ use crate::diagnostics::ExtractionDiagnostics;
 use crate::dom::{Dom, NodeId};
 use crate::metadata::{Metadata, MetadataDiagnostics};
 use serde_json::Value;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy)]
 struct ContentStats {
@@ -19,7 +20,8 @@ pub struct ExtractedPage {
     metadata: Metadata,
     dom: Dom,
     root: NodeId,
-    stats: ContentStats,
+    stats: OnceLock<ContentStats>,
+    text_length_hint: usize,
     diagnostics: Option<ExtractionDiagnostics>,
     metadata_diagnostics: Option<MetadataDiagnostics>,
     structured_data: Option<Vec<Value>>,
@@ -30,20 +32,17 @@ impl ExtractedPage {
         dom: Dom,
         root: NodeId,
         metadata: Metadata,
-        _text_length: usize,
+        text_length: usize,
         diagnostics: Option<ExtractionDiagnostics>,
         metadata_diagnostics: Option<MetadataDiagnostics>,
         structured_data: Option<Vec<Value>>,
     ) -> Self {
-        let (text_length, word_count) = crate::text::measure_text(&dom, root);
         Self {
             metadata,
             dom,
             root,
-            stats: ContentStats {
-                text_length,
-                word_count,
-            },
+            stats: OnceLock::new(),
+            text_length_hint: text_length,
             diagnostics,
             metadata_diagnostics,
             structured_data,
@@ -86,10 +85,11 @@ impl ExtractedPage {
 
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
+        let stats = self.stats();
         crate::text::render_text(
             &self.dom,
             self.root,
-            self.stats.text_length,
+            stats.text_length,
             &crate::text::TextOptions::default(),
         )
     }
@@ -117,12 +117,22 @@ impl ExtractedPage {
 
     /// Returns the number of words in the normalized extracted text.
     pub fn word_count(&self) -> usize {
-        self.stats.word_count
+        self.stats().word_count
     }
 
     /// Returns the number of characters in the normalized extracted text.
     pub fn text_length(&self) -> usize {
-        self.stats.text_length
+        self.stats().text_length
+    }
+
+    fn stats(&self) -> ContentStats {
+        *self.stats.get_or_init(|| {
+            let (text_length, word_count) = crate::text::measure_text(&self.dom, self.root);
+            ContentStats {
+                text_length,
+                word_count,
+            }
+        })
     }
 
     /// Checks retained DOM links for fuzz testing.
@@ -152,10 +162,10 @@ impl HtmlBuilder<'_> {
             crate::html::render_safe_html(
                 &self.page.dom,
                 self.page.root,
-                self.page.stats.text_length,
+                self.page.text_length_hint,
             )
         } else {
-            crate::dom::render_html(&self.page.dom, self.page.root, self.page.stats.text_length)
+            crate::dom::render_html(&self.page.dom, self.page.root, self.page.text_length_hint)
         }
     }
 }
@@ -185,7 +195,7 @@ impl MarkdownBuilder<'_> {
         crate::markdown::render_markdown(
             &self.page.dom,
             self.page.root,
-            self.page.stats.text_length,
+            self.page.text_length_hint,
             crate::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
@@ -211,6 +221,17 @@ mod tests {
         assert_eq!(page.html(), page.html());
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
+    }
+
+    #[test]
+    fn markdown_does_not_measure_text_statistics_eagerly() {
+        let page = extract("<main><p>Markdown only output.</p></main>", None).unwrap();
+
+        assert!(page.stats.get().is_none());
+        assert!(page.markdown().contains("Markdown only output."));
+        assert!(page.stats.get().is_none());
+        assert_eq!(page.word_count(), 3);
+        assert!(page.stats.get().is_some());
     }
 
     #[test]

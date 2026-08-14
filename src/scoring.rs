@@ -40,6 +40,7 @@ fn stats_for_text(text: &str) -> NodeStats {
                 }
             } else {
                 s.has_non_whitespace = true;
+                s.has_alphanumeric |= byte.is_ascii_alphanumeric();
                 word_count += usize::from(prev);
                 dot = byte == b'.';
                 comma_count += usize::from(byte == b',');
@@ -59,6 +60,7 @@ fn stats_for_text(text: &str) -> NodeStats {
                 }
             } else {
                 s.has_non_whitespace = true;
+                s.has_alphanumeric |= c.is_alphanumeric();
                 word_count += usize::from(prev);
                 dot = c == '.';
                 comma_count += usize::from(
@@ -122,6 +124,7 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     a.comma_count = a.comma_count.saturating_add(b.comma_count);
     a.sentence_end_count = a.sentence_end_count.saturating_add(b.sentence_end_count);
     a.has_non_whitespace |= b.has_non_whitespace;
+    a.has_alphanumeric |= b.has_alphanumeric;
     a.ends_with_whitespace = b.ends_with_whitespace;
     a.ends_with_dot = b.ends_with_dot;
     a.has_sentence_end = a.has_sentence_break || a.ends_with_dot

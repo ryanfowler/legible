@@ -119,11 +119,8 @@ impl ContentMetrics {
         store.enable_link_lengths();
         let text = get_or_compute_stats(dom, root, &mut store);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut metrics = Self::from_text_stats(text, link_density, false);
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
         for node in std::iter::once(root).chain(dom.descendants(root)) {
-            metrics.has_alphanumeric_text |= dom
-                .text_node(node)
-                .is_some_and(|text| text.chars().any(char::is_alphanumeric));
             metrics.count_structure(dom.tag(node));
         }
         metrics
@@ -139,21 +136,7 @@ impl ContentMetrics {
         store.enable_link_lengths();
         let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut inside_excluded = vec![false; dom.len()];
-        let has_alphanumeric_text =
-            std::iter::once(root)
-                .chain(dom.descendants(root))
-                .any(|node| {
-                    let parent_is_excluded = dom
-                        .parent(node)
-                        .is_some_and(|parent| inside_excluded[parent.index()]);
-                    inside_excluded[node.index()] = excluded[node.index()] || parent_is_excluded;
-                    !inside_excluded[node.index()]
-                        && dom
-                            .text_node(node)
-                            .is_some_and(|text| text.chars().any(char::is_alphanumeric))
-                });
-        let mut metrics = Self::from_text_stats(text, link_density, has_alphanumeric_text);
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
         let mut excluded_depth = None;
         for &(node, depth) in elements {
             if let Some(boundary) = excluded_depth {
@@ -494,6 +477,9 @@ fn denial_permission_text(text: &str) -> bool {
 }
 
 fn normalize_barrier_text(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
     text.chars()
         .flat_map(char::to_lowercase)
         .map(|character| match character {
