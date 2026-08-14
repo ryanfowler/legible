@@ -25,6 +25,7 @@ impl Dom {
         self.root
     }
     #[cfg(any(test, feature = "fuzzing"))]
+    #[allow(dead_code)] // Used by the standalone DOM mutation fuzz target.
     pub(crate) fn contains(&self, id: NodeId) -> bool {
         id.index() < self.nodes.len()
     }

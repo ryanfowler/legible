@@ -17,7 +17,6 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
             dom.detach(node);
             continue;
         }
-        #[cfg(test)]
         let semantic_kind = match dom.tag(node) {
             Some(Tag::Iframe) => "embedded",
             Some(Tag::Video) => "video",
@@ -69,9 +68,8 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
             continue;
         };
         dom.set_attr(link, AttrName::Href, &source);
-        // Stage A compiles the normalized DOM only in tests. Keep semantic
-        // media identity out of production HTML until the IR replaces it.
-        #[cfg(test)]
+        // Preserve the recognized media kind until the semantic compiler
+        // consumes this internal attribute.
         dom.set_attr(link, AttrName::DataLegibleKind, semantic_kind);
         dom.append_child(link, text);
         if let Some(fallback) = media_fallback_link(dom, node) {

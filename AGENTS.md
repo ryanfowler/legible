@@ -55,7 +55,7 @@ The extraction pipeline flows through these stages:
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
-| `document/` | Crate-private arena semantic IR, normalized-DOM compiler, validation, and stable test debug output; production pages remain DOM-backed during migration |
+| `document/` | Crate-private arena semantic IR, normalized-DOM compiler, validation, and stable test debug output; production pages retain this document instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -75,7 +75,7 @@ These invariants are costly to violate:
 - **No `RefCell` after parse.** Parser-only interior mutability stays in `dom/parse.rs`.
 - **Snapshot before mutation.** Collect preorder snapshots when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots when a pass skips text nodes and removed subtrees.
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
-- **Lazy rendering.** During the IR migration, `ExtractedPage` owns the semantic document and temporarily retains the cleaned DOM for parity checks. Render HTML, Markdown, and text lazily from the semantic document. Defer normalized text metrics until a text or metric method needs them. The public `extract` function must not eagerly render output.
+- **Lazy rendering.** `ExtractedPage` owns only the semantic document, not a retained DOM. Render HTML, Markdown, and text lazily from the semantic document. Defer normalized text metrics until a text or metric method needs them. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
@@ -135,13 +135,13 @@ let extractor = Extractor::builder().structured_data(true).build();
 let page = extractor.extract(html, None)?;
 ```
 
-`ExtractedPage` owns the cleaned extraction DOM. It provides lazy HTML, Markdown, and text methods plus page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
+`ExtractedPage` owns the semantic `Document`. It provides lazy HTML, Markdown, and text methods plus page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
 
 ## Fuzzing
 
 Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.
 
-The internal `fuzzing` feature exposes retained-DOM validation only to fuzz targets. Do not use it in normal applications.
+The internal `fuzzing` feature exposes semantic document validation only to fuzz targets. Standalone DOM fuzz targets validate their own DOM values. Do not use this feature in normal applications.
 
 ## Performance
 

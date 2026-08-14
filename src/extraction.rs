@@ -338,8 +338,8 @@ impl<'a> ContentExtractor<'a> {
         if let Some(diagnostics) = &mut self.metadata_diagnostics {
             diagnostics.complete_with_fallbacks(&self.metadata);
         }
-        // The extraction result already owns a compact fragment. Keep that
-        // fragment instead of copying every retained node a second time.
+        // Compile the final compact fragment once. ExtractedPage retains the
+        // semantic document and the fragment drops when extraction returns.
         let extracted_root = content.content_root;
         let diagnostics = self
             .diagnostic_attempts
@@ -353,16 +353,20 @@ impl<'a> ContentExtractor<'a> {
             .options
             .retain_structured_data
             .then(|| self.structured_data.retained_items());
-        ExtractedPage::new(
-            self.dom,
+        let document = crate::document::compile_document(
+            &self.dom,
             extracted_root,
+            &crate::document::CompileContext::new(self.base_uri),
+        )
+        .map_err(|_| Error::NoContent)?;
+        Ok(ExtractedPage::new(
+            document,
             self.metadata,
             content.text_length,
             diagnostics,
             self.metadata_diagnostics,
             retained_structured_data,
-            self.base_uri.as_ref(),
-        )
+        ))
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let body = self.dom.body().ok_or(Error::NoBody)?;

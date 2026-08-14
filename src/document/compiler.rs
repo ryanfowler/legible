@@ -488,6 +488,7 @@ pub(crate) fn compile_document(
         }
     }
     let document = builder.finish();
+    #[cfg(any(test, debug_assertions))]
     document.validate()?;
     Ok(document)
 }

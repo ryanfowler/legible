@@ -234,6 +234,7 @@ impl Dom {
         Ok(root)
     }
     #[cfg(any(test, feature = "fuzzing"))]
+    #[allow(dead_code)] // Used by the standalone DOM mutation fuzz target.
     pub(crate) fn validate(&self) -> Result<(), DomError> {
         if self.parent(self.root).is_some() {
             return Err(DomError("root has a parent".into()));
