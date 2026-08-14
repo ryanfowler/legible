@@ -51,6 +51,7 @@ fn detect_references(dom: &Dom, root: NodeId, definitions: &HashSet<&str>) -> Ve
                 })
                 .unwrap_or(node);
             let dialect_label = reference_convention(dom, node)
+                || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
                 || dom
                     .attr_by_local_name(node, "data-type")
                     .is_some_and(|value| value.eq_ignore_ascii_case("noteref"));
@@ -110,6 +111,7 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
             || inline
             || named_sidenote
             || has_any_class(dom, node, &["footnote-definition", "footdef"])
+            || dom.attr_by_local_name(node, "data-footnote").is_some()
             || dom
                 .attr_by_local_name(node, "data-type")
                 .is_some_and(|value| value.eq_ignore_ascii_case("footnote"));
@@ -123,6 +125,7 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
         let conventional_id = dom
             .attr(node, AttrName::Id)
             .is_some_and(looks_like_footnote_id)
+            && !has_nested_definition_candidate(dom, node)
             && (dom
                 .ancestors(node)
                 .any(|ancestor| is_footnote_container(dom, ancestor))
@@ -134,12 +137,19 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
         let key = if inline {
             inline_sidenote_key(dom, node)
         } else {
-            dom.attr(node, AttrName::Id).map(str::to_owned).or_else(|| {
-                structural
-                    .then(|| nested_definition_key(dom, node))
-                    .flatten()
-                    .or(word_definition)
-            })
+            dom.attr(node, AttrName::Id)
+                .map(str::to_owned)
+                .or_else(|| {
+                    dom.attr_by_local_name(node, "data-footnote")
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    structural
+                        .then(|| nested_definition_key(dom, node))
+                        .flatten()
+                        .or(word_definition)
+                })
         };
         let Some(key) = key else { continue };
         if definitions.iter().any(|definition: &Definition| {
@@ -153,6 +163,22 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
         definitions.push(Definition { node, key, inline });
     }
     definitions
+}
+
+fn has_nested_definition_candidate(dom: &Dom, node: NodeId) -> bool {
+    dom.descendants(node).any(|descendant| {
+        matches!(
+            dom.tag(descendant),
+            Some(Tag::Div | Tag::Li | Tag::P | Tag::Aside)
+        ) && dom
+            .attr(descendant, AttrName::Id)
+            .is_some_and(looks_like_footnote_id)
+            && (has_role(dom, descendant, "doc-footnote")
+                || dom
+                    .attr_by_local_name(descendant, "data-footnote")
+                    .is_some()
+                || matches!(dom.tag(descendant), Some(Tag::Li | Tag::P | Tag::Aside)))
+    })
 }
 
 fn canonicalize(
@@ -539,6 +565,9 @@ fn remove_definition_markers(
         let backlink = dom
             .attr(link, AttrName::Rel)
             .is_some_and(|value| token(value, "backlink"))
+            || dom
+                .attr_by_local_name(link, "data-footnote-backref")
+                .is_some()
             || has_role(dom, link, "doc-backlink")
             || href_fragment(Some(&href)).is_some_and(|target| {
                 reference_ids.contains(target)
@@ -585,6 +614,14 @@ fn first_significant_child(dom: &Dom, node: NodeId) -> Option<NodeId> {
 fn is_conventional_backlink_target(definition_key: &str, target: &str) -> bool {
     let key = definition_key.to_ascii_lowercase();
     let target = target.to_ascii_lowercase();
+    if let Some(suffix) = key.strip_prefix("user-content-fn-") {
+        return target == format!("user-content-fnref-{suffix}");
+    }
+    if let Some(suffix) = key.strip_prefix("footnotedef") {
+        return target == format!("footnoteref{suffix}")
+            || target == format!("footnote-ref{suffix}")
+            || target == format!("fnref{suffix}");
+    }
     if let Some(suffix) = key.strip_prefix("_ftn") {
         return target == format!("_ftnref{suffix}");
     }
@@ -599,24 +636,17 @@ fn has_definition_backlink(dom: &Dom, node: NodeId) -> bool {
         return false;
     };
     let id = id.to_ascii_lowercase();
-    let expected = id
-        .strip_prefix("ftnt")
-        .map(|suffix| format!("ftnt_ref{suffix}"))
-        .or_else(|| {
-            id.strip_prefix("_ftn")
-                .map(|suffix| format!("_ftnref{suffix}"))
-        });
-    let Some(expected) = expected else {
-        return false;
-    };
     dom.descendants(node)
         .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
         .filter_map(|anchor| href_fragment(dom.attr(anchor, AttrName::Href)))
-        .any(|target| target.eq_ignore_ascii_case(&expected))
+        .any(|target| is_conventional_backlink_target(&id, target))
 }
 
 fn is_explicit_reference(dom: &Dom, anchor: NodeId) -> bool {
     has_role(dom, anchor, "doc-noteref")
+        || dom
+            .attr_by_local_name(anchor, "data-footnote-ref")
+            .is_some()
         || dom
             .attr(anchor, AttrName::Rel)
             .is_some_and(|rel| token(rel, "footnote"))
@@ -629,16 +659,42 @@ fn is_explicit_reference(dom: &Dom, anchor: NodeId) -> bool {
 fn reference_convention(dom: &Dom, anchor: NodeId) -> bool {
     let parent = dom.parent(anchor);
     parent.is_some_and(|parent| {
-        has_any_class(dom, parent, &["footnote-reference", "footnoteref"])
-            || has_any_class(dom, parent, &["fn"])
-                && dom.attr_by_local_name(parent, "data-fn").is_some()
-            || dom
-                .attr(parent, AttrName::Id)
-                .is_some_and(|id| id.to_ascii_lowercase().starts_with("ftnt_ref"))
-    }) || has_any_class(dom, anchor, &["footnote-reference", "footnote-anchor"])
-        || dom
-            .attr(anchor, AttrName::Id)
-            .is_some_and(|id| id.to_ascii_lowercase().starts_with("cite_ref"))
+        has_any_class(
+            dom,
+            parent,
+            &["footnote-reference", "footnote-ref", "footnoteref", "fnref"],
+        ) || has_any_class(dom, parent, &["fn"])
+            && dom.attr_by_local_name(parent, "data-fn").is_some()
+            || dom.attr(parent, AttrName::Id).is_some_and(|id| {
+                let id = id.to_ascii_lowercase();
+                id.starts_with("ftnt_ref")
+                    || id.starts_with("user-content-fnref")
+                    || id.starts_with("footnoteref")
+                    || id.starts_with("footnote-ref")
+                    || id.starts_with("fnref")
+            })
+    }) || has_any_class(
+        dom,
+        anchor,
+        &[
+            "footnote-reference",
+            "footnote-ref",
+            "footnote-anchor",
+            "footnote-link",
+            "footnoteref",
+            "fnref",
+        ],
+    ) || dom
+        .attr_by_local_name(anchor, "data-footnote-ref")
+        .is_some()
+        || dom.attr(anchor, AttrName::Id).is_some_and(|id| {
+            let id = id.to_ascii_lowercase();
+            id.starts_with("cite_ref")
+                || id.starts_with("user-content-fnref")
+                || id.starts_with("footnoteref")
+                || id.starts_with("footnote-ref")
+                || id.starts_with("fnref")
+        })
 }
 
 fn reference_label(dom: &Dom, node: NodeId) -> Option<String> {
@@ -655,6 +711,7 @@ fn reference_label(dom: &Dom, node: NodeId) -> Option<String> {
 
 fn is_footnote_container(dom: &Dom, node: NodeId) -> bool {
     dom.attr(node, AttrName::DataFootnotes).is_some()
+        || dom.attr_by_local_name(node, "data-footnotes").is_some()
         || has_role(dom, node, "doc-endnotes")
         || dom
             .attr_by_local_name(node, "data-type")
@@ -669,6 +726,8 @@ fn is_footnote_container(dom: &Dom, node: NodeId) -> bool {
                         "footnotes"
                             | "footnote-list"
                             | "footnote-definitions"
+                            | "footnote-container"
+                            | "footnotes-container"
                             | "wp-block-footnotes"
                             | "endnotes"
                     ) || part.eq_ignore_ascii_case("references")
@@ -680,6 +739,9 @@ fn is_footnote_container(dom: &Dom, node: NodeId) -> bool {
 fn has_footnote_definitions(dom: &Dom, node: NodeId) -> bool {
     dom.descendants(node).any(|descendant| {
         dom.attr(descendant, AttrName::DataFootnote).is_some()
+            || dom
+                .attr_by_local_name(descendant, "data-footnote")
+                .is_some()
             || has_role(dom, descendant, "doc-footnote")
             || dom
                 .attr(descendant, AttrName::Id)
@@ -721,6 +783,8 @@ fn looks_like_footnote_id(value: &str) -> bool {
         || value.starts_with("sn")
         || value.starts_with("sidenote")
         || value.starts_with("cite_note")
+        || value.starts_with("user-content-fn")
+        || value.starts_with("footnotedef")
 }
 
 fn special_footnote_key(value: &str) -> bool {
@@ -728,6 +792,8 @@ fn special_footnote_key(value: &str) -> bool {
     value.starts_with("_ftn")
         || value.starts_with("ftnt")
         || value.starts_with("cite_note")
+        || value.starts_with("user-content-fn")
+        || value.starts_with("footnotedef")
         || value.chars().all(|character| character.is_ascii_digit())
         || value.len() >= 24 && value.contains('-')
 }
@@ -918,6 +984,14 @@ mod tests {
                 r#"<section id="references"><h2>References</h2><p>Smith, Example Book.</p></section>"#
             ),
             "## References\n\nSmith, Example Book.\n"
+        );
+    }
+
+    #[test]
+    fn keeps_an_unmatched_footnotedef_link_as_an_ordinary_link() {
+        assert_eq!(
+            markdown(r##"<p>Read the <a href="#footnotedef-overview">ordinary overview</a>.</p>"##),
+            "Read the [ordinary overview](#footnotedef-overview).\n"
         );
     }
 }
