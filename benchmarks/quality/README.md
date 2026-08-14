@@ -74,17 +74,17 @@ Do not copy a third-party page when its license does not allow redistribution. U
 Install the pinned local tools once:
 
 ```bash
-npm --prefix scripts/compare-defuddle ci
+npm --prefix scripts/compare-extractors ci
 cargo fetch
 ```
 
 Then run one fixture or all fixtures:
 
 ```bash
-node scripts/compare-defuddle/index.mjs --fixture technical-doc
-node scripts/compare-defuddle/index.mjs --all
-node scripts/compare-defuddle/index.mjs --all --json target/quality-report.json
-node scripts/compare-defuddle/index.mjs --all --summary benchmarks/quality/BASELINE.md
+node scripts/compare-extractors/index.mjs --fixture technical-doc
+node scripts/compare-extractors/index.mjs --all
+node scripts/compare-extractors/index.mjs --all --json target/quality-report.json
+node scripts/compare-extractors/index.mjs --all --summary benchmarks/quality/BASELINE.md
 ```
 
 Use `--summary` to write a compact category-level baseline. The summary includes

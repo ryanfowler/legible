@@ -1,11 +1,12 @@
 {
-  "name": "legible-quality-comparison",
+  "name": "legible-extractor-comparison",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test"
   },
   "dependencies": {
+    "@firecrawl/html-extractor": "0.1.2",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "defuddle": "0.19.2",

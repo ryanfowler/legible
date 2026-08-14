@@ -160,14 +160,14 @@ negative cases for each extraction heuristic.
 Install and run the optional quality comparison tool with:
 
 ```bash
-npm --prefix scripts/compare-defuddle ci
+npm --prefix scripts/compare-extractors ci
 cargo fetch
-node scripts/compare-defuddle/index.mjs --all
+node scripts/compare-extractors/index.mjs --all
 ```
 
-The tool scores Legible and a pinned Defuddle release against independent quality
-fixtures. See `benchmarks/quality/README.md` for the fixture format and
-`scripts/compare-defuddle/README.md` for runner options.
+The tool compares Legible with pinned third-party extractors against independent
+quality fixtures. See `benchmarks/quality/README.md` for the fixture format and
+`scripts/compare-extractors/README.md` for runner options.
 
 Run the compatibility performance suite with:
 

@@ -19,7 +19,7 @@ const defaultFixtureRoot = join(repository, "benchmarks/quality");
 const defaultOutputRoot = join(repository, "target/quality-comparison");
 
 function usage() {
-  return `usage: node scripts/compare-defuddle/index.mjs [--all | --fixture ID] [options]
+  return `usage: node scripts/compare-extractors/index.mjs [--all | --fixture ID] [options]
 
 Options:
   --all                 Run every discovered quality fixture (default).
@@ -206,7 +206,7 @@ async function builtInDefuddleRunner() {
     ({ parseHTML } = await import("linkedom"));
   } catch (error) {
     throw new Error(
-      `Pinned Defuddle dependencies are not installed. Run npm --prefix scripts/compare-defuddle ci. ${error.message}`,
+      `Pinned Defuddle dependencies are not installed. Run npm --prefix scripts/compare-extractors ci. ${error.message}`,
     );
   }
   return async (fixture) => {
