@@ -1147,8 +1147,19 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
             });
             let value = dom
                 .attr(id, AttrName::Content)
-                .or_else(|| name_node.and_then(|node| dom.attr(node, AttrName::Content)))
-                .unwrap_or_else(|| get_inner_text(dom, name_node.unwrap_or(id), &mut text_buffer));
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    name_node.and_then(|node| {
+                        dom.attr(node, AttrName::Content)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_owned)
+                    })
+                })
+                .or_else(|| byline_name(dom, name_node.unwrap_or(id)))
+                .unwrap_or_else(|| {
+                    get_inner_text(dom, name_node.unwrap_or(id), &mut text_buffer).to_owned()
+                });
             out.add(
                 |set| &mut set.authors,
                 value,
@@ -1190,9 +1201,11 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
                 .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"));
             if rel_author
                 || (profile_author
-                    && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading)))
+                    && primary_heading
+                        .is_some_and(|heading| is_profile_author_near_heading(dom, id, heading)))
             {
-                let value = get_inner_text(dom, id, &mut text_buffer);
+                let value = byline_name(dom, id)
+                    .unwrap_or_else(|| get_inner_text(dom, id, &mut text_buffer).to_owned());
                 out.add(
                     |set| &mut set.authors,
                     value,
@@ -1201,41 +1214,41 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Candida
                 );
             }
         }
-        let author_element = [dom.attr(id, AttrName::Class), dom.attr(id, AttrName::Id)]
-            .into_iter()
-            .flatten()
-            .flat_map(|value| value.split_ascii_whitespace())
-            .any(is_author_container_token);
+        let author_element = is_author_container(dom, id);
         if author_element
             && primary_heading.is_some_and(|heading| is_byline_near_heading(dom, id, heading))
         {
             let author_node = preferred_author_node(dom, id);
-            let value = get_inner_text(dom, author_node.unwrap_or(id), &mut text_buffer);
+            let value = byline_name(dom, id).unwrap_or_else(|| {
+                get_inner_text(dom, author_node.unwrap_or(id), &mut text_buffer).to_owned()
+            });
             if value.chars().count() <= 120 {
                 out.add(|set| &mut set.authors, value, MetadataSource::Inferred, 62);
             }
-            let visible_date = preferred_byline_date(dom, id);
-            if let Some(date) = visible_date.as_deref() {
-                out.add(
-                    |set| &mut set.published_time,
-                    date,
-                    MetadataSource::Inferred,
-                    48,
-                );
-            }
-            if (visible_date.is_some()
-                || dom
-                    .descendants(id)
-                    .any(|node| dom.tag(node) == Some(Tag::Time)))
-                && let Some(section_node) = preferred_byline_section_node(dom, id, author_node)
-            {
-                let section = get_inner_text(dom, section_node, &mut text_buffer);
-                out.add(
-                    |set| &mut set.section,
-                    section,
-                    MetadataSource::Inferred,
-                    46,
-                );
+            if is_byline_container(dom, id) {
+                let visible_date = preferred_byline_date(dom, id);
+                if let Some(date) = visible_date.as_deref() {
+                    out.add(
+                        |set| &mut set.published_time,
+                        date,
+                        MetadataSource::Inferred,
+                        48,
+                    );
+                }
+                if (visible_date.is_some()
+                    || dom
+                        .descendants(id)
+                        .any(|node| dom.tag(node) == Some(Tag::Time)))
+                    && let Some(section_node) = preferred_byline_section_node(dom, id, author_node)
+                {
+                    let section = get_inner_text(dom, section_node, &mut text_buffer);
+                    out.add(
+                        |set| &mut set.section,
+                        section,
+                        MetadataSource::Inferred,
+                        46,
+                    );
+                }
             }
         }
     }
@@ -1301,10 +1314,98 @@ fn written_date(text: &str) -> Option<(usize, String)> {
 }
 
 fn is_author_container_token(token: &str) -> bool {
-    token.eq_ignore_ascii_case("author")
-        || token.eq_ignore_ascii_case("byline")
-        || token.eq_ignore_ascii_case("p-author")
-        || token.to_ascii_lowercase().ends_with("byline")
+    let lower = token.to_ascii_lowercase();
+    let parts: Vec<_> = lower
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty()
+        || parts.iter().any(|part| {
+            matches!(
+                *part,
+                "avatar"
+                    | "bio"
+                    | "date"
+                    | "dateline"
+                    | "description"
+                    | "image"
+                    | "name"
+                    | "photo"
+                    | "picture"
+                    | "role"
+                    | "source"
+                    | "time"
+                    | "timestamp"
+                    | "title"
+            )
+        })
+    {
+        return false;
+    }
+    if matches!(lower.as_str(), "author" | "byline" | "p-author") {
+        return true;
+    }
+    if lower.ends_with("byline") {
+        return true;
+    }
+    let Some(marker) = parts
+        .iter()
+        .position(|part| matches!(*part, "author" | "byline"))
+    else {
+        return false;
+    };
+    if marker == 0 {
+        false
+    } else if marker + 1 == parts.len() {
+        parts[..marker].iter().any(|part| {
+            matches!(
+                *part,
+                "article"
+                    | "blog"
+                    | "c"
+                    | "content"
+                    | "entry"
+                    | "footer"
+                    | "p"
+                    | "post"
+                    | "sidebar"
+            ) || part.contains("meta")
+                || part.eq_ignore_ascii_case("byline")
+        })
+    } else {
+        marker + 2 == parts.len()
+            && parts[marker + 1] == "item"
+            && parts[..marker].iter().any(|part| part.contains("byline"))
+    }
+}
+
+fn is_author_container(dom: &Dom, node: NodeId) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split_ascii_whitespace())
+    .any(is_author_container_token)
+}
+
+fn is_byline_container(dom: &Dom, node: NodeId) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split_ascii_whitespace())
+    .any(|token| {
+        let lower = token.to_ascii_lowercase();
+        lower == "author"
+            || lower == "byline"
+            || lower.ends_with("byline")
+            || lower.contains("byline__author")
+            || lower.contains("byline-author")
+    })
 }
 
 fn metadata_container_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
@@ -1416,20 +1517,8 @@ fn preferred_author_node(dom: &Dom, container: NodeId) -> Option<NodeId> {
     dom.descendants(container)
         .find(|&node| has_itemprop(dom, node, "name"))
         .or_else(|| {
-            dom.descendants(container).find(|&node| {
-                [
-                    dom.attr(node, AttrName::Class),
-                    dom.attr(node, AttrName::Id),
-                ]
-                .into_iter()
-                .flatten()
-                .flat_map(|value| value.split_ascii_whitespace())
-                .any(|token| {
-                    ["author-name", "byline-name", "p-author"]
-                        .iter()
-                        .any(|value| token.eq_ignore_ascii_case(value))
-                })
-            })
+            dom.descendants(container)
+                .find(|&node| is_author_name_node(dom, node))
         })
         .or_else(|| {
             dom.descendants(container).find(|&node| {
@@ -1448,6 +1537,144 @@ fn preferred_author_node(dom: &Dom, container: NodeId) -> Option<NodeId> {
                     && get_inner_text_owned(dom, node).chars().count() <= 80
             })
         })
+}
+
+pub(crate) fn byline_name(dom: &Dom, container: NodeId) -> Option<String> {
+    let value = preferred_author_node(dom, container)
+        .or_else(|| timestamp_author_link(dom, container))
+        .and_then(|node| {
+            dom.attr(node, AttrName::Content)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| author_text_segment(dom, node))
+        })
+        .or_else(|| author_text_segment(dom, container))?;
+    normalize_text(&value)
+}
+
+fn timestamp_author_link(dom: &Dom, container: NodeId) -> Option<NodeId> {
+    let has_timestamp_separator = dom
+        .descendants(container)
+        .filter_map(|node| dom.text_node(node))
+        .any(|text| text.split_whitespace().any(|token| token == "@"));
+    if !has_timestamp_separator {
+        return None;
+    }
+    let mut links = dom.descendants(container).filter(|&node| {
+        dom.tag(node) == Some(Tag::A)
+            && dom.has_non_whitespace_text(node)
+            && dom.normalized_char_count(node) < 100
+    });
+    let link = links.next()?;
+    links.next().is_none().then_some(link)
+}
+
+fn author_text_segment(dom: &Dom, root: NodeId) -> Option<String> {
+    enum Visit {
+        Node(NodeId),
+        Stop,
+    }
+
+    let mut value = String::new();
+    let mut stack: Vec<Visit> = dom.children_rev(root).map(Visit::Node).collect();
+    while let Some(visit) = stack.pop() {
+        let Visit::Node(node) = visit else {
+            break;
+        };
+        if dom.tag(node) == Some(Tag::Br) {
+            append_author_text_segment(&mut value, " ");
+            continue;
+        }
+        if let Some(text) = dom.text_node(node) {
+            if let Some(boundary) = author_timestamp_boundary(text) {
+                append_author_text_segment(&mut value, &text[..boundary]);
+                break;
+            }
+            append_author_text_segment(&mut value, text);
+            continue;
+        }
+        if dom.tag(node) == Some(Tag::Img) {
+            continue;
+        }
+        if is_author_role_node(dom, node) || is_author_timestamp_node(dom, node) {
+            break;
+        }
+        if is_author_name_node(dom, node) {
+            stack.push(Visit::Stop);
+        }
+        stack.extend(dom.children_rev(node).map(Visit::Node));
+    }
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn author_timestamp_boundary(text: &str) -> Option<usize> {
+    written_date(text)
+        .map(|(index, _)| index)
+        .or_else(|| clock_time_boundary(text))
+}
+
+fn is_author_timestamp_node(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::Time)
+        || dom
+            .text_node(node)
+            .is_some_and(|text| author_timestamp_boundary(text).is_some())
+}
+
+fn append_author_text_segment(out: &mut String, text: &str) {
+    let Some(first) = text.chars().find(|character| !character.is_whitespace()) else {
+        if !out.is_empty() {
+            out.push_str(text);
+        }
+        return;
+    };
+    if out.chars().next_back().is_some_and(char::is_alphanumeric) && first.is_alphanumeric() {
+        out.push(' ');
+    }
+    out.push_str(text);
+}
+
+fn is_author_name_node(dom: &Dom, node: NodeId) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split_ascii_whitespace())
+    .any(|token| {
+        let token = token.to_ascii_lowercase();
+        token == "author-name"
+            || token == "byline-name"
+            || token == "byline__author"
+            || token == "byline__author-name"
+            || token == "p-author"
+            || token == "p-name"
+    })
+}
+
+fn is_author_role_node(dom: &Dom, node: NodeId) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split_ascii_whitespace())
+    .any(|token| {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "author-bio"
+                | "author-role"
+                | "author-title"
+                | "author__bio"
+                | "author__role"
+                | "author__title"
+                | "byline-role"
+                | "byline-title"
+                | "byline__role"
+                | "byline__title"
+        )
+    })
 }
 
 fn preferred_byline_section_node(
@@ -1521,6 +1748,22 @@ fn is_byline_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
     is_near_heading(dom, node, heading)
         || (nearest_ancestor_with_tag(dom, node, Tag::Aside).is_none()
             && document_element_distance(dom, node, heading) <= 12)
+}
+
+fn is_profile_author_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
+    if is_near_heading(dom, node, heading) {
+        return true;
+    }
+    let mut current = dom.parent(node);
+    while let Some(ancestor) = current {
+        if (matches!(dom.tag(ancestor), Some(Tag::Header)) || is_author_container(dom, ancestor))
+            && is_near_heading(dom, ancestor, heading)
+        {
+            return true;
+        }
+        current = dom.parent(ancestor);
+    }
+    false
 }
 
 fn document_element_distance(dom: &Dom, first: NodeId, second: NodeId) -> usize {
@@ -1965,8 +2208,10 @@ fn person_name_segment(value: &str) -> &str {
 fn clock_time_boundary(value: &str) -> Option<usize> {
     for (colon, _) in value.match_indices(':') {
         let start = value[..colon]
-            .rfind(char::is_whitespace)
-            .map_or(0, |index| index + 1);
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map_or(0, |(index, character)| index + character.len_utf8());
         let end = value[colon + 1..]
             .find(|character: char| !character.is_ascii_digit())
             .map_or(value.len(), |index| colon + 1 + index);
@@ -2490,6 +2735,10 @@ mod tests {
             Some("Carl Sverre")
         );
         assert_eq!(
+            normalize_person("Contact editor@example.com Editorial team").as_deref(),
+            Some("Contact editor@example.com Editorial team")
+        );
+        assert_eq!(
             normalize_person("Daroc AldenJuly 29, 2026 LSFMM+BPF").as_deref(),
             Some("Daroc Alden")
         );
@@ -2556,6 +2805,81 @@ mod tests {
         assert_eq!(result.authors, ["Jane Doe"]);
         assert_eq!(result.published_time.as_deref(), Some("2026-08-13"));
         assert!(result.section.is_none());
+    }
+
+    #[test]
+    fn does_not_treat_a_multi_author_wrapper_as_one_author() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><div class="authors">By <span class="author"><a href="/author/ada">Ada Lovelace</a></span> and <span class="author"><a href="/author/grace">Grace Hopper</a></span></div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Ada Lovelace", "Grace Hopper"]);
+    }
+
+    #[test]
+    fn ignores_author_cards_as_page_authors() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><p>Article body.</p><section class="profile-card-grid"><div class="author-card"><img src="avatar.jpg" alt="Pat Example" /><p>Pat Example, founder and engineer.</p></div></section></article>"#,
+            None,
+            false,
+        );
+
+        assert!(result.authors.is_empty());
+    }
+
+    #[test]
+    fn ignores_comment_authors_as_page_authors() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><p>Article body.</p><div class="comment-author"><a href="/people/commenter">Commenter</a></div><div class="reply-author">Reply Writer</div></article>"#,
+            None,
+            false,
+        );
+
+        assert!(result.authors.is_empty());
+    }
+
+    #[test]
+    fn excludes_a_bem_byline_role_from_the_author_name() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><div class="byline"><a class="byline__author"><img class="byline__avatar" src="avatar.jpg" />Mark Di Stefano</a><div class="byline__title">News Reporter</div></div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Mark Di Stefano"]);
+    }
+
+    #[test]
+    fn keeps_dates_on_simple_author_containers() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><div class="author">Jane Doe <time>August 13, 2026</time></div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Jane Doe"]);
+        assert_eq!(result.published_time.as_deref(), Some("August 13, 2026"));
+    }
+
+    #[test]
+    fn excludes_nested_roles_from_a_preferred_author_name() {
+        let result = metadata(
+            r#"<article><h1>Page</h1><div class="byline"><span class="author-name">Jane Doe <span class="author-title">Editor</span></span></div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Jane Doe"]);
+    }
+
+    #[test]
+    fn handles_non_ascii_whitespace_before_a_byline_time() {
+        assert_eq!(
+            normalize_person("Jane Doe\u{a0}1:39 PM ET").as_deref(),
+            Some("Jane Doe")
+        );
     }
 
     #[test]
