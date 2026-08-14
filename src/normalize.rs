@@ -1,11 +1,8 @@
 //! Semantic normalization for retained content.
 
-mod callouts;
-mod footnotes;
 mod headings;
 mod images;
 mod lists;
-mod math;
 mod media;
 mod svg;
 
@@ -28,8 +25,8 @@ fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
 /// Normalizes semantic structures that hard cleanup does not remove.
 ///
 /// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
-/// already converted math, media, callouts, and footnotes. Code, list, and
-/// table structures stay in their source shape until semantic compilation.
+/// already protected media that cleanup can remove. Semantic source shapes
+/// stay available until semantic compilation.
 pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     images::deduplicate_selected(dom, root, nodes);
     headings::normalize(dom, root);
@@ -37,11 +34,8 @@ pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut V
 
 /// Captures or protects semantic source data that hard cleanup would otherwise remove.
 pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
-    math::normalize(dom, root);
     svg::normalize(dom, root);
     media::prepare(dom, root);
-    callouts::normalize(dom, root);
-    footnotes::normalize(dom, root);
 }
 
 /// Removes SVG implementation details and replaces accessible charts before scoring.
@@ -59,15 +53,17 @@ pub(crate) fn adjacent_lead_media(dom: &Dom, root: NodeId) -> Option<NodeId> {
 }
 
 pub(crate) fn adopt_external_footnotes(
-    definitions: &footnotes::Definitions,
+    definitions: &crate::document::ExternalFootnoteDefinitions,
     fragment: &mut Dom,
     fragment_root: NodeId,
 ) {
-    footnotes::adopt_external(definitions, fragment, fragment_root);
+    crate::document::adopt_external_footnotes(definitions, fragment, fragment_root);
 }
 
-pub(crate) fn collect_external_footnotes(dom: &Dom) -> footnotes::Definitions {
-    footnotes::collect_external(dom)
+pub(crate) fn collect_external_footnotes(
+    dom: &Dom,
+) -> crate::document::ExternalFootnoteDefinitions {
+    crate::document::collect_external_footnotes(dom)
 }
 
 /// Preserves explicit ARIA document structure in the scoring-only DOM.
@@ -84,7 +80,7 @@ pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
     matches!(dom.tag(node), Some(Tag::H1 | Tag::H2)) || headings::has_primary_role(dom, node)
 }
 
-pub(crate) use math::accessible_math_nodes;
+pub(crate) use crate::document::accessible_math_nodes;
 
 /// Finishes normalization after URL and attribute cleanup.
 ///
@@ -149,7 +145,7 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
             in_preformatted_code[node.index()] && has_text[node.index()];
         if dom.parent(node).is_some()
             && !significant_code_whitespace
-            && dom.attr(node, AttrName::DataMath).is_none()
+            && !crate::document::math_source_is_protected(dom, node)
             && matches!(
                 dom.tag(node),
                 Some(
@@ -477,7 +473,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             r##"<h1>Guide</h1><p>Text<a href="#note">[1]</a></p><aside id="note" role="doc-footnote">A reference.</aside>"##,
         );
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "# Guide\n\nText[^note]\n\n[^note]: A reference.\n"
         );
     }

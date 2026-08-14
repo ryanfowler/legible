@@ -118,6 +118,17 @@ impl<'a> MarkdownRenderer<'a> {
         );
     }
 
+    fn block_contains_only_footnotes(&self, id: DocumentNodeId) -> bool {
+        let mut children = self.document.child_ids(id).peekable();
+        children.peek().is_some()
+            && children.all(|child| {
+                matches!(
+                    self.document.node(child).map(|node| node.kind()),
+                    Some(NodeKind::FootnoteDefinition(_))
+                )
+            })
+    }
+
     fn visible(&self, root: DocumentNodeId) -> bool {
         self.visible.get(&root).copied().unwrap_or(false)
     }
@@ -190,10 +201,19 @@ impl<'a> MarkdownRenderer<'a> {
                 self.tasks.push(Task::Close(Close::Block));
                 self.push_children(id, Mode::Inline);
             }
-            NodeKind::BlockGroup
-            | NodeKind::Figure
-            | NodeKind::Details
-            | NodeKind::DefinitionList => {
+            NodeKind::BlockGroup => {
+                if self.block_contains_only_footnotes(id) {
+                    self.out.limit_trailing_newlines(3);
+                    self.push_children(id, Mode::Block);
+                } else {
+                    if !self.out.in_empty_list_item() {
+                        self.out.ensure_blank_line();
+                    }
+                    self.tasks.push(Task::Close(Close::Block));
+                    self.push_children(id, Mode::Block);
+                }
+            }
+            NodeKind::Figure | NodeKind::Details | NodeKind::DefinitionList => {
                 if !self.out.in_empty_list_item() {
                     self.out.ensure_blank_line();
                 }
@@ -1336,6 +1356,13 @@ impl Output {
         self.line_start = true;
         self.line_text_state = LineTextState::Start;
         self.trailing_newlines += 1;
+    }
+
+    fn limit_trailing_newlines(&mut self, maximum: usize) {
+        while self.trailing_newlines > maximum && self.value.ends_with('\n') {
+            self.value.pop();
+            self.trailing_newlines -= 1;
+        }
     }
 
     fn ensure_blank_line(&mut self) {

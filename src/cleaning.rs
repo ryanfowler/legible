@@ -152,7 +152,8 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     }
 }
 fn is_directly_protected(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
-    dom.attr(id, AttrName::DataFootnote).is_some()
+    crate::document::semantic_source_is_protected(dom, id)
+        || dom.attr(id, AttrName::DataFootnote).is_some()
         || dom.attr(id, AttrName::DataFootnotes).is_some()
         || dom.attr(id, AttrName::DataMath).is_some()
         || matches!(
@@ -183,10 +184,12 @@ fn protected_masks(
     store: &crate::dom::NodeStateStore,
 ) -> (Vec<bool>, Vec<bool>) {
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    let accessible_math = crate::document::accessible_math_nodes(dom, &snapshot);
     let mut directly_protected = vec![false; dom.len()];
     directly_protected[root.index()] = is_directly_protected(dom, root, store);
     for &(node, _) in &snapshot {
-        directly_protected[node.index()] = is_directly_protected(dom, node, store);
+        directly_protected[node.index()] =
+            is_directly_protected(dom, node, store) || accessible_math[node.index()];
     }
     let mut contains_protected = vec![false; dom.len()];
     for &(node, _) in snapshot.iter().rev() {
@@ -749,10 +752,15 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
             .is_some_and(|value| value.starts_with("legible-content"))
             || crate::document::code_class_is_semantic_evidence(dom, id)
             || crate::document::figure_class_is_semantic_evidence(dom, id)
+            || crate::document::callout_class_is_semantic_evidence(dom, id)
+            || crate::document::footnote_class_is_semantic_evidence(dom, id)
+            || crate::document::math_class_is_semantic_evidence(dom, id)
         {
             continue;
         }
-        if is_element_without_content(dom, id) && dom.attr(id, AttrName::DataMath).is_none() {
+        if is_element_without_content(dom, id)
+            && !crate::document::math_source_is_protected(dom, id)
+        {
             dom.detach(id);
             continue;
         }
@@ -845,12 +853,10 @@ pub(crate) fn hard_cleanup(
     nodes: &mut Vec<NodeId>,
 ) {
     nodes.clear();
-    nodes.extend(
-        dom.element_descendants_snapshot_with_depth(root)
-            .into_iter()
-            .map(|(node, _)| node),
-    );
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    nodes.extend(snapshot.iter().map(|(node, _)| *node));
     let (media_sources, _) = crate::document::media_cleanup_evidence(dom, nodes);
+    let accessible_math = crate::document::accessible_math_nodes(dom, &snapshot);
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_none() {
             continue;
@@ -884,9 +890,12 @@ pub(crate) fn hard_cleanup(
                         class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
                     })
                 });
-        let hidden = dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image
-            || !relax_static_visibility && static_visibility
-            || modal;
+        let math_source =
+            crate::document::math_source_is_protected(dom, node) || accessible_math[node.index()];
+        let hidden =
+            dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image && !math_source
+                || !relax_static_visibility && static_visibility && !math_source
+                || modal;
         if relax_static_visibility {
             dom.remove_attr(node, AttrName::Hidden);
             if let Some(classes) = dom.attr(node, AttrName::Class) {
@@ -909,7 +918,7 @@ pub(crate) fn hard_cleanup(
         let executable = matches!(
             tag,
             Tag::Script | Tag::Style | Tag::Template | Tag::Link | Tag::Meta
-        );
+        ) && !math_source;
         let content_checkbox = tag == Tag::Input
             && dom
                 .attr(node, AttrName::Type)
@@ -951,7 +960,8 @@ pub(crate) fn hard_cleanup(
         let control = matches!(
             tag,
             Tag::Input | Tag::Textarea | Tag::Select | Tag::Button | Tag::Datalist | Tag::Option
-        ) && !content_checkbox;
+        ) && !content_checkbox
+            && !crate::document::semantic_source_is_protected(dom, node);
         let disallowed_embed = matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe)
             && !has_allowed_media(dom, node, allowed_media)
             && !media_sources[node.index()];
