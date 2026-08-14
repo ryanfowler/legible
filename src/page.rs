@@ -47,6 +47,14 @@ impl ExtractedPage {
         }
     }
 
+    /// Returns the extracted semantic document.
+    ///
+    /// The document omits site chrome and source HTML implementation details.
+    /// Use it when you need structured content instead of a rendered format.
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
     /// Returns discovered page metadata.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -247,6 +255,9 @@ mod tests {
         assert_eq!(page.markdown(), page.markdown());
         assert_eq!(page.text(), page.text());
         assert_eq!(page.html(), page.html());
+        assert_eq!(page.document().text(), page.text());
+        assert_eq!(page.document().text_length(), page.text_length());
+        assert_eq!(page.document().word_count(), page.word_count());
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
     }

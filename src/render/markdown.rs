@@ -89,7 +89,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn render(mut self) -> String {
-        let roots: SmallVec<[_; 16]> = self.document.roots().collect();
+        let roots: SmallVec<[_; 16]> = self.document.root_ids().collect();
         self.tasks.extend(
             roots
                 .into_iter()
@@ -109,7 +109,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn push_children(&mut self, id: DocumentNodeId, mode: Mode) {
-        let children: SmallVec<[_; 16]> = self.document.children(id).collect();
+        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         self.tasks.extend(
             children
                 .into_iter()
@@ -147,7 +147,7 @@ impl<'a> MarkdownRenderer<'a> {
                 NodeKind::Image(_) if self.config.images => return Some('!'),
                 kind if is_block(kind) => return None,
                 _ => {
-                    let children: SmallVec<[_; 8]> = self.document.children(id).collect();
+                    let children: SmallVec<[_; 8]> = self.document.child_ids(id).collect();
                     nodes.extend(children.into_iter().rev());
                 }
             }
@@ -360,7 +360,7 @@ impl<'a> MarkdownRenderer<'a> {
             .and_then(|value| i32::try_from(value).ok())
             .filter(|value| (1..=999_999_999).contains(value))
             .unwrap_or(1);
-        let children: SmallVec<[_; 16]> = self.document.children(id).collect();
+        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         let mut index = children
             .iter()
             .filter(|child| {
@@ -427,7 +427,7 @@ impl<'a> MarkdownRenderer<'a> {
             has_content: false,
         });
         self.tasks.push(Task::Close(Close::ListItem));
-        let children: SmallVec<[_; 16]> = self.document.children(id).collect();
+        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         for child in children.into_iter().rev() {
             if matches!(
                 self.document.node(child).map(|n| n.kind()),
@@ -458,7 +458,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn task_marker(&self, item: DocumentNodeId) -> Option<(bool, Option<&str>)> {
-        let children: SmallVec<[_; 8]> = self.document.children(item).collect();
+        let children: SmallVec<[_; 8]> = self.document.child_ids(item).collect();
         let mut nodes: SmallVec<[DocumentNodeId; 8]> = children.into_iter().rev().collect();
         while let Some(id) = nodes.pop() {
             match self.document.node(id)?.kind() {
@@ -469,7 +469,7 @@ impl<'a> MarkdownRenderer<'a> {
                 NodeKind::List(_) => {}
                 NodeKind::Image(_) | NodeKind::Media(_) => return None,
                 _ => {
-                    let children: SmallVec<[_; 8]> = self.document.children(id).collect();
+                    let children: SmallVec<[_; 8]> = self.document.child_ids(id).collect();
                     nodes.extend(children.into_iter().rev());
                 }
             }
@@ -479,13 +479,13 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn list_item_has_text(&self, item: DocumentNodeId) -> bool {
         let mut nodes = SmallVec::<[DocumentNodeId; 8]>::new();
-        nodes.extend(self.document.children(item));
+        nodes.extend(self.document.child_ids(item));
         while let Some(id) = nodes.pop() {
             match self.document.node(id).map(|node| node.kind()) {
                 Some(NodeKind::Text(text)) if has_visible_inline_text(text) => return true,
                 Some(NodeKind::List(_)) => {}
                 Some(NodeKind::TaskMarker(_)) => {}
-                Some(_) => nodes.extend(self.document.children(id)),
+                Some(_) => nodes.extend(self.document.child_ids(id)),
                 None => {}
             }
         }
@@ -494,7 +494,7 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn table(&mut self, id: DocumentNodeId) {
         self.out.ensure_blank_line();
-        let children: SmallVec<[_; 16]> = self.document.children(id).collect();
+        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         if self.table_has_spans(id) {
             for child in children.iter().rev().copied() {
                 self.tasks.push(Task::Node(child, Mode::Block));
@@ -514,7 +514,7 @@ impl<'a> MarkdownRenderer<'a> {
             })
             .collect();
         for (index, row) in rows.into_iter().enumerate().rev() {
-            let cells: SmallVec<[_; 32]> = self.document.children(row).collect();
+            let cells: SmallVec<[_; 32]> = self.document.child_ids(row).collect();
             let alignments = cells
                 .iter()
                 .map(
@@ -544,7 +544,7 @@ impl<'a> MarkdownRenderer<'a> {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
-        let cells: SmallVec<[_; 16]> = self.document.children(id).collect();
+        let cells: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         if self.table_depth == 1 {
             self.out.markup("| ");
         }
@@ -564,8 +564,8 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn table_has_spans(&self, table: DocumentNodeId) -> bool {
-        self.document.children(table).any(|row| {
-            self.document.children(row).any(|cell| {
+        self.document.child_ids(table).any(|row| {
+            self.document.child_ids(row).any(|cell| {
                 matches!(
                     self.document.node(cell).map(|node| node.kind()),
                     Some(NodeKind::TableCell(value)) if value.colspan > 1 || value.rowspan > 1
@@ -581,7 +581,7 @@ impl<'a> MarkdownRenderer<'a> {
         }
 
         let mut text = String::new();
-        let children: SmallVec<[_; 16]> = self.document.children(id).collect();
+        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         let mut nodes: SmallVec<[DocumentNodeId; 16]> = children.into_iter().rev().collect();
         while let Some(node_id) = nodes.pop() {
             let Some(node) = self.document.node(node_id) else {
@@ -599,7 +599,7 @@ impl<'a> MarkdownRenderer<'a> {
                 NodeKind::HardBreak => text.push(' '),
                 NodeKind::FootnoteReference(id) => {
                     if let Some(definition) = self.document.footnote(*id) {
-                        text.push_str(&definition.label);
+                        text.push_str(definition.label());
                     }
                 }
                 NodeKind::TaskMarker(marker) => {
@@ -617,7 +617,7 @@ impl<'a> MarkdownRenderer<'a> {
                     if is_block(kind) {
                         text.push(' ');
                     }
-                    let children: SmallVec<[_; 8]> = self.document.children(node_id).collect();
+                    let children: SmallVec<[_; 8]> = self.document.child_ids(node_id).collect();
                     nodes.extend(children.into_iter().rev());
                 }
             }
@@ -627,7 +627,7 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn table_cell_requires_flattening(&self, cell: DocumentNodeId) -> bool {
         let mut blocks = 0;
-        let mut nodes: SmallVec<[DocumentNodeId; 16]> = self.document.children(cell).collect();
+        let mut nodes: SmallVec<[DocumentNodeId; 16]> = self.document.child_ids(cell).collect();
         while let Some(id) = nodes.pop() {
             let Some(node) = self.document.node(id) else {
                 continue;
@@ -646,7 +646,7 @@ impl<'a> MarkdownRenderer<'a> {
                 }
                 _ => {}
             }
-            nodes.extend(self.document.children(id));
+            nodes.extend(self.document.child_ids(id));
         }
         false
     }
@@ -654,7 +654,7 @@ impl<'a> MarkdownRenderer<'a> {
     fn footnote_reference(&mut self, id: FootnoteId) {
         if let Some(definition) = self.document.footnote(id) {
             self.out.markup("[^");
-            self.out.footnote_label(&definition.label);
+            self.out.footnote_label(definition.label());
             self.out.markup("]");
         }
     }
@@ -665,11 +665,11 @@ impl<'a> MarkdownRenderer<'a> {
         };
         self.out.ensure_blank_line();
         self.out.markup("[^");
-        self.out.footnote_label(&definition.label);
+        self.out.footnote_label(definition.label());
         self.out.markup("]: ");
         self.out.prefixes.push(Prefix::Indent(4));
         self.tasks.push(Task::Close(Close::Footnote));
-        let children: SmallVec<[_; 8]> = self.document.children(node).collect();
+        let children: SmallVec<[_; 8]> = self.document.child_ids(node).collect();
         for (index, child) in children.into_iter().enumerate().rev() {
             let mode = if index == 0
                 && matches!(
@@ -772,14 +772,14 @@ impl<'a> MarkdownRenderer<'a> {
 fn compute_visibility(document: &Document, images: bool) -> HashMap<DocumentNodeId, bool> {
     let mut visible = HashMap::with_capacity(document.len());
     let mut tasks = Vec::with_capacity(32);
-    tasks.extend(document.roots().map(|root| (root, false)));
+    tasks.extend(document.root_ids().map(|root| (root, false)));
     while let Some((id, visited)) = tasks.pop() {
         let Some(node) = document.node(id) else {
             continue;
         };
         if !visited {
             tasks.push((id, true));
-            tasks.extend(document.children(id).map(|child| (child, false)));
+            tasks.extend(document.child_ids(id).map(|child| (child, false)));
             continue;
         }
         let value = match node.kind() {
@@ -793,7 +793,7 @@ fn compute_visibility(document: &Document, images: bool) -> HashMap<DocumentNode
                 .is_some_and(has_visible_inline_text),
             NodeKind::InlineMath(_) | NodeKind::DisplayMath(_) | NodeKind::Media(_) => true,
             _ => document
-                .children(id)
+                .child_ids(id)
                 .any(|child| visible.get(&child).copied().unwrap_or(false)),
         };
         visible.insert(id, value);
@@ -1516,7 +1516,7 @@ mod tests {
     use super::*;
     use crate::document::{
         CodeBlock, DocumentBuilder, Image, List, ListKind, MathFormat, MathValue, NodeKind, Table,
-        TableCell, TaskMarker,
+        TableCell, TaskMarker, TextValue,
     };
 
     #[test]
@@ -1524,7 +1524,7 @@ mod tests {
         let mut builder = DocumentBuilder::with_capacity(3);
         let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
         builder
-            .append(Some(paragraph), NodeKind::InlineCode("a`b".into()))
+            .append(Some(paragraph), NodeKind::InlineCode(TextValue::new("a`b")))
             .unwrap();
         builder
             .append(
@@ -1687,7 +1687,7 @@ mod tests {
                 width: None,
                 height: None,
             }),
-            NodeKind::InlineCode("a|b".into()),
+            NodeKind::InlineCode(TextValue::new("a|b")),
         ] {
             let cell = builder
                 .append(

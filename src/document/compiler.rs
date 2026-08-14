@@ -237,7 +237,7 @@ pub(crate) fn compile_document(
         if tag == Tag::Code {
             builder.append(
                 scope.parent,
-                NodeKind::InlineCode(super::text::preformatted_text(&dom.text(node))),
+                NodeKind::InlineCode(super::TextValue::new(dom.text(node))),
             )?;
             continue;
         }

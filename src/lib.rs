@@ -55,7 +55,7 @@ mod candidate;
 mod cleaning;
 mod constants;
 mod diagnostics;
-mod document;
+pub mod document;
 mod dom;
 mod error;
 mod extraction;
@@ -80,6 +80,11 @@ pub use diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
     ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
     NormalizationCountsInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+};
+pub use document::{
+    Callout, CalloutKind, CodeBlock, Document, DocumentNode, FootnoteDefinition, FootnoteId, Image,
+    Link, List, ListKind, MathFormat, MathValue, Media, MediaKind, NodeKind, Table, TableAlignment,
+    TableCell, TaskMarker, TextValue,
 };
 pub use error::{Error, Result};
 pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{Document, DocumentNode, DocumentNodeId, FootnoteDefinition, FootnoteId, NodeKind};
+use super::{ArenaNode, Document, DocumentNodeId, FootnoteId, FootnoteRecord, NodeKind, TextValue};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -15,12 +15,12 @@ pub(crate) enum BuildError {
 
 /// Builds sibling links while keeping per-node child storage out of the document.
 pub(crate) struct DocumentBuilder {
-    nodes: Vec<DocumentNode>,
+    nodes: Vec<ArenaNode>,
     roots: Vec<DocumentNodeId>,
     last_children: Vec<Option<DocumentNodeId>>,
     pending_spaces: Vec<bool>,
     pending_root_space: bool,
-    footnotes: Vec<FootnoteDefinition>,
+    footnotes: Vec<FootnoteRecord>,
     footnote_index: HashMap<FootnoteId, usize>,
 }
 
@@ -58,10 +58,10 @@ impl DocumentBuilder {
                 && let NodeKind::Text(text) = &mut self.nodes[previous.index()].kind
             {
                 if !text.ends_with(' ') {
-                    text.push(' ');
+                    text.as_mut_string().push(' ');
                 }
             } else {
-                self.append_raw(parent, NodeKind::Text(" ".into()))?;
+                self.append_raw(parent, NodeKind::Text(TextValue::new(" ")))?;
             }
         }
         self.append_raw(parent, kind)
@@ -74,7 +74,7 @@ impl DocumentBuilder {
     ) -> Result<DocumentNodeId, BuildError> {
         let raw = u32::try_from(self.nodes.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let id = DocumentNodeId(raw);
-        self.nodes.push(DocumentNode {
+        self.nodes.push(ArenaNode {
             kind,
             first_child: None,
             next_sibling: None,
@@ -131,10 +131,11 @@ impl DocumentBuilder {
         if let Some(previous) = previous
             && let NodeKind::Text(existing) = &mut self.nodes[previous.index()].kind
         {
-            super::text::merge_prose(existing, &normalized);
+            super::text::merge_prose(existing.as_mut_string(), &normalized);
             return Ok(Some(previous));
         }
-        self.append(parent, NodeKind::Text(normalized)).map(Some)
+        self.append(parent, NodeKind::Text(TextValue::new(normalized)))
+            .map(Some)
     }
 
     pub(crate) fn kind(&self, id: DocumentNodeId) -> Option<&NodeKind> {
@@ -155,7 +156,7 @@ impl DocumentBuilder {
             return Err(BuildError::DuplicateFootnoteDefinition);
         }
         self.footnote_index.insert(id, self.footnotes.len());
-        self.footnotes.push(FootnoteDefinition {
+        self.footnotes.push(FootnoteRecord {
             id,
             label: label.into(),
             node,
@@ -169,7 +170,7 @@ impl DocumentBuilder {
             .iter()
             .all(|definition| definition.id.index() < footnotes.len())
         {
-            let mut indexed: Vec<Option<FootnoteDefinition>> = std::iter::repeat_with(|| None)
+            let mut indexed: Vec<Option<FootnoteRecord>> = std::iter::repeat_with(|| None)
                 .take(footnotes.len())
                 .collect();
             for definition in footnotes.drain(..) {

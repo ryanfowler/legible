@@ -21,6 +21,39 @@ pub(crate) fn walk_text(
     preserve_line_breaks: bool,
     capacity: Option<usize>,
 ) -> (Option<String>, DocumentStats) {
+    let roots: SmallVec<[_; 16]> = document.root_ids().collect();
+    walk_text_from_roots(
+        document,
+        &roots,
+        block_newlines,
+        preserve_line_breaks,
+        capacity,
+    )
+}
+
+pub(crate) fn render_document_text(document: &Document) -> String {
+    walk_text(document, false, false, Some(0))
+        .0
+        .unwrap_or_default()
+}
+
+pub(crate) fn measure_document(document: &Document) -> DocumentStats {
+    walk_text(document, false, false, None).1
+}
+
+pub(crate) fn render_node_text(document: &Document, root: DocumentNodeId) -> String {
+    walk_text_from_roots(document, &[root], false, false, Some(0))
+        .0
+        .unwrap_or_default()
+}
+
+fn walk_text_from_roots(
+    document: &Document,
+    roots: &[DocumentNodeId],
+    block_newlines: bool,
+    preserve_line_breaks: bool,
+    capacity: Option<usize>,
+) -> (Option<String>, DocumentStats) {
     enum Task {
         Node(DocumentNodeId),
         Boundary(Separator),
@@ -33,7 +66,7 @@ pub(crate) fn walk_text(
     };
     let mut output = NormalizedOutput::new(capacity);
     let mut tasks = SmallVec::<[Task; 32]>::new();
-    tasks.extend(document.roots().rev().map(Task::Node));
+    tasks.extend(roots.iter().rev().copied().map(Task::Node));
     while let Some(task) = tasks.pop() {
         match task {
             Task::Boundary(separator) => output.separator(separator),
@@ -80,7 +113,7 @@ pub(crate) fn walk_text(
                             output.separator(block);
                             tasks.push(Task::Boundary(block));
                         }
-                        let children: SmallVec<[_; 8]> = document.children(id).collect();
+                        let children: SmallVec<[_; 8]> = document.child_ids(id).collect();
                         tasks.extend(children.into_iter().rev().map(Task::Node));
                     }
                 }

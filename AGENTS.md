@@ -55,7 +55,7 @@ The extraction pipeline flows through these stages:
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
-| `document/` | Crate-private arena semantic IR, normalized-DOM compiler, validation, and stable test debug output; production pages retain this document instead of a DOM |
+| `document/` | Public read-only semantic IR plus internal normalized-DOM compiler, validation, and stable test debug output; production pages retain this document instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -133,6 +133,7 @@ let page = extract(html, None)?;
 
 let extractor = Extractor::builder().structured_data(true).build();
 let page = extractor.extract(html, None)?;
+let document = page.document();
 ```
 
 `ExtractedPage` owns the semantic `Document`. It provides lazy HTML, Markdown, and text methods plus page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
