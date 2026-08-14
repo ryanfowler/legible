@@ -42,6 +42,7 @@
 #![allow(dead_code)]
 
 mod builder;
+mod code;
 mod compiler;
 pub(crate) mod stats;
 mod text;
@@ -49,6 +50,12 @@ mod uri;
 mod validate;
 
 pub(crate) use builder::{BuildError, DocumentBuilder};
+pub(crate) use code::{
+    class_is_semantic_evidence as code_class_is_semantic_evidence,
+    count_blocks as source_code_block_count, is_gutter_table as is_code_gutter_table,
+    is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
+    multiline_content as code_multiline_content,
+};
 pub(crate) use compiler::{CompileContext, compile_document};
 pub(crate) use stats::DocumentStats;
 pub(crate) use uri::{DestinationKind, safe_destination};

@@ -16,7 +16,10 @@ pub(super) fn normalize_layout_tables(dom: &mut Dom, root: NodeId) -> usize {
     // when an outer layout table is flattened afterward.
     let mut flattened = 0;
     for table in tables.into_iter().rev() {
-        if dom.parent(table).is_none() || !is_layout_table(dom, table) {
+        if dom.parent(table).is_none()
+            || crate::document::is_code_gutter_table(dom, table)
+            || !is_layout_table(dom, table)
+        {
             continue;
         }
         flatten(dom, table);

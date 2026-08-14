@@ -880,6 +880,7 @@ pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<Nod
         if dom
             .attr(id, AttrName::Id)
             .is_some_and(|value| value.starts_with("legible-content"))
+            || crate::document::code_class_is_semantic_evidence(dom, id)
         {
             continue;
         }

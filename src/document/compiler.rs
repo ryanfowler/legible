@@ -62,11 +62,21 @@ pub(crate) fn compile_document(
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
     let mut block_descendants = vec![false; dom.len()];
+    let mut code_blocks = vec![false; dom.len()];
     let mut meaningful_content = vec![false; dom.len()];
     let mut visible_text_content = vec![false; dom.len()];
     let mut first_visible = vec![None; dom.len()];
     let mut last_visible = vec![None; dom.len()];
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    let multiline_content = super::code::multiline_content(dom, &nodes);
+    for &node in &nodes {
+        code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
+            || super::code::is_multiline_orphan_with_evidence(
+                dom,
+                node,
+                multiline_content[node.index()],
+            );
+    }
     for &node in nodes.iter().rev() {
         if let Some(text) = dom.text_node(node) {
             first_visible[node.index()] = text.chars().find(|character| !character.is_whitespace());
@@ -84,7 +94,9 @@ pub(crate) fn compile_document(
             }
         }
         block_descendants[node.index()] = dom.children(node).any(|child| {
-            dom.tag(child).is_some_and(is_block_tag) || block_descendants[child.index()]
+            code_blocks[child.index()]
+                || dom.tag(child).is_some_and(is_block_tag)
+                || block_descendants[child.index()]
         });
         visible_text_content[node.index()] = dom
             .text_node(node)
@@ -226,12 +238,28 @@ pub(crate) fn compile_document(
             continue;
         }
 
-        if tag == Tag::Pre {
-            let code = CodeBlock {
-                language: code_language(dom, node).map(Into::into),
-                text: super::text::preformatted_text(&dom.text(node)),
-            };
-            builder.append(scope.parent, NodeKind::CodeBlock(code))?;
+        if tag == Tag::Table
+            && let Some(code) = super::code::recognize_gutter_table(dom, node)
+        {
+            builder.append(
+                scope.parent,
+                NodeKind::CodeBlock(CodeBlock {
+                    language: code.language.map(Into::into),
+                    text: code.text.into(),
+                }),
+            )?;
+            continue;
+        }
+        if code_blocks[node.index()]
+            && let Some(code) = super::code::recognize_known_block(dom, node, true)
+        {
+            builder.append(
+                scope.parent,
+                NodeKind::CodeBlock(CodeBlock {
+                    language: code.language.map(Into::into),
+                    text: code.text.into(),
+                }),
+            )?;
             continue;
         }
         if tag == Tag::Code {
@@ -614,20 +642,6 @@ fn footnote_id(
     Ok(id)
 }
 
-fn code_language(dom: &Dom, pre: NodeId) -> Option<&str> {
-    dom.element_children(pre)
-        .find(|&child| dom.tag(child) == Some(Tag::Code))
-        .and_then(|code| dom.attr(code, AttrName::DataLanguage))
-        .or_else(|| dom.attr(pre, AttrName::DataLanguage))
-        .filter(|language| {
-            !language.is_empty()
-                && language.len() <= 32
-                && language.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'#' | b'-' | b'_' | b'.')
-                })
-        })
-}
-
 fn positive_u32(value: Option<&str>) -> Option<u32> {
     value?.trim().parse().ok().filter(|value| *value > 0)
 }
@@ -745,6 +759,19 @@ mod tests {
     }
 
     #[test]
+    fn compiles_highlighted_code_to_one_semantic_leaf() {
+        let document = compile(
+            r#"<div class="highlight language-rust"><pre><code><span data-line><span class="line-number">1</span><span>fn main() {</span></span><span data-line><span class="line-number">2</span><span>    run();</span></span><span data-line><span class="line-number">3</span><span>}</span></span></code></pre></div>"#,
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            "BlockGroup\n  CodeBlock(language=Some(\"rust\"), text=\"fn main() {\\n    run();\\n}\")\n"
+        );
+        assert_eq!(document.len(), 2);
+    }
+
+    #[test]
     fn preserves_spaces_from_empty_inline_wrappers() {
         let document = compile("<p>a<em> </em><span> </span>b</p>", None);
         assert_eq!(document.debug_tree(), "Paragraph\n  Text(\"a b\")\n");
@@ -786,6 +813,20 @@ mod tests {
             document.debug_tree(),
             "Paragraph\n  Text(\"safe labeldiagram\")\n"
         );
+    }
+
+    #[test]
+    fn deeply_nested_multiline_code_compiles_in_linear_passes() {
+        const DEPTH: usize = 5_000;
+        let mut html = "<code>".repeat(DEPTH);
+        html.push_str("deep\ncode");
+        html.push_str(&"</code>".repeat(DEPTH));
+        let document = compile(&html, None);
+        assert_eq!(document.len(), 1);
+        assert!(matches!(
+            document.roots().next().map(|node| node.kind()),
+            Some(NodeKind::CodeBlock(_))
+        ));
     }
 
     #[test]

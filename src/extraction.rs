@@ -1959,6 +1959,7 @@ impl<'a> ContentExtractor<'a> {
             }
 
             if !self.options.keep_classes
+                && !crate::document::code_class_is_semantic_evidence(&self.dom, id)
                 && let Some(classes) = self.dom.attr(id, AttrName::Class)
             {
                 class_buffer.clear();
@@ -2025,21 +2026,16 @@ impl<'a> ContentExtractor<'a> {
         }
         let flattened_layout_tables = self.diagnostic_normalization.flattened_layout_tables;
         let mut counts = NormalizationCountsInfo {
+            code_blocks: crate::document::source_code_block_count(&self.dom, root),
             flattened_layout_tables,
             ..NormalizationCountsInfo::default()
         };
         for node in self.dom.descendants(root) {
             match self.dom.tag(node) {
-                Some(Tag::Pre)
-                    if self
-                        .dom
-                        .element_children(node)
-                        .any(|child| self.dom.tag(child) == Some(Tag::Code)) =>
-                {
-                    counts.code_blocks += 1;
-                }
                 Some(Tag::Img) => counts.images += 1,
-                Some(Tag::Table) => counts.tables += 1,
+                Some(Tag::Table) if !crate::document::is_code_gutter_table(&self.dom, node) => {
+                    counts.tables += 1;
+                }
                 _ => {}
             }
             counts.footnote_references +=

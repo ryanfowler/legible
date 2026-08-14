@@ -73,7 +73,7 @@ fn normalized_fragment(kind: &str, target_bytes: usize) -> String {
                 "<section><h2>Method {index}</h2><p>This method parses a representative input value.</p><pre><code class='language-rust' data-language='rust'>let value_{index} = parse(input);</code></pre><table><tr><th>Field</th><th>Value</th></tr><tr><td>index</td><td>{index}</td></tr></table></section>"
             )),
             "code" => html.push_str(&format!(
-                "<section><h2>Example {index}</h2><pre><code class='language-rust' data-language='rust'>fn example_{index}() {{\n    println!(\"value {index}\");\n}}\n</code></pre></section>"
+                "<section><h2>Example {index}</h2><div class='highlight language-rust'><pre><code><span data-line><span class='line-number'>{index}</span><span>fn example_{index}() {{</span></span><span data-line>    println!(\"value {index}\");</span><span data-line>}}</span></code></pre></div></section>"
             )),
             "tables" => html.push_str(&format!(
                 "<section><h2>Dataset {index}</h2><table><thead><tr><th>Name</th><th>Value</th><th>Status</th></tr></thead><tbody><tr><td>entry-{index}</td><td>{index}</td><td>ready</td></tr><tr><td>alternate-{index}</td><td>{}</td><td>complete</td></tr></tbody></table></section>", index + 1

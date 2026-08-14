@@ -50,12 +50,12 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
-| `normalize.rs` / `normalize/` | Ordered semantic passes for math, SVG charts, media, callouts, images, headings, lists, code, figures, footnotes, tables, and wrappers |
+| `normalize.rs` / `normalize/` | Ordered semantic passes for math, SVG charts, media, callouts, images, headings, lists, figures, footnotes, tables, and wrappers |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
-| `document/` | Public read-only semantic IR plus internal normalized-DOM compiler, validation, and stable test debug output; production pages retain this document instead of a DOM |
+| `document/` | Public read-only semantic IR plus internal normalized-DOM compiler, source-code recognition, validation, and stable test debug output; production pages retain this document instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -84,7 +84,7 @@ These invariants are costly to violate:
 - **Use static image evidence together.** Small dimensions are a signal. Protect described images, math, responsive sources, and captioned figures.
 - **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal. Breadcrumb, subscription, related-content, and document-chrome cleanup must also use structure and document position. Preserve article-contained regions, pricing content, meaningful media, and identity text.
-- **Strip only explicit code gutters.** Treat syntax-highlighter line numbers as presentation, but preserve numeric source code and source-line wrappers.
+- **Compile code directly.** The semantic compiler recognizes source code, language hints, line wrappers, and explicit syntax-highlighter gutters without renderer-oriented DOM rewrites. Preserve numeric source code and source-line wrappers.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Canonicalize discussions once.** Specialized discussion extractors must use the shared builder for primary posts, reply metadata, rich reply bodies, and retained nesting.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.

@@ -328,6 +328,28 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_count_all_compiler_code_shapes() {
+        let html = r#"<main><article><h1>Code reference</h1><p>This guide contains several code forms with enough useful explanation for stable extraction and diagnostics.</p><pre>plain preformatted text</pre><div><code>orphan
+multiline</code></div><table role="presentation" class="highlighttable"><tr><td class="linenos"><pre>1</pre></td><td><pre><code>gutter source</code></pre></td></tr></table><p>A final paragraph explains the examples and provides a complete conclusion for the reader.</p></article></main>"#;
+        let page = Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let counts = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap()
+            .normalization;
+
+        assert_eq!(counts.code_blocks, 3);
+        assert_eq!(counts.tables, 0);
+    }
+
+    #[test]
     fn diagnostics_report_specialized_extractor_identity() {
         let page = Extractor::builder()
             .diagnostics(true)
