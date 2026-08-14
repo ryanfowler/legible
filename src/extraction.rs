@@ -361,6 +361,7 @@ impl<'a> ContentExtractor<'a> {
             diagnostics,
             self.metadata_diagnostics,
             retained_structured_data,
+            self.base_uri.as_ref(),
         ))
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
