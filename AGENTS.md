@@ -55,6 +55,7 @@ The extraction pipeline flows through these stages:
 | `normalize/tables.rs` | Layout-table classification and prose flattening |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
+| `document/` | Crate-private arena semantic IR, normalized-DOM compiler, validation, and stable test debug output; production pages remain DOM-backed during migration |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |

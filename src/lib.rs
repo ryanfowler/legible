@@ -55,6 +55,7 @@ mod candidate;
 mod cleaning;
 mod constants;
 mod diagnostics;
+mod document;
 mod dom;
 mod error;
 mod extraction;
