@@ -1,0 +1,4 @@
+# Keep HTML fixtures out of GitHub's language statistics.
+tests/**/*.html linguist-detectable=false
+benches/fixtures/**/*.html linguist-detectable=false
+benchmarks/quality/**/*.html linguist-detectable=false
