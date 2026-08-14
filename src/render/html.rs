@@ -13,7 +13,12 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
 
     let mut output = String::with_capacity(capacity.max(512));
     let mut tasks = Vec::with_capacity(32);
-    tasks.extend(document.roots().rev().map(|root| Task::Node(root, false)));
+    tasks.extend(
+        document
+            .root_ids()
+            .rev()
+            .map(|root| Task::Node(root, false)),
+    );
     while let Some(task) = tasks.pop() {
         match task {
             Task::Close(tag) => {
@@ -96,7 +101,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                         output.push_str(tag);
                         output.push_str(" id=\"footnote-");
                         if let Some(definition) = document.footnote(*footnote) {
-                            escape_attribute(&mut output, &definition.label);
+                            escape_attribute(&mut output, definition.label());
                         }
                         output.push('"');
                         if !parent_is_list {
@@ -166,9 +171,9 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     NodeKind::FootnoteReference(footnote) => {
                         if let Some(definition) = document.footnote(*footnote) {
                             output.push_str("<sup><a href=\"#footnote-");
-                            escape_attribute(&mut output, &definition.label);
+                            escape_attribute(&mut output, definition.label());
                             output.push_str("\" role=\"doc-noteref\">");
-                            escape_text(&mut output, &definition.label);
+                            escape_text(&mut output, definition.label());
                             output.push_str("</a></sup>");
                         }
                         None
@@ -229,7 +234,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 };
                 if let Some(tag) = close {
                     tasks.push(Task::Close(tag));
-                    let children: SmallVec<[_; 16]> = document.children(id).collect();
+                    let children: SmallVec<[_; 16]> = document.child_ids(id).collect();
                     let parent_is_list = matches!(node.kind(), NodeKind::List(_));
                     tasks.extend(
                         children

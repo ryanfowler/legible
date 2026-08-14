@@ -1,7 +1,43 @@
 //! Semantic document intermediate representation.
 //!
-//! This module is crate-private while the representation is under development.
-//! The arena keeps traversal and destruction stack-safe for deeply nested input.
+//! [`Document`] is a read-only semantic representation. It is not an HTML DOM or a
+//! CommonMark syntax tree. Legible intentionally removes site chrome, source
+//! classes and IDs, arbitrary CSS, and implementation wrappers. It normalizes
+//! retained HTML structures into useful semantic nodes. This representation is
+//! lossy: callers cannot reconstruct unsupported elements, source attributes,
+//! wrapper structure, or source whitespace from it.
+//!
+//! Traverse roots and children to inspect structured extracted content:
+//!
+//! ```rust
+//! use legible::{NodeKind, extract};
+//!
+//! let page = extract(
+//!     r#"<main>
+//!       <h1>API guide</h1>
+//!       <p>Read the <a href="/reference">reference</a>.</p>
+//!       <pre><code class="language-rust">fn main() {}</code></pre>
+//!       <table><tr><th>Name</th></tr><tr><td>value</td></tr></table>
+//!     </main>"#,
+//!     Some("https://example.com/docs"),
+//! )?;
+//!
+//! let document = page.document();
+//! let mut nodes: Vec<_> = document.roots().rev().collect();
+//! while let Some(node) = nodes.pop() {
+//!     match node.kind() {
+//!         NodeKind::Heading { level } => println!("h{level}: {}", node.text()),
+//!         NodeKind::Paragraph => println!("paragraph: {}", node.text()),
+//!         NodeKind::Link(link) => println!("link: {}", link.destination()),
+//!         NodeKind::CodeBlock(code) => println!("code: {}", code.text()),
+//!         NodeKind::Table(table) => println!("table: {:?}", table.column_count()),
+//!         _ => {}
+//!     }
+//!     let children: Vec<_> = node.children().collect();
+//!     nodes.extend(children.into_iter().rev());
+//! }
+//! # Ok::<(), legible::Error>(())
+//! ```
 
 #![allow(dead_code)]
 
@@ -29,26 +65,65 @@ impl DocumentNodeId {
     }
 }
 
-/// A semantic document stored as a compact node arena.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Document {
-    nodes: Vec<DocumentNode>,
+/// The structured semantic content extracted from one page.
+pub struct Document {
+    nodes: Vec<ArenaNode>,
     roots: Vec<DocumentNodeId>,
-    footnotes: Vec<FootnoteDefinition>,
+    footnotes: Vec<FootnoteRecord>,
 }
 
 impl Document {
-    pub(crate) fn roots(
+    /// Iterates over the top-level semantic nodes in document order.
+    pub fn roots(&self) -> impl ExactSizeIterator<Item = DocumentNode<'_>> + DoubleEndedIterator {
+        self.roots
+            .iter()
+            .copied()
+            .map(|id| DocumentNode { document: self, id })
+    }
+
+    /// Returns the normalized text for the complete document.
+    pub fn text(&self) -> String {
+        stats::render_document_text(self)
+    }
+
+    /// Returns the number of characters in [`Self::text`].
+    pub fn text_length(&self) -> usize {
+        stats::measure_document(self).text_length
+    }
+
+    /// Returns the number of words in [`Self::text`].
+    pub fn word_count(&self) -> usize {
+        stats::measure_document(self).word_count
+    }
+
+    /// Resolves a footnote ID to its definition.
+    pub fn footnote(&self, id: FootnoteId) -> Option<FootnoteDefinition<'_>> {
+        self.footnote_record(id)
+            .map(|definition| FootnoteDefinition {
+                document: self,
+                definition,
+            })
+    }
+
+    /// Iterates over footnote definitions in semantic ID order.
+    pub fn footnotes(&self) -> impl ExactSizeIterator<Item = FootnoteDefinition<'_>> {
+        self.footnotes.iter().map(|definition| FootnoteDefinition {
+            document: self,
+            definition,
+        })
+    }
+
+    pub(crate) fn root_ids(
         &self,
     ) -> impl ExactSizeIterator<Item = DocumentNodeId> + DoubleEndedIterator + '_ {
         self.roots.iter().copied()
     }
 
-    pub(crate) fn node(&self, id: DocumentNodeId) -> Option<&DocumentNode> {
+    pub(crate) fn node(&self, id: DocumentNodeId) -> Option<&ArenaNode> {
         self.nodes.get(id.index())
     }
 
-    pub(crate) fn children(&self, parent: DocumentNodeId) -> Children<'_> {
+    pub(crate) fn child_ids(&self, parent: DocumentNodeId) -> Children<'_> {
         Children {
             document: self,
             next: self.first_child(parent),
@@ -63,14 +138,10 @@ impl Document {
         self.node(node).and_then(|node| node.next_sibling)
     }
 
-    pub(crate) fn footnote(&self, id: FootnoteId) -> Option<&FootnoteDefinition> {
+    pub(crate) fn footnote_record(&self, id: FootnoteId) -> Option<&FootnoteRecord> {
         self.footnotes
             .get(id.index())
             .filter(|definition| definition.id == id)
-    }
-
-    pub(crate) fn footnotes(&self) -> &[FootnoteDefinition] {
-        &self.footnotes
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -104,20 +175,49 @@ impl Iterator for Children<'_> {
 
 /// One semantic node and its arena links.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DocumentNode {
+pub(crate) struct ArenaNode {
     kind: NodeKind,
     first_child: Option<DocumentNodeId>,
     next_sibling: Option<DocumentNodeId>,
 }
 
-impl DocumentNode {
+impl ArenaNode {
     pub(crate) fn kind(&self) -> &NodeKind {
         &self.kind
     }
 }
 
+/// A read-only view of one semantic node.
+#[derive(Clone, Copy)]
+pub struct DocumentNode<'a> {
+    document: &'a Document,
+    id: DocumentNodeId,
+}
+
+impl<'a> DocumentNode<'a> {
+    /// Returns the semantic kind and its associated value.
+    pub fn kind(self) -> &'a NodeKind {
+        &self.document.nodes[self.id.index()].kind
+    }
+
+    /// Iterates over direct semantic children in document order.
+    pub fn children(self) -> impl Iterator<Item = DocumentNode<'a>> + 'a {
+        self.document.child_ids(self.id).map(|id| DocumentNode {
+            document: self.document,
+            id,
+        })
+    }
+
+    /// Returns normalized text from this node and all its descendants.
+    pub fn text(self) -> String {
+        stats::render_node_text(self.document, self.id)
+    }
+}
+
+/// The semantic meaning of a document node.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum NodeKind {
+#[non_exhaustive]
+pub enum NodeKind {
     Paragraph,
     /// A semantic block boundary with no more specific meaning.
     BlockGroup,
@@ -142,11 +242,11 @@ pub(crate) enum NodeKind {
     DefinitionDescription,
     Callout(Callout),
     FootnoteDefinition(FootnoteId),
-    Text(String),
+    Text(TextValue),
     Emphasis,
     Strong,
     Strikethrough,
-    InlineCode(Box<str>),
+    InlineCode(TextValue),
     Link(Link),
     Image(Image),
     HardBreak,
@@ -157,20 +257,79 @@ pub(crate) enum NodeKind {
     Media(Media),
 }
 
+/// Canonical text stored by a semantic leaf node.
+///
+/// The wrapper keeps the retained storage format out of the public API.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CodeBlock {
+pub struct TextValue(String);
+
+impl TextValue {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub(crate) fn as_mut_string(&mut self) -> &mut String {
+        &mut self.0
+    }
+
+    /// Returns the canonical text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TextValue {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::ops::Deref for TextValue {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeBlock {
     pub(crate) language: Option<Box<str>>,
     pub(crate) text: Box<str>,
 }
 
+impl CodeBlock {
+    /// Returns the detected language, when available.
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
+    /// Returns the normalized preformatted code.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Link {
+pub struct Link {
     pub(crate) destination: Box<str>,
     pub(crate) title: Option<Box<str>>,
 }
 
+impl Link {
+    /// Returns the resolved, policy-validated destination.
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    /// Returns the optional link title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Image {
+pub struct Image {
     pub(crate) source: Box<str>,
     pub(crate) alt: Box<str>,
     pub(crate) title: Option<Box<str>>,
@@ -178,47 +337,118 @@ pub(crate) struct Image {
     pub(crate) height: Option<u32>,
 }
 
+impl Image {
+    /// Returns the selected, policy-validated image source.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    /// Returns the image alternative text.
+    pub fn alt(&self) -> &str {
+        &self.alt
+    }
+    /// Returns the optional image title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+    /// Returns the declared width in pixels, when available.
+    pub fn width(&self) -> Option<u32> {
+        self.width
+    }
+    /// Returns the declared height in pixels, when available.
+    pub fn height(&self) -> Option<u32> {
+        self.height
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct List {
+pub struct List {
     pub(crate) kind: ListKind,
     pub(crate) start: Option<i64>,
 }
 
+impl List {
+    /// Returns whether this list is ordered or unordered.
+    pub fn kind(&self) -> ListKind {
+        self.kind
+    }
+    /// Returns the first ordinal for an ordered list.
+    pub fn start(&self) -> Option<i64> {
+        self.start
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ListKind {
+pub enum ListKind {
     Ordered,
     Unordered,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Table {
+pub struct Table {
     /// Exact width when no row spans make grid placement output-specific.
     pub(crate) column_count: Option<u32>,
 }
 
+impl Table {
+    /// Returns the exact column count when the semantic grid has one.
+    pub fn column_count(&self) -> Option<u32> {
+        self.column_count
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TableCell {
+pub struct TableCell {
     pub(crate) header: bool,
     pub(crate) colspan: u32,
     pub(crate) rowspan: u32,
     pub(crate) alignment: Option<TableAlignment>,
 }
 
+impl TableCell {
+    /// Returns true for a semantic header cell.
+    pub fn is_header(&self) -> bool {
+        self.header
+    }
+    /// Returns the column span. This value is at least one.
+    pub fn colspan(&self) -> u32 {
+        self.colspan
+    }
+    /// Returns the row span. This value is at least one.
+    pub fn rowspan(&self) -> u32 {
+        self.rowspan
+    }
+    /// Returns the normalized cell alignment.
+    pub fn alignment(&self) -> Option<TableAlignment> {
+        self.alignment
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TableAlignment {
+pub enum TableAlignment {
     Left,
     Center,
     Right,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Callout {
+pub struct Callout {
     pub(crate) kind: CalloutKind,
     pub(crate) title: Option<Box<str>>,
 }
 
+impl Callout {
+    /// Returns the normalized callout category.
+    pub fn kind(&self) -> CalloutKind {
+        self.kind
+    }
+    /// Returns the optional callout title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CalloutKind {
+pub enum CalloutKind {
     Note,
     Warning,
     Tip,
@@ -228,40 +458,81 @@ pub(crate) enum CalloutKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TaskMarker {
+pub struct TaskMarker {
     pub(crate) checked: bool,
     pub(crate) fallback_label: Option<Box<str>>,
 }
 
+impl TaskMarker {
+    /// Returns true when the task is checked.
+    pub fn is_checked(&self) -> bool {
+        self.checked
+    }
+    /// Returns text used by formats without task-list syntax.
+    pub fn fallback_label(&self) -> Option<&str> {
+        self.fallback_label.as_deref()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MathValue {
+pub struct MathValue {
     pub(crate) source: Box<str>,
     pub(crate) format: MathFormat,
     pub(crate) fallback_text: Option<Box<str>>,
 }
 
+impl MathValue {
+    /// Returns the recovered math source.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    /// Returns the source format.
+    pub fn format(&self) -> MathFormat {
+        self.format
+    }
+    /// Returns an accessible text fallback, when available.
+    pub fn fallback_text(&self) -> Option<&str> {
+        self.fallback_text.as_deref()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MathFormat {
+pub enum MathFormat {
     Tex,
     Text,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Media {
+pub struct Media {
     pub(crate) kind: MediaKind,
     pub(crate) source: Box<str>,
     pub(crate) title: Option<Box<str>>,
 }
 
+impl Media {
+    /// Returns the media category.
+    pub fn kind(&self) -> MediaKind {
+        self.kind
+    }
+    /// Returns the selected, policy-validated source.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    /// Returns the optional media title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MediaKind {
+pub enum MediaKind {
     Audio,
     Video,
     Embedded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct FootnoteId(u32);
+pub struct FootnoteId(u32);
 
 impl FootnoteId {
     fn index(self) -> usize {
@@ -276,10 +547,34 @@ impl FootnoteId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FootnoteDefinition {
+pub(crate) struct FootnoteRecord {
     pub(crate) id: FootnoteId,
     pub(crate) label: Box<str>,
     pub(crate) node: DocumentNodeId,
+}
+
+/// A resolved read-only footnote definition.
+#[derive(Clone, Copy)]
+pub struct FootnoteDefinition<'a> {
+    document: &'a Document,
+    definition: &'a FootnoteRecord,
+}
+
+impl<'a> FootnoteDefinition<'a> {
+    /// Returns the opaque semantic footnote ID.
+    pub fn id(self) -> FootnoteId {
+        self.definition.id
+    }
+    pub(crate) fn label(self) -> &'a str {
+        &self.definition.label
+    }
+    /// Returns the semantic definition node.
+    pub fn node(self) -> DocumentNode<'a> {
+        DocumentNode {
+            document: self.document,
+            id: self.definition.node,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -368,7 +663,14 @@ mod tests {
 
         let document = builder.finish();
         document.validate().unwrap();
-        assert_eq!(document.roots().count(), 7);
+        assert_eq!(document.root_ids().count(), 7);
+        let definition = document.footnote(footnote).unwrap();
+        assert_eq!(definition.id(), footnote);
+        assert!(matches!(
+            definition.node().kind(),
+            NodeKind::FootnoteDefinition(id) if *id == footnote
+        ));
+        assert_eq!(document.footnotes().len(), 1);
     }
 
     #[test]
@@ -384,10 +686,10 @@ mod tests {
         document.validate().unwrap();
 
         let mut count = 0;
-        let mut stack: Vec<_> = document.roots().collect();
+        let mut stack: Vec<_> = document.root_ids().collect();
         while let Some(node) = stack.pop() {
             count += 1;
-            stack.extend(document.children(node));
+            stack.extend(document.child_ids(node));
         }
         assert_eq!(count, DEPTH + 1);
     }
@@ -451,7 +753,7 @@ fn debug_tree(document: &Document) -> String {
         output.push_str(&"  ".repeat(depth));
         write_kind(&mut output, &node.kind);
         output.push('\n');
-        let children: Vec<_> = document.children(id).collect();
+        let children: Vec<_> = document.child_ids(id).collect();
         tasks.extend(
             children
                 .into_iter()
@@ -466,7 +768,7 @@ fn debug_tree(document: &Document) -> String {
 fn write_kind(output: &mut String, kind: &NodeKind) {
     use std::fmt::Write as _;
     match kind {
-        NodeKind::Text(value) => write!(output, "Text({value:?})").unwrap(),
+        NodeKind::Text(value) => write!(output, "Text({:?})", value.as_str()).unwrap(),
         NodeKind::Heading { level } => write!(output, "Heading(level={level})").unwrap(),
         NodeKind::CodeBlock(code) => write!(
             output,
@@ -498,7 +800,7 @@ fn write_kind(output: &mut String, kind: &NodeKind) {
             image.source, image.alt, image.title, image.width, image.height
         )
         .unwrap(),
-        NodeKind::InlineCode(value) => write!(output, "InlineCode({value:?})").unwrap(),
+        NodeKind::InlineCode(value) => write!(output, "InlineCode({:?})", value.as_str()).unwrap(),
         NodeKind::FootnoteReference(id) => write!(output, "FootnoteReference({})", id.0).unwrap(),
         NodeKind::FootnoteDefinition(id) => write!(output, "FootnoteDefinition({})", id.0).unwrap(),
         NodeKind::TaskMarker(marker) => write!(

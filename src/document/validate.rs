@@ -358,12 +358,12 @@ fn validate_tables(document: &Document) -> Result<(), ValidationError> {
         };
         let mut maximum_width = 0u32;
         let mut has_rowspan = false;
-        for child in document.children(DocumentNodeId(index as u32)) {
+        for child in document.child_ids(DocumentNodeId(index as u32)) {
             if !matches!(document.nodes[child.index()].kind, NodeKind::TableRow) {
                 continue;
             }
             let mut width = 0u32;
-            for cell in document.children(child) {
+            for cell in document.child_ids(child) {
                 let NodeKind::TableCell(cell) = &document.nodes[cell.index()].kind else {
                     continue;
                 };

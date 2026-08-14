@@ -101,6 +101,38 @@ let extractor = Extractor::builder()
 # let _ = extractor;
 ```
 
+## Inspect semantic content
+
+Use `page.document()` when you need structured content. The document is Legible's
+read-only semantic IR. It is not an HTML DOM or a CommonMark AST. Legible removes
+site chrome, CSS classes, IDs, and source implementation wrappers. It normalizes
+retained structures into semantic nodes. This representation is lossy. You cannot
+reconstruct unsupported elements, source attributes, wrapper structure, or source
+whitespace from it.
+
+```rust
+# let page = legible::extract(r#"<main><h1>Guide</h1><p>See <a href="/api">the API</a>.</p><pre><code>let x = 1;</code></pre><table><tr><th>Name</th></tr><tr><td>x</td></tr></table></main>"#, Some("https://example.com/docs"))?;
+use legible::NodeKind;
+
+let mut nodes: Vec<_> = page.document().roots().rev().collect();
+while let Some(node) = nodes.pop() {
+    match node.kind() {
+        NodeKind::Heading { level } => println!("h{level}: {}", node.text()),
+        NodeKind::Paragraph => println!("paragraph: {}", node.text()),
+        NodeKind::Link(link) => println!("link: {}", link.destination()),
+        NodeKind::CodeBlock(code) => println!("code: {}", code.text()),
+        NodeKind::Table(table) => println!("columns: {:?}", table.column_count()),
+        _ => {}
+    }
+    let children: Vec<_> = node.children().collect();
+    nodes.extend(children.into_iter().rev());
+}
+# Ok::<(), legible::Error>(())
+```
+
+The API exposes semantic values and traversal only. It does not expose source DOM
+IDs or mutation methods.
+
 ## Render Markdown
 
 `page.markdown()` includes links and images. Use the builder to change these settings.
