@@ -341,11 +341,11 @@ fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
         .chain(dom.descendants(heading))
         .any(|node| {
             dom.text_node(node)
-                .is_some_and(crate::markdown::has_visible_inline_text)
+                .is_some_and(crate::render::markdown::has_visible_inline_text)
                 || dom.tag(node) == Some(Tag::Img)
                     && (dom
                         .attr_by_local_name(node, "alt")
-                        .is_some_and(crate::markdown::has_visible_inline_text)
+                        .is_some_and(crate::render::markdown::has_visible_inline_text)
                         || dom
                             .attr(node, AttrName::Src)
                             .is_some_and(|source| !source.trim().is_empty()))

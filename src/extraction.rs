@@ -353,7 +353,7 @@ impl<'a> ContentExtractor<'a> {
             .options
             .retain_structured_data
             .then(|| self.structured_data.retained_items());
-        Ok(ExtractedPage::new(
+        ExtractedPage::new(
             self.dom,
             extracted_root,
             self.metadata,
@@ -362,7 +362,7 @@ impl<'a> ContentExtractor<'a> {
             self.metadata_diagnostics,
             retained_structured_data,
             self.base_uri.as_ref(),
-        ))
+        )
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let body = self.dom.body().ok_or(Error::NoBody)?;

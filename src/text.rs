@@ -1,4 +1,6 @@
-//! Normalized text rendering from the cleaned extraction DOM.
+//! Legacy normalized text rendering used by differential tests.
+
+#![allow(dead_code)]
 
 use crate::dom::{Dom, NodeId, Tag};
 use smallvec::SmallVec;

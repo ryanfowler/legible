@@ -137,6 +137,10 @@ impl DocumentBuilder {
         self.append(parent, NodeKind::Text(normalized)).map(Some)
     }
 
+    pub(crate) fn kind(&self, id: DocumentNodeId) -> Option<&NodeKind> {
+        self.nodes.get(id.index()).map(|node| &node.kind)
+    }
+
     pub(crate) fn kind_mut(&mut self, id: DocumentNodeId) -> Option<&mut NodeKind> {
         self.nodes.get_mut(id.index()).map(|node| &mut node.kind)
     }
@@ -160,10 +164,24 @@ impl DocumentBuilder {
     }
 
     pub(crate) fn finish(self) -> Document {
+        let mut footnotes = self.footnotes;
+        if footnotes
+            .iter()
+            .all(|definition| definition.id.index() < footnotes.len())
+        {
+            let mut indexed: Vec<Option<FootnoteDefinition>> = std::iter::repeat_with(|| None)
+                .take(footnotes.len())
+                .collect();
+            for definition in footnotes.drain(..) {
+                let index = definition.id.index();
+                indexed[index] = Some(definition);
+            }
+            footnotes = indexed.into_iter().flatten().collect();
+        }
         Document {
             nodes: self.nodes,
             roots: self.roots,
-            footnotes: self.footnotes,
+            footnotes,
         }
     }
 }

@@ -27,6 +27,10 @@ pub(crate) fn safe_destination(
         }
     }
 
+    if value.starts_with('#') {
+        return Some(value.into());
+    }
+
     if let Some(base_url) = base_url {
         let resolved = base_url.join(value).ok()?;
         if !allowed_scheme(resolved.scheme(), kind) {
@@ -107,7 +111,7 @@ mod tests {
             Some("https://example.test/guide")
         );
         assert_eq!(
-            safe_destination("#part", None, DestinationKind::Link).as_deref(),
+            safe_destination("#part", Some(&base), DestinationKind::Link).as_deref(),
             Some("#part")
         );
         assert_eq!(

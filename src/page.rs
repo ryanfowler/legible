@@ -14,19 +14,20 @@ struct ContentStats {
 
 /// Relevant page content and metadata.
 ///
-/// Output formats are rendered lazily from the extracted DOM. Calling a render
-/// method more than once produces the same output.
+/// Output formats are rendered lazily from one semantic document. Calling a
+/// render method more than once produces the same output.
 pub struct ExtractedPage {
     metadata: Metadata,
+    #[allow(dead_code)] // Retained temporarily for renderer parity.
     dom: Dom,
+    #[allow(dead_code)] // Retained temporarily for renderer parity.
     root: NodeId,
     stats: OnceLock<ContentStats>,
     text_length_hint: usize,
     diagnostics: Option<ExtractionDiagnostics>,
     metadata_diagnostics: Option<MetadataDiagnostics>,
     structured_data: Option<Vec<Value>>,
-    #[cfg(test)]
-    _diagnostic_document: crate::document::Document,
+    document: crate::document::Document,
 }
 
 impl ExtractedPage {
@@ -40,15 +41,14 @@ impl ExtractedPage {
         metadata_diagnostics: Option<MetadataDiagnostics>,
         structured_data: Option<Vec<Value>>,
         _compile_base_url: Option<&url::Url>,
-    ) -> Self {
-        #[cfg(test)]
-        let diagnostic_document = crate::document::compile_document(
+    ) -> crate::Result<Self> {
+        let document = crate::document::compile_document(
             &dom,
             root,
             &crate::document::CompileContext::new(_compile_base_url.cloned()),
         )
-        .expect("the normalized extraction DOM must compile to a valid semantic document");
-        Self {
+        .map_err(|_| crate::Error::NoContent)?;
+        Ok(Self {
             metadata,
             dom,
             root,
@@ -57,9 +57,8 @@ impl ExtractedPage {
             diagnostics,
             metadata_diagnostics,
             structured_data,
-            #[cfg(test)]
-            _diagnostic_document: diagnostic_document,
-        }
+            document,
+        })
     }
 
     /// Returns discovered page metadata.
@@ -99,23 +98,24 @@ impl ExtractedPage {
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
         let stats = self.stats();
-        crate::text::render_text(
-            &self.dom,
-            self.root,
+        crate::render::text::render_text(
+            &self.document,
             stats.text_length,
-            &crate::text::TextOptions::default(),
+            &crate::render::text::TextOptions::default(),
         )
     }
 
-    /// Renders the extracted content as an HTML fragment.
+    /// Renders the extracted content as canonical semantic HTML.
     ///
-    /// This HTML is not sanitized. Apply a sanitizer before you insert it into
-    /// an untrusted page.
+    /// The semantic document cannot contain active source elements, arbitrary
+    /// attributes, or unsupported URI schemes.
     pub fn html(&self) -> String {
         self.html_builder().render()
     }
 
-    /// Renders a sanitized HTML fragment for normal downstream display.
+    /// Renders canonical semantic HTML.
+    ///
+    /// This method is an alias for [`Self::html`].
     pub fn safe_html(&self) -> String {
         self.html_builder().sanitize(true).render()
     }
@@ -140,10 +140,10 @@ impl ExtractedPage {
 
     fn stats(&self) -> ContentStats {
         *self.stats.get_or_init(|| {
-            let (text_length, word_count) = crate::text::measure_text(&self.dom, self.root);
+            let stats = crate::render::text::measure_text(&self.document);
             ContentStats {
-                text_length,
-                word_count,
+                text_length: stats.text_length,
+                word_count: stats.word_count,
             }
         })
     }
@@ -163,7 +163,7 @@ pub struct HtmlBuilder<'a> {
 }
 
 impl HtmlBuilder<'_> {
-    /// Controls whether unsafe elements, attributes, and URLs are removed.
+    /// Retained for compatibility. Canonical semantic HTML is always safe by construction.
     pub fn sanitize(mut self, enabled: bool) -> Self {
         self.sanitize = enabled;
         self
@@ -171,15 +171,8 @@ impl HtmlBuilder<'_> {
 
     /// Renders the configured HTML output.
     pub fn render(self) -> String {
-        if self.sanitize {
-            crate::html::render_safe_html(
-                &self.page.dom,
-                self.page.root,
-                self.page.text_length_hint,
-            )
-        } else {
-            crate::dom::render_html(&self.page.dom, self.page.root, self.page.text_length_hint)
-        }
+        let _ = self.sanitize;
+        crate::render::html::render_html(&self.page.document, self.page.text_length_hint)
     }
 }
 
@@ -205,11 +198,10 @@ impl MarkdownBuilder<'_> {
 
     /// Renders the configured Markdown output.
     pub fn render(self) -> String {
-        crate::markdown::render_markdown(
-            &self.page.dom,
-            self.page.root,
+        crate::render::markdown::render_markdown(
+            &self.page.document,
             self.page.text_length_hint,
-            crate::markdown::MarkdownConfig {
+            crate::render::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
             },
@@ -256,6 +248,91 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    #[test]
+    fn semantic_renderers_match_legacy_fixture_output() {
+        let mut sources = Vec::new();
+        for root in ["tests/general", "tests/defuddle", "tests/specialized"] {
+            fixture_sources(Path::new(root), &mut sources);
+        }
+        sources.sort();
+
+        // The semantic compiler removes source-only wrapper boundaries. These
+        // fixtures intentionally differ only in redundant blank lines. The
+        // escaping fixture also proves that equivalent adjacent text has one
+        // deterministic representation after text-node merging.
+        let allowed_markdown_differences = [
+            "tests/defuddle/footnotes/org-mode-sidenotes/source.html",
+            "tests/general/email-contact-form/source.html",
+            "tests/general/markdown-escaping/source.html",
+            "tests/general/newsletter-like-recovery-form/source.html",
+            "tests/general/repeated-navigation-pricing/source.html",
+            "tests/general/subscription-settings-form/source.html",
+            "tests/specialized/discourse-topic/source.html",
+            "tests/specialized/github-issue/source.html",
+            "tests/specialized/github-pull-request/source.html",
+            "tests/specialized/reddit-static-thread/source.html",
+        ];
+        let mut markdown_differences = Vec::new();
+        let mut text_differences = Vec::new();
+        for source in sources {
+            if source
+                .parent()
+                .is_some_and(|directory| directory.join("expected.error").exists())
+            {
+                continue;
+            }
+            let html = std::fs::read_to_string(&source).unwrap();
+            let Ok(page) = extract(&html, Some("https://example.test/docs/page.html")) else {
+                continue;
+            };
+            let legacy_markdown = crate::markdown::render_markdown(
+                &page.dom,
+                page.root,
+                page.text_length_hint,
+                crate::markdown::MarkdownConfig::default(),
+            );
+            if legacy_markdown != page.markdown()
+                && !allowed_markdown_differences
+                    .iter()
+                    .any(|allowed| source == Path::new(allowed))
+            {
+                markdown_differences.push(source.clone());
+            }
+            let legacy_text = crate::text::render_text(
+                &page.dom,
+                page.root,
+                page.text_length_hint,
+                &crate::text::TextOptions::default(),
+            );
+            // Semantic footnote references have no visible marker text. The
+            // compiler also inserts a word boundary between adjacent source
+            // wrappers when omission would join two words. Both changes remove
+            // source implementation details from normalized text.
+            let intentional_text_change = source
+                .components()
+                .any(|component| component.as_os_str() == "footnotes")
+                || [
+                    "tests/general/inline-boundaries/source.html",
+                    "tests/general/job-company-profile/source.html",
+                    "tests/general/markdown-escaping/source.html",
+                ]
+                .iter()
+                .any(|allowed| source == Path::new(allowed));
+            if legacy_text != page.text() && !intentional_text_change {
+                text_differences.push(source);
+            }
+        }
+
+        assert!(
+            markdown_differences.is_empty(),
+            "Markdown parity failures: {markdown_differences:?}"
+        );
+        assert!(
+            text_differences.is_empty(),
+            "text parity failures: {text_differences:?}"
+        );
     }
 
     #[test]
@@ -324,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_html_removes_active_content_without_changing_raw_html() {
+    fn canonical_html_cannot_include_active_source_content() {
         let page = extract(
             r##"<main><p onclick="alert(1)"><a href="java&#x0A;script:alert(1)" onfocus="x">bad</a>
             <a href="/safe">safe</a><img src="data:text/html,bad" onerror="x">
@@ -337,7 +414,8 @@ mod tests {
 
         let raw = page.html();
         let safe = page.safe_html();
-        assert!(raw.contains("onclick="));
+        assert_eq!(raw, safe);
+        assert!(!raw.contains("onclick="));
         assert!(!safe.to_ascii_lowercase().contains("javascript:"));
         assert!(!safe.contains("onclick="));
         assert!(!safe.contains("onfocus="));

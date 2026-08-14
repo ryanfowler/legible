@@ -30,7 +30,7 @@ Ordinary prose keeps write!, version 3.7, issue #15292, and a URL query separato
 
 ####### title
 
-~~\~ code fence
+\~~\~ code fence
 
 ![Image with query parameters](https://example.test/image.png?x=1&y=2)
 

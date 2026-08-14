@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::{AttrName, Attribute, NodeLink, Tag};
 use html5ever::QualName;
 use tendril::StrTendril;

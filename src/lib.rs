@@ -1,8 +1,8 @@
 //! Extract relevant content and metadata from HTML.
 //!
-//! Legible keeps an extracted DOM and renders each requested output format lazily.
-//! Markdown is the primary output, with HTML and normalized plain text available from
-//! the same extracted tree. Legible does not use a browser, execute JavaScript, fetch
+//! Legible compiles selected HTML into a semantic document and renders each requested
+//! output format lazily. Markdown is the primary output. Canonical HTML and normalized
+//! plain text come from the same semantic document. Legible does not use a browser, execute JavaScript, fetch
 //! URLs, or make network requests.
 //!
 //! ```rust
@@ -46,10 +46,10 @@
 //!
 //! # Security
 //!
-//! Use [`ExtractedPage::safe_html`] for normal downstream display.
-//! [`ExtractedPage::html`] is not sanitized and remains available when a caller needs
-//! raw extracted markup. Markdown output contains no raw HTML and omits destinations
-//! with unsupported URI schemes.
+//! [`ExtractedPage::html`] returns canonical semantic HTML. It cannot contain source
+//! scripts, event handlers, arbitrary attributes, or unsupported URI schemes.
+//! [`ExtractedPage::safe_html`] is an alias for the same output. Markdown output
+//! contains no raw HTML.
 
 mod candidate;
 mod cleaning;
@@ -60,16 +60,20 @@ mod dom;
 mod error;
 mod extraction;
 mod extractor;
+#[cfg(test)]
 mod html;
 mod logging;
+#[cfg(test)]
 mod markdown;
 mod metadata;
 mod normalize;
 mod page;
 mod page_kind;
 mod quality;
+mod render;
 mod scoring;
 mod specialized;
+#[cfg(test)]
 mod text;
 
 pub use diagnostics::{
