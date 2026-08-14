@@ -42,11 +42,14 @@
 #![allow(dead_code)]
 
 mod builder;
+mod callouts;
 mod code;
 mod compiler;
 mod figures;
+mod footnotes;
 mod images;
 mod lists;
+mod math;
 mod media;
 pub(crate) mod stats;
 mod tables;
@@ -63,6 +66,11 @@ pub(crate) use code::{
 };
 pub(crate) use compiler::{CompileContext, compile_document};
 pub(crate) use figures::class_is_semantic_evidence as figure_class_is_semantic_evidence;
+pub(crate) use footnotes::{
+    Definitions as ExternalFootnoteDefinitions, adopt_external as adopt_external_footnotes,
+    collect_external as collect_external_footnotes,
+};
+pub(crate) use math::accessible_math_nodes;
 pub(crate) fn media_cleanup_evidence(
     dom: &crate::dom::Dom,
     nodes: &[crate::dom::NodeId],
@@ -77,10 +85,64 @@ pub(crate) fn selected_image_sources_for_cleanup(
     images::analyze(dom, nodes, None).sources
 }
 pub(crate) use stats::DocumentStats;
+pub(crate) fn callout_class_is_semantic_evidence(
+    dom: &crate::dom::Dom,
+    node: crate::dom::NodeId,
+) -> bool {
+    callouts::class_is_semantic_evidence(dom, node)
+}
+pub(crate) fn is_local_footnote_reference(
+    dom: &crate::dom::Dom,
+    node: crate::dom::NodeId,
+    href: &str,
+) -> bool {
+    footnotes::is_local_reference(dom, node, href)
+}
+pub(crate) fn footnote_class_is_semantic_evidence(
+    dom: &crate::dom::Dom,
+    node: crate::dom::NodeId,
+) -> bool {
+    footnotes::class_is_semantic_evidence(dom, node)
+}
+pub(crate) fn math_class_is_semantic_evidence(
+    dom: &crate::dom::Dom,
+    node: crate::dom::NodeId,
+) -> bool {
+    math::class_is_semantic_evidence(dom, node)
+}
+pub(crate) fn math_source_is_protected(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
+    math::is_source_evidence(dom, node)
+}
+pub(crate) fn semantic_source_is_protected(
+    dom: &crate::dom::Dom,
+    node: crate::dom::NodeId,
+) -> bool {
+    callouts::is_source_evidence(dom, node)
+        || footnotes::is_source_evidence(dom, node)
+        || math::is_source_evidence(dom, node)
+}
 pub(crate) use tables::{
     class_is_semantic_evidence as table_class_is_semantic_evidence, repeated_listing_start,
 };
 pub(crate) use uri::{DestinationKind, safe_destination};
+
+pub(crate) fn semantic_normalization_counts(
+    dom: &crate::dom::Dom,
+    root: crate::dom::NodeId,
+) -> (usize, usize, usize) {
+    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    let footnotes = footnotes::FootnoteAnalysis::analyze(dom, root);
+    let math = math::MathAnalysis::analyze(dom, &nodes);
+    let mut references = 0;
+    let mut definitions = 0;
+    let mut expressions = 0;
+    for node in nodes {
+        references += usize::from(footnotes.reference(node).is_some());
+        definitions += usize::from(footnotes.definition(node).is_some());
+        expressions += usize::from(math.value(node).is_some());
+    }
+    (references, definitions, expressions)
+}
 
 pub(crate) fn table_normalization_counts(
     dom: &crate::dom::Dom,

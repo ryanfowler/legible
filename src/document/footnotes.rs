@@ -16,25 +16,186 @@ struct Definition {
     inline: bool,
 }
 
-pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
-    let definitions = detect_definitions(dom, root);
-    let keys: HashSet<&str> = definitions
-        .iter()
-        .map(|definition| definition.key.as_str())
-        .collect();
-    let references = detect_references(dom, root, &keys);
-    canonicalize(dom, root, references, definitions);
+pub(crate) struct FootnoteAnalysis {
+    references: Vec<Option<Box<str>>>,
+    definitions: Vec<Option<Box<str>>>,
+    skipped: Vec<bool>,
+    deferred: Vec<bool>,
+    trim_start: Vec<bool>,
+    transparent: Vec<bool>,
+    available: HashSet<String>,
+}
+
+impl FootnoteAnalysis {
+    pub(crate) fn analyze(dom: &Dom, root: NodeId) -> Self {
+        let definition_index = DefinitionIndex::analyze(dom, root);
+        let definitions = detect_definitions_with_index(dom, root, &definition_index);
+        let keys: HashSet<&str> = definitions
+            .iter()
+            .map(|definition| definition.key.as_str())
+            .collect();
+        let references = detect_references(dom, root, &keys);
+        let mut labels = HashMap::<String, String>::new();
+        let mut used_labels = HashSet::<String>::new();
+        let mut generated_label = 1usize;
+        for reference in &references {
+            if !labels.contains_key(&reference.key) {
+                let desired = reference.label.clone().unwrap_or_else(|| {
+                    let label = if special_footnote_key(&reference.key) {
+                        numeric_suffix(&reference.key)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| generated_label.to_string())
+                    } else {
+                        reference.key.clone()
+                    };
+                    generated_label += 1;
+                    label
+                });
+                labels.insert(
+                    reference.key.clone(),
+                    reserve_label(desired, &mut used_labels),
+                );
+            }
+        }
+        for definition in &definitions {
+            if !labels.contains_key(&definition.key) {
+                labels.insert(
+                    definition.key.clone(),
+                    reserve_label(definition.key.clone(), &mut used_labels),
+                );
+            }
+        }
+
+        let mut selected = HashMap::<String, usize>::new();
+        for (index, definition) in definitions.iter().enumerate() {
+            selected
+                .entry(definition.key.clone())
+                .and_modify(|current| {
+                    if definitions[*current].inline && !definition.inline {
+                        *current = index;
+                    }
+                })
+                .or_insert(index);
+        }
+        let reference_ids: HashSet<String> = references
+            .iter()
+            .flat_map(|reference| {
+                std::iter::once(reference.node)
+                    .chain(dom.descendants(reference.node))
+                    .filter_map(|node| dom.attr(node, AttrName::Id).map(str::to_owned))
+            })
+            .collect();
+        let mut semantic_references: Vec<Option<Box<str>>> = (0..dom.len()).map(|_| None).collect();
+        let mut semantic_definitions: Vec<Option<Box<str>>> =
+            (0..dom.len()).map(|_| None).collect();
+        let mut skipped = vec![false; dom.len()];
+        let mut deferred = vec![false; dom.len()];
+        for reference in references {
+            if let Some(label) = labels.get(&reference.key) {
+                semantic_references[reference.node.index()] = Some(label.clone().into());
+            }
+        }
+        for (index, definition) in definitions.iter().enumerate() {
+            if selected.get(&definition.key) != Some(&index) {
+                skipped[definition.node.index()] = true;
+                continue;
+            }
+            let Some(label) = labels.get(&definition.key) else {
+                continue;
+            };
+            semantic_definitions[definition.node.index()] = Some(label.clone().into());
+            deferred[definition.node.index()] = definition.inline;
+            mark_definition_chrome(dom, definition, label, &reference_ids, &mut skipped);
+        }
+        mark_container_chrome(dom, root, &definition_index, &mut skipped);
+        mark_sidenote_controls(dom, root, &mut skipped);
+        let mut transparent = vec![false; dom.len()];
+        for definition in definitions
+            .iter()
+            .filter(|definition| semantic_definitions[definition.node.index()].is_some())
+        {
+            for child in dom.element_children(definition.node) {
+                if dom.tag(child) == Some(Tag::Div) && semantic_definitions[child.index()].is_none()
+                {
+                    transparent[child.index()] = true;
+                }
+            }
+        }
+        let mut trim_start = vec![false; dom.len()];
+        for definition in definitions
+            .iter()
+            .filter(|definition| semantic_definitions[definition.node.index()].is_some())
+        {
+            if let Some(text) = dom.descendants(definition.node).find(|&node| {
+                dom.text_node(node).is_some()
+                    && !dom
+                        .ancestors(node)
+                        .take_while(|&ancestor| ancestor != definition.node)
+                        .any(|ancestor| skipped[ancestor.index()])
+            }) {
+                trim_start[text.index()] = true;
+            }
+        }
+        let available = semantic_definitions
+            .iter()
+            .flatten()
+            .map(|label| label.to_string())
+            .collect();
+        Self {
+            references: semantic_references,
+            definitions: semantic_definitions,
+            skipped,
+            deferred,
+            trim_start,
+            transparent,
+            available,
+        }
+    }
+
+    pub(crate) fn reference(&self, node: NodeId) -> Option<&str> {
+        self.references[node.index()].as_deref()
+    }
+
+    pub(crate) fn definition(&self, node: NodeId) -> Option<&str> {
+        self.definitions[node.index()].as_deref()
+    }
+
+    pub(crate) fn is_skipped(&self, node: NodeId) -> bool {
+        self.skipped[node.index()]
+    }
+
+    pub(crate) fn is_deferred(&self, node: NodeId) -> bool {
+        self.deferred[node.index()]
+    }
+
+    pub(crate) fn should_trim_start(&self, node: NodeId) -> bool {
+        self.trim_start[node.index()]
+    }
+
+    pub(crate) fn is_transparent(&self, node: NodeId) -> bool {
+        self.transparent[node.index()]
+    }
+
+    pub(crate) fn has_definition(&self, label: &str) -> bool {
+        self.available.contains(label)
+    }
 }
 
 fn detect_references(dom: &Dom, root: NodeId, definitions: &HashSet<&str>) -> Vec<Reference> {
     let mut references = Vec::new();
     for node in dom.descendants(root) {
-        if dom.tag(node) == Some(Tag::A) {
-            let Some(key) = fragment_target(dom.attr(node, AttrName::Href)).map(str::to_owned)
-            else {
+        if let Some(label) = dom.attr(node, AttrName::DataFootnoteRef) {
+            references.push(Reference {
+                node,
+                key: label.to_owned(),
+                label: Some(label.to_owned()),
+            });
+        } else if dom.tag(node) == Some(Tag::A) {
+            let explicit = is_explicit_reference(dom, node);
+            let key = fragment_target(dom.attr(node, AttrName::Href));
+            let Some(key) = key.map(str::to_owned) else {
                 continue;
             };
-            let explicit = is_explicit_reference(dom, node);
             if !explicit && !definitions.contains(key.as_str()) {
                 continue;
             }
@@ -79,7 +240,121 @@ fn detect_references(dom: &Dom, root: NodeId, definitions: &HashSet<&str>) -> Ve
     references
 }
 
+struct DefinitionIndex {
+    container: Vec<bool>,
+    inside_container: Vec<bool>,
+    nested_candidate: Vec<bool>,
+    definition_backlink: Vec<bool>,
+    first_descendant_id: Vec<Option<NodeId>>,
+}
+
+impl DefinitionIndex {
+    fn analyze(dom: &Dom, root: NodeId) -> Self {
+        let nodes = std::iter::once(root)
+            .chain(dom.descendants(root))
+            .collect::<Vec<_>>();
+        let mut own_candidate = vec![false; dom.len()];
+        for &node in &nodes {
+            own_candidate[node.index()] = matches!(
+                dom.tag(node),
+                Some(Tag::Div | Tag::Li | Tag::P | Tag::Aside)
+            ) && dom
+                .attr(node, AttrName::Id)
+                .is_some_and(looks_like_footnote_id)
+                && (has_role(dom, node, "doc-footnote")
+                    || dom.attr_by_local_name(node, "data-footnote").is_some()
+                    || matches!(dom.tag(node), Some(Tag::Li | Tag::P | Tag::Aside)));
+        }
+        let mut nested_candidate = vec![false; dom.len()];
+        let mut first_descendant_id = vec![None; dom.len()];
+        for &node in nodes.iter().rev() {
+            nested_candidate[node.index()] = dom
+                .children(node)
+                .any(|child| own_candidate[child.index()] || nested_candidate[child.index()]);
+            first_descendant_id[node.index()] = dom.children(node).find_map(|child| {
+                dom.attr(child, AttrName::Id)
+                    .map(|_| child)
+                    .or(first_descendant_id[child.index()])
+            });
+        }
+        let mut container = vec![false; dom.len()];
+        let mut inside_container = vec![false; dom.len()];
+        for &node in &nodes {
+            container[node.index()] = is_footnote_container(dom, node)
+                || has_any_class(dom, node, &["references"]) && nested_candidate[node.index()];
+            inside_container[node.index()] = container[node.index()]
+                || dom
+                    .parent(node)
+                    .is_some_and(|parent| inside_container[parent.index()]);
+        }
+        let elements = std::iter::once((root, 0))
+            .chain(dom.element_descendants_snapshot_with_depth(root))
+            .collect::<Vec<_>>();
+        let mut preorder = vec![usize::MAX; dom.len()];
+        let mut subtree_end = vec![elements.len(); dom.len()];
+        let mut open = Vec::<(NodeId, u32)>::new();
+        for (position, &(node, depth)) in elements.iter().enumerate() {
+            while open
+                .last()
+                .is_some_and(|(_, open_depth)| *open_depth >= depth)
+            {
+                let (closed, _) = open.pop().unwrap();
+                subtree_end[closed.index()] = position;
+            }
+            preorder[node.index()] = position;
+            open.push((node, depth));
+        }
+        let mut targets = HashMap::<String, Vec<usize>>::new();
+        for &(node, _) in &elements {
+            if dom.tag(node) == Some(Tag::A)
+                && let Some(target) = href_fragment(dom.attr(node, AttrName::Href))
+            {
+                targets
+                    .entry(target.to_ascii_lowercase())
+                    .or_default()
+                    .push(preorder[node.index()]);
+            }
+        }
+        let mut definition_backlink = vec![false; dom.len()];
+        for &(node, _) in &elements {
+            let Some(id) = dom.attr(node, AttrName::Id) else {
+                continue;
+            };
+            let start = preorder[node.index()] + 1;
+            let end = subtree_end[node.index()];
+            definition_backlink[node.index()] =
+                conventional_backlink_targets(id).iter().any(|target| {
+                    targets.get(target).is_some_and(|positions| {
+                        let index = positions.partition_point(|position| *position < start);
+                        positions.get(index).is_some_and(|position| *position < end)
+                    })
+                });
+        }
+        Self {
+            container,
+            inside_container,
+            nested_candidate,
+            definition_backlink,
+            first_descendant_id,
+        }
+    }
+
+    fn has_container_ancestor(&self, dom: &Dom, node: NodeId) -> bool {
+        dom.parent(node)
+            .is_some_and(|parent| self.inside_container[parent.index()])
+    }
+}
+
 fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
+    let index = DefinitionIndex::analyze(dom, root);
+    detect_definitions_with_index(dom, root, &index)
+}
+
+fn detect_definitions_with_index(
+    dom: &Dom,
+    root: NodeId,
+    index: &DefinitionIndex,
+) -> Vec<Definition> {
     let potential_reference_targets: HashSet<String> = dom
         .descendants(root)
         .filter(|&node| dom.tag(node) == Some(Tag::A))
@@ -95,8 +370,12 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
         })
         .filter_map(|node| fragment_target(dom.attr(node, AttrName::Href)).map(str::to_owned))
         .collect();
-    let mut definitions = Vec::new();
+    let mut definitions: Vec<Definition> = Vec::new();
+    let mut nearest_definition: Vec<Option<usize>> = vec![None; dom.len()];
     for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
+        nearest_definition[node.index()] = dom
+            .parent(node)
+            .and_then(|parent| nearest_definition[parent.index()]);
         let sidenote = has_any_class(
             dom,
             node,
@@ -111,25 +390,24 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
             || inline
             || named_sidenote
             || has_any_class(dom, node, &["footnote-definition", "footdef"])
+            || dom.attr(node, AttrName::DataFootnote).is_some()
             || dom.attr_by_local_name(node, "data-footnote").is_some()
             || dom
                 .attr_by_local_name(node, "data-type")
                 .is_some_and(|value| value.eq_ignore_ascii_case("footnote"));
-        let contained = matches!(dom.tag(node), Some(Tag::Li | Tag::P | Tag::Aside))
+        let contained = (matches!(dom.tag(node), Some(Tag::Li | Tag::P | Tag::Aside))
+            || dom.tag(node) == Some(Tag::Div)
+                && index.container[node.index()]
+                && !index.nested_candidate[node.index()])
             && dom.attr(node, AttrName::Id).is_some_and(|id| {
                 looks_like_footnote_id(id) || potential_reference_targets.contains(id)
             })
-            && dom
-                .ancestors(node)
-                .any(|ancestor| is_footnote_container(dom, ancestor));
+            && (index.container[node.index()] || index.has_container_ancestor(dom, node));
         let conventional_id = dom
             .attr(node, AttrName::Id)
             .is_some_and(looks_like_footnote_id)
-            && !has_nested_definition_candidate(dom, node)
-            && (dom
-                .ancestors(node)
-                .any(|ancestor| is_footnote_container(dom, ancestor))
-                || has_definition_backlink(dom, node));
+            && !index.nested_candidate[node.index()]
+            && (index.has_container_ancestor(dom, node) || index.definition_backlink[node.index()]);
         let word_definition = word_definition_key(dom, node);
         if !inline && !structural && !contained && !conventional_id && word_definition.is_none() {
             continue;
@@ -140,144 +418,34 @@ fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
             dom.attr(node, AttrName::Id)
                 .map(str::to_owned)
                 .or_else(|| {
+                    dom.attr(node, AttrName::DataFootnote)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
                     dom.attr_by_local_name(node, "data-footnote")
                         .filter(|value| !value.trim().is_empty())
                         .map(str::to_owned)
                 })
                 .or_else(|| {
                     structural
-                        .then(|| nested_definition_key(dom, node))
+                        .then(|| {
+                            index.first_descendant_id[node.index()]
+                                .and_then(|descendant| dom.attr(descendant, AttrName::Id))
+                                .map(str::to_owned)
+                        })
                         .flatten()
                         .or(word_definition)
                 })
         };
         let Some(key) = key else { continue };
-        if definitions.iter().any(|definition: &Definition| {
-            definition.key == key
-                && dom
-                    .ancestors(node)
-                    .any(|ancestor| ancestor == definition.node)
-        }) {
+        if nearest_definition[node.index()].is_some() {
             continue;
         }
+        nearest_definition[node.index()] = Some(definitions.len());
         definitions.push(Definition { node, key, inline });
     }
     definitions
-}
-
-fn has_nested_definition_candidate(dom: &Dom, node: NodeId) -> bool {
-    dom.descendants(node).any(|descendant| {
-        matches!(
-            dom.tag(descendant),
-            Some(Tag::Div | Tag::Li | Tag::P | Tag::Aside)
-        ) && dom
-            .attr(descendant, AttrName::Id)
-            .is_some_and(looks_like_footnote_id)
-            && (has_role(dom, descendant, "doc-footnote")
-                || dom
-                    .attr_by_local_name(descendant, "data-footnote")
-                    .is_some()
-                || matches!(dom.tag(descendant), Some(Tag::Li | Tag::P | Tag::Aside)))
-    })
-}
-
-fn canonicalize(
-    dom: &mut Dom,
-    root: NodeId,
-    references: Vec<Reference>,
-    definitions: Vec<Definition>,
-) {
-    let reference_ids: HashSet<String> = references
-        .iter()
-        .flat_map(|reference| {
-            std::iter::once(reference.node)
-                .chain(dom.descendants(reference.node))
-                .filter_map(|node| dom.attr(node, AttrName::Id).map(str::to_owned))
-        })
-        .collect();
-    let mut labels = HashMap::<String, String>::new();
-    let mut used_labels = HashSet::<String>::new();
-    let mut generated_label = 1usize;
-    for reference in &references {
-        if !labels.contains_key(&reference.key) {
-            let desired = reference.label.clone().unwrap_or_else(|| {
-                let label = if special_footnote_key(&reference.key) {
-                    numeric_suffix(&reference.key)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| generated_label.to_string())
-                } else {
-                    reference.key.clone()
-                };
-                generated_label += 1;
-                label
-            });
-            let label = reserve_label(desired, &mut used_labels);
-            labels.insert(reference.key.clone(), label);
-        }
-        dom.set_attr(
-            reference.node,
-            AttrName::DataFootnoteRef,
-            &labels[&reference.key],
-        );
-    }
-    for definition in &definitions {
-        if !labels.contains_key(&definition.key) {
-            let label = reserve_label(definition.key.clone(), &mut used_labels);
-            labels.insert(definition.key.clone(), label);
-        }
-    }
-
-    // Prefer a separate definition over a duplicate inline sidenote. The separate
-    // definition usually has cleaner prose and valid block structure.
-    let mut selected = HashMap::<String, usize>::new();
-    for (index, definition) in definitions.iter().enumerate() {
-        selected
-            .entry(definition.key.clone())
-            .and_modify(|current| {
-                if definitions[*current].inline && !definition.inline {
-                    *current = index;
-                }
-            })
-            .or_insert(index);
-    }
-
-    let matched_sidenote_keys: HashSet<String> = definitions
-        .iter()
-        .filter(|definition| definition.inline && labels.contains_key(&definition.key))
-        .map(|definition| definition.key.clone())
-        .collect();
-    let mut inline_definitions = Vec::new();
-    for (index, definition) in definitions.iter().enumerate() {
-        if dom.parent(definition.node).is_none() {
-            continue;
-        }
-        if selected.get(&definition.key) != Some(&index) {
-            dom.detach(definition.node);
-            continue;
-        }
-        let label = &labels[&definition.key];
-        dom.set_attr(definition.node, AttrName::DataFootnote, label);
-        remove_preceding_separator(dom, definition.node);
-        remove_definition_markers(dom, definition.node, &definition.key, label, &reference_ids);
-        if definition.inline {
-            inline_definitions.push(definition.node);
-        }
-    }
-
-    if !inline_definitions.is_empty()
-        && let Ok(section) = dom.create_html_element(Tag::Section)
-    {
-        dom.set_attr(section, AttrName::DataFootnotes, "");
-        for definition in inline_definitions {
-            if dom.parent(definition).is_some() {
-                dom.append_child(section, definition);
-            }
-        }
-        dom.append_child(root, section);
-    }
-
-    remove_sidenote_controls(dom, root, &matched_sidenote_keys);
-    mark_containers(dom, root);
 }
 
 fn reserve_label(desired: String, used: &mut HashSet<String>) -> String {
@@ -293,15 +461,10 @@ fn reserve_label(desired: String, used: &mut HashSet<String>) -> String {
     unreachable!("an unbounded numeric suffix always finds a label")
 }
 
-fn mark_containers(dom: &mut Dom, root: NodeId) {
-    let nodes = dom.element_descendants_snapshot_with_depth(root);
-    for (node, _) in nodes {
-        if dom.parent(node).is_none() || !is_footnote_container(dom, node) {
+fn mark_container_chrome(dom: &Dom, root: NodeId, index: &DefinitionIndex, skipped: &mut [bool]) {
+    for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
+        if !index.container[node.index()] {
             continue;
-        }
-        dom.set_attr(node, AttrName::DataFootnotes, "");
-        if matches!(dom.tag(node), Some(Tag::Div | Tag::Aside)) {
-            dom.rename_html(node, Tag::Section);
         }
         if let Some(heading) = dom.element_children(node).find(|&child| {
             matches!(
@@ -309,24 +472,18 @@ fn mark_containers(dom: &mut Dom, root: NodeId) {
                 Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
             )
         }) {
-            dom.detach(heading);
+            skipped[heading.index()] = true;
         }
     }
 }
 
-fn remove_sidenote_controls(dom: &mut Dom, root: NodeId, matched_keys: &HashSet<String>) {
-    let controls: SmallVec<[NodeId; 8]> = dom
-        .descendants(root)
-        .filter(|&node| {
-            dom.tag(node) == Some(Tag::Input)
-                && has_any_class(dom, node, &["footref-toggle", "margin-toggle"])
-                && dom
-                    .attr(node, AttrName::Id)
-                    .is_some_and(|id| matched_keys.contains(id))
-        })
-        .collect();
-    for control in controls {
-        dom.detach(control);
+fn mark_sidenote_controls(dom: &Dom, root: NodeId, skipped: &mut [bool]) {
+    for node in dom.descendants(root) {
+        if dom.tag(node) == Some(Tag::Input)
+            && has_any_class(dom, node, &["footref-toggle", "margin-toggle"])
+        {
+            skipped[node.index()] = true;
+        }
     }
 }
 
@@ -409,11 +566,6 @@ pub(crate) fn adopt_external(definitions: &Definitions, fragment: &mut Dom, frag
     fragment.append_child(fragment_root, section);
 }
 
-fn nested_definition_key(dom: &Dom, node: NodeId) -> Option<String> {
-    dom.descendants(node)
-        .find_map(|descendant| dom.attr(descendant, AttrName::Id).map(str::to_owned))
-}
-
 fn word_definition_key(dom: &Dom, node: NodeId) -> Option<String> {
     if dom.tag(node) != Some(Tag::P) {
         return None;
@@ -482,12 +634,18 @@ fn previous_significant_sibling(dom: &Dom, node: NodeId) -> Option<NodeId> {
     None
 }
 
-fn remove_preceding_separator(dom: &mut Dom, definition: NodeId) {
-    let mut previous = dom.prev_sibling(definition);
+fn mark_definition_chrome(
+    dom: &Dom,
+    definition: &Definition,
+    label: &str,
+    reference_ids: &HashSet<String>,
+    skipped: &mut [bool],
+) {
+    let mut previous = dom.prev_sibling(definition.node);
     while let Some(node) = previous {
         if dom.tag(node) == Some(Tag::Hr) {
-            dom.detach(node);
-            return;
+            skipped[node.index()] = true;
+            break;
         }
         if dom
             .text_node(node)
@@ -496,22 +654,31 @@ fn remove_preceding_separator(dom: &mut Dom, definition: NodeId) {
             previous = dom.prev_sibling(node);
             continue;
         }
-        return;
+        break;
     }
-}
 
-fn remove_definition_markers(
-    dom: &mut Dom,
-    definition: NodeId,
-    definition_key: &str,
-    label: &str,
-    reference_ids: &HashSet<String>,
-) {
-    let leading_sup = first_significant_child(dom, definition).filter(|&node| {
-        if dom.tag(node) != Some(Tag::Sup) {
+    let definition_key = &definition.key;
+    let definition_node = definition.node;
+    let leading_marker = first_significant_child(dom, definition_node).filter(|&node| {
+        let marker_node = if dom.tag(node) == Some(Tag::Sup) {
+            Some(node)
+        } else if dom.tag(node) == Some(Tag::P)
+            && dom.element_children(node).count() == 1
+            && dom.children(node).all(|child| {
+                dom.tag(child) == Some(Tag::Sup)
+                    || dom
+                        .text_node(child)
+                        .is_some_and(|text| text.trim().is_empty())
+            })
+        {
+            dom.element_children(node).next()
+        } else {
+            None
+        };
+        let Some(marker_node) = marker_node else {
             return false;
-        }
-        let text = dom.text(node);
+        };
+        let text = dom.text(marker_node);
         let marker = text
             .trim()
             .trim_matches(|character| matches!(character, '[' | ']'));
@@ -520,12 +687,12 @@ fn remove_definition_markers(
             && marker.chars().all(|character| character.is_ascii_digit())
             && (marker == label || numeric_suffix(definition_key) == Some(marker))
     });
-    if let Some(marker) = leading_sup {
-        dom.detach(marker);
+    if let Some(marker) = leading_marker {
+        skipped[marker.index()] = true;
     }
 
     let wrappers: SmallVec<[NodeId; 4]> = dom
-        .descendants(definition)
+        .descendants(definition_node)
         .filter(|&node| {
             has_any_class(
                 dom,
@@ -539,19 +706,14 @@ fn remove_definition_markers(
         })
         .collect();
     for wrapper in wrappers {
-        if dom.parent(wrapper).is_some() {
-            dom.detach(wrapper);
-        }
+        skipped[wrapper.index()] = true;
     }
 
     let links: SmallVec<[NodeId; 4]> = dom
-        .descendants(definition)
+        .descendants(definition_node)
         .filter(|&node| dom.tag(node) == Some(Tag::A))
         .collect();
     for link in links {
-        if dom.parent(link).is_none() {
-            continue;
-        }
         let text = dom.text(link);
         let label = text.trim().to_ascii_lowercase();
         let href = dom
@@ -582,25 +744,19 @@ fn remove_definition_markers(
         if !backlink {
             continue;
         }
-        let parent = dom.parent(link);
-        dom.detach(link);
-        if let Some(parent) = parent
-            && dom.parent(parent).is_some()
+        skipped[link.index()] = true;
+        if let Some(parent) = dom.parent(link)
             && dom.tag(parent) == Some(Tag::Sup)
-            && !dom.has_non_whitespace_text(parent)
+            && dom.element_children(parent).all(|child| child == link)
+            && dom.children(parent).all(|child| {
+                child == link
+                    || dom
+                        .text_node(child)
+                        .is_some_and(|text| text.trim().is_empty())
+            })
         {
-            dom.detach(parent);
+            skipped[parent.index()] = true;
         }
-    }
-
-    if let Some(text_node) = std::iter::once(definition)
-        .chain(dom.descendants(definition))
-        .find(|&node| dom.text_node(node).is_some())
-        && let Some(trimmed) = dom.text_node(text_node).map(str::trim_start)
-        && trimmed.len() != dom.text_node(text_node).unwrap_or("").len()
-    {
-        let trimmed = trimmed.to_owned();
-        dom.set_text(text_node, &trimmed);
     }
 }
 
@@ -611,39 +767,33 @@ fn first_significant_child(dom: &Dom, node: NodeId) -> Option<NodeId> {
     })
 }
 
-fn is_conventional_backlink_target(definition_key: &str, target: &str) -> bool {
+fn conventional_backlink_targets(definition_key: &str) -> SmallVec<[String; 3]> {
     let key = definition_key.to_ascii_lowercase();
-    let target = target.to_ascii_lowercase();
+    let mut targets = SmallVec::new();
     if let Some(suffix) = key.strip_prefix("user-content-fn-") {
-        return target == format!("user-content-fnref-{suffix}");
+        targets.push(format!("user-content-fnref-{suffix}"));
+    } else if let Some(suffix) = key.strip_prefix("footnotedef") {
+        targets.push(format!("footnoteref{suffix}"));
+        targets.push(format!("footnote-ref{suffix}"));
+        targets.push(format!("fnref{suffix}"));
+    } else if let Some(suffix) = key.strip_prefix("_ftn") {
+        targets.push(format!("_ftnref{suffix}"));
+    } else if let Some(suffix) = key.strip_prefix("ftnt") {
+        targets.push(format!("ftnt_ref{suffix}"));
     }
-    if let Some(suffix) = key.strip_prefix("footnotedef") {
-        return target == format!("footnoteref{suffix}")
-            || target == format!("footnote-ref{suffix}")
-            || target == format!("fnref{suffix}");
-    }
-    if let Some(suffix) = key.strip_prefix("_ftn") {
-        return target == format!("_ftnref{suffix}");
-    }
-    if let Some(suffix) = key.strip_prefix("ftnt") {
-        return target == format!("ftnt_ref{suffix}");
-    }
-    false
+    targets
 }
 
-fn has_definition_backlink(dom: &Dom, node: NodeId) -> bool {
-    let Some(id) = dom.attr(node, AttrName::Id) else {
-        return false;
-    };
-    let id = id.to_ascii_lowercase();
-    dom.descendants(node)
-        .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
-        .filter_map(|anchor| href_fragment(dom.attr(anchor, AttrName::Href)))
-        .any(|target| is_conventional_backlink_target(&id, target))
+fn is_conventional_backlink_target(definition_key: &str, target: &str) -> bool {
+    let target = target.to_ascii_lowercase();
+    conventional_backlink_targets(definition_key)
+        .iter()
+        .any(|expected| expected == &target)
 }
 
 fn is_explicit_reference(dom: &Dom, anchor: NodeId) -> bool {
     has_role(dom, anchor, "doc-noteref")
+        || dom.attr(anchor, AttrName::DataFootnoteRef).is_some()
         || dom
             .attr_by_local_name(anchor, "data-footnote-ref")
             .is_some()
@@ -662,7 +812,13 @@ fn reference_convention(dom: &Dom, anchor: NodeId) -> bool {
         has_any_class(
             dom,
             parent,
-            &["footnote-reference", "footnote-ref", "footnoteref", "fnref"],
+            &[
+                "footnote-reference",
+                "footnote-ref",
+                "footnoteref",
+                "fnref",
+                "reference",
+            ],
         ) || has_any_class(dom, parent, &["fn"])
             && dom.attr_by_local_name(parent, "data-fn").is_some()
             || dom.attr(parent, AttrName::Id).is_some_and(|id| {
@@ -730,23 +886,9 @@ fn is_footnote_container(dom: &Dom, node: NodeId) -> bool {
                             | "footnotes-container"
                             | "wp-block-footnotes"
                             | "endnotes"
-                    ) || part.eq_ignore_ascii_case("references")
-                        && has_footnote_definitions(dom, node)
+                    )
                 })
             })
-}
-
-fn has_footnote_definitions(dom: &Dom, node: NodeId) -> bool {
-    dom.descendants(node).any(|descendant| {
-        dom.attr(descendant, AttrName::DataFootnote).is_some()
-            || dom
-                .attr_by_local_name(descendant, "data-footnote")
-                .is_some()
-            || has_role(dom, descendant, "doc-footnote")
-            || dom
-                .attr(descendant, AttrName::Id)
-                .is_some_and(looks_like_footnote_id)
-    })
 }
 
 fn fragment_target(href: Option<&str>) -> Option<&str> {
@@ -829,169 +971,61 @@ fn token(value: &str, expected: &str) -> bool {
         .any(|value| value.eq_ignore_ascii_case(expected))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::markdown::dom_to_markdown;
+pub(crate) fn is_local_reference(dom: &Dom, node: NodeId, href: &str) -> bool {
+    dom.tag(node) == Some(Tag::A)
+        && is_explicit_reference(dom, node)
+        && fragment_target(Some(href)).is_some()
+}
 
-    fn markdown(html: &str) -> String {
-        let mut dom = Dom::parse_fragment(html, Tag::Div).unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        dom_to_markdown(&dom, root, 0)
-    }
+pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {
+    is_explicit_reference(dom, node)
+        || has_role(dom, node, "doc-footnote")
+        || has_role(dom, node, "doc-endnotes")
+        || dom.attr_by_local_name(node, "data-footnote").is_some()
+        || dom.attr_by_local_name(node, "data-footnotes").is_some()
+        || has_any_class(dom, node, &["fn"]) && dom.attr_by_local_name(node, "data-fn").is_some()
+        || has_any_class(
+            dom,
+            node,
+            &[
+                "footnote-reference",
+                "footnote-ref",
+                "footnoteref",
+                "fnref",
+                "footnote-definition",
+                "footdef",
+                "sidenote",
+                "side-note",
+                "marginnote",
+                "margin-note",
+                "footref",
+                "sidenote-number",
+                "footref-toggle",
+                "margin-toggle",
+                "footnotes",
+                "footnote-list",
+                "footnote-definitions",
+                "footnote-container",
+                "footnotes-container",
+                "wp-block-footnotes",
+                "endnotes",
+            ],
+        )
+}
 
-    #[test]
-    fn normalizes_repeated_references_links_and_backlinks() {
-        assert_eq!(
-            markdown(
-                r##"<p>One<sup><a href="#fn1">1</a></sup> and again <a role="doc-noteref" href="#fn1">1</a>.</p><section class="footnotes"><h2>Notes</h2><ol><li id="fn1" role="doc-footnote"><p>See <a href="https://example.test">source</a>. <a href="#ref" rel="backlink">Back</a></p><p>More detail.</p></li></ol></section>"##
-            ),
-            "One[^fn1] and again [^fn1].\n\n[^fn1]: See [source](https://example.test).\n\n    More detail.\n"
-        );
-    }
-
-    #[test]
-    fn supports_google_docs_and_word_exports() {
-        assert_eq!(
-            markdown(
-                r##"<p>Google note<sup id="ftnt_ref1"><a href="#ftnt1">[1]</a></sup>.</p><p id="ftnt1"><a href="#ftnt_ref1">[1]</a> Google content.</p><p>Word note<sup><a href="#_ftn2">[2]</a></sup>.</p><p><span class="MsoFootnoteReference"><a name="_ftn2" href="//GUID#_ftnref2">[2]</a></span> Word content.</p>"##
-            ),
-            "Google note[^1].\n\n[^1]: Google content.\n\nWord note[^2].\n\n[^2]: Word content.\n"
-        );
-    }
-
-    #[test]
-    fn supports_static_site_generator_definitions() {
-        assert_eq!(
-            markdown(
-                r##"<p>Text<sup class="footnote-reference"><a href="#1">1</a></sup>.</p><div class="footnote-definition" id="1"><sup class="footnote-definition-label">1</sup><p>Generated note.</p></div>"##
-            ),
-            "Text[^1].\n\n[^1]: Generated note.\n"
-        );
-    }
-
-    #[test]
-    fn supports_htmlbook_relative_noterefs() {
-        assert_eq!(
-            markdown(
-                r##"<p>Text<sup><a data-type="noteref" href="chapter.html#fn1">1</a></sup>.</p><div data-type="footnotes"><p data-type="footnote" id="fn1"><sup><a href="chapter.html#fn1-marker">1</a></sup>Book note.</p></div>"##
-            ),
-            "Text[^1].\n\n[^1]: Book note.\n"
-        );
-    }
-
-    #[test]
-    fn moves_an_inline_sidenote_and_keeps_normal_asides() {
-        assert_eq!(
-            markdown(
-                r##"<p>Text<label class="footref" for="fn.1">1</label><input id="fn.1" class="footref-toggle" type="checkbox"><span class="sidenote"><sup>1</sup> Side note.</span> More.</p><aside><p>Related prose.</p></aside>"##
-            ),
-            "Text[^1] More.\n\nRelated prose.\n\n[^1]: Side note.\n"
-        );
-    }
-
-    #[test]
-    fn keeps_definition_wrappers_links_and_unmatched_sidenotes_safe() {
-        let output = markdown(
-            r##"<p>One<a role="doc-noteref" href="#fn1">1</a> and two<a role="doc-noteref" href="#fn2">2</a>, plus three<a role="doc-noteref" href="#fn3">3</a>.</p><section class="footnotes"><p id="intro">Notes introduction.</p><div class="definitions-wrapper"><div id="fn1" role="doc-footnote">First note with <a href="#reference-data">reference data</a>.</div><div id="fn2" role="doc-footnote">Second note uses x<sup>2</sup>.</div><div id="fn3" role="doc-footnote"><sup>2</sup> H<sup>2</sup> stays meaningful.</div></div></section><p>An <a href="#details">ordinary link</a><em>intervening prose</em><span class="sidenote">unmatched annotation</span>.</p><p>See <a href="appendix.html#_ftnref7">the appendix reference</a>, <a href="mailto:user@example.test#fn1">email</a>, and <a href="urn:example#fn99">URN data</a>.</p><p id="note-1">See <a href="#reference-1">numbered reference</a>.</p><p><label class="footref" for="missing">Unmatched label</label></p><aside id="orphan" class="sidenote">Unmatched named sidenote.</aside><aside id="details">Details remain ordinary content.</aside>"##,
-        );
-        assert!(output.contains("[^fn1]: First note with [reference data](#reference-data)."));
-        assert!(output.contains("[^fn2]: Second note uses x2."));
-        assert!(output.contains("[^fn3]: 2 H2 stays meaningful."));
-        assert!(output.contains("Notes introduction."));
-        assert!(!output.contains("[^intro]"));
-        assert!(
-            output.contains("[ordinary link](#details) *intervening prose* unmatched annotation")
-        );
-        assert!(output.contains("[the appendix reference](appendix.html#_ftnref7)"));
-        assert!(output.contains("[email](mailto:user@example.test#fn1)"));
-        assert!(output.contains("URN data"));
-        assert!(!output.contains("[^fn99]"));
-        assert!(output.contains("[numbered reference](#reference-1)"));
-        assert!(!output.contains("[^_ftn7]"));
-        assert!(!output.contains("[^note-1]"));
-        assert!(output.contains("Unmatched label"));
-        assert!(output.contains("Unmatched named sidenote."));
-        assert!(!output.contains("[^missing]"));
-        assert!(!output.contains("[^orphan]"));
-        assert!(output.contains("Details remain ordinary content."));
-    }
-
-    #[test]
-    fn keeps_unmatched_bibliography_links_and_allocates_unique_labels() {
-        let output = markdown(
-            r##"<p>A citation<a role="doc-biblioref" href="#book">[Book]</a> and <span class="fn"><a href="#details">see details</a></span>.</p><p>Notes<a href="#_ftn1">[1]</a>, <sup class="reference"><a href="#cite_note-1">[1]</a></sup>, <sup><a rel="footnote" href="#group-a">A</a>, <a rel="footnote" href="#group-b">B</a></sup>, and <a rel="footnote" href="#arbitrary">another note</a>.</p><p><sup><a href="//GUID#_ftnref1">[1]</a></sup>Word note.</p><ol class="references"><li id="cite_note-1">Wiki note.</li><li id="group-a">Grouped A.</li><li id="group-b">Grouped B.</li><li id="arbitrary">Explicit arbitrary note.</li></ol><p id="details">Ordinary details.</p>"##,
-        );
-        assert!(output.contains(r"[\[Book\]](#book)"), "{output}");
-        assert!(output.contains("[see details](#details)"), "{output}");
-        assert!(
-            output.contains("Notes[^1], [^1-2], [^group-a], [^group-b], and [^arbitrary]."),
-            "{output}"
-        );
-        assert!(output.contains("[^1]: Word note."), "{output}");
-        assert!(output.contains("[^1-2]: Wiki note."), "{output}");
-        assert!(output.contains("[^group-a]: Grouped A."), "{output}");
-        assert!(output.contains("[^group-b]: Grouped B."), "{output}");
-        assert!(
-            output.contains("[^arbitrary]: Explicit arbitrary note."),
-            "{output}"
-        );
-    }
-
-    #[test]
-    fn adopts_only_referenced_external_definitions() {
-        let source = Dom::parse_fragment(r##"<article><p>Text<sup><a href="#fn1">1</a></sup> and again <sup><a href="#fn1">1</a></sup>.</p></article><footer class="footnotes"><div id="fn1" role="doc-footnote">Kept note.</div><div id="fn2" role="doc-footnote">Unused note.</div></footer>"##, Tag::Div).unwrap();
-        let selected = source
-            .first_descendant_by_tag(source.root(), Tag::Article)
-            .unwrap();
-        let definitions = collect_external(&source);
-        let mut fragment = source.copy_subtree_as_fragment(selected).unwrap();
-        let root = fragment.root();
-        adopt_external(&definitions, &mut fragment, root);
-        normalize(&mut fragment, root);
-        let markdown = dom_to_markdown(&fragment, root, 0);
-        assert!(markdown.contains("[^fn1]: Kept note."), "{markdown}");
-        assert_eq!(markdown.matches("[^fn1]:").count(), 1, "{markdown}");
-        assert!(!markdown.contains("Unused note"), "{markdown}");
-    }
-
-    #[test]
-    fn keeps_valid_list_ancestry_and_copies_only_outer_definitions() {
-        let source = Dom::parse_fragment(r#"<section class="footnotes"><ol><li id="fn1" role="doc-footnote">Outer <span id="fn-inner" role="doc-footnote">nested marker</span></li></ol></section>"#, Tag::Div).unwrap();
-        let definitions = collect_external(&source);
-        assert_eq!(definitions.0.len(), 1);
-        let mut dom = source;
-        let root = dom.root();
-        normalize(&mut dom, root);
-        let html = crate::dom::render_html(&dom, root, 0);
-        assert!(html.contains("<ol><li"), "{html}");
-        assert!(!html.contains("<ol><div"), "{html}");
-    }
-
-    #[test]
-    fn keeps_a_missing_inferred_reference_as_a_link() {
-        assert_eq!(
-            markdown(r##"<p>Text<sup><a href="#fn404">404</a></sup>.</p>"##),
-            "Text[404](#fn404).\n"
-        );
-    }
-
-    #[test]
-    fn keeps_an_ordinary_references_heading() {
-        assert_eq!(
-            markdown(
-                r#"<section id="references"><h2>References</h2><p>Smith, Example Book.</p></section>"#
-            ),
-            "## References\n\nSmith, Example Book.\n"
-        );
-    }
-
-    #[test]
-    fn keeps_an_unmatched_footnotedef_link_as_an_ordinary_link() {
-        assert_eq!(
-            markdown(r##"<p>Read the <a href="#footnotedef-overview">ordinary overview</a>.</p>"##),
-            "Read the [ordinary overview](#footnotedef-overview).\n"
-        );
-    }
+pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {
+    is_source_evidence(dom, node)
+        || has_any_class(
+            dom,
+            node,
+            &[
+                "reference",
+                "references",
+                "fn",
+                "footnote-backref",
+                "footnote-body",
+                "reference-text",
+                "mw-cite-backlink",
+            ],
+        )
 }

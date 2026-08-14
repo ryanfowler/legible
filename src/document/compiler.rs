@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use thiserror::Error;
 use url::Url;
@@ -58,6 +58,16 @@ enum Task {
         scope: Scope,
         kind: NodeKind,
     },
+    DeferredFootnote {
+        node: NodeId,
+        label: Box<str>,
+        scope: Scope,
+    },
+    CalloutTitle {
+        node: NodeId,
+        scope: Scope,
+        already_strong: bool,
+    },
 }
 
 #[derive(Default)]
@@ -86,6 +96,9 @@ pub(crate) fn compile_document(
     let media = super::media::analyze(dom, &nodes, context.base_url.as_ref());
     let lists = super::lists::ListAnalysis::analyze(dom, &nodes);
     let tables = super::tables::TableAnalysis::analyze(dom, &nodes);
+    let callouts = super::callouts::CalloutAnalysis::analyze(dom, &nodes);
+    let footnotes = super::footnotes::FootnoteAnalysis::analyze(dom, root);
+    let math = super::math::MathAnalysis::analyze(dom, &nodes);
     let (media_separators, text_after_media_separators) = media_separators(dom, root, &media);
     for &node in &nodes {
         code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
@@ -135,8 +148,8 @@ pub(crate) fn compile_document(
                         | Tag::Iframe
                         | Tag::Video
                         | Tag::Audio
-                ) || dom.attr(node, AttrName::DataMath).is_some()
-                    || dom.attr(node, AttrName::DataFootnoteRef).is_some()
+                ) || math.value(node).is_some()
+                    || footnotes.reference(node).is_some()
             })
             || dom
                 .children(node)
@@ -154,12 +167,9 @@ pub(crate) fn compile_document(
     }
 
     let mut builder = DocumentBuilder::with_capacity(dom.len());
-    let available_footnotes: HashSet<&str> = dom
-        .descendants(root)
-        .filter_map(|node| dom.attr(node, AttrName::DataFootnote))
-        .collect();
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
     let mut table_layouts = HashMap::<DocumentNodeId, TableAnalysis>::new();
+    let mut deferred_footnote_group = None;
     let scope = Scope {
         parent: None,
         list: None,
@@ -170,7 +180,20 @@ pub(crate) fn compile_document(
         link: None,
         preserve_isolated_whitespace: false,
     };
-    let mut tasks = Vec::new();
+    let mut tasks = nodes
+        .iter()
+        .rev()
+        .filter_map(|&node| {
+            footnotes
+                .definition(node)
+                .filter(|_| footnotes.is_deferred(node))
+                .map(|label| Task::DeferredFootnote {
+                    node,
+                    label: label.into(),
+                    scope,
+                })
+        })
+        .collect::<Vec<_>>();
     tasks.extend(
         dom.children_rev(root)
             .map(|node| Task::Node { node, scope }),
@@ -197,14 +220,66 @@ pub(crate) fn compile_document(
                         &mut tasks,
                     );
                 }
+                Task::DeferredFootnote {
+                    node,
+                    label,
+                    mut scope,
+                } => {
+                    let parent = if let Some(parent) = deferred_footnote_group {
+                        parent
+                    } else {
+                        let parent = builder.append(None, NodeKind::BlockGroup)?;
+                        deferred_footnote_group = Some(parent);
+                        parent
+                    };
+                    scope.parent = Some(parent);
+                    compile_footnote_definition(
+                        dom,
+                        node,
+                        &label,
+                        scope,
+                        &mut footnote_ids,
+                        &mut builder,
+                        &mut tasks,
+                    )?;
+                }
+                Task::CalloutTitle {
+                    node,
+                    scope,
+                    already_strong,
+                } => {
+                    let paragraph = builder.append(scope.parent, NodeKind::Paragraph)?;
+                    let parent = if already_strong {
+                        paragraph
+                    } else {
+                        builder.append(Some(paragraph), NodeKind::Strong)?
+                    };
+                    push_children(
+                        dom,
+                        node,
+                        Scope {
+                            parent: Some(parent),
+                            ..scope
+                        },
+                        &mut tasks,
+                    );
+                }
                 Task::Node { .. } => unreachable!(),
             }
             continue;
         };
-        if tables.is_skipped(node) {
+        if tables.is_skipped(node)
+            || footnotes.is_skipped(node)
+            || math.is_skipped(node)
+            || footnotes.is_deferred(node)
+        {
             if tables.emits_separator(node) {
                 builder.append_prose(scope.parent, " ")?;
             }
+            continue;
+        }
+        if footnotes.is_transparent(node) {
+            push_children(dom, node, scope, &mut tasks);
             continue;
         }
         if let Some(text) = dom.text_node(node) {
@@ -212,6 +287,11 @@ pub(crate) fn compile_document(
                 .replacement_text(node)
                 .or_else(|| lists.replacement_text(node))
                 .unwrap_or(text);
+            let text = if footnotes.should_trim_start(node) {
+                text.trim_start()
+            } else {
+                text
+            };
             let whitespace_only = text.chars().all(char::is_whitespace);
             if !whitespace_only
                 && !text.chars().next().is_some_and(char::is_whitespace)
@@ -249,35 +329,30 @@ pub(crate) fn compile_document(
         if matches!(
             tag,
             Tag::Head | Tag::Script | Tag::Style | Tag::Template | Tag::Noscript
-        ) {
+        ) && math.value(node).is_none()
+        {
             continue;
         }
 
-        if let Some(kind) = dom.attr(node, AttrName::DataMath) {
-            let source = dom
-                .attr(node, AttrName::DataLatex)
-                .unwrap_or_default()
-                .trim();
-            if !source.is_empty() {
-                let value = MathValue {
-                    source: source.into(),
-                    format: MathFormat::Tex,
-                    fallback_text: nonempty(dom.text(node)).map(Into::into),
-                };
-                builder.append(
-                    scope.parent,
-                    if kind.eq_ignore_ascii_case("block") {
-                        NodeKind::DisplayMath(value)
-                    } else {
-                        NodeKind::InlineMath(value)
-                    },
-                )?;
-                continue;
-            }
+        if let Some(math) = math.value(node) {
+            let value = MathValue {
+                source: math.source.clone(),
+                format: MathFormat::Tex,
+                fallback_text: Some(math.fallback.clone()),
+            };
+            builder.append(
+                scope.parent,
+                if math.block {
+                    NodeKind::DisplayMath(value)
+                } else {
+                    NodeKind::InlineMath(value)
+                },
+            )?;
+            continue;
         }
 
-        if let Some(label) = dom.attr(node, AttrName::DataFootnoteRef) {
-            if available_footnotes.contains(label) {
+        if let Some(label) = footnotes.reference(node) {
+            if footnotes.has_definition(label) {
                 let id = footnote_id(&mut footnote_ids, label)?;
                 builder.append(scope.parent, NodeKind::FootnoteReference(id))?;
             } else {
@@ -286,19 +361,16 @@ pub(crate) fn compile_document(
             continue;
         }
 
-        if let Some(label) = dom.attr(node, AttrName::DataFootnote) {
-            let id = footnote_id(&mut footnote_ids, label)?;
-            let definition = builder.append(scope.parent, NodeKind::FootnoteDefinition(id))?;
-            builder.define_footnote(id, label, definition)?;
-            push_children(
+        if let Some(label) = footnotes.definition(node) {
+            compile_footnote_definition(
                 dom,
                 node,
-                Scope {
-                    parent: Some(definition),
-                    ..scope
-                },
+                label,
+                scope,
+                &mut footnote_ids,
+                &mut builder,
                 &mut tasks,
-            );
+            )?;
             continue;
         }
 
@@ -431,10 +503,18 @@ pub(crate) fn compile_document(
         }
 
         let mut next_scope = scope;
+        let callout = callouts.value(node);
         let parent_is_block_group = scope
             .parent
             .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
-        let semantic = if figures[node.index()] {
+        let semantic = if let Some(callout) = &callout {
+            callout_kind(callout.kind).map(|kind| {
+                NodeKind::Callout(Callout {
+                    kind,
+                    title: Some(callout.title.clone()),
+                })
+            })
+        } else if figures[node.index()] {
             Some(NodeKind::Figure)
         } else if captions[node.index()] && scope.figure.is_some() {
             Some(NodeKind::Figcaption)
@@ -527,6 +607,7 @@ pub(crate) fn compile_document(
 
         let Some(kind) = semantic else {
             if !is_block_tag(tag)
+                && tag != Tag::Sup
                 && inline_word_boundary_before(dom, node, &first_visible, &last_visible)
             {
                 builder.append_prose(scope.parent, " ")?;
@@ -608,7 +689,23 @@ pub(crate) fn compile_document(
             _ => {}
         }
         if !semantic_leaf {
-            if figures[node.index()] {
+            if let Some(callout) = callout {
+                if let Some(title) = callout.title_node {
+                    push_callout_children(
+                        dom,
+                        node,
+                        title,
+                        callout.title_is_strong,
+                        next_scope,
+                        &mut tasks,
+                    );
+                } else {
+                    let paragraph = builder.append(Some(semantic_node), NodeKind::Paragraph)?;
+                    let strong = builder.append(Some(paragraph), NodeKind::Strong)?;
+                    builder.append_prose(Some(strong), &callout.title)?;
+                    push_children(dom, node, next_scope, &mut tasks);
+                }
+            } else if figures[node.index()] {
                 push_figure_children(dom, node, next_scope, &captions, &mut tasks);
             } else {
                 push_children(dom, node, next_scope, &mut tasks);
@@ -834,6 +931,51 @@ fn push_children(dom: &Dom, node: NodeId, scope: Scope, tasks: &mut Vec<Task>) {
     );
 }
 
+fn push_callout_children(
+    dom: &Dom,
+    node: NodeId,
+    title: NodeId,
+    title_is_strong: bool,
+    scope: Scope,
+    tasks: &mut Vec<Task>,
+) {
+    tasks.extend(dom.children_rev(node).map(|child| {
+        if child == title {
+            Task::CalloutTitle {
+                node: child,
+                scope,
+                already_strong: title_is_strong,
+            }
+        } else {
+            Task::Node { node: child, scope }
+        }
+    }));
+}
+
+fn compile_footnote_definition(
+    dom: &Dom,
+    node: NodeId,
+    label: &str,
+    scope: Scope,
+    footnote_ids: &mut HashMap<String, FootnoteId>,
+    builder: &mut DocumentBuilder,
+    tasks: &mut Vec<Task>,
+) -> Result<(), BuildError> {
+    let id = footnote_id(footnote_ids, label)?;
+    let definition = builder.append(scope.parent, NodeKind::FootnoteDefinition(id))?;
+    builder.define_footnote(id, label, definition)?;
+    push_children(
+        dom,
+        node,
+        Scope {
+            parent: Some(definition),
+            ..scope
+        },
+        tasks,
+    );
+    Ok(())
+}
+
 fn push_figure_children(
     dom: &Dom,
     node: NodeId,
@@ -985,10 +1127,6 @@ fn callout_kind(value: &str) -> Option<CalloutKind> {
     }
 }
 
-fn nonempty(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1071,6 +1209,51 @@ mod tests {
             )
         );
         assert_eq!(document.footnotes().len(), 1);
+    }
+
+    #[test]
+    fn compiles_source_callout_math_and_footnote_semantics_directly() {
+        let document = compile(
+            r##"<div class="admonition warning"><p class="admonition-title"><strong>Warning</strong></p><p>Take care.</p></div><input class="footref-toggle" type="checkbox"><p>Equation <math><msup><mi>x</mi><mn>2</mn></msup></math>.<sup class="footnote-reference"><a href="#fn1">1</a></sup></p><section class="footnotes"><ol><li id="fn1"><p>Source note. <a class="footnote-backref" href="#ref1">↩</a></p></li></ol></section>"##,
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "Callout(kind=Warning, title=Some(\"Warning\"))\n",
+                "  Paragraph\n",
+                "    Strong\n",
+                "      Text(\"Warning\")\n",
+                "  Paragraph\n",
+                "    Text(\"Take care.\")\n",
+                "Paragraph\n",
+                "  Text(\"Equation \")\n",
+                "  InlineMath(source=\"x^{2}\", format=Tex, fallback=Some(\"x 2\"))\n",
+                "  Text(\".\")\n",
+                "  FootnoteReference(0)\n",
+                "BlockGroup\n",
+                "  List(kind=Ordered, start=None)\n",
+                "    FootnoteDefinition(0)\n",
+                "      Paragraph\n",
+                "        Text(\"Source note. \")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn external_noteref_urls_remain_links() {
+        let document = compile(
+            r##"<p><a role="doc-noteref" href="https://example.test/notes#fn1">external note</a></p><aside id="fn1" role="doc-footnote">Local definition.</aside>"##,
+            None,
+        );
+        assert!(matches!(
+            document
+                .roots()
+                .next()
+                .and_then(|root| root.children().next())
+                .map(|node| node.kind()),
+            Some(NodeKind::Link(_))
+        ));
     }
 
     #[test]

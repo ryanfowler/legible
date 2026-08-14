@@ -1,79 +1,168 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
-pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
-    let nodes = dom.element_descendants_snapshot_with_depth(root);
-    let mut script_for_rendered = vec![None; dom.len()];
-    let mut rendered_for_script = vec![None; dom.len()];
-    for &(node, _) in &nodes {
-        if dom.tag(node) != Some(Tag::Script) {
-            continue;
+#[derive(Clone, Debug)]
+pub(crate) struct RecognizedMath {
+    pub(crate) source: Box<str>,
+    pub(crate) fallback: Box<str>,
+    pub(crate) block: bool,
+}
+
+pub(crate) struct MathAnalysis {
+    values: Vec<Option<RecognizedMath>>,
+    skipped: Vec<bool>,
+}
+
+impl MathAnalysis {
+    pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
+        let mut has_annotation = vec![false; dom.len()];
+        for &node in nodes.iter().rev() {
+            has_annotation[node.index()] = is_tex_annotation(dom, node)
+                || dom
+                    .children(node)
+                    .any(|child| has_annotation[child.index()]);
         }
-        let Some(latex) = explicit_latex(dom, node) else {
-            continue;
-        };
-        let Some(rendered) = adjacent_rendered_math(dom, node).filter(|&rendered| {
-            authoritative_rendered_latex(dom, rendered)
-                .is_none_or(|rendered_latex| rendered_latex.trim() == latex.trim())
-        }) else {
-            continue;
-        };
-        script_for_rendered[rendered.index()] = Some(node);
-        rendered_for_script[node.index()] = Some(rendered);
+        let mut inside_container = vec![false; dom.len()];
+        let mut candidates = vec![false; dom.len()];
+        for &node in nodes {
+            let inherited = dom
+                .parent(node)
+                .is_some_and(|parent| inside_container[parent.index()]);
+            let evidence = has_own_math_evidence(dom, node)
+                || has_math_wrapper_class(dom, node) && has_annotation[node.index()];
+            let container =
+                evidence && (is_math_root(dom, node) || has_math_wrapper_class(dom, node));
+            inside_container[node.index()] = inherited || container;
+            candidates[node.index()] =
+                evidence && (!inherited || dom.tag(node) == Some(Tag::Script));
+        }
+
+        let mut script_for_rendered = vec![None; dom.len()];
+        let mut rendered_for_script = vec![None; dom.len()];
+        for &node in nodes {
+            if !candidates[node.index()] || dom.tag(node) != Some(Tag::Script) {
+                continue;
+            }
+            let Some(latex) = explicit_latex(dom, node) else {
+                continue;
+            };
+            let Some(rendered) = adjacent_rendered_math(dom, node).filter(|&rendered| {
+                authoritative_rendered_latex(dom, rendered)
+                    .is_none_or(|rendered_latex| rendered_latex.trim() == latex.trim())
+            }) else {
+                continue;
+            };
+            script_for_rendered[rendered.index()] = Some(node);
+            rendered_for_script[node.index()] = Some(rendered);
+        }
+
+        let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
+        let mut skipped = vec![false; dom.len()];
+        for &node in nodes {
+            if !candidates[node.index()] || skipped[node.index()] || values[node.index()].is_some()
+            {
+                continue;
+            }
+            let paired_script = script_for_rendered[node.index()];
+            let Some(latex) = paired_script
+                .and_then(|script| explicit_latex(dom, script))
+                .or_else(|| explicit_latex(dom, node))
+            else {
+                continue;
+            };
+            let rendered = rendered_for_script[node.index()];
+            let semantic_root = rendered.unwrap_or(node);
+            let block = is_block_math(dom, semantic_root) || is_block_math(dom, node);
+            let fallback = math_fallback(dom, semantic_root)
+                .or_else(|| {
+                    dom.attr(semantic_root, AttrName::DataMath).and_then(|_| {
+                        let fallback = dom.text(semantic_root);
+                        (!fallback.trim().is_empty()).then_some(fallback)
+                    })
+                })
+                .unwrap_or_else(|| latex.clone());
+            values[semantic_root.index()] = Some(RecognizedMath {
+                source: latex.trim().into(),
+                fallback: fallback.into(),
+                block,
+            });
+            if semantic_root != node {
+                skipped[node.index()] = true;
+            }
+            if let Some(script) = paired_script
+                && script != semantic_root
+            {
+                skipped[script.index()] = true;
+            }
+        }
+        Self { values, skipped }
     }
 
-    for (node, _) in nodes {
-        if dom.parent(node).is_none() || dom.attr(node, AttrName::DataMath).is_some() {
-            continue;
-        }
-        let paired_script = script_for_rendered[node.index()];
-        let Some(latex) = paired_script
-            .and_then(|script| explicit_latex(dom, script))
-            .or_else(|| explicit_latex(dom, node))
-        else {
-            continue;
-        };
-        let rendered_sibling = rendered_for_script[node.index()];
-        let source = rendered_sibling.unwrap_or(node);
-        let block = is_block_math(dom, source) || is_block_math(dom, node);
-        let fallback = math_fallback(dom, source).unwrap_or_else(|| latex.clone());
-        let Ok(canonical) = dom.create_html_element(if block { Tag::Div } else { Tag::Span })
-        else {
-            continue;
-        };
-        dom.set_attr(
-            canonical,
-            AttrName::DataMath,
-            if block { "block" } else { "inline" },
-        );
-        dom.set_attr(canonical, AttrName::DataLatex, latex.trim());
-        if let Ok(text) = dom.create_text(&fallback) {
-            dom.append_child(canonical, text);
-        }
-        dom.replace_with(source, canonical);
-        let source_script = paired_script.or((source != node).then_some(node));
-        if let Some(script) = source_script
-            && script != source
-        {
-            dom.detach(script);
-        }
+    pub(crate) fn value(&self, node: NodeId) -> Option<&RecognizedMath> {
+        self.values[node.index()].as_ref()
+    }
+
+    pub(crate) fn is_skipped(&self, node: NodeId) -> bool {
+        self.skipped[node.index()]
     }
 }
 
+pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {
+    has_own_math_evidence(dom, node)
+}
+
+fn has_own_math_evidence(dom: &Dom, node: NodeId) -> bool {
+    is_math_root(dom, node)
+        || is_tex_annotation(dom, node)
+        || ["data-latex", "data-tex"]
+            .into_iter()
+            .filter_map(|name| dom.attr_by_local_name(node, name))
+            .any(valid_latex)
+        || ["data-math", "data-formula"]
+            .into_iter()
+            .filter_map(|name| dom.attr_by_local_name(node, name))
+            .any(|value| looks_like_latex(value) || has_math_wrapper_class(dom, node))
+        || has_math_wrapper_class(dom, node)
+            && ["alttext", "aria-label"]
+                .into_iter()
+                .filter_map(|name| dom.attr_by_local_name(node, name))
+                .any(valid_latex)
+        || dom.tag(node) == Some(Tag::Script)
+            && dom
+                .attr(node, AttrName::Type)
+                .is_some_and(is_math_script_type)
+            && valid_latex(&dom.text(node))
+        || dom.tag(node) == Some(Tag::Img)
+            && image_is_equation(dom, node)
+            && dom
+                .attr_by_local_name(node, "alt")
+                .is_some_and(looks_like_latex)
+}
+
+pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {
+    has_math_wrapper_class(dom, node) || image_is_equation(dom, node)
+}
+
 fn math_fallback(dom: &Dom, node: NodeId) -> Option<String> {
-    let math = if dom.tag(node) == Some(Tag::Math) {
+    let math = if is_math_root(dom, node) {
         node
     } else {
         dom.descendants(node)
-            .find(|&descendant| dom.tag(descendant) == Some(Tag::Math))?
+            .find(|&descendant| is_math_root(dom, descendant))?
     };
+    let math_nodes = std::iter::once(math)
+        .chain(dom.descendants(math))
+        .collect::<Vec<_>>();
+    let mut inside_annotation = vec![false; dom.len()];
     let mut fallback = String::new();
-    for descendant in std::iter::once(math).chain(dom.descendants(math)) {
-        if dom.text_node(descendant).is_none()
-            || dom.ancestors(descendant).any(|ancestor| {
-                dom.qual_name(ancestor)
-                    .is_some_and(|name| is_annotation_element(name.local.as_ref()))
-            })
-        {
+    for descendant in math_nodes {
+        let inherited = dom
+            .parent(descendant)
+            .is_some_and(|parent| inside_annotation[parent.index()]);
+        let annotation = dom
+            .qual_name(descendant)
+            .is_some_and(|name| is_annotation_element(name.local.as_ref()));
+        inside_annotation[descendant.index()] = inherited || annotation;
+        if dom.text_node(descendant).is_none() || inside_annotation[descendant.index()] {
             continue;
         }
         let text = dom.text_node(descendant).unwrap_or_default().trim();
@@ -86,6 +175,11 @@ fn math_fallback(dom: &Dom, node: NodeId) -> Option<String> {
         fallback.push_str(text);
     }
     (!fallback.is_empty()).then_some(fallback)
+}
+
+fn is_math_root(dom: &Dom, node: NodeId) -> bool {
+    dom.qual_name(node)
+        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("math"))
 }
 
 fn is_annotation_element(local: &str) -> bool {
@@ -114,7 +208,7 @@ pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> Vec<b
         let wrapper = inherited || has_math_wrapper_class(dom, node);
         inside_wrapper[node.index()] = wrapper;
         accessible[node.index()] =
-            has_annotation[node.index()] && (dom.tag(node) == Some(Tag::Math) || wrapper);
+            has_annotation[node.index()] && (is_math_root(dom, node) || wrapper);
     }
     accessible
 }
@@ -212,7 +306,7 @@ fn explicit_latex(dom: &Dom, node: NodeId) -> Option<String> {
         return Some(value.trim().to_owned());
     }
 
-    let math_root = dom.tag(node) == Some(Tag::Math) || has_math_wrapper_class(dom, node);
+    let math_root = is_math_root(dom, node) || has_math_wrapper_class(dom, node);
     if !math_root {
         return None;
     }
@@ -244,7 +338,7 @@ fn explicit_latex(dom: &Dom, node: NodeId) -> Option<String> {
             return Some(value.trim().to_owned());
         }
     }
-    (dom.tag(node) == Some(Tag::Math))
+    is_math_root(dom, node)
         .then(|| mathml_latex(dom, node))
         .flatten()
 }
@@ -483,10 +577,16 @@ fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn is_block_math(dom: &Dom, node: NodeId) -> bool {
+    if dom
+        .attr(node, AttrName::DataMath)
+        .is_some_and(|value| value.eq_ignore_ascii_case("block"))
+    {
+        return true;
+    }
     if std::iter::once(node)
         .chain(dom.descendants(node))
         .any(|math| {
-            dom.tag(math) == Some(Tag::Math)
+            is_math_root(dom, math)
                 && dom
                     .attr_by_local_name(math, "display")
                     .is_some_and(|value| value.eq_ignore_ascii_case("block"))
@@ -518,242 +618,4 @@ fn is_block_math(dom: &Dom, node: NodeId) -> bool {
         return true;
     }
     matches!(dom.tag(node), Some(Tag::Div | Tag::P))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::markdown::dom_to_markdown;
-    use crate::text::{TextOptions, render_text};
-
-    #[test]
-    fn extracts_katex_annotation_once() {
-        let mut dom = Dom::parse_fragment(r#"<p>A <span class="katex" aria-label="E equals m c squared"><math><semantics><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math><span class="katex-html">duplicate</span></span>.</p>"#, Tag::Div).unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "A $E=mc^2$.\n");
-    }
-
-    #[test]
-    fn converts_common_mathml_without_a_dependency() {
-        let mut dom = Dom::parse_fragment(
-            "<math><mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup></math>",
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "$E=mc^{2}$\n");
-    }
-
-    #[test]
-    fn converts_extended_mathml_structures() {
-        let cases = [
-            (
-                "<math><mroot>\n  <mi>x</mi>\n  <mn>3</mn>\n</mroot></math>",
-                "$\\sqrt[3]{x}$\n",
-            ),
-            (
-                "<math><munder><mo>∑</mo><mi>i</mi></munder><mover><mi>x</mi><mo>¯</mo></mover><munderover><mo>∫</mo><mn>0</mn><mn>1</mn></munderover></math>",
-                "$\\underset{i}{∑}\\overset{¯}{x}\\overset{1}{\\underset{0}{∫}}$\n",
-            ),
-            (
-                r#"<math><mfenced open="[" close="]" separators=";,"><mi>a</mi><mi>b</mi><mi>c</mi></mfenced><mtext>speed &amp; time</mtext></math>"#,
-                "$[a;b,c]\\text{speed \\& time}$\n",
-            ),
-        ];
-        for (source, expected) in cases {
-            let mut dom = Dom::parse_fragment(source, Tag::Div).unwrap();
-            let root = dom.root();
-            normalize(&mut dom, root);
-            assert_eq!(dom_to_markdown(&dom, root, 0), expected, "{source}");
-        }
-    }
-
-    #[test]
-    fn converts_labeled_mathml_equations_without_duplicate_labels() {
-        let mut dom = Dom::parse_fragment(
-            r#"<math display="block"><mtable><mlabeledtr><mtd><mtext>(1)</mtext></mtd><mtd><mi>x</mi><mo>=</mo><mn>1</mn></mtd></mlabeledtr></mtable></math>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "$$\n\\begin{aligned}x=1\\tag{1}\\end{aligned}\n$$\n"
-        );
-    }
-
-    #[test]
-    fn normalizes_rendered_mathjax_from_accessible_labels() {
-        let mut dom = Dom::parse_fragment(
-            r#"<mjx-container class="MathJax" jax="SVG" display="true" aria-label="\int_0^1 x dx"><svg><path d="glyph"></path></svg></mjx-container><mjx-container class="MathJax" jax="CHTML" aria-label="a+b"><mjx-math><mjx-mi></mjx-mi></mjx-math></mjx-container>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "$$\n\\int_0^1 x dx\n$$\n$a+b$\n"
-        );
-    }
-
-    #[test]
-    fn uses_adjacent_tex_source_for_rendered_mathjax_once() {
-        let mut dom = Dom::parse_fragment(
-            r#"<script type="math/tex; mode=display">x=1</script>
-<mjx-container class="MathJax" jax="CHTML" display="true"><mjx-math><mjx-mi></mjx-mi></mjx-math></mjx-container>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "$$\nx=1\n$$\n");
-    }
-
-    #[test]
-    fn keeps_cells_from_an_empty_mathml_equation_label() {
-        let mut dom = Dom::parse_fragment(
-            r#"<math><mtable><mlabeledtr><mtd></mtd><mtd><mi>x</mi><mo>=</mo><mn>2</mn></mtd></mlabeledtr></mtable></math>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "$\\begin{aligned}x=2\\end{aligned}$\n"
-        );
-    }
-
-    #[test]
-    fn pairs_tex_source_after_rendered_mathjax() {
-        let mut dom = Dom::parse_fragment(
-            r#"<mjx-container class="MathJax" jax="CHTML" aria-label="y equals two"><mjx-math></mjx-math></mjx-container>
-<script type="math/tex">y=2</script>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "$y=2$\n");
-    }
-
-    #[test]
-    fn converts_only_images_with_equation_evidence() {
-        let mut dom = Dom::parse_fragment(
-            r#"<img class="equation" src="eq.png" alt="E=mc^2"><img src="photo.png" alt="x=y">"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "$E=mc^2$![x=y](photo.png)\n"
-        );
-    }
-
-    #[test]
-    fn canonical_math_has_one_html_and_text_fallback() {
-        let mut dom = Dom::parse_fragment(
-            r#"<script type="math/tex">x=1</script><span data-latex="y=2"></span><span class="katex"><math><semantics><mrow><mi>z</mi><mo>=</mo><mn>3</mn></mrow><annotation encoding="application/x-tex">z=3</annotation></semantics></math><span class="katex-html">duplicate</span></span>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        let html = crate::dom::render_html(&dom, root, 0);
-        assert!(html.contains(">x=1</span>"), "{html}");
-        assert!(html.contains(">y=2</span>"), "{html}");
-        assert!(html.contains(">z = 3</span>"), "{html}");
-        assert!(!html.contains("duplicate"), "{html}");
-        assert_eq!(
-            render_text(&dom, root, 0, &TextOptions::default()),
-            "x=1y=2z = 3"
-        );
-    }
-
-    #[test]
-    fn ignores_ambiguous_application_data_attributes() {
-        let mut dom = Dom::parse_fragment(
-            r#"<div data-math="true"><p>Article content.</p></div><div data-formula="enabled">More content.</div>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "Article content.\n\nMore content.\n"
-        );
-    }
-
-    #[test]
-    fn honors_block_mathml_display() {
-        let mut dom = Dom::parse_fragment(
-            r#"<math display="block"><mi>x</mi><mo>=</mo><mn>1</mn></math>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "$$\nx=1\n$$\n");
-    }
-
-    #[test]
-    fn honors_block_mathml_inside_a_wrapper() {
-        let mut dom = Dom::parse_fragment(
-            r#"<span class="katex"><math display="block"><semantics><mi>x</mi><annotation encoding="application/x-tex">x=1</annotation></semantics></math></span>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "$$\nx=1\n$$\n");
-    }
-
-    #[test]
-    fn ignores_non_tex_mathml_semantic_alternatives() {
-        let mut dom = Dom::parse_fragment(
-            r#"<math><semantics><mi>x</mi><annotation encoding="text/plain">duplicate x</annotation><annotation-xml encoding="application/xhtml+xml"><span>duplicate x</span></annotation-xml></semantics></math>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        assert_eq!(dom_to_markdown(&dom, root, 0), "$x$\n");
-        assert_eq!(render_text(&dom, root, 0, &TextOptions::default()), "x");
-    }
-
-    #[test]
-    fn preserves_multiline_display_tex() {
-        let mut dom = Dom::parse_fragment(
-            r#"<script type="math/tex; mode=display">
-\begin{align}
-x &= 1 \\
-y &= 2
-\end{align}
-</script><span class="katex katex-display"><math><semantics><mi>z</mi><annotation encoding="application/x-tex">
-\begin{aligned}
-z &amp;= 3
-\end{aligned}
-</annotation></semantics></math></span>"#,
-            Tag::Div,
-        )
-        .unwrap();
-        let root = dom.root();
-        normalize(&mut dom, root);
-        let markdown = dom_to_markdown(&dom, root, 0);
-        assert!(
-            markdown.contains("$$\n\\begin{align}\nx &= 1 \\\\\ny &= 2\n\\end{align}\n$$"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("$$\n\\begin{aligned}\nz &= 3\n\\end{aligned}\n$$"),
-            "{markdown}"
-        );
-    }
 }

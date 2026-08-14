@@ -1829,7 +1829,7 @@ impl<'a> ContentExtractor<'a> {
                 matches!(
                     self.dom.tag(node),
                     Some(Tag::Img | Tag::Embed | Tag::Object | Tag::Iframe)
-                ) || self.dom.attr(node, AttrName::DataMath).is_some()
+                ) || crate::document::math_source_is_protected(&self.dom, node)
             });
             if !media && !has_non_empty_inner_text(&self.dom, paragraph) {
                 self.dom.detach(paragraph);
@@ -1898,7 +1898,10 @@ impl<'a> ContentExtractor<'a> {
             if let Some(base) = self.base_uri.as_ref() {
                 if tag == Tag::A {
                     if let Some(href) = self.dom.attr(id, AttrName::Href) {
-                        if href.starts_with('#') && !self.resolve_fragment_links {
+                        if crate::document::is_local_footnote_reference(&self.dom, id, href) {
+                            // Keep the source form until semantic compilation resolves the
+                            // local reference against its retained definition.
+                        } else if href.starts_with('#') && !self.resolve_fragment_links {
                             // Fragment links do not need URI resolution when the
                             // document does not override its base URL.
                         } else if href.starts_with("javascript:") {
@@ -1958,6 +1961,9 @@ impl<'a> ContentExtractor<'a> {
                 && !crate::document::code_class_is_semantic_evidence(&self.dom, id)
                 && !crate::document::figure_class_is_semantic_evidence(&self.dom, id)
                 && !crate::document::table_class_is_semantic_evidence(&self.dom, id)
+                && !crate::document::callout_class_is_semantic_evidence(&self.dom, id)
+                && !crate::document::footnote_class_is_semantic_evidence(&self.dom, id)
+                && !crate::document::math_class_is_semantic_evidence(&self.dom, id)
                 && let Some(classes) = self.dom.attr(id, AttrName::Class)
             {
                 class_buffer.clear();
@@ -2024,22 +2030,21 @@ impl<'a> ContentExtractor<'a> {
         }
         let (flattened_layout_tables, semantic_tables) =
             crate::document::table_normalization_counts(&self.dom, root);
+        let (footnote_references, footnote_definitions, math_expressions) =
+            crate::document::semantic_normalization_counts(&self.dom, root);
         let mut counts = NormalizationCountsInfo {
             code_blocks: crate::document::source_code_block_count(&self.dom, root),
             flattened_layout_tables,
             tables: semantic_tables,
+            footnote_references,
+            footnote_definitions,
+            math_expressions,
             ..NormalizationCountsInfo::default()
         };
         for node in self.dom.descendants(root) {
             if self.dom.tag(node) == Some(Tag::Img) {
                 counts.images += 1;
             }
-            counts.footnote_references +=
-                usize::from(self.dom.attr(node, AttrName::DataFootnoteRef).is_some());
-            counts.footnote_definitions +=
-                usize::from(self.dom.attr(node, AttrName::DataFootnote).is_some());
-            counts.math_expressions +=
-                usize::from(self.dom.attr(node, AttrName::DataMath).is_some());
         }
         self.diagnostic_normalization = counts;
     }
