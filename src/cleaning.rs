@@ -7,13 +7,14 @@ use crate::constants::{
 use crate::dom::{AttrName, Dom, NodeId, NodeStats, Tag};
 use crate::page_kind::PageKind;
 use crate::scoring::{
-    get_inner_text, get_link_density_cached, get_or_compute_stats, has_hidden_utility_class,
-    has_single_tag_inside_element, has_static_hidden_marker, is_element_without_content,
-    is_hidden_utility_class, is_phrasing_content,
+    get_inner_text, get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
+    has_hidden_utility_class, has_single_tag_inside_element, has_static_hidden_marker,
+    is_element_without_content, is_hidden_utility_class, is_phrasing_content,
 };
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
 use smallvec::SmallVec;
+use std::collections::HashMap;
 
 pub fn prep_document(dom: &mut Dom) {
     // Preserve the required preparation order. Remove inactive subtrees,
@@ -1327,6 +1328,661 @@ pub(crate) fn heuristic_cleanup(
     }
 
     remove_contextual_boilerplate(dom, root, store, text_buffer, nodes);
+}
+
+/// Removes document-level navigation and footer material that survives root
+/// selection. These regions often sit inside a broad `main` wrapper, so root
+/// semantics alone cannot separate them from the useful page.
+///
+/// A name or element tag is only one signal. Removal also requires a terminal
+/// or leading position, link-heavy low-prose structure, and either semantic or
+/// repeated structural evidence. This keeps pricing cards, article dates, and
+/// short company content out of the global-chrome bucket.
+pub(crate) fn remove_global_chrome(
+    dom: &mut Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    if snapshot.is_empty() {
+        return false;
+    }
+
+    store.clear_stats();
+    store.enable_link_lengths();
+    get_or_compute_stats(dom, root, store);
+
+    let aggregates = chrome_aggregates(dom, &snapshot);
+    let mut signatures = HashMap::<u64, u8>::new();
+    for &(node, _) in &snapshot {
+        let aggregate = aggregates[node.index()];
+        if aggregate.link_count >= 2 {
+            let count = signatures.entry(aggregate.signature).or_default();
+            *count = count.saturating_add(1).min(3);
+        }
+    }
+
+    let mut remove = vec![false; dom.len()];
+    let mut text_buffer = String::new();
+    for &(node, _) in &snapshot {
+        if node == root || dom.parent(node).is_none() {
+            continue;
+        }
+        let aggregate = aggregates[node.index()];
+        let name = node_name(dom, node);
+        let semantic_navigation = dom.tag(node) == Some(Tag::Nav)
+            || dom.tag(node) == Some(Tag::Footer)
+            || dom.tag(node) == Some(Tag::Header) && aggregate.link_count >= 3
+            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+                roles.split_whitespace().any(|role| {
+                    role.eq_ignore_ascii_case("navigation")
+                        || role.eq_ignore_ascii_case("contentinfo")
+                })
+            });
+        let named_chrome = contains_any(
+            &name,
+            &[
+                "navigation",
+                "navbar",
+                "menu",
+                "footer",
+                "contact",
+                "legal",
+                "site-links",
+                "site_links",
+            ],
+        );
+        let repeated = aggregate.link_count >= 2
+            && signatures
+                .get(&aggregate.signature)
+                .is_some_and(|count| *count >= 2);
+        if !semantic_navigation && !named_chrome && !repeated {
+            continue;
+        }
+        let stats = get_or_compute_stats(dom, node, store);
+        if stats.text_length == 0 {
+            continue;
+        }
+        let links = usize::from(aggregate.link_count);
+        let link_density = get_link_density_cached(dom, node, stats.text_length, store);
+        let non_link_chars = f64::from(stats.text_length) * (1.0 - link_density);
+        let at_start = near_content_start(dom, node, root, store);
+        let at_end = near_content_end(dom, node, root, store);
+        let adjacent_content = has_substantive_content_sibling(dom, node, store);
+        let text = get_normalized_inner_text(dom, node, &mut text_buffer).to_ascii_lowercase();
+
+        let metrics = ChromeMetrics {
+            name: &name,
+            text: &text,
+            stats,
+            links,
+            link_density,
+            non_link_chars,
+            repeated,
+            has_meaningful_media: aggregate.has_meaningful_media,
+            has_content_structure: aggregate.has_content_structure,
+            at_start,
+            at_end,
+            adjacent_content,
+        };
+        if is_global_navigation(dom, node, root, &metrics)
+            || is_global_footer(dom, node, root, &metrics)
+        {
+            remove[node.index()] = true;
+        }
+    }
+
+    let mut changed = false;
+    for &(node, _) in &snapshot {
+        if !remove[node.index()] || dom.parent(node).is_none() {
+            continue;
+        }
+        if dom.ancestors(node).any(|ancestor| remove[ancestor.index()]) {
+            continue;
+        }
+        if dom.tag(node) == Some(Tag::Header) {
+            hoist_header_identity(dom, node);
+        } else if dom.tag(node) == Some(Tag::Footer)
+            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+                roles
+                    .split_whitespace()
+                    .any(|role| role.eq_ignore_ascii_case("contentinfo"))
+            })
+            || node_name(dom, node).contains("footer")
+        {
+            hoist_footer_identity(dom, node);
+        }
+        detach_and_invalidate_stats(dom, node, store);
+        changed = true;
+    }
+    changed
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChromeAggregate {
+    link_count: u8,
+    signature: u64,
+    has_meaningful_media: bool,
+    has_content_structure: bool,
+}
+
+fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggregate> {
+    const HASH_OFFSET: u64 = 14_695_981_039_346_656_037;
+    let mut aggregates = vec![ChromeAggregate::default(); dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        let mut signature = HASH_OFFSET;
+        signature = signature
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(dom.tag(node).map_or(0, |tag| tag as u64 + 1));
+        let mut link_count = u8::from(dom.tag(node) == Some(Tag::A));
+        let mut has_meaningful_media = own_meaningful_media(dom, node);
+        let mut has_content_structure = matches!(
+            dom.tag(node),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P)
+        );
+        for child in dom.element_children(node) {
+            let child_aggregate = aggregates[child.index()];
+            link_count = link_count
+                .saturating_add(child_aggregate.link_count)
+                .min(32);
+            has_meaningful_media |= child_aggregate.has_meaningful_media;
+            has_content_structure |= child_aggregate.has_content_structure;
+            signature = signature
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(child_aggregate.signature);
+        }
+        aggregates[node.index()] = ChromeAggregate {
+            link_count,
+            signature,
+            has_meaningful_media,
+            has_content_structure,
+        };
+    }
+    aggregates
+}
+
+fn own_meaningful_media(dom: &Dom, node: NodeId) -> bool {
+    if dom.tag(node) == Some(Tag::Figure)
+        && dom.descendants(node).any(|child| {
+            dom.tag(child) == Some(Tag::Figcaption) && dom.has_non_whitespace_text(child)
+        })
+    {
+        return true;
+    }
+    dom.tag(node) == Some(Tag::Img)
+        && dom.attr_by_local_name(node, "alt").is_some_and(|alt| {
+            let alt = alt.trim();
+            alt.chars().count() >= 12
+                && !contains_any(
+                    &alt.to_ascii_lowercase(),
+                    &["logo", "icon", "avatar", "placeholder"],
+                )
+        })
+}
+
+fn has_substantive_prose(dom: &Dom, node: NodeId) -> bool {
+    dom.descendants(node).any(|descendant| {
+        matches!(dom.tag(descendant), Some(Tag::Blockquote | Tag::P))
+            && dom.normalized_char_count(descendant) >= 80
+    })
+}
+
+fn is_brand_identity_link(dom: &Dom, link: NodeId) -> bool {
+    let named = [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(link, attribute))
+        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "brand" | "branding" | "logo" | "masthead" | "wordmark" | "sitetitle"
+            )
+        });
+    if named {
+        return true;
+    }
+    let Some(href) = dom.attr(link, AttrName::Href) else {
+        return false;
+    };
+    let root_link = href.trim() == "/" || href.trim().is_empty();
+    if !root_link {
+        return false;
+    }
+    let mut text_buffer = String::new();
+    let text = get_normalized_inner_text(dom, link, &mut text_buffer);
+    (2..=80).contains(&text.chars().count())
+        && !matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "home" | "menu" | "menu button" | "skip to content"
+        )
+}
+
+fn hoist_header_identity(dom: &mut Dom, header: NodeId) {
+    let identity = dom
+        .descendants(header)
+        .filter(|&node| dom.tag(node) == Some(Tag::A))
+        .find(|&link| is_brand_identity_link(dom, link));
+    if let Some(identity) = identity {
+        dom.insert_before(header, identity);
+    }
+}
+
+fn has_substantive_content_sibling(
+    dom: &Dom,
+    node: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let Some(parent) = dom.parent(node) else {
+        return false;
+    };
+    dom.element_children(parent).any(|sibling| {
+        sibling != node
+            && !matches!(
+                dom.tag(sibling),
+                Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
+            )
+            && {
+                let stats = get_or_compute_stats(dom, sibling, store);
+                stats.text_length >= 80
+                    && (stats.sentence_end_count > 0
+                        || dom.descendants(sibling).any(|descendant| {
+                            matches!(
+                                dom.tag(descendant),
+                                Some(
+                                    Tag::Article
+                                        | Tag::H1
+                                        | Tag::H2
+                                        | Tag::H3
+                                        | Tag::H4
+                                        | Tag::H5
+                                        | Tag::H6
+                                        | Tag::P
+                                )
+                            )
+                        }))
+            }
+    })
+}
+
+struct ChromeMetrics<'a> {
+    name: &'a str,
+    text: &'a str,
+    stats: NodeStats,
+    links: usize,
+    link_density: f64,
+    non_link_chars: f64,
+    repeated: bool,
+    has_meaningful_media: bool,
+    has_content_structure: bool,
+    at_start: bool,
+    at_end: bool,
+    adjacent_content: bool,
+}
+
+fn has_meaningful_heading(dom: &Dom, node: NodeId) -> bool {
+    dom.descendants(node).any(|descendant| {
+        matches!(
+            dom.tag(descendant),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) && {
+            let mut heading = String::new();
+            dom.append_normalized_text(descendant, &mut heading);
+            !matches!(
+                heading.trim().to_ascii_lowercase().as_str(),
+                "menu" | "navigation" | "sections" | "contents" | "on this page"
+            )
+        }
+    })
+}
+
+fn is_global_navigation(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    metrics: &ChromeMetrics<'_>,
+) -> bool {
+    if !matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Div | Tag::Header | Tag::Nav | Tag::Ol | Tag::Section | Tag::Ul)
+    ) || dom.tag(node) == Some(Tag::Header)
+        && (has_meaningful_heading(dom, node)
+            || contains_any(metrics.name, &["page-head", "article-head", "post-head"]))
+    {
+        return false;
+    }
+    if is_inside_article_content(dom, node, root)
+        || is_content_relative_navigation(dom, node)
+        || is_document_toc(dom, node, metrics.name)
+        || is_within_pricing_region(dom, node)
+        || has_pricing_content(dom, node, metrics.text)
+        || metrics.has_meaningful_media
+        || has_meaningful_heading(dom, node)
+    {
+        return false;
+    }
+    let semantic = dom.tag(node) == Some(Tag::Nav)
+        || dom.tag(node) == Some(Tag::Header) && metrics.links >= 3
+        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+            roles
+                .split_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("navigation"))
+        });
+    let named = contains_any(
+        metrics.name,
+        &[
+            "global-nav",
+            "global_navigation",
+            "site-nav",
+            "site_navigation",
+            "navbar",
+            "navigation",
+            "main-menu",
+            "main_menu",
+            "site-menu",
+            "site_menu",
+            "sidebar-nav",
+            "sidebar_navigation",
+            "docs-nav",
+            "docs_navigation",
+            "menu",
+        ],
+    );
+    let low_prose = metrics.stats.sentence_end_count <= 4 && metrics.non_link_chars <= 360.0;
+    let compact = metrics.links >= 3 && metrics.link_density >= 0.35
+        || metrics.repeated && metrics.links >= 2 && metrics.link_density >= 0.45;
+    let positioned = metrics.at_start || metrics.at_end || metrics.adjacent_content;
+    let navigation_name = contains_any(
+        metrics.name,
+        &[
+            "navigation",
+            "navbar",
+            "nav-",
+            "nav_",
+            "menu",
+            "sidebar",
+            "site-links",
+        ],
+    );
+    let structural = (semantic || named) && positioned
+        || metrics.repeated
+            && navigation_name
+            && !metrics.has_meaningful_media
+            && !metrics.has_content_structure
+            && (metrics.at_start || metrics.at_end);
+    structural && compact && low_prose
+}
+
+fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetrics<'_>) -> bool {
+    if !metrics.at_end
+        || !matches!(
+            dom.tag(node),
+            Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Header | Tag::Other | Tag::Section)
+        )
+        || matches!(dom.tag(node), Some(Tag::Article | Tag::Main))
+        || is_inside_article_content(dom, node, root)
+        || is_within_pricing_region(dom, node)
+        || has_pricing_content(dom, node, metrics.text)
+        || metrics.has_meaningful_media
+    {
+        return false;
+    }
+    let semantic = dom.tag(node) == Some(Tag::Footer)
+        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+            roles
+                .split_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("contentinfo"))
+        });
+    let named_contact = metrics.name.contains("contact")
+        && !has_meaningful_heading(dom, node)
+        && !has_substantive_prose(dom, node);
+    let named = metrics.name.contains("footer")
+        || named_contact
+        || metrics.name.contains("legal")
+        || metrics.name.contains("site-links")
+        || metrics.name.contains("site_links");
+    let footer_text = contains_any(
+        metrics.text,
+        &[
+            "privacy",
+            "terms of service",
+            "terms and conditions",
+            "cookie policy",
+            "all rights reserved",
+            "copyright",
+            "contact us",
+            "follow us",
+            "sitemap",
+        ],
+    );
+    let low_prose = metrics.stats.sentence_end_count <= 4 && metrics.non_link_chars <= 480.0;
+    let link_cluster = metrics.links >= 2 && metrics.link_density >= 0.2;
+    let contact_link = dom.descendants(node).any(|descendant| {
+        dom.tag(descendant) == Some(Tag::A)
+            && get_normalized_inner_text(dom, descendant, &mut String::new())
+                .to_ascii_lowercase()
+                .contains("contact")
+    });
+    let global_structure = semantic || named;
+    low_prose
+        && ((global_structure && (link_cluster || footer_text || contact_link))
+            || (footer_text && metrics.links >= 2 && metrics.link_density >= 0.15))
+}
+
+fn is_content_relative_navigation(dom: &Dom, node: NodeId) -> bool {
+    let name = node_name(dom, node);
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token == "hlist" || token.starts_with("navbox") || token.starts_with("portal"))
+        || dom
+            .ancestors(node)
+            .any(|ancestor| dom.tag(ancestor) == Some(Tag::Table))
+        || dom
+            .descendants(node)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::Table))
+}
+
+fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
+    let labelled = dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
+        matches!(
+            label.trim().to_ascii_lowercase().as_str(),
+            "on this page" | "table of contents" | "contents" | "toc"
+        )
+    });
+    let named = contains_any(
+        name,
+        &["table-of-contents", "table_of_contents", "docs-toc", "toc"],
+    );
+    let headings = dom.descendants(node).any(|descendant| {
+        matches!(
+            dom.tag(descendant),
+            Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) && {
+            let mut text = String::new();
+            dom.append_normalized_text(descendant, &mut text);
+            matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "contents" | "on this page"
+            )
+        }
+    });
+    let links: Vec<_> = dom
+        .descendants(node)
+        .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
+        .collect();
+    let all_fragment_links = !links.is_empty()
+        && links.iter().all(|&link| {
+            dom.attr(link, AttrName::Href)
+                .is_some_and(|href| href.trim_start().starts_with('#'))
+        });
+    labelled || named || headings || all_fragment_links
+}
+
+fn has_pricing_heading(dom: &Dom, node: NodeId) -> bool {
+    dom.descendants(node).any(|descendant| {
+        matches!(
+            dom.tag(descendant),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) && {
+            let mut heading = String::new();
+            dom.append_normalized_text(descendant, &mut heading);
+            let heading = heading.trim().to_ascii_lowercase();
+            heading == "pricing"
+                || heading == "plans"
+                || heading == "pricing plans"
+                || heading.ends_with(" plans")
+                || heading.contains("pricing")
+        }
+    })
+}
+
+fn has_pricing_content(dom: &Dom, node: NodeId, text: &str) -> bool {
+    let pricing_heading = has_pricing_heading(dom, node);
+    if pricing_heading {
+        return true;
+    }
+    let price_words = ["pricing", "price", "plan", "monthly", "annual", "per month"]
+        .into_iter()
+        .filter(|word| text.contains(word))
+        .count();
+    let has_currency = text
+        .chars()
+        .any(|character| matches!(character, '$' | '€' | '£' | '¥'))
+        && text.chars().any(|character| character.is_ascii_digit());
+    let price_period = ["/month", "/year", "/mo", "/yr", "per month", "per year"]
+        .into_iter()
+        .any(|period| text.contains(period));
+    has_currency && (price_words >= 2 || price_words >= 1 && price_period)
+}
+
+fn is_within_pricing_region(dom: &Dom, node: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .take(8)
+        .any(|ancestor| {
+            let name = node_name(dom, ancestor);
+            contains_any(&name, &["pricing", "price-table", "plan-grid", "plans"])
+                || dom.element_children(ancestor).any(|child| {
+                    matches!(
+                        dom.tag(child),
+                        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+                    ) && {
+                        let mut heading = String::new();
+                        dom.append_normalized_text(child, &mut heading);
+                        let heading = heading.trim().to_ascii_lowercase();
+                        heading == "pricing"
+                            || heading == "plans"
+                            || heading == "pricing plans"
+                            || heading.ends_with(" plans")
+                            || heading.contains("pricing")
+                    }
+                })
+        })
+}
+
+fn is_inside_article_content(dom: &Dom, node: NodeId, _root: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .any(|ancestor| {
+            dom.tag(ancestor) == Some(Tag::Article)
+                || dom.attr(ancestor, AttrName::ItemProp).is_some_and(|value| {
+                    value.split_whitespace().any(|item| {
+                        item.eq_ignore_ascii_case("articleBody")
+                            || item.eq_ignore_ascii_case("text")
+                    })
+                })
+                || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
+                    roles
+                        .split_whitespace()
+                        .any(|role| role.eq_ignore_ascii_case("article"))
+                })
+        })
+}
+
+fn hoist_footer_identity(dom: &mut Dom, footer: NodeId) {
+    let children: Vec<_> = dom.children(footer).collect();
+    for child in children {
+        if dom.is_text(child) {
+            if dom.text_node(child).is_some_and(is_footer_identity_text) {
+                dom.insert_before(footer, child);
+                return;
+            }
+            continue;
+        }
+        if dom
+            .descendants(child)
+            .all(|descendant| dom.tag(descendant) != Some(Tag::A))
+            && is_footer_identity_node(dom, child)
+        {
+            dom.insert_before(footer, child);
+            return;
+        }
+    }
+
+    let links: Vec<_> = dom
+        .descendants(footer)
+        .filter(|&node| dom.tag(node) == Some(Tag::A))
+        .collect();
+    let mut text_buffer = String::new();
+    if let Some(link) = links.into_iter().find(|&link| {
+        let text = get_normalized_inner_text(dom, link, &mut text_buffer);
+        is_footer_identity_text(text)
+    }) {
+        dom.insert_before(footer, link);
+    }
+}
+
+fn is_footer_identity_node(dom: &Dom, node: NodeId) -> bool {
+    if matches!(
+        dom.tag(node),
+        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+    ) {
+        return false;
+    }
+    let mut text_buffer = String::new();
+    let text = get_normalized_inner_text(dom, node, &mut text_buffer);
+    is_footer_identity_text(text)
+}
+
+fn is_footer_identity_text(text: &str) -> bool {
+    let text = text.trim();
+    let lower = text.to_ascii_lowercase();
+    let ui_label = matches!(
+        lower.as_str(),
+        "home"
+            | "privacy"
+            | "privacy policy"
+            | "terms"
+            | "terms of service"
+            | "contact"
+            | "contact us"
+            | "copyright"
+            | "cookie policy"
+            | "sitemap"
+            | "imprint"
+            | "presskit"
+            | "faq"
+            | "rss"
+            | "jobs"
+            | "subscribe"
+            | "newsletter"
+            | "follow us"
+            | "learn more"
+            | "read more"
+            | "view details"
+            | "more"
+    );
+    let boilerplate = contains_any(
+        &lower,
+        &[
+            "all rights reserved",
+            "privacy policy",
+            "terms of service",
+            "cookie policy",
+        ],
+    );
+    (2..=100).contains(&text.chars().count())
+        && !ui_label
+        && !boilerplate
+        && text.split_ascii_whitespace().count() <= 8
 }
 
 fn remove_explicit_peripheral_sections(
@@ -2700,6 +3356,8 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "toolbar",
             "actions",
             "feedback",
+            "footer",
+            "contact",
             "comment",
             "button-wrapper",
             "taxonomy",
