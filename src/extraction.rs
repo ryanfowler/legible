@@ -409,6 +409,15 @@ impl<'a> ContentExtractor<'a> {
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
+        // These indexes depend only on the prepared source. Reuse them across
+        // strategy retries instead of rebuilding the same preorder snapshot
+        // and title plan for every attempt.
+        let initial_nodes = self
+            .dom
+            .element_descendants_snapshot_with_depth(self.dom.root());
+        let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
+        let base_candidates =
+            CandidateSet::discover_semantic_from_snapshot(&self.dom, &initial_nodes);
         let title_plan = title_heading_plan(
             &self.dom,
             &self.page_title,
@@ -416,6 +425,14 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
+        if let Some(html) = self.dom.html_element() {
+            if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
+                self.page_language = Some(lang.into())
+            }
+            if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
+                self.page_direction = Some(dir.into())
+            }
+        }
         for strategy in ExtractionStrategy::ORDER {
             if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
                 continue;
@@ -434,7 +451,14 @@ impl<'a> ContentExtractor<'a> {
             // Discovery only records nodes. It does not mutate the source DOM.
             // Deferred removals stay attached until all candidate scores and
             // link-density values have been calculated.
-            let mut discovery = self.discover_candidates(&mut match_buffer, &mut text_buffer);
+            let mut discovery = self.discover_candidates_with_indexes(
+                &mut match_buffer,
+                &mut text_buffer,
+                &initial_nodes,
+                &accessible_math,
+                &title_plan,
+                &base_candidates,
+            );
             if let Some(root) = self.specialized_root {
                 // A specialized extractor has already separated content from
                 // page chrome. Generic discovery can still provide ranking
@@ -1294,26 +1318,12 @@ impl<'a> ContentExtractor<'a> {
                 })
     }
 
+    #[cfg(test)]
     fn discover_candidates(
         &mut self,
         match_buffer: &mut String,
         text_buffer: &mut String,
     ) -> CandidateDiscovery {
-        let candidates = CandidateSet::discover_semantic(&self.dom);
-        let relaxed_hidden = (self.strategy == ExtractionStrategy::RelaxedVisibility)
-            .then(|| self.relaxed_hidden_roots());
-        let mut to_score = SmallVec::<[NodeId; 256]>::new();
-        let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
-        let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
-        if let Some(html) = self.dom.html_element() {
-            if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
-                self.page_language = Some(lang.into())
-            }
-            if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
-                self.page_direction = Some(dir.into())
-            }
-        }
-        self.node_data.sync_len(self.dom.len());
         let initial_nodes = self
             .dom
             .element_descendants_snapshot_with_depth(self.dom.root());
@@ -1325,12 +1335,40 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
+        let base_candidates =
+            CandidateSet::discover_semantic_from_snapshot(&self.dom, &initial_nodes);
+        self.discover_candidates_with_indexes(
+            match_buffer,
+            text_buffer,
+            &initial_nodes,
+            &accessible_math,
+            &title_plan,
+            &base_candidates,
+        )
+    }
+
+    fn discover_candidates_with_indexes(
+        &mut self,
+        match_buffer: &mut String,
+        text_buffer: &mut String,
+        initial_nodes: &[(NodeId, u32)],
+        accessible_math: &[bool],
+        title_plan: &TitleHeadingPlan,
+        base_candidates: &CandidateSet,
+    ) -> CandidateDiscovery {
+        let candidates = base_candidates.clone();
+        let relaxed_hidden = (self.strategy == ExtractionStrategy::RelaxedVisibility)
+            .then(|| self.relaxed_hidden_roots());
+        let mut to_score = SmallVec::<[NodeId; 256]>::new();
+        let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
+        let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
+        self.node_data.sync_len(self.dom.len());
         let heading_limit = heading_text_limit(&self.page_title, &self.structured_title);
         let mut excluded_depth = None;
         let retain_preferred_title =
             title_plan.preferred.is_some() && !title_plan.brand_headings.is_empty();
         let mut remove_title = !retain_preferred_title;
-        for (id, depth) in initial_nodes {
+        for &(id, depth) in initial_nodes {
             if let Some(root_depth) = excluded_depth {
                 if depth > root_depth {
                     continue;
@@ -1348,7 +1386,7 @@ impl<'a> ContentExtractor<'a> {
                 self.is_static_hidden_marker(id)
                     && (!allowed[id.index()] || self.is_duplicate_hidden_variant(id))
             });
-            if !self.is_visible_for_strategy(id, &accessible_math)
+            if !self.is_visible_for_strategy(id, accessible_math)
                 || self.is_modal_or_dialog(id)
                 || unsupported_hidden
             {
@@ -1448,7 +1486,7 @@ impl<'a> ContentExtractor<'a> {
             );
         }
 
-        let context = candidates.ranking_context(dom);
+        let context = candidates.ranking_context(dom, &self.node_data);
         let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
             .iter()
             .enumerate()
