@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::OnceLock;
@@ -112,16 +113,42 @@ impl DocumentBuilder {
         if parent.is_some_and(|id| id.index() >= self.nodes.len()) {
             return Err(BuildError::InvalidParent);
         }
-        let mut normalized = super::text::normalize_prose_fragment(value);
-        if normalized.is_empty() {
+        let normalized = super::text::normalize_prose_fragment(value);
+        self.append_normalized_prose_value(parent, normalized)
+    }
+
+    /// Appends a fragment that is already canonical prose.
+    ///
+    /// Callers use this for synthetic boundaries and for normalized source
+    /// fragments. Keeping this path separate lets borrowed ASCII fragments go
+    /// directly to an existing semantic text value. The owned value is created
+    /// only when no adjacent text value can receive the fragment.
+    pub(crate) fn append_normalized_prose(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        value: &str,
+    ) -> Result<Option<DocumentNodeId>, BuildError> {
+        if parent.is_some_and(|id| id.index() >= self.nodes.len()) {
+            return Err(BuildError::InvalidParent);
+        }
+        self.append_normalized_prose_value(parent, Cow::Borrowed(value))
+    }
+
+    fn append_normalized_prose_value(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        value: Cow<'_, str>,
+    ) -> Result<Option<DocumentNodeId>, BuildError> {
+        if value.is_empty() {
             return Ok(None);
         }
 
+        let value_ref = value.as_ref();
         let previous = match parent {
             Some(id) => self.last_children[id.index()],
             None => self.roots.last().copied(),
         };
-        if normalized == " " {
+        if value_ref == " " {
             if previous.is_some() {
                 match parent {
                     Some(id) => self.pending_spaces[id.index()] = true,
@@ -134,17 +161,40 @@ impl DocumentBuilder {
             Some(id) => std::mem::take(&mut self.pending_spaces[id.index()]),
             None => std::mem::take(&mut self.pending_root_space),
         };
-        if pending_space && !normalized.starts_with(' ') {
-            normalized.insert(0, ' ');
-        }
+        let needs_leading_space = pending_space && !value_ref.starts_with(' ');
         if let Some(previous) = previous
             && let NodeKind::Text(existing) = &mut self.nodes[previous.index()].kind
         {
-            self.output_capacity_hint = self.output_capacity_hint.saturating_add(normalized.len());
-            super::text::merge_prose(existing.as_mut_string(), &normalized);
+            let leading_space = needs_leading_space && !existing.ends_with(' ');
+            self.output_capacity_hint = self
+                .output_capacity_hint
+                .saturating_add(value_ref.len().saturating_add(usize::from(leading_space)));
+            if leading_space {
+                existing.as_mut_string().push(' ');
+            }
+            existing.append_normalized_prose(value_ref);
             return Ok(Some(previous));
         }
-        self.append(parent, NodeKind::Text(TextValue::new(normalized)))
+
+        // Reserve the complete run once. This also avoids reallocating when a
+        // pending boundary must be included before the first fragment.
+        let mut owned = match value {
+            Cow::Borrowed(value) => {
+                let mut owned = String::with_capacity(
+                    value.len().saturating_add(usize::from(needs_leading_space)),
+                );
+                owned.push_str(value);
+                owned
+            }
+            Cow::Owned(value) => value,
+        };
+        if needs_leading_space {
+            owned.insert(0, ' ');
+        }
+        if owned.is_empty() {
+            return Ok(None);
+        }
+        self.append(parent, NodeKind::Text(TextValue::new(owned)))
             .map(Some)
     }
 
@@ -241,6 +291,40 @@ fn is_inline_sibling(kind: &NodeKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalized_prose_merges_adjacent_fragments() {
+        let mut builder = DocumentBuilder::with_capacity(2);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let first = builder
+            .append_normalized_prose(Some(paragraph), "first")
+            .unwrap();
+        let second = builder
+            .append_normalized_prose(Some(paragraph), " second")
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            builder.finish().debug_tree(),
+            "Paragraph\n  Text(\"first second\")\n"
+        );
+    }
+
+    #[test]
+    fn pending_prose_boundaries_do_not_duplicate_existing_spaces() {
+        let mut builder = DocumentBuilder::with_capacity(2);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "a ").unwrap();
+        builder
+            .append_normalized_prose(Some(paragraph), " ")
+            .unwrap();
+        builder.append_prose(Some(paragraph), "b").unwrap();
+
+        assert_eq!(
+            builder.finish().debug_tree(),
+            "Paragraph\n  Text(\"a b\")\n"
+        );
+    }
 
     #[test]
     fn finish_compacts_material_excess_node_capacity() {

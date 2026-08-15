@@ -68,7 +68,6 @@ enum Task {
     },
     Prose {
         parent: Option<DocumentNodeId>,
-        text: Box<str>,
     },
     HardBreak {
         parent: Option<DocumentNodeId>,
@@ -270,8 +269,8 @@ fn compile_complex_document(
     while let Some(task) = tasks.pop() {
         let Task::Node { node, scope } = task else {
             match task {
-                Task::Prose { parent, text } => {
-                    builder.append_prose(parent, &text)?;
+                Task::Prose { parent } => {
+                    builder.append_normalized_prose(parent, " ")?;
                 }
                 Task::HardBreak { parent } => {
                     builder.append(parent, NodeKind::HardBreak)?;
@@ -346,7 +345,7 @@ fn compile_complex_document(
             if tables.emits_separator(node)
                 || heading_permalink && facts.permalink_separates_words(node)
             {
-                builder.append_prose(scope.parent, " ")?;
+                builder.append_normalized_prose(scope.parent, " ")?;
             }
             continue;
         }
@@ -372,7 +371,7 @@ fn compile_complex_document(
                 && (inline_word_boundary_before(dom, node, &facts)
                     || text_after_media_separators[node.index()])
             {
-                builder.append_prose(scope.parent, " ")?;
+                builder.append_normalized_prose(scope.parent, " ")?;
             }
             let structural_parent = scope.parent.is_some_and(|parent| {
                 Some(parent) == scope.list
@@ -556,7 +555,7 @@ fn compile_complex_document(
         if matches!(tag, Tag::Iframe | Tag::Video | Tag::Audio) {
             if let Some(media) = media.item(node) {
                 if media_separators[node.index()] {
-                    builder.append_prose(scope.parent, " ")?;
+                    builder.append_normalized_prose(scope.parent, " ")?;
                 }
                 builder.append(
                     scope.parent,
@@ -567,7 +566,7 @@ fn compile_complex_document(
                     }),
                 )?;
                 if let Some(fallback) = media.fallback {
-                    builder.append_prose(scope.parent, " ")?;
+                    builder.append_normalized_prose(scope.parent, " ")?;
                     tasks.push(Task::Node {
                         node: fallback,
                         scope,
@@ -682,7 +681,7 @@ fn compile_complex_document(
                 && tag != Tag::Sup
                 && inline_word_boundary_before(dom, node, &facts)
             {
-                builder.append_prose(scope.parent, " ")?;
+                builder.append_normalized_prose(scope.parent, " ")?;
             }
             let mut transparent_scope = scope;
             if !is_block_tag(tag) && !facts.has_meaningful_content(node) {
@@ -988,7 +987,6 @@ fn append_cell_tasks(
         if inserted {
             ordered.push(Task::Prose {
                 parent: scope.parent,
-                text: " ".into(),
             });
         }
         append_child_tasks(dom, cell, scope, ordered);

@@ -112,7 +112,7 @@ fn validate_kind(
             return Err(ValidationError::new("semantic text node is empty"));
         }
         NodeKind::Text(value)
-            if super::text::normalize_prose_fragment(value).as_str() != value.as_str() =>
+            if super::text::normalize_prose_fragment(value).as_ref() != value.as_str() =>
         {
             return Err(ValidationError::new("semantic text is not canonical prose"));
         }

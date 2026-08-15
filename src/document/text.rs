@@ -1,16 +1,18 @@
+use std::borrow::Cow;
+
 /// Canonicalizes one prose fragment without changing code payloads.
 ///
 /// A leading or trailing HTML whitespace run becomes one ASCII space. This
 /// preserves a boundary across inline semantic nodes. Adjacent fragments are
 /// merged by the builder.
-pub(super) fn normalize_prose_fragment(value: &str) -> String {
-    // HTML prose is usually already ASCII-normalized. Copy it directly instead
-    // of rebuilding the same string one character at a time.
-    if is_ascii_normalized(value) {
-        return value.to_owned();
+pub(super) fn normalize_prose_fragment(value: &str) -> Cow<'_, str> {
+    // HTML prose is usually already ASCII-normalized. Keep it borrowed so the
+    // builder can append it without creating a short-lived copy.
+    if value.is_empty() || is_ascii_normalized(value) {
+        return Cow::Borrowed(value);
     }
 
-    let mut output = String::with_capacity(value.len());
+    let mut output = String::with_capacity(value.len().saturating_add(1));
     let mut pending_space = false;
     for character in value.chars() {
         if character.is_whitespace() {
@@ -26,7 +28,7 @@ pub(super) fn normalize_prose_fragment(value: &str) -> String {
     if pending_space {
         output.push(' ');
     }
-    output
+    Cow::Owned(output)
 }
 
 fn is_ascii_normalized(value: &str) -> bool {
@@ -58,7 +60,7 @@ pub(crate) struct ProseTextAccumulator {
 impl ProseTextAccumulator {
     pub(crate) fn push(&mut self, fragment: &str) {
         let fragment = normalize_prose_fragment(fragment);
-        merge_prose(&mut self.value, &fragment);
+        merge_prose(&mut self.value, fragment.as_ref());
     }
 
     pub(crate) fn finish(self) -> String {
@@ -81,6 +83,15 @@ mod tests {
         text.push(" Hello\t");
         text.push(" \u{2003}world ");
         assert_eq!(text.finish(), "Hello world");
+    }
+
+    #[test]
+    fn normalized_ascii_prose_is_borrowed() {
+        let value = "already normalized";
+        assert!(matches!(
+            normalize_prose_fragment(value),
+            Cow::Borrowed(fragment) if fragment == value
+        ));
     }
 
     #[test]
