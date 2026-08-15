@@ -109,6 +109,19 @@ pub(crate) fn compile_document(
     compile_complex_document(dom, root, context)
 }
 
+/// Compiles and releases an owned retained-source fragment.
+///
+/// Production extraction transfers its winning compact fragment here. This
+/// keeps borrowed compilation available for diagnostics and tests without a
+/// second compiler implementation.
+pub(crate) fn compile_document_owned(
+    dom: Dom,
+    root: NodeId,
+    context: &CompileContext,
+) -> Result<Document, CompileError> {
+    compile_document(&dom, root, context)
+}
+
 fn compile_complex_document(
     dom: &Dom,
     root: NodeId,
@@ -321,7 +334,7 @@ fn compile_complex_document(
         };
     }
 
-    let mut builder = DocumentBuilder::with_capacity(dom.len());
+    let mut builder = DocumentBuilder::with_capacity(nodes.len());
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
     let mut table_layouts = HashMap::<DocumentNodeId, TableAnalysis>::new();
     let mut deferred_footnote_group = None;
@@ -1356,6 +1369,21 @@ mod tests {
         let base = base.map(|value| Url::parse(value).unwrap());
         let context = CompileContext::new(base.clone(), base.as_ref());
         compile_document(&dom, dom.root(), &context).unwrap()
+    }
+
+    #[test]
+    fn owned_compilation_matches_borrowed_compilation() {
+        let html = r##"<article><h2>Owned input</h2><p>Text with <a href="/safe">a link</a> and <a href="javascript:bad">unsafe text</a>.</p><pre><code class="language-rust">let value = 1;</code></pre><figure><img src="/image.png" alt="Diagram"><figcaption>Figure label</figcaption></figure><p>Equation <math><mi>x</mi></math>.<sup><a role="doc-noteref" href="#note">1</a></sup></p><aside id="note" role="doc-footnote">Note text.</aside></article>"##;
+        let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let root = dom.root();
+        let base = Url::parse("https://example.test/base/").unwrap();
+        let context = CompileContext::new(Some(base.clone()), Some(&base));
+        let borrowed = compile_document(&dom, root, &context).unwrap();
+
+        let owned = compile_document_owned(dom, root, &context).unwrap();
+
+        assert_eq!(owned.debug_tree(), borrowed.debug_tree());
+        assert_eq!(owned.stats(), borrowed.stats());
     }
 
     fn uses_ordinary_compiler(html: &str) -> bool {

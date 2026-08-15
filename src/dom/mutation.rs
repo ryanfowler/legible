@@ -4,7 +4,23 @@ use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Ta
 use html5ever::{LocalName, QualName, ns};
 use smallvec::SmallVec;
 use tendril::StrTendril;
+
+#[cfg(test)]
+std::thread_local! {
+    static FRAGMENT_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Dom {
+    #[cfg(test)]
+    pub(crate) fn reset_fragment_copy_count() {
+        FRAGMENT_COPY_COUNT.with(|count| count.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fragment_copy_count() -> usize {
+        FRAGMENT_COPY_COUNT.with(std::cell::Cell::get)
+    }
+
     fn ensure_no_cycle(&self, parent: NodeId, child: NodeId) {
         assert!(parent != child, "DOM cycle");
 
@@ -166,21 +182,14 @@ impl Dom {
         Ok(())
     }
     pub(crate) fn copy_subtree_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
+        #[cfg(test)]
+        FRAGMENT_COPY_COUNT.with(|count| count.set(count.get() + 1));
         // Reserve the attached subtree in one allocation. Template contents can
         // add a small number of extra nodes, but ordinary fragments stay exact.
         let capacity = 2 + self.descendants(source_root).count();
         let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
         let copied = fragment.import_subtree(self, source_root)?;
         fragment.append_child(fragment.root(), copied);
-        Ok(fragment)
-    }
-    pub(crate) fn copy_children_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
-        let capacity = 1 + self.descendants(source_root).count();
-        let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
-        for child in self.children(source_root) {
-            let copied = fragment.import_subtree(self, child)?;
-            fragment.append_child(fragment.root(), copied);
-        }
         Ok(fragment)
     }
     pub(crate) fn import_subtree(
