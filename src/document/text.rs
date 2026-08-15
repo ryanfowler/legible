@@ -4,6 +4,12 @@
 /// preserves a boundary across inline semantic nodes. Adjacent fragments are
 /// merged by the builder.
 pub(super) fn normalize_prose_fragment(value: &str) -> String {
+    // HTML prose is usually already ASCII-normalized. Copy it directly instead
+    // of rebuilding the same string one character at a time.
+    if is_ascii_normalized(value) {
+        return value.to_owned();
+    }
+
     let mut output = String::with_capacity(value.len());
     let mut pending_space = false;
     for character in value.chars() {
@@ -21,6 +27,18 @@ pub(super) fn normalize_prose_fragment(value: &str) -> String {
         output.push(' ');
     }
     output
+}
+
+fn is_ascii_normalized(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.is_ascii()
+        && !bytes.is_empty()
+        && bytes[0] != b' '
+        && bytes[bytes.len() - 1] != b' '
+        && bytes
+            .iter()
+            .all(|&byte| !byte.is_ascii_whitespace() || byte == b' ')
+        && !bytes.windows(2).any(|window| window == b"  ")
 }
 
 pub(super) fn merge_prose(existing: &mut String, next: &str) {

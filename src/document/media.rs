@@ -15,6 +15,10 @@ impl MediaAnalysis {
     pub(crate) fn item(&self, node: NodeId) -> Option<&RecognizedMedia> {
         self.items.get(node.index()).and_then(Option::as_ref)
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 pub(crate) struct RecognizedMedia {

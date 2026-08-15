@@ -99,7 +99,9 @@ pub(crate) fn compile_document(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
-    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    let mut nodes = Vec::with_capacity(dom.len());
+    nodes.push(root);
+    nodes.extend(dom.descendants(root));
     if is_plain_prose_fragment(dom, &nodes) {
         return compile_plain_prose_fragment(dom, root, context);
     }
@@ -203,7 +205,12 @@ pub(crate) fn compile_document(
             }
         }
     }
-    let multiline_content = super::code::multiline_content(dom, &nodes);
+    let has_multiline_source = nodes.iter().any(|&node| {
+        matches!(dom.tag(node), Some(Tag::Pre | Tag::Br))
+            || dom.text_node(node).is_some_and(|text| text.contains('\n'))
+    });
+    let multiline_content =
+        has_multiline_source.then(|| super::code::multiline_content(dom, &nodes));
     let images = super::images::analyze(dom, &nodes, context.base_url.as_ref());
     let mut meaningful_heading_content = vec![false; dom.len()];
     for &node in nodes.iter().rev() {
@@ -225,14 +232,24 @@ pub(crate) fn compile_document(
     let callouts = super::callouts::CalloutAnalysis::analyze(dom, &nodes);
     let footnotes = super::footnotes::FootnoteAnalysis::analyze(dom, root);
     let math = super::math::MathAnalysis::analyze(dom, &nodes);
-    let (media_separators, text_after_media_separators) = media_separators(dom, root, &media);
-    for &node in &nodes {
-        code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
-            || super::code::is_multiline_orphan_with_evidence(
-                dom,
-                node,
-                multiline_content[node.index()],
-            );
+    let (media_separators, text_after_media_separators) = if media.is_empty() {
+        (vec![false; dom.len()], vec![false; dom.len()])
+    } else {
+        media_separators(dom, root, &media)
+    };
+    if let Some(multiline_content) = multiline_content.as_deref() {
+        for &node in &nodes {
+            code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
+                || super::code::is_multiline_orphan_with_evidence(
+                    dom,
+                    node,
+                    multiline_content[node.index()],
+                );
+        }
+    } else {
+        for &node in &nodes {
+            code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre);
+        }
     }
     for &node in nodes.iter().rev() {
         if let Some(text) = dom.text_node(node) {
