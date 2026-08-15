@@ -100,6 +100,7 @@ fn walk_text_from_roots(
 ) -> (Option<String>, DocumentStats) {
     enum Task {
         Node(DocumentNodeId),
+        Siblings(DocumentNodeId),
         Boundary(Separator),
         EndLink { fragment: LinkFragment },
     }
@@ -113,66 +114,77 @@ fn walk_text_from_roots(
     let mut tasks = SmallVec::<[Task; 32]>::new();
     tasks.extend(roots.iter().rev().copied().map(Task::Node));
     while let Some(task) = tasks.pop() {
-        match task {
-            Task::Boundary(separator) => output.separator(separator),
-            Task::EndLink { fragment } => output.end_link(fragment),
-            Task::Node(id) => {
-                let Some(node) = document.node(id) else {
-                    continue;
-                };
-                output.count(node.kind());
-                match node.kind() {
-                    NodeKind::Text(text) => output.text(text),
-                    NodeKind::CodeBlock(code) => {
-                        output.separator(block);
-                        output.text(&code.text);
-                        output.separator(block);
-                    }
-                    NodeKind::InlineCode(code) => output.text(code),
-                    NodeKind::Image(_)
-                    | NodeKind::FootnoteReference(_)
-                    | NodeKind::ThematicBreak => {}
-                    NodeKind::TaskMarker(marker) => {
-                        if let Some(label) = &marker.fallback_label {
-                            output.text(label);
-                        }
-                    }
-                    NodeKind::InlineMath(math) => {
-                        output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
-                    }
-                    NodeKind::DisplayMath(math) => {
-                        output.separator(block);
-                        output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
-                        output.separator(block);
-                    }
-                    NodeKind::Media(media) => {
-                        if let Some(title) = &media.title {
-                            output.text(title);
-                        }
-                    }
-                    NodeKind::HardBreak => output.separator(if preserve_line_breaks {
-                        Separator::Newline
-                    } else {
-                        Separator::Space
-                    }),
-                    NodeKind::Link(link) => {
-                        output.begin_link();
-                        tasks.push(Task::EndLink {
-                            fragment: LinkFragment {
-                                hash: link.fragment_only,
-                            },
-                        });
-                        let children: SmallVec<[_; 8]> = document.child_ids(id).collect();
-                        tasks.extend(children.into_iter().rev().map(Task::Node));
-                    }
-                    _ => {
-                        if is_block(node.kind()) {
-                            output.separator(block);
-                            tasks.push(Task::Boundary(block));
-                        }
-                        let children: SmallVec<[_; 8]> = document.child_ids(id).collect();
-                        tasks.extend(children.into_iter().rev().map(Task::Node));
-                    }
+        let id = match task {
+            Task::Boundary(separator) => {
+                output.separator(separator);
+                continue;
+            }
+            Task::EndLink { fragment } => {
+                output.end_link(fragment);
+                continue;
+            }
+            Task::Node(id) => id,
+            Task::Siblings(id) => {
+                if let Some(sibling) = document.next_sibling(id) {
+                    tasks.push(Task::Siblings(sibling));
+                }
+                id
+            }
+        };
+        let Some(node) = document.node(id) else {
+            continue;
+        };
+        output.count(node.kind());
+        match node.kind() {
+            NodeKind::Text(text) => output.text(text),
+            NodeKind::CodeBlock(code) => {
+                output.separator(block);
+                output.text(&code.text);
+                output.separator(block);
+            }
+            NodeKind::InlineCode(code) => output.text(code),
+            NodeKind::Image(_) | NodeKind::FootnoteReference(_) | NodeKind::ThematicBreak => {}
+            NodeKind::TaskMarker(marker) => {
+                if let Some(label) = &marker.fallback_label {
+                    output.text(label);
+                }
+            }
+            NodeKind::InlineMath(math) => {
+                output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
+            }
+            NodeKind::DisplayMath(math) => {
+                output.separator(block);
+                output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
+                output.separator(block);
+            }
+            NodeKind::Media(media) => {
+                if let Some(title) = &media.title {
+                    output.text(title);
+                }
+            }
+            NodeKind::HardBreak => output.separator(if preserve_line_breaks {
+                Separator::Newline
+            } else {
+                Separator::Space
+            }),
+            NodeKind::Link(link) => {
+                output.begin_link();
+                tasks.push(Task::EndLink {
+                    fragment: LinkFragment {
+                        hash: link.fragment_only,
+                    },
+                });
+                if let Some(child) = document.first_child(id) {
+                    tasks.push(Task::Siblings(child));
+                }
+            }
+            _ => {
+                if is_block(node.kind()) {
+                    output.separator(block);
+                    tasks.push(Task::Boundary(block));
+                }
+                if let Some(child) = document.first_child(id) {
+                    tasks.push(Task::Siblings(child));
                 }
             }
         }

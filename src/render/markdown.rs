@@ -35,6 +35,13 @@ enum ListMarker {
 
 enum Task {
     Node(DocumentNodeId, Mode),
+    Siblings(DocumentNodeId, Mode),
+    ListItems(DocumentNodeId, ListKind, i32, usize),
+    ListItemSiblings(DocumentNodeId),
+    FootnoteSiblings(DocumentNodeId, bool),
+    TableRows(DocumentNodeId, bool),
+    TableHeader(DocumentNodeId),
+    TableCells(DocumentNodeId),
     Close(Close),
     ListItem(DocumentNodeId, ListMarker),
     ItemParagraph(DocumentNodeId),
@@ -87,16 +94,27 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn render(mut self) -> String {
-        let roots: SmallVec<[_; 16]> = self.document.root_ids().collect();
         self.tasks.extend(
-            roots
-                .into_iter()
+            self.document
+                .root_ids()
                 .rev()
                 .map(|id| Task::Node(id, Mode::Block)),
         );
         while let Some(task) = self.tasks.pop() {
             match task {
                 Task::Node(id, mode) => self.node(id, mode),
+                Task::Siblings(id, mode) => {
+                    if let Some(sibling) = self.document.next_sibling(id) {
+                        self.tasks.push(Task::Siblings(sibling, mode));
+                    }
+                    self.node(id, mode);
+                }
+                Task::ListItems(id, kind, start, index) => self.list_items(id, kind, start, index),
+                Task::ListItemSiblings(id) => self.list_item_siblings(id),
+                Task::FootnoteSiblings(id, first) => self.footnote_siblings(id, first),
+                Task::TableRows(id, first) => self.table_rows(id, first),
+                Task::TableHeader(row) => self.table_header(row),
+                Task::TableCells(id) => self.table_cells(id),
                 Task::Close(close) => self.close(close),
                 Task::ListItem(id, marker) => self.list_item(id, marker),
                 Task::ItemParagraph(id) => self.item_paragraph(id),
@@ -107,13 +125,9 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn push_children(&mut self, id: DocumentNodeId, mode: Mode) {
-        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
-        self.tasks.extend(
-            children
-                .into_iter()
-                .rev()
-                .map(|child| Task::Node(child, mode)),
-        );
+        if let Some(child) = self.document.first_child(id) {
+            self.tasks.push(Task::Siblings(child, mode));
+        }
     }
 
     fn block_contains_only_footnotes(&self, id: DocumentNodeId) -> bool {
@@ -378,31 +392,33 @@ impl<'a> MarkdownRenderer<'a> {
             .and_then(|value| i32::try_from(value).ok())
             .filter(|value| (1..=999_999_999).contains(value))
             .unwrap_or(1);
-        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
-        let mut index = children
-            .iter()
-            .filter(|child| {
-                matches!(
-                    self.document.node(**child).map(|n| n.kind()),
-                    Some(NodeKind::ListItem)
-                )
-            })
-            .count();
-        for child in children.into_iter().rev() {
-            match self.document.node(child).map(|node| node.kind()) {
-                Some(NodeKind::ListItem) => {
-                    index -= 1;
-                    let marker = match kind {
-                        ListKind::Unordered => ListMarker::Bullet,
-                        ListKind::Ordered if index == 0 && start != 1 => {
-                            ListMarker::OrderedStart(start)
-                        }
-                        ListKind::Ordered => ListMarker::Ordered,
-                    };
-                    self.tasks.push(Task::ListItem(child, marker));
-                }
-                _ => self.tasks.push(Task::Node(child, Mode::Block)),
-            }
+        if let Some(child) = self.document.first_child(id) {
+            self.tasks.push(Task::ListItems(child, kind, start, 0));
+        }
+    }
+
+    fn list_items(&mut self, id: DocumentNodeId, kind: ListKind, start: i32, index: usize) {
+        let is_item = matches!(
+            self.document.node(id).map(|node| node.kind()),
+            Some(NodeKind::ListItem)
+        );
+        if let Some(sibling) = self.document.next_sibling(id) {
+            self.tasks.push(Task::ListItems(
+                sibling,
+                kind,
+                start,
+                index.saturating_add(usize::from(is_item)),
+            ));
+        }
+        if is_item {
+            let marker = match kind {
+                ListKind::Unordered => ListMarker::Bullet,
+                ListKind::Ordered if index == 0 && start != 1 => ListMarker::OrderedStart(start),
+                ListKind::Ordered => ListMarker::Ordered,
+            };
+            self.tasks.push(Task::ListItem(id, marker));
+        } else {
+            self.tasks.push(Task::Node(id, Mode::Block));
         }
     }
 
@@ -445,22 +461,28 @@ impl<'a> MarkdownRenderer<'a> {
             has_content: false,
         });
         self.tasks.push(Task::Close(Close::ListItem));
-        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
-        for child in children.into_iter().rev() {
-            if matches!(
-                self.document.node(child).map(|n| n.kind()),
-                Some(NodeKind::TaskMarker(_))
-            ) {
-                continue;
-            }
-            if matches!(
-                self.document.node(child).map(|n| n.kind()),
-                Some(NodeKind::Paragraph)
-            ) {
-                self.tasks.push(Task::ItemParagraph(child));
-            } else {
-                self.tasks.push(Task::Node(child, Mode::Inline));
-            }
+        if let Some(child) = self.document.first_child(id) {
+            self.tasks.push(Task::ListItemSiblings(child));
+        }
+    }
+
+    fn list_item_siblings(&mut self, id: DocumentNodeId) {
+        if let Some(sibling) = self.document.next_sibling(id) {
+            self.tasks.push(Task::ListItemSiblings(sibling));
+        }
+        if matches!(
+            self.document.node(id).map(|node| node.kind()),
+            Some(NodeKind::TaskMarker(_))
+        ) {
+            return;
+        }
+        if matches!(
+            self.document.node(id).map(|node| node.kind()),
+            Some(NodeKind::Paragraph)
+        ) {
+            self.tasks.push(Task::ItemParagraph(id));
+        } else {
+            self.tasks.push(Task::Node(id, Mode::Inline));
         }
     }
 
@@ -512,49 +534,56 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn table(&mut self, id: DocumentNodeId) {
         self.out.ensure_blank_line();
-        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         if self.table_has_spans(id) {
-            for child in children.iter().rev().copied() {
-                self.tasks.push(Task::Node(child, Mode::Block));
-            }
+            self.push_children(id, Mode::Block);
             return;
         }
         self.table_depth += 1;
         self.tasks.push(Task::Close(Close::Table));
-        let rows: SmallVec<[_; 16]> = children
-            .iter()
-            .copied()
-            .filter(|row| {
+        if let Some(child) = self.document.first_child(id) {
+            self.tasks.push(Task::TableRows(child, true));
+            if let Some(caption) = self.document.child_ids(id).find(|child| {
                 matches!(
-                    self.document.node(*row).map(|n| n.kind()),
-                    Some(NodeKind::TableRow)
+                    self.document.node(*child).map(|node| node.kind()),
+                    Some(NodeKind::TableCaption)
                 )
-            })
-            .collect();
-        for (index, row) in rows.into_iter().enumerate().rev() {
-            let cells: SmallVec<[_; 32]> = self.document.child_ids(row).collect();
-            let alignments = cells
-                .iter()
+            }) {
+                self.tasks.push(Task::Close(Close::Block));
+                self.tasks.push(Task::Node(caption, Mode::Block));
+            }
+        }
+    }
+
+    fn table_rows(&mut self, id: DocumentNodeId, first: bool) {
+        let is_row = matches!(
+            self.document.node(id).map(|node| node.kind()),
+            Some(NodeKind::TableRow)
+        );
+        if let Some(sibling) = self.document.next_sibling(id) {
+            self.tasks.push(Task::TableRows(sibling, first && !is_row));
+        }
+        if !is_row {
+            return;
+        }
+        if first && self.table_depth == 1 {
+            self.tasks.push(Task::TableHeader(id));
+        }
+        self.tasks.push(Task::Node(id, Mode::Block));
+    }
+
+    fn table_header(&mut self, row: DocumentNodeId) {
+        if self.table_depth == 1 {
+            let alignments = self
+                .document
+                .child_ids(row)
                 .map(
-                    |cell| match self.document.node(*cell).map(|node| node.kind()) {
+                    |cell| match self.document.node(cell).map(|node| node.kind()) {
                         Some(NodeKind::TableCell(value)) => value.alignment,
                         _ => None,
                     },
                 )
                 .collect();
-            if index == 0 && self.table_depth == 1 {
-                self.tasks.push(Task::Close(Close::TableHeader(alignments)));
-            }
-            self.tasks.push(Task::Node(row, Mode::Block));
-        }
-        if let Some(caption) = children.into_iter().find(|child| {
-            matches!(
-                self.document.node(*child).map(|node| node.kind()),
-                Some(NodeKind::TableCaption)
-            )
-        }) {
-            self.tasks.push(Task::Close(Close::Block));
-            self.tasks.push(Task::Node(caption, Mode::Block));
+            self.close(Close::TableHeader(alignments));
         }
     }
 
@@ -562,23 +591,28 @@ impl<'a> MarkdownRenderer<'a> {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
-        let cells: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
         if self.table_depth == 1 {
             self.out.markup("| ");
         }
         self.tasks.push(Task::Close(Close::TableRow));
-        for (index, cell) in cells.into_iter().enumerate().rev() {
-            self.tasks.push(Task::TableCell(cell));
-            if index != 0 {
-                // A close task avoids exposing HTML-specific cell traversal.
-                self.tasks
-                    .push(Task::Close(Close::Marker(if self.table_depth == 1 {
-                        " | "
-                    } else {
-                        "; "
-                    })));
-            }
+        if let Some(cell) = self.document.first_child(id) {
+            self.tasks.push(Task::TableCells(cell));
         }
+    }
+
+    fn table_cells(&mut self, id: DocumentNodeId) {
+        let next = self.document.next_sibling(id);
+        if let Some(sibling) = next {
+            self.tasks.push(Task::TableCells(sibling));
+            // A close task avoids exposing HTML-specific cell traversal.
+            self.tasks
+                .push(Task::Close(Close::Marker(if self.table_depth == 1 {
+                    " | "
+                } else {
+                    "; "
+                })));
+        }
+        self.tasks.push(Task::TableCell(id));
     }
 
     fn table_has_spans(&self, table: DocumentNodeId) -> bool {
@@ -687,19 +721,25 @@ impl<'a> MarkdownRenderer<'a> {
         self.out.markup("]: ");
         self.out.prefixes.push(Prefix::Indent(4));
         self.tasks.push(Task::Close(Close::Footnote));
-        let children: SmallVec<[_; 8]> = self.document.child_ids(node).collect();
-        for (index, child) in children.into_iter().enumerate().rev() {
-            let mode = if index == 0
-                && matches!(
-                    self.document.node(child).map(|n| n.kind()),
-                    Some(NodeKind::Paragraph)
-                ) {
-                Mode::Inline
-            } else {
-                Mode::Block
-            };
-            self.tasks.push(Task::Node(child, mode));
+        if let Some(child) = self.document.first_child(node) {
+            self.tasks.push(Task::FootnoteSiblings(child, true));
         }
+    }
+
+    fn footnote_siblings(&mut self, id: DocumentNodeId, first: bool) {
+        if let Some(sibling) = self.document.next_sibling(id) {
+            self.tasks.push(Task::FootnoteSiblings(sibling, false));
+        }
+        let mode = if first
+            && matches!(
+                self.document.node(id).map(|node| node.kind()),
+                Some(NodeKind::Paragraph)
+            ) {
+            Mode::Inline
+        } else {
+            Mode::Block
+        };
+        self.tasks.push(Task::Node(id, mode));
     }
 
     fn close(&mut self, close: Close) {
@@ -1562,6 +1602,23 @@ mod tests {
         assert_eq!(
             render_markdown(&document, 0, MarkdownConfig::default()),
             "``a`b``\n\n````rust\nlet fence = ```;\n````\n"
+        );
+    }
+
+    #[test]
+    fn sibling_tasks_preserve_nested_inline_order() {
+        let mut builder = DocumentBuilder::with_capacity(6);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "first").unwrap();
+        let emphasis = builder.append(Some(paragraph), NodeKind::Emphasis).unwrap();
+        builder.append_prose(Some(emphasis), "second").unwrap();
+        builder.append_prose(Some(paragraph), " third").unwrap();
+        let trailing = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(trailing), "next").unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish(), 0, MarkdownConfig::default()),
+            "first *second* third\n\nnext\n"
         );
     }
 
