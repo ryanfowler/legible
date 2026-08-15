@@ -10,12 +10,31 @@ pub(crate) fn analyze(
     nodes: &[NodeId],
     images: &ImageAnalysis,
 ) -> (Vec<bool>, Vec<bool>) {
-    if !nodes.iter().any(|&node| {
+    let has_candidates = nodes.iter().any(|&node| {
         matches!(
             dom.tag(node),
             Some(Tag::Img | Tag::Figure | Tag::Figcaption)
         ) || class_is_semantic_evidence(dom, node)
-    }) {
+    });
+    analyze_inner(dom, nodes, images, has_candidates)
+}
+
+pub(crate) fn analyze_with_inventory(
+    dom: &Dom,
+    nodes: &[NodeId],
+    candidates: &[NodeId],
+    images: &ImageAnalysis,
+) -> (Vec<bool>, Vec<bool>) {
+    analyze_inner(dom, nodes, images, !candidates.is_empty())
+}
+
+fn analyze_inner(
+    dom: &Dom,
+    nodes: &[NodeId],
+    images: &ImageAnalysis,
+    has_candidates: bool,
+) -> (Vec<bool>, Vec<bool>) {
+    if !has_candidates {
         return (vec![false; dom.len()], vec![false; dom.len()]);
     }
     let mut image_count = vec![0_u8; dom.len()];

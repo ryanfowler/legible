@@ -4,6 +4,7 @@ use url::Url;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
+use super::facts::SemanticFacts;
 use super::{DestinationKind, MediaKind, safe_destination};
 
 pub(crate) struct MediaAnalysis {
@@ -30,10 +31,32 @@ pub(crate) struct RecognizedMedia {
 
 /// Resolves media sources and fallback links in linear document passes.
 pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> MediaAnalysis {
-    if !nodes
-        .iter()
-        .any(|&node| media_kind(dom.tag(node)).is_some())
-    {
+    analyze_inner(dom, nodes, None, base_url)
+}
+
+/// Resolves media with visible-text facts from the shared complex-source scan.
+pub(crate) fn analyze_with_facts(
+    dom: &Dom,
+    facts: &SemanticFacts,
+    base_url: Option<&Url>,
+) -> MediaAnalysis {
+    analyze_inner(dom, facts.nodes(), Some(facts), base_url)
+}
+
+fn analyze_inner(
+    dom: &Dom,
+    nodes: &[NodeId],
+    facts: Option<&SemanticFacts>,
+    base_url: Option<&Url>,
+) -> MediaAnalysis {
+    if facts.map_or_else(
+        || {
+            !nodes
+                .iter()
+                .any(|&node| media_kind(dom.tag(node)).is_some())
+        },
+        |facts| facts.inventory().media.is_empty(),
+    ) {
         return MediaAnalysis {
             items: Vec::new(),
             fallbacks: Vec::new(),
@@ -61,16 +84,23 @@ pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> Me
         }
     }
 
-    let mut has_text = vec![false; dom.len()];
-    for &node in nodes.iter().rev() {
-        has_text[node.index()] = dom
-            .text_node(node)
-            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
-            || dom.children(node).any(|child| has_text[child.index()]);
+    let mut has_text = Vec::new();
+    if facts.is_none() {
+        has_text = vec![false; dom.len()];
+        for &node in nodes.iter().rev() {
+            has_text[node.index()] = dom
+                .text_node(node)
+                .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
+                || dom.children(node).any(|child| has_text[child.index()]);
+        }
     }
     let mut fallbacks = vec![None; dom.len()];
     for &node in nodes {
-        if dom.tag(node) != Some(Tag::A) || !has_text[node.index()] {
+        let has_visible_text = facts.map_or_else(
+            || has_text[node.index()],
+            |facts| facts.has_visible_text(node),
+        );
+        if dom.tag(node) != Some(Tag::A) || !has_visible_text {
             continue;
         }
         let Some(media) = nearest_media[node.index()] else {

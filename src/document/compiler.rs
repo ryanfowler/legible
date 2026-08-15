@@ -127,214 +127,47 @@ fn compile_complex_document(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
-    let mut nodes = Vec::with_capacity(dom.len());
-    nodes.push(root);
-    nodes.extend(dom.descendants(root));
-    let mut block_descendants = vec![false; dom.len()];
-    let mut code_blocks = vec![false; dom.len()];
-    let mut meaningful_content = vec![false; dom.len()];
-    let mut visible_text_content = vec![false; dom.len()];
-    let mut first_visible = vec![None; dom.len()];
-    let mut last_visible = vec![None; dom.len()];
-    let heading_permalinks = super::headings::permalink_nodes(dom, &nodes);
-    let has_heading_permalinks = heading_permalinks.iter().any(|value| *value);
-    let mut heading_levels = vec![None; dom.len()];
-    let mut nearest_heading = if has_heading_permalinks {
-        vec![None; dom.len()]
-    } else {
-        Vec::new()
-    };
-    let mut heading_has_permalink = if has_heading_permalinks {
-        vec![false; dom.len()]
-    } else {
-        Vec::new()
-    };
-    let mut nearest_heading_permalink = if has_heading_permalinks {
-        vec![None; dom.len()]
-    } else {
-        Vec::new()
-    };
-    let mut first_heading_text = if has_heading_permalinks {
-        vec![None; dom.len()]
-    } else {
-        Vec::new()
-    };
-    let mut last_heading_text = if has_heading_permalinks {
-        vec![None; dom.len()]
-    } else {
-        Vec::new()
-    };
-    for &node in &nodes {
-        heading_levels[node.index()] = heading_level(dom, node);
-        if !has_heading_permalinks {
-            continue;
-        }
-        nearest_heading[node.index()] = if heading_levels[node.index()].is_some() {
-            Some(node)
-        } else {
-            dom.parent(node)
-                .and_then(|parent| nearest_heading[parent.index()])
-        };
-        nearest_heading_permalink[node.index()] = if heading_permalinks[node.index()] {
-            Some(node)
-        } else {
-            dom.parent(node)
-                .and_then(|parent| nearest_heading_permalink[parent.index()])
-        };
-        if let Some(heading) = nearest_heading[node.index()] {
-            if nearest_heading_permalink[node.index()].is_some() {
-                heading_has_permalink[heading.index()] = true;
-            } else if dom.text_node(node).is_some() {
-                first_heading_text[heading.index()].get_or_insert(node);
-                last_heading_text[heading.index()] = Some(node);
-            }
-        }
+    let mut facts = super::facts::SemanticFacts::analyze(dom, root);
+    let images = super::images::analyze_with_inventory(
+        dom,
+        facts.nodes(),
+        &facts.inventory().images,
+        context.base_url.as_ref(),
+    );
+    super::headings::analyze_complex(dom, &mut facts, &images);
+    let (figures, captions) = super::figures::analyze_with_inventory(
+        dom,
+        facts.nodes(),
+        &facts.inventory().figures,
+        &images,
+    );
+    let media = super::media::analyze_with_facts(dom, &facts, context.base_url.as_ref());
+    let lists = super::lists::ListAnalysis::analyze(dom, facts.inventory().lists.as_slice());
+    let tables =
+        super::tables::TableAnalysis::analyze_candidates(dom, facts.inventory().tables.as_slice());
+    let callouts =
+        super::callouts::CalloutAnalysis::analyze(dom, facts.nodes(), &facts.inventory().callouts);
+    let footnotes = super::footnotes::FootnoteAnalysis::analyze_with_inventory(
+        dom,
+        root,
+        &facts.inventory().footnotes,
+    );
+    let math = super::math::MathAnalysis::analyze_with_inventory(
+        dom,
+        facts.nodes(),
+        &facts.inventory().math,
+    );
+    if !facts.inventory().math.is_empty() || !facts.inventory().footnotes.is_empty() {
+        facts.include_semantic_meaning(dom, |node| {
+            math.value(node).is_some() || footnotes.reference(node).is_some()
+        });
     }
-    let mut permalink_separates_words = if has_heading_permalinks {
-        vec![false; dom.len()]
-    } else {
-        Vec::new()
-    };
-    if has_heading_permalinks {
-        let mut previous_heading_character = vec![None; dom.len()];
-        for &node in &nodes {
-            let Some(heading) = nearest_heading[node.index()] else {
-                continue;
-            };
-            if heading_permalinks[node.index()] {
-                permalink_separates_words[node.index()] =
-                    previous_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
-            } else if nearest_heading_permalink[node.index()].is_none()
-                && let Some(text) = dom.text_node(node)
-                && let Some(character) = text
-                    .chars()
-                    .rev()
-                    .find(|character| !character.is_whitespace())
-            {
-                previous_heading_character[heading.index()] = Some(character);
-            }
-        }
-        let mut next_heading_character = vec![None; dom.len()];
-        for &node in nodes.iter().rev() {
-            let Some(heading) = nearest_heading[node.index()] else {
-                continue;
-            };
-            if heading_permalinks[node.index()] {
-                permalink_separates_words[node.index()] &=
-                    next_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
-            } else if nearest_heading_permalink[node.index()].is_none()
-                && let Some(text) = dom.text_node(node)
-                && let Some(character) = text.chars().find(|character| !character.is_whitespace())
-            {
-                next_heading_character[heading.index()] = Some(character);
-            }
-        }
-    }
-    let has_multiline_source = nodes.iter().any(|&node| {
-        matches!(dom.tag(node), Some(Tag::Pre | Tag::Br))
-            || dom.text_node(node).is_some_and(|text| text.contains('\n'))
-    });
-    let multiline_content =
-        has_multiline_source.then(|| super::code::multiline_content(dom, &nodes));
-    let images = super::images::analyze(dom, &nodes, context.base_url.as_ref());
-    let mut meaningful_heading_content = vec![false; dom.len()];
-    for &node in nodes.iter().rev() {
-        if has_heading_permalinks && nearest_heading_permalink[node.index()].is_some() {
-            continue;
-        }
-        meaningful_heading_content[node.index()] = dom
-            .text_node(node)
-            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
-            || dom.tag(node) == Some(Tag::Img) && images.source(node).is_some()
-            || dom
-                .children(node)
-                .any(|child| meaningful_heading_content[child.index()]);
-    }
-    let (figures, captions) = super::figures::analyze(dom, &nodes, &images);
-    let media = super::media::analyze(dom, &nodes, context.base_url.as_ref());
-    let lists = super::lists::ListAnalysis::analyze(dom, &nodes);
-    let tables = super::tables::TableAnalysis::analyze(dom, &nodes);
-    let callouts = super::callouts::CalloutAnalysis::analyze(dom, &nodes);
-    let footnotes = super::footnotes::FootnoteAnalysis::analyze(dom, root);
-    let math = super::math::MathAnalysis::analyze(dom, &nodes);
     let (media_separators, text_after_media_separators) = if media.is_empty() {
         (vec![false; dom.len()], vec![false; dom.len()])
     } else {
         media_separators(dom, root, &media)
     };
-    if let Some(multiline_content) = multiline_content.as_deref() {
-        for &node in &nodes {
-            code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre)
-                || super::code::is_multiline_orphan_with_evidence(
-                    dom,
-                    node,
-                    multiline_content[node.index()],
-                );
-        }
-    } else {
-        for &node in &nodes {
-            code_blocks[node.index()] = dom.tag(node) == Some(Tag::Pre);
-        }
-    }
-    for &node in nodes.iter().rev() {
-        if let Some(text) = dom.text_node(node) {
-            first_visible[node.index()] = text.chars().find(|character| !character.is_whitespace());
-            last_visible[node.index()] = text
-                .chars()
-                .rev()
-                .find(|character| !character.is_whitespace());
-        } else {
-            for child in dom.children(node) {
-                first_visible[node.index()] =
-                    first_visible[node.index()].or(first_visible[child.index()]);
-                if last_visible[child.index()].is_some() {
-                    last_visible[node.index()] = last_visible[child.index()];
-                }
-            }
-        }
-        block_descendants[node.index()] = dom.children(node).any(|child| {
-            code_blocks[child.index()]
-                || dom.tag(child).is_some_and(is_block_tag)
-                || block_descendants[child.index()]
-        });
-        visible_text_content[node.index()] = dom
-            .text_node(node)
-            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
-            || dom
-                .children(node)
-                .any(|child| visible_text_content[child.index()]);
-        meaningful_content[node.index()] = dom
-            .text_node(node)
-            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
-            || dom.tag(node).is_some_and(|tag| {
-                matches!(
-                    tag,
-                    Tag::Br
-                        | Tag::Code
-                        | Tag::Hr
-                        | Tag::Img
-                        | Tag::Iframe
-                        | Tag::Video
-                        | Tag::Audio
-                ) || math.value(node).is_some()
-                    || footnotes.reference(node).is_some()
-            })
-            || dom
-                .children(node)
-                .any(|child| meaningful_content[child.index()]);
-    }
-
-    let mut nearest_list_item = vec![None; dom.len()];
-    for &node in &nodes {
-        nearest_list_item[node.index()] = if dom.tag(node) == Some(Tag::Li) || lists.is_item(node) {
-            Some(node)
-        } else {
-            dom.parent(node)
-                .and_then(|parent| nearest_list_item[parent.index()])
-        };
-    }
-
-    let mut builder = DocumentBuilder::with_capacity(nodes.len());
+    let mut builder = DocumentBuilder::with_capacity(facts.nodes().len());
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
     let mut table_layouts = HashMap::<DocumentNodeId, TableAnalysis>::new();
     let mut deferred_footnote_group = None;
@@ -348,7 +181,8 @@ fn compile_complex_document(
         link: None,
         preserve_isolated_whitespace: false,
     };
-    let mut tasks = nodes
+    let mut tasks = facts
+        .nodes()
         .iter()
         .rev()
         .filter_map(|&node| {
@@ -436,9 +270,7 @@ fn compile_complex_document(
             }
             continue;
         };
-        let heading_permalink = has_heading_permalinks
-            && nearest_heading[node.index()]
-                .is_some_and(|heading| heading != node && heading_permalinks[node.index()]);
+        let heading_permalink = facts.is_heading_permalink(node);
         if tables.is_skipped(node)
             || footnotes.is_skipped(node)
             || math.is_skipped(node)
@@ -446,7 +278,7 @@ fn compile_complex_document(
             || heading_permalink
         {
             if tables.emits_separator(node)
-                || heading_permalink && permalink_separates_words[node.index()]
+                || heading_permalink && facts.permalink_separates_words(node)
             {
                 builder.append_prose(scope.parent, " ")?;
             }
@@ -461,16 +293,9 @@ fn compile_complex_document(
                 .replacement_text(node)
                 .or_else(|| lists.replacement_text(node))
                 .unwrap_or(text);
-            let heading = has_heading_permalinks
-                .then(|| nearest_heading[node.index()])
-                .flatten()
-                .filter(|heading| heading_has_permalink[heading.index()]);
-            let trim_start = footnotes.should_trim_start(node)
-                || heading.is_some_and(|heading| first_heading_text[heading.index()] == Some(node));
+            let trim_start = footnotes.should_trim_start(node) || facts.trims_heading_start(node);
             let text = if trim_start { text.trim_start() } else { text };
-            let text = if heading
-                .is_some_and(|heading| last_heading_text[heading.index()] == Some(node))
-            {
+            let text = if facts.trims_heading_end(node) {
                 text.trim_end()
             } else {
                 text
@@ -478,7 +303,7 @@ fn compile_complex_document(
             let whitespace_only = text.chars().all(char::is_whitespace);
             if !whitespace_only
                 && !text.chars().next().is_some_and(char::is_whitespace)
-                && (inline_word_boundary_before(dom, node, &first_visible, &last_visible)
+                && (inline_word_boundary_before(dom, node, &facts)
                     || text_after_media_separators[node.index()])
             {
                 builder.append_prose(scope.parent, " ")?;
@@ -492,7 +317,7 @@ fn compile_complex_document(
             if !(whitespace_only
                 && (structural_parent
                     || (!scope.preserve_isolated_whitespace
-                        && !meaningful_inline_separator(dom, node, &block_descendants))))
+                        && !meaningful_inline_separator(dom, node, &facts))))
             {
                 let parent = if scope.parent.is_some() && scope.parent == scope.list {
                     Some(builder.append(scope.parent, NodeKind::ListItem)?)
@@ -598,7 +423,7 @@ fn compile_complex_document(
                 super::tables::TableKind::Data => {}
             }
         }
-        if code_blocks[node.index()]
+        if facts.is_code_block(node)
             && let Some(code) = super::code::recognize_known_block(dom, node, true)
         {
             builder.append(
@@ -626,8 +451,9 @@ fn compile_complex_document(
                 scope.parent,
                 NodeKind::TaskMarker(TaskMarker {
                     checked: dom.attr(node, AttrName::Checked).is_some(),
-                    fallback_label: (!nearest_list_item[node.index()]
-                        .is_some_and(|item| visible_text_content[item.index()]))
+                    fallback_label: (!nearest_list_item_has_visible_text(
+                        dom, node, &lists, &facts,
+                    ))
                     .then(|| {
                         dom.attr(node, AttrName::AriaLabel)
                             .or_else(|| dom.attr(node, AttrName::Title))
@@ -690,10 +516,10 @@ fn compile_complex_document(
         let parent_is_block_group = scope
             .parent
             .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
-        let semantic = if let Some(level) = heading_levels[node.index()] {
-            if !meaningful_heading_content[node.index()] {
+        let semantic = if let Some(level) = facts.heading_level(node) {
+            if !facts.heading_has_meaningful_content(node) {
                 None
-            } else if block_descendants[node.index()] {
+            } else if facts.has_block_descendant(node) {
                 Some(NodeKind::BlockGroup)
             } else {
                 Some(NodeKind::Heading { level })
@@ -716,7 +542,7 @@ fn compile_complex_document(
         } else {
             match tag {
                 Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
-                Tag::P if block_descendants[node.index()] => Some(NodeKind::BlockGroup),
+                Tag::P if facts.has_block_descendant(node) => Some(NodeKind::BlockGroup),
                 Tag::P | Tag::Address | Tag::Caption => Some(NodeKind::Paragraph),
                 Tag::Blockquote => dom
                     .attr(node, AttrName::DataCallout)
@@ -742,12 +568,12 @@ fn compile_complex_document(
                 Tag::Dd if scope.definition_list.is_some() => Some(NodeKind::DefinitionDescription),
                 Tag::Dt | Tag::Dd => Some(NodeKind::Paragraph),
                 Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
-                    if block_descendants[node.index()] =>
+                    if facts.has_block_descendant(node) =>
                 {
                     Some(NodeKind::BlockGroup)
                 }
                 Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
-                    if !meaningful_content[node.index()] =>
+                    if !facts.has_meaningful_content(node) =>
                 {
                     None
                 }
@@ -757,8 +583,8 @@ fn compile_complex_document(
                 Tag::Br => Some(NodeKind::HardBreak),
                 Tag::A
                     if scope.link.is_none()
-                        && !block_descendants[node.index()]
-                        && meaningful_content[node.index()] =>
+                        && !facts.has_block_descendant(node)
+                        && facts.has_meaningful_content(node) =>
                 {
                     dom.attr(node, AttrName::Href).and_then(|destination| {
                         let trimmed = destination.trim_matches(|character: char| {
@@ -788,12 +614,12 @@ fn compile_complex_document(
         let Some(kind) = semantic else {
             if !is_block_tag(tag)
                 && tag != Tag::Sup
-                && inline_word_boundary_before(dom, node, &first_visible, &last_visible)
+                && inline_word_boundary_before(dom, node, &facts)
             {
                 builder.append_prose(scope.parent, " ")?;
             }
             let mut transparent_scope = scope;
-            if !is_block_tag(tag) && !meaningful_content[node.index()] {
+            if !is_block_tag(tag) && !facts.has_meaningful_content(node) {
                 transparent_scope.preserve_isolated_whitespace = true;
             }
             push_children(dom, node, transparent_scope, &mut tasks);
@@ -1188,35 +1014,51 @@ fn push_figure_children(
 fn inline_word_boundary_before(
     dom: &Dom,
     node: NodeId,
-    first_visible: &[Option<char>],
-    last_visible: &[Option<char>],
+    facts: &super::facts::SemanticFacts,
 ) -> bool {
-    first_visible[node.index()].is_some_and(char::is_alphanumeric)
+    facts.first_visible(node).is_some_and(char::is_alphanumeric)
         && dom.prev_sibling(node).is_some_and(|previous| {
-            last_visible[previous.index()].is_some_and(char::is_alphanumeric)
+            facts
+                .last_visible(previous)
+                .is_some_and(char::is_alphanumeric)
                 && dom.tag(previous).is_some_and(|tag| !is_block_tag(tag))
         })
 }
 
-fn meaningful_inline_separator(dom: &Dom, node: NodeId, block_descendants: &[bool]) -> bool {
+fn meaningful_inline_separator(
+    dom: &Dom,
+    node: NodeId,
+    facts: &super::facts::SemanticFacts,
+) -> bool {
     dom.prev_sibling(node)
-        .is_some_and(|sibling| is_inline_dom_node(dom, sibling, block_descendants))
+        .is_some_and(|sibling| is_inline_dom_node(dom, sibling, facts))
         && dom
             .next_sibling(node)
-            .is_some_and(|sibling| is_inline_dom_node(dom, sibling, block_descendants))
+            .is_some_and(|sibling| is_inline_dom_node(dom, sibling, facts))
 }
 
-fn is_inline_dom_node(dom: &Dom, node: NodeId, block_descendants: &[bool]) -> bool {
+fn is_inline_dom_node(dom: &Dom, node: NodeId, facts: &super::facts::SemanticFacts) -> bool {
     dom.text_node(node)
         .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
         || dom.tag(node).is_some_and(|tag| {
-            !block_descendants[node.index()]
+            !facts.has_block_descendant(node)
                 && !is_block_tag(tag)
                 && !matches!(
                     tag,
                     Tag::Head | Tag::Script | Tag::Style | Tag::Template | Tag::Noscript
                 )
         })
+}
+
+fn nearest_list_item_has_visible_text(
+    dom: &Dom,
+    node: NodeId,
+    lists: &super::lists::ListAnalysis,
+    facts: &super::facts::SemanticFacts,
+) -> bool {
+    dom.ancestors(node)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Li) || lists.is_item(ancestor))
+        .is_some_and(|item| facts.has_visible_text(item))
 }
 
 pub(super) fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
