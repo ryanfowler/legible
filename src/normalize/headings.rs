@@ -6,7 +6,7 @@ pub(super) fn remove_artifacts(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
 
     // The compiler also ignores permalink controls when it compiles an
-    // arbitrary source fragment. Remove them here so DOM-based result metrics
+    // arbitrary source fragment. Remove them here so source-relative result metrics
     // measure the same visible heading content during extraction retries. Use
     // one ancestry index instead of scanning each heading subtree.
     if nodes.iter().any(|&(node, _)| dom.tag(node) == Some(Tag::A)) {

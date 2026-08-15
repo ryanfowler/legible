@@ -561,7 +561,20 @@ fn svg_local_name(dom: &Dom, node: NodeId) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::markdown::dom_to_markdown;
+
+    fn semantic_markdown(dom: &Dom, root: NodeId) -> String {
+        let document = crate::document::compile_document(
+            dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        crate::render::markdown::render_markdown(
+            &document,
+            0,
+            crate::render::markdown::MarkdownConfig::default(),
+        )
+    }
 
     #[test]
     fn removes_svg_css_and_converts_grouped_chart_data() {
@@ -580,7 +593,7 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "AA Intelligence Index\n\nScores by model\n\n| Model | Score |\n| --- | --- |\n| Fable 5 Max | 62 |\n| Grok 4.6 | 61 |\n"
         );
         assert!(!dom.text(root).contains("--ink"));
@@ -604,7 +617,7 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "Build status\n\nThree successful builds\n\nDeployment chart\n"
         );
     }
@@ -631,7 +644,7 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "Release comparison\n\nRelease scores\n\n| Label | Value |\n| --- | --- |\n| Grok 4.6 | 61 |\n| Fable 5 Max | 62 |\n\nReferenced scores\n\n| Label | Value |\n| --- | --- |\n| Alpha | 10 |\n| Beta | 20 |\n"
         );
     }
@@ -654,7 +667,7 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "Model comparison\n\nGrok 4.6, score 61\n\nHigher is better\n\n| Label | Value |\n| --- | --- |\n| Grok 4.6 | 61 |\n| Fable 5 Max | 62 |\n"
         );
     }
@@ -681,7 +694,7 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "External comparison\n\nExternal comparison\n\n| Label | Value |\n| --- | --- |\n| Alpha | 10 |\n| Beta | 20 |\n\nInternal comparison\n\nScores for two releases\n\n| Label | Value |\n| --- | --- |\n| Stable | 30 |\n| Preview | 40 |\n"
         );
     }
@@ -704,7 +717,7 @@ mod tests {
         normalize(&mut dom, root);
 
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "Nested comparison\n\nOuter chart\n\n| Label | Value |\n| --- | --- |\n| Alpha | 10 |\n| Beta | 20 |\n"
         );
 
@@ -721,7 +734,7 @@ mod tests {
         let mut deep = Dom::parse_fragment(&source, Tag::Div).unwrap();
         let deep_root = deep.root();
         normalize(&mut deep, deep_root);
-        assert!(dom_to_markdown(&deep, deep_root, 0).contains("Deep nesting"));
+        assert!(semantic_markdown(&deep, deep_root).contains("Deep nesting"));
     }
 
     #[test]
@@ -746,7 +759,7 @@ mod tests {
 
         normalize(&mut dom, root);
 
-        assert!(dom_to_markdown(&dom, root, 0).contains("Bounded chart"));
+        assert!(semantic_markdown(&dom, root).contains("Bounded chart"));
     }
 
     #[test]
@@ -765,7 +778,7 @@ mod tests {
 
         normalize(&mut dom, root);
 
-        let markdown = dom_to_markdown(&dom, root, 0);
+        let markdown = semantic_markdown(&dom, root);
         assert_eq!(
             markdown,
             "Formatted results\n\nPrice: $10–$20\n\nLatency: 61 ± 2 ms\n"
@@ -813,7 +826,7 @@ mod tests {
 
         normalize(&mut dom, root);
 
-        let markdown = dom_to_markdown(&dom, root, 0);
+        let markdown = semantic_markdown(&dom, root);
         assert!(markdown.contains("| Model 0 | 0 |"));
         assert!(markdown.contains("| Model 1999 | 1999 |"));
     }

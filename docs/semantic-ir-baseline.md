@@ -6,9 +6,9 @@ This note records the historical behavior baseline and the current status of the
 
 The migration baseline is `main` at `a97e49c460a0ef0e8e4ed271ef2b3f417c7b6184`.
 
-## Baseline output contracts
+## Historical pre-IR output contracts
 
-At the recorded baseline, `ExtractedPage` retained a compact cleaned DOM fragment. It rendered each output on demand.
+At the recorded pre-IR baseline, `ExtractedPage` retained a compact cleaned DOM fragment and rendered each output on demand. This describes historical behavior only; the current page retains a semantic `Document`.
 
 - `markdown()` returned CommonMark and GFM output. It did not emit raw HTML. It filtered unsupported link and image URI schemes.
 - `text()` returned normalized plain text. `text_length()` counted its Unicode scalar values. `word_count()` used the same normalized DOM walk.
@@ -95,20 +95,20 @@ The initial IR vocabulary comes from existing normalization and rendering behavi
 
 | Semantic area | Existing implementation evidence | Fixture evidence |
 | --- | --- | --- |
-| Paragraphs, headings, quotes, emphasis, strong text, links, breaks, and thematic breaks | `src/markdown.rs`, `src/text.rs`, `src/normalize/headings.rs` | General, Defuddle, Web, and Readability suites |
+| Paragraphs, headings, quotes, emphasis, strong text, links, breaks, and thematic breaks | `src/render/markdown.rs`, `src/render/text.rs`, `src/normalize/headings.rs` | General, Defuddle, Web, and Readability suites |
 | Ordered and unordered lists, including normalized ARIA lists | `src/normalize/lists.rs` | `tests/general/article-listing`, `tests/web/listings`, and specialized Hacker News fixtures |
-| Code blocks and inline code | `src/normalize/code.rs` | `tests/general/code-heavy-docs`, `tests/general/standalone-code-breaks`, and `tests/defuddle/code-blocks` |
-| Data tables and normalized layout or listing tables | `src/normalize/tables.rs`, repeated-listing normalization | `tests/general/recommended-data-table`, `tests/general/table-heavy-reference`, `tests/general/old-table-layout`, and `tests/defuddle/table-layout` |
-| Figures, captions, and images | `src/normalize/images.rs`, figure normalization | `tests/general/figure-heavy`, `tests/general/figure-caption`, `tests/general/lazy-images`, `tests/defuddle/images`, and `tests/web/images` |
-| Footnote references and definitions | `src/normalize/footnotes.rs` | `tests/general/footnotes`, `tests/defuddle/footnotes`, and `tests/web/footnotes` |
-| Inline and display math | `src/normalize/math.rs` | `tests/defuddle/math`, `tests/web/math`, and Readability MathJax fixtures |
-| Callouts | `src/normalize/callouts.rs` | `tests/web/docs/callout` and quality fixtures such as `docs-callout-types` |
-| Details and summaries | DOM Markdown and text block handling | Readability `toc-missing` and focused IR tests. This distinction has limited exact-output coverage and remains provisional. |
-| Definition lists | DOM Markdown and text handling, list normalization | Quality fixture `docs-definition-list` and focused IR tests |
+| Code blocks and inline code | `src/document/code.rs`, `src/normalize.rs` | `tests/general/code-heavy-docs`, `tests/general/standalone-code-breaks`, and `tests/defuddle/code-blocks` |
+| Data tables and normalized layout or listing tables | `src/document/tables.rs`, `src/normalize.rs` | `tests/general/recommended-data-table`, `tests/general/table-heavy-reference`, `tests/general/old-table-layout`, and `tests/defuddle/table-layout` |
+| Figures, captions, and images | `src/document/figures.rs`, `src/document/images.rs`, `src/normalize/images.rs` | `tests/general/figure-heavy`, `tests/general/figure-caption`, `tests/general/lazy-images`, `tests/defuddle/images`, and `tests/web/images` |
+| Footnote references and definitions | `src/document/footnotes.rs`, `src/document/compiler.rs` | `tests/general/footnotes`, `tests/defuddle/footnotes`, and `tests/web/footnotes` |
+| Inline and display math | `src/document/math.rs`, `src/normalize.rs` | `tests/defuddle/math`, `tests/web/math`, and Readability MathJax fixtures |
+| Callouts | `src/document/callouts.rs`, `src/document/compiler.rs` | `tests/web/docs/callout` and quality fixtures such as `docs-callout-types` |
+| Details and summaries | `src/document/compiler.rs`, `src/render/markdown.rs`, and `src/render/text.rs` | Readability `toc-missing` and focused IR tests. This distinction has limited exact-output coverage and remains provisional. |
+| Definition lists | `src/document/compiler.rs`, `src/render/markdown.rs`, and `src/normalize/lists.rs` | Quality fixture `docs-definition-list` and focused IR tests |
 | Meaningful media | `src/normalize/media.rs` | `tests/web/media` and the quality corpus media categories |
 | Discussions | Shared specialized discussion builder and adapters | `tests/general/barrier-discussion` and all 12 fixtures under `tests/specialized` |
 
-The crate-private IR also includes table spans and alignment because the baseline DOM renderers retained that source meaning. It includes typed figures, footnotes, math, and callouts because normalization already identifies those concepts. It does not include arbitrary HTML elements, classes, IDs, styles, or attribute bags.
+The semantic IR also includes table spans and alignment because the previous DOM renderers retained that source meaning. It includes typed figures, footnotes, math, and callouts because normalization already identifies those concepts. It does not include arbitrary HTML elements, classes, IDs, styles, or attribute bags.
 
 ## Fixture coverage
 
