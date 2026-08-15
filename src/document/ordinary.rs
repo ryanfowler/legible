@@ -33,11 +33,13 @@ struct ScanFrame {
 
 pub(super) struct Inventory {
     first_visible: Vec<(NodeId, Option<char>)>,
+    node_count: usize,
 }
 
 /// Inventories source features when they can be emitted without global analysis.
 pub(super) fn inventory(dom: &Dom, root: NodeId) -> Option<Inventory> {
     let mut first_visible: Vec<(NodeId, Option<char>)> = Vec::new();
+    let mut node_count = 0;
     let mut frames = vec![ScanFrame {
         has_content: false,
         requires_content: false,
@@ -66,6 +68,7 @@ pub(super) fn inventory(dom: &Dom, root: NodeId) -> Option<Inventory> {
             parent.first_visible = parent.first_visible.or(frame.first_visible);
             continue;
         };
+        node_count += 1;
         if let Some(text) = dom.text_node(node) {
             if context.inside_code && !context.inside_pre && text.contains('\n') {
                 return None;
@@ -147,7 +150,10 @@ pub(super) fn inventory(dom: &Dom, root: NodeId) -> Option<Inventory> {
             context: next,
         }));
     }
-    Some(Inventory { first_visible })
+    Some(Inventory {
+        first_visible,
+        node_count,
+    })
 }
 
 #[cfg(test)]
@@ -412,7 +418,7 @@ pub(super) fn compile(
     context: &CompileContext,
     inventory: &Inventory,
 ) -> Result<Document, CompileError> {
-    let mut builder = DocumentBuilder::with_capacity(dom.len());
+    let mut builder = DocumentBuilder::with_capacity(inventory.node_count);
     let mut inventory_cursor = 0;
     let mut frames = vec![Frame {
         tag: None,

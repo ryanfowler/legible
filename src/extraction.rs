@@ -789,21 +789,25 @@ impl<'a> ContentExtractor<'a> {
             let access_barrier = is_access_barrier(&self.dom, content_id);
             self.final_cleanup(content_id, &mut cleaning_nodes);
             self.capture_normalization_counts(content_id);
-            let result_dom = if synthetic {
-                self.dom.copy_subtree_as_fragment(content_id)
-            } else {
-                self.dom.copy_children_as_fragment(content_id)
+            // The selected region is already a compact fragment. Remove the
+            // internal selection boundary when the output contract excludes
+            // it. This makes the fragment itself the final compiler input and
+            // avoids copying it immediately before semantic compilation.
+            if !synthetic {
+                let fragment_root = self.dom.root();
+                self.dom.move_children(content_id, fragment_root);
+                self.dom.detach(content_id);
             }
-            .map_err(|_| Error::NoContent)?;
-            let final_dom_nodes = result_dom.len();
+            let result_root = self.dom.root();
+            let final_dom_nodes = 1 + self.dom.descendants(result_root).count();
             // Normal extraction only needs the semantic document for a candidate
             // that can win. Diagnostics still compile every attempt so that they
             // retain complete semantic metrics.
             let result_document = if self.diagnostic_attempts.is_some() {
                 Some(
                     crate::document::compile_document(
-                        &result_dom,
-                        result_dom.root(),
+                        &self.dom,
+                        result_root,
                         &crate::document::CompileContext::new(
                             self.base_uri.clone(),
                             self.source_uri.as_ref(),
@@ -824,7 +828,7 @@ impl<'a> ContentExtractor<'a> {
                         estimated_document_bytes: document.retained_bytes_estimate(),
                     });
             let result_metrics = result_document.as_ref().map_or_else(
-                || ContentMetrics::measure_fast(&result_dom, result_dom.root()),
+                || ContentMetrics::measure_fast(&self.dom, result_root),
                 ContentMetrics::measure_document,
             );
             let result_semantic_counts = result_document.as_ref().and_then(|document| {
@@ -901,12 +905,13 @@ impl<'a> ContentExtractor<'a> {
                     true,
                     None,
                 );
+                let content = std::mem::replace(&mut self.dom, source_dom);
                 let document = if let Some(document) = result_document {
                     document
                 } else {
-                    crate::document::compile_document(
-                        &result_dom,
-                        result_dom.root(),
+                    crate::document::compile_document_owned(
+                        content,
+                        result_root,
                         &crate::document::CompileContext::new(
                             self.base_uri.clone(),
                             self.source_uri.as_ref(),
@@ -952,15 +957,22 @@ impl<'a> ContentExtractor<'a> {
                     attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
                 }
                 self.best_attempt = Some(BestAttempt {
-                    content: FrozenContent { dom: result_dom },
+                    content: FrozenContent {
+                        dom: std::mem::replace(&mut self.dom, source_dom),
+                    },
                     quality,
                     excerpt,
                     direction: self.page_direction.clone(),
                     strategy,
                     diagnostic_index,
                 });
+                self.page_byline = None;
+                self.page_direction = None;
+                self.page_language = None;
+                self.node_data.clear();
+            } else {
+                self.restore_source(source_dom);
             }
-            self.restore_source(source_dom);
         }
 
         let best = self.best_attempt.take().ok_or(Error::NoContent)?;
@@ -975,9 +987,10 @@ impl<'a> ContentExtractor<'a> {
             attempts[index].accepted = true;
             attempts[index].rejection_reason = None;
         }
-        let document = crate::document::compile_document(
-            &best.content.dom,
-            best.content.dom.root(),
+        let root = best.content.dom.root();
+        let document = crate::document::compile_document_owned(
+            best.content.dom,
+            root,
             &crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref()),
         )
         .map_err(|_| Error::NoContent)?;
@@ -2446,6 +2459,20 @@ fn heading_matches_page_title(page_title: &str, heading: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_extraction_copies_the_selected_region_once() {
+        let html = r#"<body><article><h1>Direct compilation</h1>
+            <p>This complete article has enough useful text to select and accept its content.</p>
+            <p>The semantic compiler consumes the cleaned fragment without a second deep copy.</p>
+        </article></body>"#;
+        Dom::reset_fragment_copy_count();
+
+        let page = crate::extract(html, None).unwrap();
+
+        assert!(page.markdown().contains("semantic compiler consumes"));
+        assert_eq!(Dom::fragment_copy_count(), 1);
+    }
 
     #[test]
     fn subtitle_context_must_precede_and_stay_close_to_content() {
