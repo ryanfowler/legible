@@ -103,10 +103,19 @@ pub(crate) fn compile_document(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
+    compile_document_with_optional_source_facts(dom, root, context, None)
+}
+
+pub(crate) fn compile_document_with_optional_source_facts(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+) -> Result<Document, CompileError> {
     if let Some(inventory) = super::ordinary::inventory(dom, root) {
         return super::ordinary::compile(dom, root, context, &inventory);
     }
-    compile_complex_document(dom, root, context)
+    compile_complex_document(dom, root, context, source_facts)
 }
 
 /// Compiles and releases an owned retained-source fragment.
@@ -122,12 +131,23 @@ pub(crate) fn compile_document_owned(
     compile_document(&dom, root, context)
 }
 
+/// Compiles an owned fragment while reusing source facts from final cleanup.
+pub(crate) fn compile_document_owned_with_optional_source_facts(
+    dom: Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+) -> Result<Document, CompileError> {
+    compile_document_with_optional_source_facts(&dom, root, context, source_facts)
+}
+
 fn compile_complex_document(
     dom: &Dom,
     root: NodeId,
     context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
 ) -> Result<Document, CompileError> {
-    let mut facts = super::facts::SemanticFacts::analyze(dom, root);
+    let mut facts = super::facts::SemanticFacts::analyze_with_source_facts(dom, root, source_facts);
     let images = super::images::analyze_with_inventory(
         dom,
         facts.nodes(),
@@ -1241,7 +1261,7 @@ mod tests {
             .expect("source must support ordinary compilation");
         let ordinary =
             super::super::ordinary::compile(&dom, dom.root(), &context, &inventory).unwrap();
-        let complex = compile_complex_document(&dom, dom.root(), &context).unwrap();
+        let complex = compile_complex_document(&dom, dom.root(), &context, None).unwrap();
         assert_eq!(ordinary.debug_tree(), complex.debug_tree());
     }
 

@@ -21,7 +21,7 @@ use crate::normalize::{
     accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes, cleanup_selected_content,
     collect_external_footnotes, has_primary_heading_semantics, normalize_scoring_structure,
     normalize_svg_before_scoring, prepare_media_before_cleanup,
-    remove_decorative_media_before_cleanup, remove_empty_content,
+    remove_decorative_media_before_cleanup, remove_empty_content_with_source_facts,
 };
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
@@ -97,6 +97,7 @@ struct BestAttempt {
 
 struct FrozenContent {
     dom: Dom,
+    source_facts: Option<crate::document::SemanticSourceFacts>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -787,7 +788,7 @@ impl<'a> ContentExtractor<'a> {
             }
             let excerpt = self.content_excerpt(content_id);
             let access_barrier = is_access_barrier(&self.dom, content_id);
-            self.final_cleanup(content_id, &mut cleaning_nodes);
+            let mut source_facts = self.final_cleanup(content_id, &mut cleaning_nodes);
             self.capture_normalization_counts(content_id);
             // The selected region is already a compact fragment. Remove the
             // internal selection boundary when the output contract excludes
@@ -799,19 +800,23 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.detach(content_id);
             }
             let result_root = self.dom.root();
+            if let Some(source_facts) = source_facts.as_mut() {
+                source_facts.rebase_root(&self.dom, result_root);
+            }
             let final_dom_nodes = 1 + self.dom.descendants(result_root).count();
             // Normal extraction only needs the semantic document for a candidate
             // that can win. Diagnostics still compile every attempt so that they
             // retain complete semantic metrics.
             let result_document = if self.diagnostic_attempts.is_some() {
                 Some(
-                    crate::document::compile_document(
+                    crate::document::compile_document_with_optional_source_facts(
                         &self.dom,
                         result_root,
                         &crate::document::CompileContext::new(
                             self.base_uri.clone(),
                             self.source_uri.as_ref(),
                         ),
+                        source_facts.as_ref(),
                     )
                     .map_err(|_| Error::NoContent)?,
                 )
@@ -909,13 +914,14 @@ impl<'a> ContentExtractor<'a> {
                 let document = if let Some(document) = result_document {
                     document
                 } else {
-                    crate::document::compile_document_owned(
+                    crate::document::compile_document_owned_with_optional_source_facts(
                         content,
                         result_root,
                         &crate::document::CompileContext::new(
                             self.base_uri.clone(),
                             self.source_uri.as_ref(),
                         ),
+                        source_facts.as_ref(),
                     )
                     .map_err(|_| Error::NoContent)?
                 };
@@ -959,6 +965,7 @@ impl<'a> ContentExtractor<'a> {
                 self.best_attempt = Some(BestAttempt {
                     content: FrozenContent {
                         dom: std::mem::replace(&mut self.dom, source_dom),
+                        source_facts,
                     },
                     quality,
                     excerpt,
@@ -988,10 +995,11 @@ impl<'a> ContentExtractor<'a> {
             attempts[index].rejection_reason = None;
         }
         let root = best.content.dom.root();
-        let document = crate::document::compile_document_owned(
+        let document = crate::document::compile_document_owned_with_optional_source_facts(
             best.content.dom,
             root,
             &crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref()),
+            best.content.source_facts.as_ref(),
         )
         .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
@@ -1971,13 +1979,19 @@ impl<'a> ContentExtractor<'a> {
                 }
             })
     }
-    fn final_cleanup(&mut self, root: NodeId, nodes: &mut Vec<NodeId>) {
+    fn final_cleanup(
+        &mut self,
+        root: NodeId,
+        nodes: &mut Vec<NodeId>,
+    ) -> Option<crate::document::SemanticSourceFacts> {
         // The compiler resolves URLs, drops source attributes, ignores comments,
         // and collapses transparent wrappers. Only relevance cleanup mutates the
         // selected DOM at this stage.
         let before = self.diagnostic_element_count(root);
-        remove_empty_content(&mut self.dom, root, nodes);
+        let mut source_facts = None;
+        remove_empty_content_with_source_facts(&mut self.dom, root, nodes, &mut source_facts);
         self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
+        source_facts
     }
 
     fn diagnostic_element_count(&self, root: NodeId) -> Option<usize> {

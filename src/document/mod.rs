@@ -66,7 +66,11 @@ pub(crate) use code::{
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
     multiline_content as code_multiline_content,
 };
-pub(crate) use compiler::{CompileContext, compile_document, compile_document_owned};
+pub(crate) use compiler::{
+    CompileContext, compile_document, compile_document_owned_with_optional_source_facts,
+    compile_document_with_optional_source_facts,
+};
+pub(crate) use facts::SemanticSourceFacts;
 pub(crate) use footnotes::{
     Definitions as ExternalFootnoteDefinitions, adopt_external as adopt_external_footnotes,
     collect_external as collect_external_footnotes,
