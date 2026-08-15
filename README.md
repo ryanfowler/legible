@@ -82,12 +82,13 @@ if let Some(diagnostics) = page.diagnostics() {
     for attempt in &diagnostics.attempts {
         println!("Cleanup: {:?}", attempt.cleanup_actions);
         println!("Normalization: {:?}", attempt.normalization);
+        println!("Semantic coverage: {:?}", attempt.semantic_coverage);
     }
 }
 # Ok::<(), legible::Error>(())
 ```
 
-Legible does not retain attempt diagnostics by default. When enabled, diagnostics record each strategy, the selected root, quality metrics, major cleanup actions, semantic normalization counts, and the specialized extractor identity.
+Legible does not retain attempt diagnostics by default. When enabled, diagnostics record each strategy, the selected root, quality metrics, candidate-to-result semantic coverage, major cleanup actions, semantic normalization counts, and the specialized extractor identity. Semantic coverage is diagnostic data. It does not affect attempt acceptance.
 
 Use a content hint when you know a likely content container. The hint adds strong
 evidence, but Legible can select a better container. Use `content_root` when you

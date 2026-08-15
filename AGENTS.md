@@ -54,8 +54,8 @@ The extraction pipeline flows through these stages:
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
 | `document/footnotes.rs` / `document/math.rs` / `document/callouts.rs` | Direct semantic footnote, math, and callout recognition for the compiler |
-| `quality.rs` | Source-relative DOM metrics, Document-native result metrics, access-barrier and short-result checks, and best-attempt scoring |
-| `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
+| `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
+| `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
 | `document/` | Public read-only semantic IR plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this document instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |

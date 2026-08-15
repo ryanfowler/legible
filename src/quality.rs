@@ -1,12 +1,17 @@
 //! Extraction quality metrics and best-attempt comparison.
 
-use crate::document::Document;
+use crate::diagnostics::{
+    SemanticCategoryCoverageInfo, SemanticCoverageCategory, SemanticCoverageInfo,
+};
+use crate::document::{Document, DocumentNodeId, NodeKind};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
     get_or_compute_stats_excluding, has_hidden_utility_class_for_discovery,
     has_static_hidden_marker,
 };
+use smallvec::SmallVec;
+use std::collections::{HashMap, HashSet};
 
 /// Text and structure measured for one DOM region.
 #[derive(Clone, Copy, Debug, Default)]
@@ -274,6 +279,216 @@ impl ContentMetrics {
     pub(crate) fn has_meaningful_text(self) -> bool {
         self.has_alphanumeric_text && self.word_count > 0 && self.text_chars > 0
     }
+}
+
+/// Useful structures measured from one semantic document in one linear walk.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SemanticStructureCounts {
+    code_blocks: usize,
+    data_tables: usize,
+    list_items: HashMap<Box<str>, usize>,
+    substantial_list_items: HashMap<Box<str>, usize>,
+    visuals: usize,
+    headings: usize,
+    referenced_footnotes: HashSet<Box<str>>,
+    math_expressions: usize,
+}
+
+impl SemanticStructureCounts {
+    pub(crate) fn measure(document: &Document) -> Self {
+        let mut counts = Self::default();
+        let mut stack = document
+            .root_ids()
+            .rev()
+            .map(|node| (node, false))
+            .collect::<SmallVec<[(DocumentNodeId, bool); 32]>>();
+        while let Some((node, in_figure)) = stack.pop() {
+            let Some(arena_node) = document.node(node) else {
+                continue;
+            };
+            let node_is_figure = matches!(arena_node.kind(), NodeKind::Figure);
+            let child_in_figure = in_figure || node_is_figure;
+            let children = document.child_ids(node).collect::<SmallVec<[_; 8]>>();
+            match arena_node.kind() {
+                NodeKind::CodeBlock(_) => counts.code_blocks += 1,
+                NodeKind::Table(_) => counts.data_tables += 1,
+                NodeKind::List(_) => {
+                    let items = children
+                        .iter()
+                        .filter(|&&child| {
+                            document
+                                .node(child)
+                                .is_some_and(|child| matches!(child.kind(), NodeKind::ListItem))
+                        })
+                        .map(|&child| list_item_signature(document, child))
+                        .collect::<SmallVec<[_; 8]>>();
+                    for item in &items {
+                        *counts.list_items.entry(item.clone()).or_default() += 1;
+                    }
+                    if items.len() >= 3 {
+                        for item in items {
+                            *counts.substantial_list_items.entry(item).or_default() += 1;
+                        }
+                    }
+                }
+                NodeKind::Figure => counts.visuals += 1,
+                NodeKind::Image(_) if !in_figure => counts.visuals += 1,
+                NodeKind::Heading { .. } => counts.headings += 1,
+                NodeKind::FootnoteReference(id) => {
+                    if let Some(definition) = document.footnote_record(*id) {
+                        counts.referenced_footnotes.insert(definition.label.clone());
+                    }
+                }
+                NodeKind::InlineMath(_) | NodeKind::DisplayMath(_) => {
+                    counts.math_expressions += 1;
+                }
+                _ => {}
+            }
+            stack.extend(
+                children
+                    .into_iter()
+                    .rev()
+                    .map(|child| (child, child_in_figure)),
+            );
+        }
+        counts
+    }
+}
+
+/// Measures bounded semantic preservation inside one credible source candidate.
+/// Categories with weak source evidence do not affect the score.
+pub(crate) fn semantic_coverage(
+    source: &SemanticStructureCounts,
+    result: &SemanticStructureCounts,
+) -> Option<SemanticCoverageInfo> {
+    let mut categories = Vec::with_capacity(7);
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::CodeBlocks,
+        source.code_blocks,
+        result.code_blocks,
+        1,
+    );
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::DataTables,
+        source.data_tables,
+        result.data_tables,
+        1,
+    );
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::SubstantialListItems,
+        multiset_size(&source.substantial_list_items),
+        multiset_overlap(&source.substantial_list_items, &result.list_items),
+        1,
+    );
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::Visuals,
+        source.visuals,
+        result.visuals,
+        1,
+    );
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::Headings,
+        source.headings,
+        result.headings,
+        3,
+    );
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::FootnoteDefinitions,
+        source.referenced_footnotes.len(),
+        source
+            .referenced_footnotes
+            .intersection(&result.referenced_footnotes)
+            .count(),
+        1,
+    );
+    push_semantic_coverage(
+        &mut categories,
+        SemanticCoverageCategory::MathExpressions,
+        source.math_expressions,
+        result.math_expressions,
+        1,
+    );
+    if categories.is_empty() {
+        return None;
+    }
+    let score = categories
+        .iter()
+        .map(|category| category.coverage)
+        .sum::<f64>()
+        / categories.len() as f64;
+    Some(SemanticCoverageInfo { score, categories })
+}
+
+fn list_item_signature(document: &Document, root: DocumentNodeId) -> Box<str> {
+    let mut parts = Vec::<Box<str>>::new();
+    let mut stack = SmallVec::<[DocumentNodeId; 16]>::from_slice(&[root]);
+    while let Some(node) = stack.pop() {
+        let Some(arena_node) = document.node(node) else {
+            continue;
+        };
+        if node != root && matches!(arena_node.kind(), NodeKind::List(_)) {
+            continue;
+        }
+        let text = match arena_node.kind() {
+            NodeKind::Text(text) | NodeKind::InlineCode(text) => Some(text.as_str()),
+            NodeKind::CodeBlock(code) => Some(code.text()),
+            NodeKind::Image(image) => Some(if image.alt().is_empty() {
+                image.source()
+            } else {
+                image.alt()
+            }),
+            NodeKind::TaskMarker(marker) => marker.fallback_label(),
+            NodeKind::InlineMath(math) | NodeKind::DisplayMath(math) => {
+                Some(math.fallback_text().unwrap_or_else(|| math.source()))
+            }
+            NodeKind::Media(media) => Some(media.title().unwrap_or_else(|| media.source())),
+            _ => None,
+        };
+        if let Some(text) = text {
+            let text = crate::constants::normalize_whitespace(text);
+            if !text.is_empty() {
+                parts.push(text.into_boxed_str());
+            }
+        }
+        let children = document.child_ids(node).collect::<SmallVec<[_; 8]>>();
+        stack.extend(children.into_iter().rev());
+    }
+    parts.join(" ").into_boxed_str()
+}
+
+fn multiset_size(values: &HashMap<Box<str>, usize>) -> usize {
+    values.values().copied().sum()
+}
+
+fn multiset_overlap(source: &HashMap<Box<str>, usize>, result: &HashMap<Box<str>, usize>) -> usize {
+    source
+        .iter()
+        .map(|(item, &count)| count.min(result.get(item).copied().unwrap_or_default()))
+        .sum()
+}
+
+fn push_semantic_coverage(
+    categories: &mut Vec<SemanticCategoryCoverageInfo>,
+    category: SemanticCoverageCategory,
+    source_count: usize,
+    result_count: usize,
+    minimum_source_count: usize,
+) {
+    if source_count < minimum_source_count {
+        return;
+    }
+    categories.push(SemanticCategoryCoverageInfo {
+        category,
+        source_count,
+        result_count,
+        coverage: ratio(result_count, source_count),
+    });
 }
 
 /// Rates an extraction relative to the meaningful source body.
@@ -719,6 +934,115 @@ mod tests {
         let code =
             ExtractionQuality::new(metrics(100, 700, 2, 0.0), metrics(30, 250, 2, 0.0), true);
         assert!(code.is_good());
+    }
+
+    #[test]
+    fn semantic_coverage_reports_missing_code_and_table_structure() {
+        let source = SemanticStructureCounts {
+            code_blocks: 4,
+            data_tables: 2,
+            headings: 2,
+            ..SemanticStructureCounts::default()
+        };
+        let result = SemanticStructureCounts {
+            code_blocks: 1,
+            data_tables: 0,
+            headings: 0,
+            ..SemanticStructureCounts::default()
+        };
+
+        let coverage = semantic_coverage(&source, &result).unwrap();
+
+        assert_eq!(coverage.categories.len(), 2);
+        assert_eq!(coverage.score, 0.125);
+        assert_eq!(
+            coverage.categories[0],
+            SemanticCategoryCoverageInfo {
+                category: SemanticCoverageCategory::CodeBlocks,
+                source_count: 4,
+                result_count: 1,
+                coverage: 0.25,
+            }
+        );
+        assert_eq!(
+            coverage.categories[1].category,
+            SemanticCoverageCategory::DataTables
+        );
+        assert_eq!(coverage.categories[1].coverage, 0.0);
+    }
+
+    #[test]
+    fn semantic_coverage_ignores_weak_list_heading_and_footnote_evidence() {
+        let source = SemanticStructureCounts {
+            headings: 1,
+            ..SemanticStructureCounts::default()
+        };
+
+        assert!(semantic_coverage(&source, &SemanticStructureCounts::default()).is_none());
+    }
+
+    #[test]
+    fn semantic_coverage_reports_partial_retention_of_a_substantial_list() {
+        let source = SemanticStructureCounts {
+            list_items: HashMap::from([
+                (Box::<str>::from("a"), 1),
+                (Box::<str>::from("b"), 1),
+                (Box::<str>::from("c"), 1),
+            ]),
+            substantial_list_items: HashMap::from([
+                (Box::<str>::from("a"), 1),
+                (Box::<str>::from("b"), 1),
+                (Box::<str>::from("c"), 1),
+            ]),
+            ..SemanticStructureCounts::default()
+        };
+        let result = SemanticStructureCounts {
+            list_items: HashMap::from([
+                (Box::<str>::from("a"), 1),
+                (Box::<str>::from("b"), 1),
+                (Box::<str>::from("unrelated"), 3),
+            ]),
+            ..SemanticStructureCounts::default()
+        };
+
+        let coverage = semantic_coverage(&source, &result).unwrap();
+
+        assert_eq!(coverage.categories.len(), 1);
+        assert_eq!(
+            coverage.categories[0].category,
+            SemanticCoverageCategory::SubstantialListItems
+        );
+        assert_eq!(coverage.categories[0].coverage, 2.0 / 3.0);
+        assert_eq!(coverage.score, 2.0 / 3.0);
+
+        let unrelated = SemanticStructureCounts {
+            list_items: HashMap::from([(Box::<str>::from("unrelated"), 3)]),
+            ..SemanticStructureCounts::default()
+        };
+        assert_eq!(semantic_coverage(&source, &unrelated).unwrap().score, 0.0);
+    }
+
+    #[test]
+    fn semantic_structure_counts_measure_lists_visuals_and_resolved_footnotes() {
+        let dom = Dom::parse_fragment(
+            r##"<ul><li>one</li></ul><ul><li>two</li></ul><ul><li>three</li></ul><ol><li>a</li><li>b</li><li>c</li></ol><figure><img src="one.png"><img src="two.png"></figure><figure><figcaption>Diagram</figcaption></figure><img src="standalone.png"><p><sup data-legible-footnote-ref="n1">1</sup><sup data-legible-footnote-ref="n1">1</sup></p><ol><li data-legible-footnote="n1">Used note</li><li data-legible-footnote="n2">Unused note</li></ol>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let document = crate::document::compile_document(
+            &dom,
+            dom.root(),
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+
+        let counts = SemanticStructureCounts::measure(&document);
+
+        assert_eq!(multiset_size(&counts.substantial_list_items), 3);
+        assert_eq!(multiset_size(&counts.list_items), 6);
+        assert_eq!(counts.visuals, 3);
+        assert_eq!(counts.referenced_footnotes.len(), 1);
+        assert!(counts.referenced_footnotes.contains("n1"));
     }
 
     #[test]

@@ -80,6 +80,7 @@ pub use diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
     ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
     NormalizationCountsInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+    SemanticCategoryCoverageInfo, SemanticCoverageCategory, SemanticCoverageInfo,
 };
 pub use document::{
     Callout, CalloutKind, CodeBlock, Document, DocumentNode, DocumentStats, FootnoteDefinition,

@@ -110,6 +110,7 @@ $x + y$`;
     headings_h6: 0,
     junk_phrases: [],
     metadata: null,
+    semantic_coverage: null,
   });
 });
 
@@ -416,6 +417,32 @@ test("builds a stable aggregate with comparison rankings", () => {
   assert.equal(report.by_category["technical-documentation"].fixture_count, 1);
   assert.equal(report.largest_legible_wins[0].fixture, "sample");
   assert.ok(Math.abs(report.largest_legible_wins[0].delta - 1 / 3) < 1e-12);
+});
+
+test("retains diagnostics-only semantic coverage in fixture reports", () => {
+  const result = comparisonResult(
+    fixture(),
+    {
+      success: true,
+      deterministic: true,
+      markdown: "Required phrase",
+      semantic_coverage: {
+        score: 0.5,
+        categories: [
+          {
+            category: "code_blocks",
+            source_count: 2,
+            result_count: 1,
+            coverage: 0.5,
+          },
+        ],
+      },
+    },
+    { success: true, deterministic: true, markdown: "Required phrase" },
+  );
+
+  assert.equal(result.legible.semantic_coverage.score, 0.5);
+  assert.equal(result.defuddle.semantic_coverage, null);
 });
 
 test("formats a compact deterministic Markdown summary", () => {

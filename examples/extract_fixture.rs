@@ -1,4 +1,4 @@
-use legible::{Error, extract};
+use legible::{Error, Extractor, SemanticCoverageCategory};
 use std::{env, fs, process::ExitCode};
 
 fn error_variant(error: &Error) -> &'static str {
@@ -64,10 +64,43 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match extract(&source, Some(&source_url)) {
+    match Extractor::builder()
+        .diagnostics(true)
+        .build()
+        .extract(&source, Some(&source_url))
+    {
         Ok(page) => {
             let markdown = page.markdown();
             if json {
+                let semantic_coverage = page
+                    .diagnostics()
+                    .and_then(|diagnostics| {
+                        diagnostics.attempts.iter().find(|attempt| attempt.accepted)
+                    })
+                    .and_then(|attempt| attempt.semantic_coverage.as_ref())
+                    .map(|coverage| {
+                        serde_json::json!({
+                            "score": coverage.score,
+                            "categories": coverage.categories.iter().map(|category| {
+                                let name = match category.category {
+                                    SemanticCoverageCategory::CodeBlocks => "code_blocks",
+                                    SemanticCoverageCategory::DataTables => "data_tables",
+                                    SemanticCoverageCategory::SubstantialListItems => "substantial_list_items",
+                                    SemanticCoverageCategory::Visuals => "visuals",
+                                    SemanticCoverageCategory::Headings => "headings",
+                                    SemanticCoverageCategory::FootnoteDefinitions => "footnote_definitions",
+                                    SemanticCoverageCategory::MathExpressions => "math_expressions",
+                                    _ => "unknown",
+                                };
+                                serde_json::json!({
+                                    "category": name,
+                                    "source_count": category.source_count,
+                                    "result_count": category.result_count,
+                                    "coverage": category.coverage,
+                                })
+                            }).collect::<Vec<_>>(),
+                        })
+                    });
                 println!(
                     "{}",
                     serde_json::json!({
@@ -90,6 +123,7 @@ fn main() -> ExitCode {
                         },
                         "tables": page.html().match_indices("<table").count(),
                         "figures": page.html().match_indices("<figure").count(),
+                        "semantic_coverage": semantic_coverage,
                     })
                 );
             } else {
