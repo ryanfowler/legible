@@ -214,7 +214,41 @@ struct LinkOutput {
 }
 
 impl LinkOutput {
-    fn text(&mut self, text: &str) {
+    fn text(&mut self, text: &str, is_ascii: bool) {
+        if is_ascii {
+            self.text_ascii(text);
+        } else {
+            self.text_unicode(text);
+        }
+    }
+
+    fn text_ascii(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let run_start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if run_start != index {
+                if self.pending {
+                    self.character_count += 1;
+                    self.pending = false;
+                }
+                self.character_count += index - run_start;
+            }
+
+            let whitespace_start = index;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if whitespace_start != index && self.character_count > 0 {
+                self.pending = true;
+            }
+        }
+    }
+
+    fn text_unicode(&mut self, text: &str) {
         for character in text.chars() {
             if character.is_whitespace() {
                 if self.character_count > 0 {
@@ -316,11 +350,90 @@ impl NormalizedOutput {
     }
 
     fn text(&mut self, text: &str) {
-        if self.collect_stats
-            && let Some(link_output) = &mut self.link_output
-        {
-            link_output.text(text);
+        if self.collect_stats {
+            self.text_with_stats(text);
+        } else {
+            self.text_without_stats(text);
         }
+    }
+
+    fn text_with_stats(&mut self, text: &str) {
+        let is_ascii = text.is_ascii();
+        if let Some(link_output) = &mut self.link_output {
+            link_output.text(text, is_ascii);
+        }
+        if is_ascii {
+            self.text_ascii_with_stats(text);
+        } else {
+            self.text_unicode_with_stats(text);
+        }
+    }
+
+    fn text_without_stats(&mut self, text: &str) {
+        if text.is_ascii() {
+            self.text_ascii_without_stats(text);
+        } else {
+            self.text_unicode_without_stats(text);
+        }
+    }
+
+    fn text_ascii_with_stats(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index].is_ascii_whitespace() {
+                if self.character_count > 0 && self.pending == Separator::None {
+                    self.pending = Separator::Space;
+                }
+                index += 1;
+                continue;
+            }
+
+            self.flush();
+            if !self.in_word {
+                self.word_count += 1;
+            }
+            self.in_word = true;
+            let run_start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                let byte = bytes[index];
+                self.has_alphanumeric_text |= byte.is_ascii_alphanumeric();
+                self.alphabetic_chars += usize::from(byte.is_ascii_alphabetic());
+                self.digit_chars += usize::from(byte.is_ascii_digit());
+                index += 1;
+            }
+            self.character_count += index - run_start;
+            if let Some(output) = &mut self.output {
+                output.push_str(&text[run_start..index]);
+            }
+        }
+    }
+
+    fn text_ascii_without_stats(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index].is_ascii_whitespace() {
+                if self.character_count > 0 && self.pending == Separator::None {
+                    self.pending = Separator::Space;
+                }
+                index += 1;
+                continue;
+            }
+
+            self.flush_without_stats();
+            let run_start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            self.character_count += index - run_start;
+            if let Some(output) = &mut self.output {
+                output.push_str(&text[run_start..index]);
+            }
+        }
+    }
+
+    fn text_unicode_with_stats(&mut self, text: &str) {
         for character in text.chars() {
             if character.is_whitespace() {
                 if self.character_count > 0 && self.pending == Separator::None {
@@ -328,15 +441,29 @@ impl NormalizedOutput {
                 }
             } else {
                 self.flush();
-                if self.collect_stats {
-                    if !self.in_word {
-                        self.word_count += 1;
-                    }
-                    self.in_word = true;
-                    self.has_alphanumeric_text |= character.is_alphanumeric();
-                    self.alphabetic_chars += usize::from(character.is_alphabetic());
-                    self.digit_chars += usize::from(character.is_numeric());
+                if !self.in_word {
+                    self.word_count += 1;
                 }
+                self.in_word = true;
+                self.has_alphanumeric_text |= character.is_alphanumeric();
+                self.alphabetic_chars += usize::from(character.is_alphabetic());
+                self.digit_chars += usize::from(character.is_numeric());
+                self.character_count += 1;
+                if let Some(output) = &mut self.output {
+                    output.push(character);
+                }
+            }
+        }
+    }
+
+    fn text_unicode_without_stats(&mut self, text: &str) {
+        for character in text.chars() {
+            if character.is_whitespace() {
+                if self.character_count > 0 && self.pending == Separator::None {
+                    self.pending = Separator::Space;
+                }
+            } else {
+                self.flush_without_stats();
                 self.character_count += 1;
                 if let Some(output) = &mut self.output {
                     output.push(character);
@@ -388,9 +515,22 @@ impl NormalizedOutput {
         };
         if let Some(separator) = separator {
             self.character_count += 1;
-            if self.collect_stats {
-                self.in_word = false;
+            self.in_word = false;
+            if let Some(output) = &mut self.output {
+                output.push(separator);
             }
+        }
+        self.pending = Separator::None;
+    }
+
+    fn flush_without_stats(&mut self) {
+        let separator = match self.pending {
+            Separator::None => None,
+            Separator::Space => Some(' '),
+            Separator::Newline => Some('\n'),
+        };
+        if let Some(separator) = separator {
+            self.character_count += 1;
             if let Some(output) = &mut self.output {
                 output.push(separator);
             }
@@ -578,6 +718,46 @@ mod tests {
         let stats = document.stats();
         assert_eq!(stats.link_text_length, 11);
         assert_eq!(stats.link_density, 3.3 / 11.0);
+    }
+
+    #[test]
+    fn ascii_and_unicode_text_paths_preserve_normalization_and_metrics() {
+        let mut builder = DocumentBuilder::with_capacity(4);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder
+            .append_prose(Some(paragraph), "  ASCII\twords 42!  ")
+            .unwrap();
+        let link = builder
+            .append(
+                None,
+                NodeKind::Link(Link {
+                    destination: "https://example.test".into(),
+                    title: None,
+                    fragment_only: false,
+                }),
+            )
+            .unwrap();
+        builder.append_prose(Some(link), "  世界  café  ").unwrap();
+        let document = builder.finish();
+
+        assert_eq!(
+            super::render_node_text(&document, paragraph),
+            "ASCII words 42!"
+        );
+        assert!(!document.stats_initialized());
+        assert_eq!(document.text(), "ASCII words 42! 世界 café");
+
+        let stats = document.stats();
+        assert_eq!(stats.text_length, 23);
+        assert_eq!(stats.word_count, 5);
+        assert_eq!(stats.link_text_length, 7);
+        assert_eq!(stats.alphabetic_chars, 16);
+        assert_eq!(stats.digit_chars, 2);
+        assert!(stats.has_alphanumeric_text);
+        assert_eq!(
+            super::render_document_text(&document, stats.text_length),
+            document.text()
+        );
     }
 
     #[test]
