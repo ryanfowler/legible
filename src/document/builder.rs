@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::{ArenaNode, Document, DocumentNodeId, FootnoteId, FootnoteRecord, NodeKind, TextValue};
 use thiserror::Error;
@@ -183,6 +184,7 @@ impl DocumentBuilder {
             nodes: self.nodes,
             roots: self.roots,
             footnotes,
+            stats: OnceLock::new(),
         }
     }
 }

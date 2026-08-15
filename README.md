@@ -131,7 +131,8 @@ while let Some(node) = nodes.pop() {
 ```
 
 The API exposes semantic values and traversal only. It does not expose source DOM
-IDs or mutation methods.
+IDs or mutation methods. `page.document().stats()` returns cached normalized text,
+link, structure, media, footnote, and math counts for the semantic result.
 
 ## Render Markdown
 

@@ -74,8 +74,17 @@ pub struct RootInfo {
 pub struct ContentMetricsInfo {
     pub word_count: usize,
     pub text_chars: usize,
+    pub link_text_chars: usize,
     pub paragraph_count: usize,
     pub heading_count: usize,
+    pub list_item_count: usize,
+    pub code_block_count: usize,
+    pub table_count: usize,
+    pub figure_count: usize,
+    pub image_count: usize,
+    pub footnote_reference_count: usize,
+    pub footnote_definition_count: usize,
+    pub math_count: usize,
     pub structured_block_count: usize,
     pub link_density: f64,
 }

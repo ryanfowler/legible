@@ -84,7 +84,7 @@ pub(crate) fn selected_image_sources_for_cleanup(
 ) -> Vec<Option<Box<str>>> {
     images::analyze(dom, nodes, None).sources
 }
-pub(crate) use stats::DocumentStats;
+pub use stats::DocumentStats;
 pub(crate) fn math_source_is_protected(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
     math::is_source_evidence(dom, node)
 }
@@ -104,12 +104,20 @@ pub(crate) fn semantic_normalization_counts(
     root: crate::dom::NodeId,
 ) -> (usize, usize, usize) {
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    semantic_normalization_counts_for_nodes(dom, root, &nodes)
+}
+
+pub(crate) fn semantic_normalization_counts_for_nodes(
+    dom: &crate::dom::Dom,
+    root: crate::dom::NodeId,
+    nodes: &[crate::dom::NodeId],
+) -> (usize, usize, usize) {
     let footnotes = footnotes::FootnoteAnalysis::analyze(dom, root);
-    let math = math::MathAnalysis::analyze(dom, &nodes);
+    let math = math::MathAnalysis::analyze(dom, nodes);
     let mut references = 0;
     let mut definitions = 0;
     let mut expressions = 0;
-    for node in nodes {
+    for &node in nodes {
         references += usize::from(footnotes.reference(node).is_some());
         definitions += usize::from(footnotes.definition(node).is_some());
         expressions += usize::from(math.value(node).is_some());
@@ -127,6 +135,7 @@ pub(crate) fn table_normalization_counts(
 }
 
 use std::fmt;
+use std::sync::OnceLock;
 
 /// An index into a [`Document`] arena.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -143,6 +152,7 @@ pub struct Document {
     nodes: Vec<ArenaNode>,
     roots: Vec<DocumentNodeId>,
     footnotes: Vec<FootnoteRecord>,
+    stats: OnceLock<DocumentStats>,
 }
 
 impl Document {
@@ -154,6 +164,13 @@ impl Document {
             .map(|id| DocumentNode { document: self, id })
     }
 
+    /// Returns measurements derived from the semantic document.
+    pub fn stats(&self) -> DocumentStats {
+        *self
+            .stats
+            .get_or_init(|| stats::compute_document_stats(self))
+    }
+
     /// Returns the normalized text for the complete document.
     pub fn text(&self) -> String {
         stats::render_document_text(self)
@@ -161,12 +178,72 @@ impl Document {
 
     /// Returns the number of characters in [`Self::text`].
     pub fn text_length(&self) -> usize {
-        stats::measure_document(self).text_length
+        self.stats().text_length
     }
 
     /// Returns the number of words in [`Self::text`].
     pub fn word_count(&self) -> usize {
-        stats::measure_document(self).word_count
+        self.stats().word_count
+    }
+
+    /// Returns the number of characters contributed by link content.
+    pub fn link_text_length(&self) -> usize {
+        self.stats().link_text_length
+    }
+
+    /// Returns the fraction of normalized text contributed by links.
+    pub fn link_density(&self) -> f64 {
+        self.stats().link_density
+    }
+
+    /// Returns the number of semantic paragraphs.
+    pub fn paragraph_count(&self) -> usize {
+        self.stats().paragraph_count
+    }
+
+    /// Returns the number of semantic headings.
+    pub fn heading_count(&self) -> usize {
+        self.stats().heading_count
+    }
+
+    /// Returns the number of semantic list items.
+    pub fn list_item_count(&self) -> usize {
+        self.stats().list_item_count
+    }
+
+    /// Returns the number of semantic code blocks.
+    pub fn code_block_count(&self) -> usize {
+        self.stats().code_block_count
+    }
+
+    /// Returns the number of semantic data tables.
+    pub fn table_count(&self) -> usize {
+        self.stats().table_count
+    }
+
+    /// Returns the number of semantic figures.
+    pub fn figure_count(&self) -> usize {
+        self.stats().figure_count
+    }
+
+    /// Returns the number of semantic images.
+    pub fn image_count(&self) -> usize {
+        self.stats().image_count
+    }
+
+    /// Returns the number of footnote references.
+    pub fn footnote_reference_count(&self) -> usize {
+        self.stats().footnote_reference_count
+    }
+
+    /// Returns the number of footnote definitions.
+    pub fn footnote_definition_count(&self) -> usize {
+        self.stats().footnote_definition_count
+    }
+
+    /// Returns the number of math expressions.
+    pub fn math_count(&self) -> usize {
+        self.stats().math_count
     }
 
     /// Resolves a footnote ID to its definition.
@@ -387,6 +464,9 @@ impl CodeBlock {
 pub struct Link {
     pub(crate) destination: Box<str>,
     pub(crate) title: Option<Box<str>>,
+    // Retain the source link kind for the compatibility link-density metric.
+    // The destination may be resolved to an absolute URL during compilation.
+    pub(crate) fragment_only: bool,
 }
 
 impl Link {

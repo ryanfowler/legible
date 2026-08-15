@@ -25,8 +25,8 @@ use crate::normalize::{
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
 use crate::quality::{
-    ContentMetrics, ExtractionQuality, is_access_barrier, is_incoherent_short_result,
-    is_interactive_shell,
+    ContentMetrics, ExtractionQuality, interactive_shell_evidence, is_access_barrier,
+    is_incoherent_short_result, is_interactive_shell,
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
@@ -85,7 +85,7 @@ fn remove_title_brand_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingP
 }
 
 struct BestAttempt {
-    content: FrozenContent,
+    document: crate::document::Document,
     quality: ExtractionQuality,
     excerpt: Option<String>,
     direction: Option<String>,
@@ -150,14 +150,10 @@ impl ExtractionStrategy {
         )
     }
 }
-struct FrozenContent {
-    dom: Dom,
-}
 struct ExtractedContent {
-    text_length: usize,
     excerpt: Option<String>,
-    /// The node whose children form the output fragment.
-    content_root: NodeId,
+    /// The compiled semantic result.
+    document: crate::document::Document,
 }
 
 struct CandidateDiscovery {
@@ -332,9 +328,9 @@ impl<'a> ContentExtractor<'a> {
         if let Some(diagnostics) = &mut self.metadata_diagnostics {
             diagnostics.complete_with_fallbacks(&self.metadata);
         }
-        // Compile the final compact fragment once. ExtractedPage retains the
-        // semantic document and the fragment drops when extraction returns.
-        let extracted_root = content.content_root;
+        // The selected attempt already compiled the compact fragment for its
+        // result metrics. Reuse that document instead of compiling the final
+        // fragment a second time.
         let diagnostics = self
             .diagnostic_attempts
             .take()
@@ -347,16 +343,9 @@ impl<'a> ContentExtractor<'a> {
             .options
             .retain_structured_data
             .then(|| self.structured_data.retained_items());
-        let document = crate::document::compile_document(
-            &self.dom,
-            extracted_root,
-            &crate::document::CompileContext::new(self.base_uri, self.source_uri.as_ref()),
-        )
-        .map_err(|_| Error::NoContent)?;
         Ok(ExtractedPage::new(
-            document,
+            content.document,
             self.metadata,
-            content.text_length,
             diagnostics,
             self.metadata_diagnostics,
             retained_structured_data,
@@ -762,7 +751,7 @@ impl<'a> ContentExtractor<'a> {
             self.node_data.clear();
             self.node_data.enable_link_lengths();
 
-            let interactive_shell = is_interactive_shell(&self.dom, content_id);
+            let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
             let video = regexps::VIDEOS.clone();
             self.prep_article(
                 content_id,
@@ -798,9 +787,18 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.copy_children_as_fragment(content_id)
             }
             .map_err(|_| Error::NoContent)?;
-            let result_metrics = ContentMetrics::measure(&result_dom, result_dom.root());
-            let incoherent_short =
-                is_incoherent_short_result(&result_dom, result_dom.root(), result_metrics);
+            let result_document = crate::document::compile_document(
+                &result_dom,
+                result_dom.root(),
+                &crate::document::CompileContext::new(
+                    self.base_uri.clone(),
+                    self.source_uri.as_ref(),
+                ),
+            )
+            .map_err(|_| Error::NoContent)?;
+            let result_metrics = ContentMetrics::measure_document(&result_document);
+            let interactive_shell = is_interactive_shell(result_metrics, shell_evidence);
+            let incoherent_short = is_incoherent_short_result(result_metrics);
             let attempt_source_metrics = if strategy == ExtractionStrategy::RelaxedVisibility {
                 relaxed_source_metrics
             } else {
@@ -861,12 +859,9 @@ impl<'a> ContentExtractor<'a> {
                     true,
                     None,
                 );
-                self.dom = result_dom;
-                let root = self.dom.root();
                 return Ok(ExtractedContent {
-                    text_length: quality.text_chars,
                     excerpt,
-                    content_root: root,
+                    document: result_document,
                 });
             }
 
@@ -903,7 +898,7 @@ impl<'a> ContentExtractor<'a> {
                     attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
                 }
                 self.best_attempt = Some(BestAttempt {
-                    content: FrozenContent { dom: result_dom },
+                    document: result_document,
                     quality,
                     excerpt,
                     direction: self.page_direction.clone(),
@@ -918,7 +913,6 @@ impl<'a> ContentExtractor<'a> {
         if !best.quality.is_good() && best.quality.is_suspiciously_small() {
             return Err(Error::NoContent);
         }
-        self.dom = best.content.dom;
         self.page_direction = best.direction;
         self.strategy = best.strategy;
         if let Some(index) = best.diagnostic_index
@@ -927,11 +921,9 @@ impl<'a> ContentExtractor<'a> {
             attempts[index].accepted = true;
             attempts[index].rejection_reason = None;
         }
-        let root = self.dom.root();
         Ok(ExtractedContent {
-            text_length: best.quality.text_chars,
             excerpt: best.excerpt,
-            content_root: root,
+            document: best.document,
         })
     }
     fn root_info(
@@ -1028,8 +1020,17 @@ impl<'a> ContentExtractor<'a> {
         ContentMetricsInfo {
             word_count: metrics.word_count,
             text_chars: metrics.text_chars,
+            link_text_chars: metrics.link_text_chars,
             paragraph_count: metrics.paragraph_count,
             heading_count: metrics.heading_count,
+            list_item_count: metrics.list_item_count,
+            code_block_count: metrics.code_block_count,
+            table_count: metrics.table_count,
+            figure_count: metrics.figure_count,
+            image_count: metrics.image_count,
+            footnote_reference_count: metrics.footnote_reference_count,
+            footnote_definition_count: metrics.footnote_definition_count,
+            math_count: metrics.math_count,
             structured_block_count: metrics.structured_block_count,
             link_density: metrics.link_density,
         }

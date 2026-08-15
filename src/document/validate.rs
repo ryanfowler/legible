@@ -478,6 +478,7 @@ mod tests {
                 NodeKind::Link(Link {
                     destination: "https://example.test/outer".into(),
                     title: None,
+                    fragment_only: false,
                 }),
             )
             .unwrap();
@@ -488,6 +489,7 @@ mod tests {
                 NodeKind::Link(Link {
                     destination: "https://example.test/inner".into(),
                     title: None,
+                    fragment_only: false,
                 }),
             )
             .unwrap();

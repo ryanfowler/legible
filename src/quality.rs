@@ -1,5 +1,6 @@
 //! Extraction quality metrics and best-attempt comparison.
 
+use crate::document::Document;
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
@@ -12,11 +13,23 @@ use crate::scoring::{
 pub(crate) struct ContentMetrics {
     pub(crate) word_count: usize,
     pub(crate) text_chars: usize,
+    pub(crate) link_text_chars: usize,
     pub(crate) paragraph_count: usize,
     pub(crate) heading_count: usize,
+    pub(crate) list_item_count: usize,
+    pub(crate) code_block_count: usize,
+    pub(crate) table_count: usize,
+    pub(crate) figure_count: usize,
+    pub(crate) image_count: usize,
+    pub(crate) footnote_reference_count: usize,
+    pub(crate) footnote_definition_count: usize,
+    pub(crate) math_count: usize,
     pub(crate) structured_block_count: usize,
     pub(crate) link_density: f64,
     has_alphanumeric_text: bool,
+    alphabetic_chars: usize,
+    digit_chars: usize,
+    contextual_structure: bool,
 }
 
 impl ContentMetrics {
@@ -114,6 +127,32 @@ impl ContentMetrics {
         Self::measure_filtered(dom, root, &elements, &excluded)
     }
 
+    /// Measures the final semantic result without inspecting source HTML.
+    pub(crate) fn measure_document(document: &Document) -> Self {
+        let stats = document.stats();
+        Self {
+            word_count: stats.word_count,
+            text_chars: stats.text_length,
+            link_text_chars: stats.link_text_length,
+            paragraph_count: stats.paragraph_count,
+            heading_count: stats.heading_count,
+            list_item_count: stats.list_item_count,
+            code_block_count: stats.code_block_count,
+            table_count: stats.table_count,
+            figure_count: stats.figure_count,
+            image_count: stats.image_count,
+            footnote_reference_count: stats.footnote_reference_count,
+            footnote_definition_count: stats.footnote_definition_count,
+            math_count: stats.math_count,
+            structured_block_count: stats.structured_block_count,
+            link_density: stats.link_density,
+            has_alphanumeric_text: stats.has_alphanumeric_text,
+            alphabetic_chars: stats.alphabetic_chars,
+            digit_chars: stats.digit_chars,
+            contextual_structure: stats.has_contextual_structure,
+        }
+    }
+
     pub(crate) fn measure(dom: &Dom, root: NodeId) -> Self {
         let mut store = NodeStateStore::new();
         store.enable_link_lengths();
@@ -122,7 +161,17 @@ impl ContentMetrics {
         let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
         for node in std::iter::once(root).chain(dom.descendants(root)) {
             metrics.count_structure(dom.tag(node));
+            if dom.tag(node) == Some(Tag::A) {
+                metrics.link_text_chars = metrics.link_text_chars.saturating_add(
+                    get_or_compute_stats(dom, node, &mut store).text_length as usize,
+                );
+            }
         }
+        let (references, definitions, expressions) =
+            crate::document::semantic_normalization_counts(dom, root);
+        metrics.footnote_reference_count = references;
+        metrics.footnote_definition_count = definitions;
+        metrics.math_count = expressions;
         metrics
     }
 
@@ -137,6 +186,10 @@ impl ContentMetrics {
         let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
         let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
+        let mut included_nodes = Vec::with_capacity(elements.len() + 1);
+        if !excluded.get(root.index()).copied().unwrap_or(false) {
+            included_nodes.push(root);
+        }
         let mut excluded_depth = None;
         for &(node, depth) in elements {
             if let Some(boundary) = excluded_depth {
@@ -149,8 +202,20 @@ impl ContentMetrics {
                 excluded_depth = Some(depth);
                 continue;
             }
+            included_nodes.push(node);
             metrics.count_structure(dom.tag(node));
+            if dom.tag(node) == Some(Tag::A) {
+                metrics.link_text_chars = metrics.link_text_chars.saturating_add(
+                    get_or_compute_stats_excluding(dom, node, &mut store, excluded).text_length
+                        as usize,
+                );
+            }
         }
+        let (references, definitions, expressions) =
+            crate::document::semantic_normalization_counts_for_nodes(dom, root, &included_nodes);
+        metrics.footnote_reference_count = references;
+        metrics.footnote_definition_count = definitions;
+        metrics.math_count = expressions;
         metrics
     }
 
@@ -162,8 +227,11 @@ impl ContentMetrics {
         Self {
             word_count: text.word_count as usize,
             text_chars: text.text_length as usize,
+            link_text_chars: 0,
             link_density,
             has_alphanumeric_text,
+            alphabetic_chars: text.alphabetic_chars as usize,
+            digit_chars: text.digit_chars as usize,
             ..Self::default()
         }
     }
@@ -174,18 +242,32 @@ impl ContentMetrics {
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
                 self.heading_count += 1
             }
+            Some(Tag::Li) => self.list_item_count += 1,
+            Some(Tag::Pre) => self.code_block_count += 1,
+            Some(Tag::Table) => self.table_count += 1,
+            Some(Tag::Figure) => self.figure_count += 1,
+            Some(Tag::Img) => self.image_count += 1,
+            Some(Tag::Math) => self.math_count += 1,
+            _ => {}
+        }
+        if matches!(tag, Some(Tag::Pre | Tag::Th | Tag::Math)) {
+            self.contextual_structure = true;
+        }
+        if matches!(
+            tag,
             Some(
                 Tag::Pre
-                | Tag::Table
-                | Tag::Figure
-                | Tag::Blockquote
-                | Tag::Details
-                | Tag::Dl
-                | Tag::Math
-                | Tag::Ol
-                | Tag::Ul,
-            ) => self.structured_block_count += 1,
-            _ => {}
+                    | Tag::Table
+                    | Tag::Figure
+                    | Tag::Blockquote
+                    | Tag::Details
+                    | Tag::Dl
+                    | Tag::Math
+                    | Tag::Ol
+                    | Tag::Ul
+            )
+        ) {
+            self.structured_block_count += 1;
         }
     }
 
@@ -402,13 +484,16 @@ pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
         || structural_gate && action > 0 && offer >= 2
 }
 
-/// Detects a control-dominated application shell with no explanatory content.
+/// Evidence for a control-dominated application shell.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct InteractiveShellEvidence {
+    controls: usize,
+    data_structure: bool,
+}
+
+/// Collects source structure used to recognize an application shell.
 /// Extraction does not execute the client code that would populate such a page.
-pub(crate) fn is_interactive_shell(dom: &Dom, root: NodeId) -> bool {
-    let metrics = ContentMetrics::measure(dom, root);
-    if metrics.word_count > 20 || metrics.paragraph_count > 0 || metrics.heading_count > 0 {
-        return false;
-    }
+pub(crate) fn interactive_shell_evidence(dom: &Dom, root: NodeId) -> InteractiveShellEvidence {
     let controls = std::iter::once(root)
         .chain(dom.descendants(root))
         .filter(|&node| {
@@ -431,33 +516,35 @@ pub(crate) fn is_interactive_shell(dom: &Dom, root: NodeId) -> bool {
             Some(Tag::Table | Tag::Pre | Tag::Dl | Tag::Ol | Tag::Ul)
         )
     });
-    controls >= 2 && !data_structure
+    InteractiveShellEvidence {
+        controls,
+        data_structure,
+    }
+}
+
+/// Detects a control-dominated application shell with no explanatory content.
+/// The text and semantic structure come from the compiled result.
+pub(crate) fn is_interactive_shell(
+    metrics: ContentMetrics,
+    evidence: InteractiveShellEvidence,
+) -> bool {
+    if metrics.word_count > 20 || metrics.paragraph_count > 0 || metrics.heading_count > 0 {
+        return false;
+    }
+    evidence.controls >= 2 && !evidence.data_structure
 }
 
 /// Rejects only very short fragments that contain values but no lexical or
 /// structural context.
-pub(crate) fn is_incoherent_short_result(dom: &Dom, root: NodeId, metrics: ContentMetrics) -> bool {
+pub(crate) fn is_incoherent_short_result(metrics: ContentMetrics) -> bool {
     if metrics.text_chars > 200 || metrics.word_count > 20 {
         return false;
     }
-    let (alphabetic_chars, digit_chars) = std::iter::once(root)
-        .chain(dom.descendants(root))
-        .filter_map(|node| dom.text_node(node))
-        .flat_map(str::chars)
-        .fold((0_usize, 0_usize), |(letters, digits), character| {
-            (
-                letters + usize::from(character.is_alphabetic()),
-                digits + usize::from(character.is_numeric()),
-            )
-        });
-    let has_lexical_text = alphabetic_chars > 0;
-    let contextual_structure = dom
-        .descendants(root)
-        .any(|node| matches!(dom.tag(node), Some(Tag::Th | Tag::Pre | Tag::Math)));
-    let unlabeled_values = alphabetic_chars <= 16
-        && digit_chars >= alphabetic_chars.saturating_mul(2).max(4)
+    let has_lexical_text = metrics.alphabetic_chars > 0;
+    let unlabeled_values = metrics.alphabetic_chars <= 16
+        && metrics.digit_chars >= metrics.alphabetic_chars.saturating_mul(2).max(4)
         && metrics.structured_block_count == 0;
-    (!has_lexical_text || unlabeled_values) && !contextual_structure
+    (!has_lexical_text || unlabeled_values) && !metrics.contextual_structure
 }
 
 fn denial_permission_text(text: &str) -> bool {
@@ -550,8 +637,61 @@ mod tests {
             actual.structured_block_count,
             expected.structured_block_count
         );
+        assert_eq!(actual.link_text_chars, expected.link_text_chars);
         assert_eq!(actual.link_density, expected.link_density);
         assert_eq!(actual.has_alphanumeric_text, expected.has_alphanumeric_text);
+        assert_eq!(actual.alphabetic_chars, expected.alphabetic_chars);
+        assert_eq!(actual.digit_chars, expected.digit_chars);
+    }
+
+    #[test]
+    fn semantic_result_metrics_match_dom_metrics_for_common_shapes() {
+        let dom = Dom::parse_fragment(
+            r#"<div><h1>Heading</h1><p>First <a href="/guide">linked words</a>.</p><p>Second paragraph.</p><ul><li>One</li><li>Two</li></ul><pre><code>let x = 1;</code></pre><figure><img src="image.png" alt="Image"><figcaption>Figure caption</figcaption></figure><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table><math><mi>x</mi></math><p>Reference <sup data-legible-footnote-ref="n1">1</sup></p><ol><li data-legible-footnote="n1"><p>Note text.</p></li></ol></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let old = ContentMetrics::measure(&dom, dom.root());
+        let document = crate::document::compile_document(
+            &dom,
+            dom.root(),
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        let semantic = ContentMetrics::measure_document(&document);
+
+        // Structural result metrics have the same meaning on both sides of
+        // the migration. Text metrics use the canonical semantic rendering.
+        assert!(semantic.word_count >= old.word_count);
+        assert!(semantic.text_chars >= old.text_chars);
+        assert_eq!(semantic.text_chars, document.text().chars().count());
+        assert_eq!(old.paragraph_count, semantic.paragraph_count);
+        assert_eq!(old.heading_count, semantic.heading_count);
+        assert!(old.list_item_count >= semantic.list_item_count);
+        assert!(semantic.list_item_count > 0);
+        assert_eq!(old.code_block_count, semantic.code_block_count);
+        assert_eq!(old.table_count, semantic.table_count);
+        assert_eq!(old.figure_count, semantic.figure_count);
+        assert_eq!(old.image_count, semantic.image_count);
+        assert_eq!(
+            old.footnote_reference_count,
+            semantic.footnote_reference_count
+        );
+        assert_eq!(
+            old.footnote_definition_count,
+            semantic.footnote_definition_count
+        );
+        assert!(old.math_count >= semantic.math_count);
+        assert!(semantic.math_count > 0);
+        assert!(old.structured_block_count >= semantic.structured_block_count);
+        assert!(semantic.structured_block_count > 0);
+        assert_eq!(old.link_text_chars, semantic.link_text_chars);
+        assert!((old.link_density - semantic.link_density).abs() < 0.05);
+        assert_eq!(old.has_alphanumeric_text, semantic.has_alphanumeric_text);
+        assert_eq!(old.alphabetic_chars, semantic.alphabetic_chars);
+        assert!(old.digit_chars >= semantic.digit_chars);
+        assert_eq!(old.contextual_structure, semantic.contextual_structure);
+        assert_eq!(old.has_meaningful_text(), semantic.has_meaningful_text());
     }
 
     #[test]
@@ -664,11 +804,9 @@ mod tests {
     fn short_coherence_uses_lexical_and_structural_context() {
         let ruler = Dom::parse_fragment("<div>11.1×10¹⁹ 2.2×10¹⁹</div>", Tag::Div).unwrap();
         let root = ruler.root();
-        assert!(is_incoherent_short_result(
-            &ruler,
-            root,
-            ContentMetrics::measure(&ruler, root)
-        ));
+        assert!(is_incoherent_short_result(ContentMetrics::measure(
+            &ruler, root
+        )));
 
         for html in [
             "<p>Status: 200 OK</p>",
@@ -679,7 +817,7 @@ mod tests {
             let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
             let root = dom.root();
             assert!(
-                !is_incoherent_short_result(&dom, root, ContentMetrics::measure(&dom, root)),
+                !is_incoherent_short_result(ContentMetrics::measure(&dom, root)),
                 "{html}"
             );
         }
