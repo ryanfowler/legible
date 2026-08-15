@@ -5,27 +5,31 @@ use super::{List, ListKind};
 
 /// Semantic list evidence collected without changing the selected DOM.
 pub(super) struct ListAnalysis {
-    containers: Vec<Option<List>>,
-    items: Vec<bool>,
-    text_replacements: Vec<Option<Box<str>>>,
+    slots: Vec<u32>,
+    entries: Vec<ListFacts>,
+}
+
+#[derive(Default)]
+struct ListFacts {
+    container: Option<List>,
+    item: bool,
+    replacement: Option<Box<str>>,
 }
 
 impl ListAnalysis {
-    pub(super) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
-        if !nodes.iter().any(|&node| {
-            matches!(dom.tag(node), Some(Tag::Ul | Tag::Ol)) || has_role(dom, node, "list")
-        }) {
+    pub(super) fn analyze(dom: &Dom, candidates: &[NodeId]) -> Self {
+        if candidates.is_empty() {
             return Self {
-                containers: Vec::new(),
-                items: Vec::new(),
-                text_replacements: Vec::new(),
+                slots: Vec::new(),
+                entries: Vec::new(),
             };
         }
-        let mut containers = vec![None; dom.len()];
-        let mut items = vec![false; dom.len()];
-        let mut text_replacements = vec![None; dom.len()];
+        let mut analysis = Self {
+            slots: vec![u32::MAX; dom.len()],
+            entries: Vec::new(),
+        };
 
-        for &node in nodes {
+        for &node in candidates {
             let native = match dom.tag(node) {
                 Some(Tag::Ul) => Some(List {
                     kind: ListKind::Unordered,
@@ -48,10 +52,10 @@ impl ListAnalysis {
                 .filter(|&child| has_role(dom, child, "listitem"))
                 .collect();
             for &item in &role_items {
-                items[item.index()] = true;
+                analysis.entry_mut(item).item = true;
             }
             if let Some(list) = native {
-                containers[node.index()] = Some(list);
+                analysis.entry_mut(node).container = Some(list);
                 continue;
             }
             if role_items.is_empty() {
@@ -59,42 +63,55 @@ impl ListAnalysis {
             }
             if let Some(markers) = ordered_markers(dom, &role_items) {
                 let start = markers.first().map(|marker| i64::from(marker.number));
-                containers[node.index()] = Some(List {
+                analysis.entry_mut(node).container = Some(List {
                     kind: ListKind::Ordered,
                     start: start.filter(|start| *start != 1),
                 });
                 for marker in markers {
                     let value = dom.text_node(marker.text).unwrap_or_default();
-                    text_replacements[marker.text.index()] =
+                    analysis.entry_mut(marker.text).replacement =
                         Some(value[marker.prefix_end..].trim_start().into());
                 }
             } else {
-                containers[node.index()] = Some(List {
+                analysis.entry_mut(node).container = Some(List {
                     kind: ListKind::Unordered,
                     start: None,
                 });
             }
         }
 
-        Self {
-            containers,
-            items,
-            text_replacements,
-        }
+        analysis
+    }
+
+    fn entry(&self, node: NodeId) -> Option<&ListFacts> {
+        let slot = *self.slots.get(node.index())?;
+        (slot != u32::MAX).then(|| &self.entries[slot as usize])
+    }
+
+    fn entry_mut(&mut self, node: NodeId) -> &mut ListFacts {
+        let slot = self.slots[node.index()];
+        let slot = if slot == u32::MAX {
+            let slot = self.entries.len() as u32;
+            self.entries.push(ListFacts::default());
+            self.slots[node.index()] = slot;
+            slot
+        } else {
+            slot
+        };
+        &mut self.entries[slot as usize]
     }
 
     pub(super) fn container(&self, node: NodeId) -> Option<List> {
-        self.containers.get(node.index()).copied().flatten()
+        self.entry(node).and_then(|facts| facts.container)
     }
 
     pub(super) fn is_item(&self, node: NodeId) -> bool {
-        self.items.get(node.index()).copied().unwrap_or(false)
+        self.entry(node).is_some_and(|facts| facts.item)
     }
 
     pub(super) fn replacement_text(&self, node: NodeId) -> Option<&str> {
-        self.text_replacements
-            .get(node.index())
-            .and_then(Option::as_deref)
+        self.entry(node)
+            .and_then(|facts| facts.replacement.as_deref())
     }
 }
 

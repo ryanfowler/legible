@@ -13,19 +13,13 @@ pub(crate) struct CalloutAnalysis {
 }
 
 impl CalloutAnalysis {
-    pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
-        if !nodes.iter().any(|&node| {
-            matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
-                && callout_evidence(dom, node).1.is_some()
-        }) {
+    pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], candidates: &[NodeId]) -> Self {
+        if candidates.is_empty() {
             return Self { values: Vec::new() };
         }
         let labels = bounded_subtree_text(dom, nodes);
         let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
-        for &node in nodes {
-            if !matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section)) {
-                continue;
-            }
+        for &node in candidates {
             let (structural, candidate_kind) = callout_evidence(dom, node);
             let Some(kind) = candidate_kind else {
                 continue;
@@ -197,7 +191,12 @@ mod tests {
         let nodes = std::iter::once(dom.root())
             .chain(dom.descendants(dom.root()))
             .collect::<Vec<_>>();
-        let analysis = CalloutAnalysis::analyze(&dom, &nodes);
+        let candidates = nodes
+            .iter()
+            .copied()
+            .filter(|&node| class_is_semantic_evidence(&dom, node))
+            .collect::<Vec<_>>();
+        let analysis = CalloutAnalysis::analyze(&dom, &nodes, &candidates);
         let mut divs = dom
             .descendants(dom.root())
             .filter(|&node| dom.tag(node) == Some(Tag::Div));

@@ -36,10 +36,28 @@ impl ImageAnalysis {
 
 /// Selects image sources and synthetic image containers in linear passes.
 pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> ImageAnalysis {
-    if !nodes
+    let has_candidates = nodes
         .iter()
-        .any(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure)))
-    {
+        .any(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure)));
+    analyze_inner(dom, nodes, base_url, has_candidates)
+}
+
+pub(crate) fn analyze_with_inventory(
+    dom: &Dom,
+    nodes: &[NodeId],
+    candidates: &[NodeId],
+    base_url: Option<&Url>,
+) -> ImageAnalysis {
+    analyze_inner(dom, nodes, base_url, !candidates.is_empty())
+}
+
+fn analyze_inner(
+    dom: &Dom,
+    nodes: &[NodeId],
+    base_url: Option<&Url>,
+    has_candidates: bool,
+) -> ImageAnalysis {
+    if !has_candidates {
         return ImageAnalysis {
             sources: Vec::new(),
             synthetic: Vec::new(),

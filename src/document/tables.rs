@@ -19,50 +19,76 @@ struct CellFacts {
     has_content_link: bool,
 }
 
+const NO_SLOT: u32 = u32::MAX;
+
+#[derive(Clone, Copy)]
+struct NodeSlots {
+    table: u32,
+    row: u32,
+    cell: u32,
+    control: u32,
+}
+
+impl Default for NodeSlots {
+    fn default() -> Self {
+        Self {
+            table: NO_SLOT,
+            row: NO_SLOT,
+            cell: NO_SLOT,
+            control: NO_SLOT,
+        }
+    }
+}
+
+struct TableFacts {
+    kind: Option<TableKind>,
+    rows: Box<[NodeId]>,
+    captions: Box<[NodeId]>,
+    explicit_structure: bool,
+}
+
+struct RowFacts {
+    cells: Box<[NodeId]>,
+}
+
+#[derive(Default)]
+struct ControlFacts {
+    skipped: bool,
+    separator: bool,
+    replacement: Option<Box<str>>,
+}
+
 pub(super) struct TableAnalysis {
-    kinds: Vec<Option<TableKind>>,
-    rows: Vec<Option<Box<[NodeId]>>>,
-    cells: Vec<Option<Box<[NodeId]>>>,
-    captions: Vec<Option<Box<[NodeId]>>>,
-    explicit_structure: Vec<bool>,
+    slots: Vec<NodeSlots>,
+    tables: Vec<TableFacts>,
+    rows: Vec<RowFacts>,
     cell_facts: Vec<CellFacts>,
-    skipped_nodes: Vec<bool>,
-    separator_nodes: Vec<bool>,
-    text_replacements: Vec<Option<Box<str>>>,
+    controls: Vec<ControlFacts>,
 }
 
 impl TableAnalysis {
     /// Classifies every selected table and indexes listing controls once.
     pub(super) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
-        if !nodes.iter().any(|&node| dom.tag(node) == Some(Tag::Table)) {
-            return Self {
-                kinds: Vec::new(),
-                rows: Vec::new(),
-                cells: Vec::new(),
-                captions: Vec::new(),
-                explicit_structure: Vec::new(),
-                cell_facts: Vec::new(),
-                skipped_nodes: Vec::new(),
-                separator_nodes: Vec::new(),
-                text_replacements: Vec::new(),
-            };
-        }
-        let mut analysis = Self {
-            kinds: vec![None; dom.len()],
-            rows: vec![None; dom.len()],
-            cells: vec![None; dom.len()],
-            captions: vec![None; dom.len()],
-            explicit_structure: vec![false; dom.len()],
-            cell_facts: vec![CellFacts::default(); dom.len()],
-            skipped_nodes: vec![false; dom.len()],
-            separator_nodes: vec![false; dom.len()],
-            text_replacements: vec![None; dom.len()],
-        };
-        let tables: Vec<_> = nodes
+        let tables = nodes
             .iter()
             .copied()
             .filter(|&node| dom.tag(node) == Some(Tag::Table))
-            .collect();
+            .collect::<Vec<_>>();
+        Self::analyze_candidates(dom, &tables)
+    }
+
+    pub(super) fn analyze_candidates(dom: &Dom, tables: &[NodeId]) -> Self {
+        if tables.is_empty() {
+            return Self::empty();
+        }
+        let mut analysis = Self {
+            slots: vec![NodeSlots::default(); dom.len()],
+            tables: Vec::with_capacity(tables.len()),
+            rows: Vec::new(),
+            cell_facts: Vec::new(),
+            controls: Vec::new(),
+        };
+        let tables = tables.to_vec();
         let mut text = String::new();
         let mut subtree_content = vec![false; dom.len()];
         for &table in &tables {
@@ -77,9 +103,7 @@ impl TableAnalysis {
                 .copied()
                 .filter(|&node| dom.tag(node) == Some(Tag::Caption))
                 .collect();
-            analysis.rows[table.index()] = Some(rows.clone().into_boxed_slice());
-            analysis.captions[table.index()] = Some(captions.into_boxed_slice());
-            analysis.explicit_structure[table.index()] = direct.iter().any(|&node| {
+            let explicit_structure = direct.iter().any(|&node| {
                 matches!(
                     dom.tag(node),
                     Some(
@@ -87,16 +111,34 @@ impl TableAnalysis {
                     )
                 )
             });
+            let table_slot = analysis.tables.len() as u32;
+            analysis.slots[table.index()].table = table_slot;
+            analysis.tables.push(TableFacts {
+                kind: None,
+                rows: rows.clone().into_boxed_slice(),
+                captions: captions.into_boxed_slice(),
+                explicit_structure,
+            });
             for row in rows {
                 let cells: Vec<_> = dom
                     .element_children(row)
                     .filter(|&node| matches!(dom.tag(node), Some(Tag::Td | Tag::Th)))
                     .collect();
                 for &cell in &cells {
-                    analysis.cell_facts[cell.index()] =
-                        analyze_cell(dom, cell, &mut text, &mut subtree_content);
+                    let cell_slot = analysis.cell_facts.len() as u32;
+                    analysis.slots[cell.index()].cell = cell_slot;
+                    analysis.cell_facts.push(analyze_cell(
+                        dom,
+                        cell,
+                        &mut text,
+                        &mut subtree_content,
+                    ));
                 }
-                analysis.cells[row.index()] = Some(cells.into_boxed_slice());
+                let row_slot = analysis.rows.len() as u32;
+                analysis.slots[row.index()].row = row_slot;
+                analysis.rows.push(RowFacts {
+                    cells: cells.into_boxed_slice(),
+                });
             }
         }
 
@@ -114,95 +156,127 @@ impl TableAnalysis {
                 } else {
                     TableKind::Data
                 };
-            analysis.kinds[table.index()] = Some(kind);
+            analysis.table_mut(table).kind = Some(kind);
         }
         analysis
     }
 
+    fn empty() -> Self {
+        Self {
+            slots: Vec::new(),
+            tables: Vec::new(),
+            rows: Vec::new(),
+            cell_facts: Vec::new(),
+            controls: Vec::new(),
+        }
+    }
+
+    fn table(&self, node: NodeId) -> Option<&TableFacts> {
+        let slot = self.slots.get(node.index())?.table;
+        (slot != NO_SLOT).then(|| &self.tables[slot as usize])
+    }
+
+    fn table_mut(&mut self, node: NodeId) -> &mut TableFacts {
+        let slot = self.slots[node.index()].table;
+        &mut self.tables[slot as usize]
+    }
+
+    fn row(&self, node: NodeId) -> Option<&RowFacts> {
+        let slot = self.slots.get(node.index())?.row;
+        (slot != NO_SLOT).then(|| &self.rows[slot as usize])
+    }
+
+    fn cell(&self, node: NodeId) -> Option<CellFacts> {
+        let slot = self.slots.get(node.index())?.cell;
+        (slot != NO_SLOT).then(|| self.cell_facts[slot as usize])
+    }
+
+    fn has_explicit_structure(&self, table: NodeId) -> bool {
+        self.table(table)
+            .is_some_and(|facts| facts.explicit_structure)
+    }
+
+    fn control(&self, node: NodeId) -> Option<&ControlFacts> {
+        let slot = self.slots.get(node.index())?.control;
+        (slot != NO_SLOT).then(|| &self.controls[slot as usize])
+    }
+
+    fn control_mut(&mut self, node: NodeId) -> &mut ControlFacts {
+        let slot = self.slots[node.index()].control;
+        let slot = if slot == NO_SLOT {
+            let slot = self.controls.len() as u32;
+            self.controls.push(ControlFacts::default());
+            self.slots[node.index()].control = slot;
+            slot
+        } else {
+            slot
+        };
+        &mut self.controls[slot as usize]
+    }
+
     pub(super) fn kind(&self, table: NodeId) -> TableKind {
-        self.kinds
-            .get(table.index())
-            .copied()
-            .flatten()
+        self.table(table)
+            .and_then(|facts| facts.kind)
             .unwrap_or(TableKind::Data)
     }
 
     pub(super) fn is_skipped(&self, node: NodeId) -> bool {
-        self.skipped_nodes
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        self.control(node).is_some_and(|facts| facts.skipped)
     }
 
     pub(super) fn emits_separator(&self, node: NodeId) -> bool {
-        self.separator_nodes
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        self.control(node).is_some_and(|facts| facts.separator)
     }
 
     pub(super) fn replacement_text(&self, node: NodeId) -> Option<&str> {
-        self.text_replacements
-            .get(node.index())
-            .and_then(Option::as_deref)
+        self.control(node)
+            .and_then(|facts| facts.replacement.as_deref())
     }
 
     pub(super) fn rows(&self, table: NodeId) -> &[NodeId] {
-        self.rows
-            .get(table.index())
-            .and_then(Option::as_deref)
-            .unwrap_or_default()
+        self.table(table).map_or(&[], |facts| facts.rows.as_ref())
     }
 
     pub(super) fn cells(&self, row: NodeId) -> &[NodeId] {
-        self.cells
-            .get(row.index())
-            .and_then(Option::as_deref)
-            .unwrap_or_default()
+        self.row(row).map_or(&[], |facts| facts.cells.as_ref())
     }
 
     pub(super) fn captions(&self, table: NodeId) -> &[NodeId] {
-        self.captions
-            .get(table.index())
-            .and_then(Option::as_deref)
-            .unwrap_or_default()
+        self.table(table)
+            .map_or(&[], |facts| facts.captions.as_ref())
     }
 
     pub(super) fn row_has_rank(&self, row: NodeId) -> bool {
         self.cells(row)
             .first()
-            .is_some_and(|cell| self.cell_facts[cell.index()].rank.is_some())
+            .is_some_and(|cell| self.cell(*cell).is_some_and(|facts| facts.rank.is_some()))
     }
 
     pub(super) fn row_has_content(&self, row: NodeId) -> bool {
         self.cells(row)
             .iter()
-            .any(|cell| self.cell_facts[cell.index()].has_content)
+            .any(|cell| self.cell(*cell).is_some_and(|facts| facts.has_content))
     }
 
     pub(super) fn meaningful_cell(&self, cell: NodeId) -> bool {
-        self.cell_facts
-            .get(cell.index())
-            .is_some_and(|facts| facts.meaningful)
+        self.cell(cell).is_some_and(|facts| facts.meaningful)
     }
 
     pub(super) fn cell_is_phrasing(&self, cell: NodeId) -> bool {
-        self.cell_facts
-            .get(cell.index())
-            .is_some_and(|facts| facts.phrasing)
+        self.cell(cell).is_some_and(|facts| facts.phrasing)
     }
 
     pub(super) fn flattened_count(&self) -> usize {
-        self.kinds
+        self.tables
             .iter()
-            .filter(|kind| matches!(kind, Some(TableKind::Layout)))
+            .filter(|facts| facts.kind == Some(TableKind::Layout))
             .count()
     }
 
     pub(super) fn semantic_table_count(&self) -> usize {
-        self.kinds
+        self.tables
             .iter()
-            .filter(|kind| matches!(kind, Some(TableKind::Data)))
+            .filter(|facts| facts.kind == Some(TableKind::Data))
             .count()
     }
 }
@@ -438,7 +512,7 @@ fn repeated_listing_start_from_analysis(
                     || value.eq_ignore_ascii_case("treegrid")
             })
         })
-        || analysis.explicit_structure[table.index()]
+        || analysis.has_explicit_structure(table)
     {
         return None;
     }
@@ -460,7 +534,7 @@ fn repeated_listing_start_from_analysis(
         let cells = analysis.cells(row);
         let rank = cells
             .first()
-            .and_then(|cell| analysis.cell_facts[cell.index()].rank);
+            .and_then(|cell| analysis.cell(*cell).and_then(|facts| facts.rank));
         let Some(rank) = rank else {
             if analysis.row_has_content(row) {
                 if expect_metadata {
@@ -481,10 +555,11 @@ fn repeated_listing_start_from_analysis(
         previous_rank = Some(rank);
         ranked_rows += 1;
         expect_metadata = true;
-        if cells
-            .iter()
-            .any(|cell| analysis.cell_facts[cell.index()].has_content_link)
-        {
+        if cells.iter().any(|cell| {
+            analysis
+                .cell(*cell)
+                .is_some_and(|facts| facts.has_content_link)
+        }) {
             linked_ranked_rows += 1;
         }
         match common_columns {
@@ -600,7 +675,7 @@ fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
                     || value.eq_ignore_ascii_case("treegrid")
             })
         })
-        || analysis.explicit_structure[table.index()]
+        || analysis.has_explicit_structure(table)
     {
         return false;
     }
@@ -624,7 +699,7 @@ fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
             )
         }));
         for &cell in cells {
-            let facts = analysis.cell_facts[cell.index()];
+            let facts = analysis.cell(cell).unwrap_or_default();
             block_rich_cells += usize::from(facts.block_rich);
             long_prose_cells += usize::from(facts.text_length >= 160);
         }
@@ -696,7 +771,7 @@ fn index_listing_controls(
         if !(text.is_empty() && action_url && !has_media || action_label && action_url) {
             continue;
         }
-        analysis.skipped_nodes[anchor.index()] = true;
+        analysis.control_mut(anchor).skipped = true;
         if !action_label {
             continue;
         }
@@ -704,12 +779,12 @@ fn index_listing_controls(
         let next = separator_replacement(dom, dom.next_sibling(anchor), false);
         if previous.is_some() || next.is_some() {
             if let Some((node, replacement)) = previous {
-                analysis.text_replacements[node.index()] = Some(replacement.into());
+                analysis.control_mut(node).replacement = Some(replacement.into());
             }
             if let Some((node, replacement)) = next {
-                analysis.text_replacements[node.index()] = Some(replacement.into());
+                analysis.control_mut(node).replacement = Some(replacement.into());
             }
-            analysis.separator_nodes[anchor.index()] = true;
+            analysis.control_mut(anchor).separator = true;
         }
     }
 }

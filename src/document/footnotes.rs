@@ -32,16 +32,32 @@ impl FootnoteAnalysis {
             .chain(dom.descendants(root))
             .any(|node| has_possible_footnote_evidence(dom, node))
         {
-            return Self {
-                references: Vec::new(),
-                definitions: Vec::new(),
-                skipped: Vec::new(),
-                deferred: Vec::new(),
-                trim_start: Vec::new(),
-                transparent: Vec::new(),
-                available: HashSet::new(),
-            };
+            return Self::empty();
         }
+        Self::analyze_detected(dom, root)
+    }
+
+    pub(crate) fn analyze_with_inventory(dom: &Dom, root: NodeId, candidates: &[NodeId]) -> Self {
+        if candidates.is_empty() {
+            Self::empty()
+        } else {
+            Self::analyze_detected(dom, root)
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            references: Vec::new(),
+            definitions: Vec::new(),
+            skipped: Vec::new(),
+            deferred: Vec::new(),
+            trim_start: Vec::new(),
+            transparent: Vec::new(),
+            available: HashSet::new(),
+        }
+    }
+
+    fn analyze_detected(dom: &Dom, root: NodeId) -> Self {
         let definition_index = DefinitionIndex::analyze(dom, root);
         let definitions = detect_definitions_with_index(dom, root, &definition_index);
         let keys: HashSet<&str> = definitions

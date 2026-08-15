@@ -45,6 +45,7 @@ mod builder;
 mod callouts;
 mod code;
 mod compiler;
+mod facts;
 mod figures;
 mod footnotes;
 mod headings;

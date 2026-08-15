@@ -15,11 +15,31 @@ pub(crate) struct MathAnalysis {
 impl MathAnalysis {
     pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
         if !nodes.iter().any(|&node| has_own_math_evidence(dom, node)) {
-            return Self {
-                values: Vec::new(),
-                skipped: Vec::new(),
-            };
+            return Self::empty();
         }
+        Self::analyze_detected(dom, nodes)
+    }
+
+    pub(crate) fn analyze_with_inventory(
+        dom: &Dom,
+        nodes: &[NodeId],
+        candidates: &[NodeId],
+    ) -> Self {
+        if candidates.is_empty() {
+            Self::empty()
+        } else {
+            Self::analyze_detected(dom, nodes)
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            values: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    fn analyze_detected(dom: &Dom, nodes: &[NodeId]) -> Self {
         let mut has_annotation = vec![false; dom.len()];
         for &node in nodes.iter().rev() {
             has_annotation[node.index()] = is_tex_annotation(dom, node)
