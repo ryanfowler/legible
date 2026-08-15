@@ -9,7 +9,8 @@ use crate::constants::{is_alter_to_div_exception, is_default_tag_to_score, regex
 use crate::diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
     ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
-    NormalizationCountsInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
+    NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo, RootInfo,
+    RootSelectionReasonInfo,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
@@ -37,6 +38,7 @@ use url::Url;
 
 pub(crate) struct ContentExtractor<'a> {
     dom: Dom,
+    source_dom_nodes: usize,
     options: &'a ExtractorConfig,
     strategy: ExtractionStrategy,
     node_data: NodeStateStore,
@@ -194,6 +196,7 @@ fn find_content_targets(dom: &Dom, target: &ContentHint) -> Vec<NodeId> {
 
 impl<'a> ContentExtractor<'a> {
     pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
+        let source_dom_nodes = dom.len();
         let (base_uri, url_error) = match url {
             Some(x) => match Url::parse(x) {
                 Ok(u) => (Some(u), None),
@@ -203,6 +206,7 @@ impl<'a> ContentExtractor<'a> {
         };
         Self {
             dom,
+            source_dom_nodes,
             options,
             strategy: ExtractionStrategy::Normal,
             node_data: NodeStateStore::new(),
@@ -788,6 +792,7 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.copy_children_as_fragment(content_id)
             }
             .map_err(|_| Error::NoContent)?;
+            let final_dom_nodes = result_dom.len();
             let result_document = crate::document::compile_document(
                 &result_dom,
                 result_dom.root(),
@@ -797,6 +802,15 @@ impl<'a> ContentExtractor<'a> {
                 ),
             )
             .map_err(|_| Error::NoContent)?;
+            let representation =
+                self.diagnostic_attempts
+                    .as_ref()
+                    .map(|_| RepresentationMetricsInfo {
+                        source_dom_nodes: self.source_dom_nodes,
+                        final_dom_nodes,
+                        document_nodes: result_document.len(),
+                        estimated_document_bytes: result_document.retained_bytes_estimate(),
+                    });
             let result_metrics = ContentMetrics::measure_document(&result_document);
             let result_semantic_counts = candidate_semantic_metrics
                 .as_ref()
@@ -866,6 +880,7 @@ impl<'a> ContentExtractor<'a> {
                     result_metrics,
                     quality,
                     semantic_coverage,
+                    representation,
                     true,
                     None,
                 );
@@ -891,6 +906,7 @@ impl<'a> ContentExtractor<'a> {
                 result_metrics,
                 quality,
                 semantic_coverage,
+                representation,
                 false,
                 Some(rejection),
             );
@@ -1004,6 +1020,7 @@ impl<'a> ContentExtractor<'a> {
         result: ContentMetrics,
         quality: ExtractionQuality,
         semantic_coverage: Option<crate::diagnostics::SemanticCoverageInfo>,
+        representation: Option<RepresentationMetricsInfo>,
         accepted: bool,
         rejection_reason: Option<AttemptRejectionReason>,
     ) -> Option<usize> {
@@ -1023,6 +1040,8 @@ impl<'a> ContentExtractor<'a> {
             semantic_coverage,
             cleanup_actions: self.diagnostic_cleanup_actions.clone(),
             normalization: self.diagnostic_normalization,
+            representation: representation
+                .expect("representation metrics are built when diagnostics are enabled"),
             accepted,
             rejection_reason,
         });

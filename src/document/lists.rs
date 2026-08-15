@@ -12,6 +12,15 @@ pub(super) struct ListAnalysis {
 
 impl ListAnalysis {
     pub(super) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
+        if !nodes.iter().any(|&node| {
+            matches!(dom.tag(node), Some(Tag::Ul | Tag::Ol)) || has_role(dom, node, "list")
+        }) {
+            return Self {
+                containers: Vec::new(),
+                items: Vec::new(),
+                text_replacements: Vec::new(),
+            };
+        }
         let mut containers = vec![None; dom.len()];
         let mut items = vec![false; dom.len()];
         let mut text_replacements = vec![None; dom.len()];

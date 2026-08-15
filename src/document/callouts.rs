@@ -14,6 +14,12 @@ pub(crate) struct CalloutAnalysis {
 
 impl CalloutAnalysis {
     pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
+        if !nodes.iter().any(|&node| {
+            matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+                && callout_evidence(dom, node).1.is_some()
+        }) {
+            return Self { values: Vec::new() };
+        }
         let labels = bounded_subtree_text(dom, nodes);
         let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
         for &node in nodes {
@@ -54,7 +60,7 @@ impl CalloutAnalysis {
     }
 
     pub(crate) fn value(&self, node: NodeId) -> Option<&RecognizedCallout> {
-        self.values[node.index()].as_ref()
+        self.values.get(node.index()).and_then(Option::as_ref)
     }
 }
 

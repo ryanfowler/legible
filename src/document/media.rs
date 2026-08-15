@@ -13,7 +13,7 @@ pub(crate) struct MediaAnalysis {
 
 impl MediaAnalysis {
     pub(crate) fn item(&self, node: NodeId) -> Option<&RecognizedMedia> {
-        self.items[node.index()].as_ref()
+        self.items.get(node.index()).and_then(Option::as_ref)
     }
 }
 
@@ -26,6 +26,15 @@ pub(crate) struct RecognizedMedia {
 
 /// Resolves media sources and fallback links in linear document passes.
 pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> MediaAnalysis {
+    if !nodes
+        .iter()
+        .any(|&node| media_kind(dom.tag(node)).is_some())
+    {
+        return MediaAnalysis {
+            items: Vec::new(),
+            fallbacks: Vec::new(),
+        };
+    }
     let mut nearest_media = vec![None; dom.len()];
     let mut kinds = vec![None; dom.len()];
     let mut sources = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
@@ -109,8 +118,13 @@ pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> Me
 
 pub(super) fn cleanup_evidence(dom: &Dom, nodes: &[NodeId]) -> (Vec<bool>, Vec<Option<NodeId>>) {
     let analysis = analyze(dom, nodes, None);
-    let sources = analysis.items.iter().map(Option::is_some).collect();
-    (sources, analysis.fallbacks)
+    let mut sources = vec![false; dom.len()];
+    for (source, item) in sources.iter_mut().zip(&analysis.items) {
+        *source = item.is_some();
+    }
+    let mut fallbacks = analysis.fallbacks;
+    fallbacks.resize(dom.len(), None);
+    (sources, fallbacks)
 }
 
 fn media_kind(tag: Option<Tag>) -> Option<MediaKind> {

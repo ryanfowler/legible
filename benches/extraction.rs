@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use legible::extract;
+use legible::{Extractor, extract};
 use std::hint::black_box;
 
 // Criterion benchmarks compile as a separate crate. Include the private DOM module so
@@ -133,6 +133,27 @@ fn bench_extract(c: &mut Criterion) {
         ),
     ] {
         let html = benchmark_page(kind, bytes);
+        let measured = Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, Some(url))
+            .unwrap();
+        let representation = &measured
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap()
+            .representation;
+        eprintln!(
+            "extraction-representation/{size}-{name}: source_dom_nodes={}, final_dom_nodes={}, ir_nodes={}, retained_bytes={}, source_bytes={}",
+            representation.source_dom_nodes,
+            representation.final_dom_nodes,
+            representation.document_nodes,
+            representation.estimated_document_bytes,
+            html.len()
+        );
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
             b.iter(|| extract(black_box(html), Some(url)).unwrap())
@@ -156,9 +177,19 @@ fn bench_document_compile(c: &mut Criterion) {
         let root = dom.root();
         let base = url::Url::parse("https://example.com/docs/page").unwrap();
         let context = document::CompileContext::new(Some(base.clone()), Some(&base));
-        let semantic_nodes = document::compile_document(&dom, root, &context)
-            .unwrap()
-            .len();
+        let document = document::compile_document(&dom, root, &context).unwrap();
+        let semantic_nodes = document.len();
+        let retained_bytes = document.retained_bytes_estimate();
+        let source_sized_bytes = retained_bytes.saturating_add(
+            dom.len()
+                .saturating_sub(document.node_capacity())
+                .saturating_mul(document::Document::node_slot_size()),
+        );
+        eprintln!(
+            "representation/{name}: dom_nodes={}, ir_nodes={semantic_nodes}, ir_capacity={}, retained_bytes={retained_bytes}, source_sized_bytes={source_sized_bytes}",
+            dom.len(),
+            document.node_capacity()
+        );
         group.throughput(Throughput::Elements(dom.len() as u64));
         group.bench_with_input(
             BenchmarkId::new(name, format!("dom-{}-ir-{semantic_nodes}", dom.len())),

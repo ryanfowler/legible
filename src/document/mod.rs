@@ -298,6 +298,42 @@ impl Document {
         self.nodes.len()
     }
 
+    pub(crate) fn retained_bytes_estimate(&self) -> usize {
+        let arena_bytes = self
+            .nodes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<ArenaNode>());
+        let root_bytes = self
+            .roots
+            .capacity()
+            .saturating_mul(std::mem::size_of::<DocumentNodeId>());
+        let footnote_bytes = self
+            .footnotes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<FootnoteRecord>());
+        let node_value_bytes = self.nodes.iter().fold(0usize, |total, node| {
+            total.saturating_add(node.kind.retained_value_bytes())
+        });
+        let footnote_value_bytes = self.footnotes.iter().fold(0usize, |total, footnote| {
+            total.saturating_add(footnote.label.len())
+        });
+
+        std::mem::size_of::<Self>()
+            .saturating_add(arena_bytes)
+            .saturating_add(root_bytes)
+            .saturating_add(footnote_bytes)
+            .saturating_add(node_value_bytes)
+            .saturating_add(footnote_value_bytes)
+    }
+
+    pub(crate) fn node_capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    pub(crate) fn node_slot_size() -> usize {
+        std::mem::size_of::<ArenaNode>()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         validate::validate(self)
     }
@@ -405,6 +441,41 @@ pub enum NodeKind {
     InlineMath(MathValue),
     DisplayMath(MathValue),
     Media(Media),
+}
+
+impl NodeKind {
+    fn retained_value_bytes(&self) -> usize {
+        match self {
+            Self::Text(text) | Self::InlineCode(text) => text.0.capacity(),
+            Self::CodeBlock(code) => {
+                optional_boxed_str_len(&code.language).saturating_add(code.text.len())
+            }
+            Self::Link(link) => link
+                .destination
+                .len()
+                .saturating_add(optional_boxed_str_len(&link.title)),
+            Self::Image(image) => image
+                .source
+                .len()
+                .saturating_add(image.alt.len())
+                .saturating_add(optional_boxed_str_len(&image.title)),
+            Self::Callout(callout) => optional_boxed_str_len(&callout.title),
+            Self::TaskMarker(marker) => optional_boxed_str_len(&marker.fallback_label),
+            Self::InlineMath(math) | Self::DisplayMath(math) => math
+                .source
+                .len()
+                .saturating_add(optional_boxed_str_len(&math.fallback_text)),
+            Self::Media(media) => media
+                .source
+                .len()
+                .saturating_add(optional_boxed_str_len(&media.title)),
+            _ => 0,
+        }
+    }
+}
+
+fn optional_boxed_str_len(value: &Option<Box<str>>) -> usize {
+    value.as_deref().map_or(0, str::len)
 }
 
 /// Canonical text stored by a semantic leaf node.

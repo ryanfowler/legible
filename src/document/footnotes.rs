@@ -28,6 +28,20 @@ pub(crate) struct FootnoteAnalysis {
 
 impl FootnoteAnalysis {
     pub(crate) fn analyze(dom: &Dom, root: NodeId) -> Self {
+        if !std::iter::once(root)
+            .chain(dom.descendants(root))
+            .any(|node| has_possible_footnote_evidence(dom, node))
+        {
+            return Self {
+                references: Vec::new(),
+                definitions: Vec::new(),
+                skipped: Vec::new(),
+                deferred: Vec::new(),
+                trim_start: Vec::new(),
+                transparent: Vec::new(),
+                available: HashSet::new(),
+            };
+        }
         let definition_index = DefinitionIndex::analyze(dom, root);
         let definitions = detect_definitions_with_index(dom, root, &definition_index);
         let keys: HashSet<&str> = definitions
@@ -153,32 +167,56 @@ impl FootnoteAnalysis {
     }
 
     pub(crate) fn reference(&self, node: NodeId) -> Option<&str> {
-        self.references[node.index()].as_deref()
+        self.references.get(node.index()).and_then(Option::as_deref)
     }
 
     pub(crate) fn definition(&self, node: NodeId) -> Option<&str> {
-        self.definitions[node.index()].as_deref()
+        self.definitions
+            .get(node.index())
+            .and_then(Option::as_deref)
     }
 
     pub(crate) fn is_skipped(&self, node: NodeId) -> bool {
-        self.skipped[node.index()]
+        self.skipped.get(node.index()).copied().unwrap_or(false)
     }
 
     pub(crate) fn is_deferred(&self, node: NodeId) -> bool {
-        self.deferred[node.index()]
+        self.deferred.get(node.index()).copied().unwrap_or(false)
     }
 
     pub(crate) fn should_trim_start(&self, node: NodeId) -> bool {
-        self.trim_start[node.index()]
+        self.trim_start.get(node.index()).copied().unwrap_or(false)
     }
 
     pub(crate) fn is_transparent(&self, node: NodeId) -> bool {
-        self.transparent[node.index()]
+        self.transparent.get(node.index()).copied().unwrap_or(false)
     }
 
     pub(crate) fn has_definition(&self, label: &str) -> bool {
         self.available.contains(label)
     }
+}
+
+fn has_possible_footnote_evidence(dom: &Dom, node: NodeId) -> bool {
+    let tag_evidence = match dom.tag(node) {
+        Some(Tag::A) => {
+            is_explicit_reference(dom, node)
+                || fragment_target(dom.attr(node, AttrName::Href)).is_some()
+        }
+        Some(Tag::Label) => has_any_class(dom, node, &["footref", "sidenote-number"]),
+        _ => false,
+    };
+    tag_evidence
+        || is_source_evidence(dom, node)
+        || is_footnote_container(dom, node)
+        || dom
+            .attr(node, AttrName::Id)
+            .is_some_and(looks_like_footnote_id)
+        || dom
+            .attr_by_local_name(node, "data-type")
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case("footnote") || value.eq_ignore_ascii_case("noteref")
+            })
 }
 
 fn detect_references(dom: &Dom, root: NodeId, definitions: &HashSet<&str>) -> Vec<Reference> {

@@ -26,16 +26,25 @@ pub(crate) struct ImageAnalysis {
 
 impl ImageAnalysis {
     pub(crate) fn source(&self, node: NodeId) -> Option<&str> {
-        self.sources[node.index()].as_deref()
+        self.sources.get(node.index()).and_then(Option::as_deref)
     }
 
     pub(crate) fn is_synthetic(&self, node: NodeId) -> bool {
-        self.synthetic[node.index()]
+        self.synthetic.get(node.index()).copied().unwrap_or(false)
     }
 }
 
 /// Selects image sources and synthetic image containers in linear passes.
 pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> ImageAnalysis {
+    if !nodes
+        .iter()
+        .any(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure)))
+    {
+        return ImageAnalysis {
+            sources: Vec::new(),
+            synthetic: Vec::new(),
+        };
+    }
     let mut nearest_picture = vec![None; dom.len()];
     for &node in nodes {
         nearest_picture[node.index()] = if dom.tag(node) == Some(Tag::Picture) {

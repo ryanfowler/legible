@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::OnceLock;
 
 use super::{ArenaNode, Document, DocumentNodeId, FootnoteId, FootnoteRecord, NodeKind, TextValue};
@@ -166,6 +167,10 @@ impl DocumentBuilder {
     }
 
     pub(crate) fn finish(self) -> Document {
+        let mut nodes = self.nodes;
+        compact_excess_capacity(&mut nodes);
+        let mut roots = self.roots;
+        compact_excess_capacity(&mut roots);
         let mut footnotes = self.footnotes;
         if footnotes
             .iter()
@@ -180,12 +185,29 @@ impl DocumentBuilder {
             }
             footnotes = indexed.into_iter().flatten().collect();
         }
+        compact_excess_capacity(&mut footnotes);
         Document {
-            nodes: self.nodes,
-            roots: self.roots,
+            nodes,
+            roots,
             footnotes,
             stats: OnceLock::new(),
         }
+    }
+}
+
+/// Releases capacity only when the retained saving is material.
+///
+/// Semantic compilation often preserves most DOM nodes. A reallocation does not
+/// help those documents. Component-heavy code can collapse several DOM nodes into
+/// one semantic leaf, so keeping the source-sized reservation would retain much
+/// more memory than the document needs.
+fn compact_excess_capacity<T>(values: &mut Vec<T>) {
+    const MINIMUM_SAVING_BYTES: usize = 4 * 1024;
+
+    let unused = values.capacity().saturating_sub(values.len());
+    let unused_bytes = unused.saturating_mul(size_of::<T>());
+    if values.capacity() > values.len().saturating_mul(2) && unused_bytes >= MINIMUM_SAVING_BYTES {
+        values.shrink_to_fit();
     }
 }
 
@@ -204,4 +226,29 @@ fn is_inline_sibling(kind: &NodeKind) -> bool {
             | NodeKind::InlineMath(_)
             | NodeKind::Media(_)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finish_compacts_material_excess_node_capacity() {
+        let mut builder = DocumentBuilder::with_capacity(1_000);
+        builder.append(None, NodeKind::Paragraph).unwrap();
+
+        let document = builder.finish();
+
+        assert!(document.nodes.capacity() < 1_000);
+    }
+
+    #[test]
+    fn finish_keeps_small_excess_capacity() {
+        let mut builder = DocumentBuilder::with_capacity(20);
+        builder.append(None, NodeKind::Paragraph).unwrap();
+
+        let document = builder.finish();
+
+        assert_eq!(document.nodes.capacity(), 20);
+    }
 }

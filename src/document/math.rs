@@ -14,6 +14,12 @@ pub(crate) struct MathAnalysis {
 
 impl MathAnalysis {
     pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
+        if !nodes.iter().any(|&node| has_own_math_evidence(dom, node)) {
+            return Self {
+                values: Vec::new(),
+                skipped: Vec::new(),
+            };
+        }
         let mut has_annotation = vec![false; dom.len()];
         for &node in nodes.iter().rev() {
             has_annotation[node.index()] = is_tex_annotation(dom, node)
@@ -98,11 +104,11 @@ impl MathAnalysis {
     }
 
     pub(crate) fn value(&self, node: NodeId) -> Option<&RecognizedMath> {
-        self.values[node.index()].as_ref()
+        self.values.get(node.index()).and_then(Option::as_ref)
     }
 
     pub(crate) fn is_skipped(&self, node: NodeId) -> bool {
-        self.skipped[node.index()]
+        self.skipped.get(node.index()).copied().unwrap_or(false)
     }
 }
 

@@ -10,6 +10,14 @@ pub(crate) fn analyze(
     nodes: &[NodeId],
     images: &ImageAnalysis,
 ) -> (Vec<bool>, Vec<bool>) {
+    if !nodes.iter().any(|&node| {
+        matches!(
+            dom.tag(node),
+            Some(Tag::Img | Tag::Figure | Tag::Figcaption)
+        ) || class_is_semantic_evidence(dom, node)
+    }) {
+        return (vec![false; dom.len()], vec![false; dom.len()]);
+    }
     let mut image_count = vec![0_u8; dom.len()];
     let mut semantic_figure = vec![false; dom.len()];
     let mut caption_evidence = vec![false; dom.len()];
