@@ -489,7 +489,7 @@ pub(super) fn compile(
                     .previous_child_last_visible
                     .is_some_and(char::is_alphanumeric)
             {
-                builder.append_prose(frame.scope.parent, " ")?;
+                builder.append_normalized_prose(frame.scope.parent, " ")?;
             }
             builder.append_prose(frame.scope.parent, text)?;
             complete_child(frame, None, first, last);
@@ -632,7 +632,7 @@ pub(super) fn compile(
                         .is_some_and(char::is_alphanumeric)
             });
         if boundary_before && subtree_first.is_some_and(char::is_alphanumeric) {
-            builder.append_prose(scope.parent, " ")?;
+            builder.append_normalized_prose(scope.parent, " ")?;
         }
         let semantic_parent = if tag == Tag::Figcaption {
             scope.figure

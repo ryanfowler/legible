@@ -645,6 +645,10 @@ impl TextValue {
         &mut self.0
     }
 
+    pub(crate) fn append_normalized_prose(&mut self, value: &str) {
+        text::merge_prose(&mut self.0, value);
+    }
+
     /// Returns the canonical text.
     pub fn as_str(&self) -> &str {
         &self.0
