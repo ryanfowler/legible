@@ -9,7 +9,7 @@ mod svg;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::is_element_without_content;
 
-/// Prepares and cleans retained source markup without shaping serializer output.
+/// Prepares and cleans retained source markup before semantic compilation.
 ///
 /// The selected DOM keeps semantic source evidence for the document compiler.
 /// These passes only protect meaningful media and remove artifacts that affect
@@ -207,7 +207,6 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::markdown::dom_to_markdown;
 
     fn semantic_markdown(dom: &Dom, root: NodeId) -> String {
         let document = crate::document::compile_document(
@@ -238,19 +237,19 @@ mod tests {
             "<p><strong>Listen to this <strong>post</strong>:</strong> <em>one <i>two</i></em></p>",
         );
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
+            semantic_markdown(&dom, root),
             "**Listen to this post:** *one two*\n"
         );
     }
 
     #[test]
-    fn removes_orphan_placeholders_and_keeps_described_images() {
+    fn replaces_orphan_placeholders_with_described_image_text() {
         let (dom, root) = normalized(
             r#"<img src="grey-placeholder.png"><img src="blank.gif" aria-label="image unavailable"><img src="placeholder.png" alt="A meaningful diagram"><img src="real.jpg" alt="Photo">"#,
         );
         assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "![A meaningful diagram](placeholder.png)![Photo](real.jpg)\n"
+            semantic_markdown(&dom, root),
+            "A meaningful diagram![Photo](real.jpg)\n"
         );
     }
 
@@ -308,7 +307,7 @@ mod tests {
         let (dom, root) = normalized(
             r#"<p>Use <code class="language-plaintext"><span>cargo test</span></code> now.</p><table><tr><th>Call</th></tr><tr><td><code class="language-rust">run()</code></td></tr></table>"#,
         );
-        let markdown = dom_to_markdown(&dom, root, 0);
+        let markdown = semantic_markdown(&dom, root);
         assert!(markdown.contains("Use `cargo test` now."));
         assert!(
             markdown.contains("| Call |\n| --- |\n| `run()` |"),
@@ -336,7 +335,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         let (dom, root) = normalized(
             "<h2> </h2><h2>&nbsp;<br></h2><h2>\u{200b}\u{2060}\u{feff}</h2><h2>Visible\u{200b}</h2><h2><img src='x' alt='Diagram'></h2><p>Text.</p>",
         );
-        let markdown = dom_to_markdown(&dom, root, 0);
+        let markdown = semantic_markdown(&dom, root);
         assert_eq!(
             markdown,
             "## Visible\u{200b}\n\n## ![Diagram](x)\n\nText.\n"
@@ -350,10 +349,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             dom.descendants(root)
                 .any(|node| dom.tag(node) == Some(Tag::H2))
         );
-        assert_eq!(
-            dom_to_markdown(&dom, root, 0),
-            "![](diagram.png)\n\nText.\n"
-        );
+        assert_eq!(semantic_markdown(&dom, root), "![](diagram.png)\n\nText.\n");
     }
 
     #[test]

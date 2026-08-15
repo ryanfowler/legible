@@ -453,10 +453,21 @@ mod tests {
         let result = AiConversationExtractor
             .extract(&context(&dom, "https://chatgpt.com/share/conversation-1"))
             .unwrap();
-        let html = result.dom.html(result.root).unwrap();
-        assert!(html.contains("First paragraph."));
-        assert!(html.contains("Keep this list."));
-        assert!(!html.contains("Copy Regenerate"));
+        assert!(result.dom.text(result.root).contains("First paragraph."));
+        assert!(result.dom.text(result.root).contains("Keep this list."));
+        assert!(!result.dom.text(result.root).contains("Copy Regenerate"));
+        assert!(
+            result
+                .dom
+                .descendants(result.root)
+                .any(|node| result.dom.tag(node) == Some(Tag::Pre))
+        );
+        assert!(
+            result
+                .dom
+                .descendants(result.root)
+                .any(|node| result.dom.tag(node) == Some(Tag::Ul))
+        );
     }
 
     #[test]

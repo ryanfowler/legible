@@ -535,7 +535,7 @@ impl CodeBlock {
 pub struct Link {
     pub(crate) destination: Box<str>,
     pub(crate) title: Option<Box<str>>,
-    // Retain the source link kind for the compatibility link-density metric.
+    // Retain whether the source link was fragment-only for weighted link density.
     // The destination may be resolved to an absolute URL during compilation.
     pub(crate) fragment_only: bool,
 }

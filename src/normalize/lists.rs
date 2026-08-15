@@ -101,7 +101,20 @@ fn first_text_marker(dom: &Dom, item: NodeId) -> Option<(u32, (NodeId, usize))> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::markdown::dom_to_markdown;
+
+    fn semantic_markdown(dom: &Dom, root: NodeId) -> String {
+        let document = crate::document::compile_document(
+            dom,
+            root,
+            &crate::document::CompileContext::default(),
+        )
+        .unwrap();
+        crate::render::markdown::render_markdown(
+            &document,
+            0,
+            crate::render::markdown::MarkdownConfig::default(),
+        )
+    }
 
     fn normalized(html: &str) -> (Dom, NodeId) {
         let mut dom = Dom::parse_document(html).unwrap();
@@ -136,7 +149,7 @@ mod tests {
         );
         let list = dom.first_descendant_by_tag(root, Tag::Ol).unwrap();
         assert_eq!(dom.attr(list, AttrName::Start), Some("3"));
-        assert_eq!(dom_to_markdown(&dom, root, 0), "3. Three\n1. Four\n");
+        assert_eq!(semantic_markdown(&dom, root), "3. Three\n1. Four\n");
     }
 
     #[test]

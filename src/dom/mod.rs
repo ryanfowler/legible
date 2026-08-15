@@ -6,8 +6,6 @@ mod mutation;
 mod node;
 mod parse;
 mod query;
-#[cfg(test)]
-mod serialize;
 mod state;
 mod tag;
 mod traversal;
@@ -16,8 +14,6 @@ pub(crate) use arena::Dom;
 pub(crate) use attr::{AttrName, Attribute};
 pub(crate) use id::{DomError, NodeId, NodeLink};
 pub(crate) use node::{ElementData, Node, NodeData};
-#[cfg(test)]
-pub(crate) use serialize::render_html;
 pub(crate) use state::{DataTableState, NodeStateStore, NodeStats};
 pub(crate) use tag::Tag;
 pub(crate) use traversal::build_match_string;
@@ -27,7 +23,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_and_serializes_html() {
+    fn parses_html_and_preserves_attributes() {
         let mut dom = Dom::parse_document(
             "<!doctype html><html><body><p title='a &amp; b'>Hello <b>world</b></p></body></html>",
         )
@@ -37,9 +33,7 @@ mod tests {
         let paragraph = dom.first_descendant_by_tag(body, Tag::P).unwrap();
         assert_eq!(dom.attr_by_local_name(paragraph, "title"), Some("a & b"));
         dom.set_attr(paragraph, AttrName::Title, "a < b");
-        let serialized = dom.html(dom.root()).unwrap();
-        assert!(serialized.contains("title=\"a &lt; b\""));
-        assert!(!serialized.contains("&amp;lt;"));
+        assert_eq!(dom.attr(paragraph, AttrName::Title), Some("a < b"));
         dom.validate().unwrap();
     }
 
@@ -106,37 +100,97 @@ mod tests {
     #[test]
     fn fragment_contexts_have_exact_structure() {
         let div = Dom::parse_fragment("<b>x</b><!-- note -->", Tag::Div).unwrap();
-        assert_eq!(div.inner_html(div.root()).unwrap(), "<b>x</b><!-- note -->");
+        let div_children: Vec<_> = div.children(div.root()).collect();
+        assert_eq!(div_children.len(), 2);
+        assert_eq!(div.tag(div_children[0]), Some(Tag::B));
+        assert_eq!(div.text(div_children[0]), "x");
+        assert!(div.is_comment(div_children[1]));
 
         let table = Dom::parse_fragment("<tr><td>x</td></tr>", Tag::Table).unwrap();
-        assert_eq!(
-            table.inner_html(table.root()).unwrap(),
-            "<tbody><tr><td>x</td></tr></tbody>"
-        );
+        let tbody = table
+            .first_descendant_by_tag(table.root(), Tag::Tbody)
+            .unwrap();
+        let row = table.first_descendant_by_tag(tbody, Tag::Tr).unwrap();
+        let cell = table.first_descendant_by_tag(row, Tag::Td).unwrap();
+        assert_eq!(table.text(cell), "x");
     }
 
     #[test]
-    fn foreign_namespaces_and_templates_serialize_exactly() {
+    fn foreign_namespaces_and_templates_are_retained() {
         let dom = Dom::parse_document(
             "<body><svg viewBox='0 0 1 1'><foreignObject><p>x</p></foreignObject></svg>\
              <math><mi>x</mi></math><template><em>saved</em></template>",
         )
         .unwrap();
         let body = dom.body().unwrap();
+        let svg = dom.first_descendant_by_tag(body, Tag::Svg).unwrap();
+        assert_eq!(dom.attr_by_local_name(svg, "viewBox"), Some("0 0 1 1"));
         assert_eq!(
-            dom.inner_html(body).unwrap(),
-            "<svg viewBox=\"0 0 1 1\"><foreignObject><p>x</p></foreignObject></svg>\
-             <math><mi>x</mi></math><template><em>saved</em></template>"
+            dom.qual_name(svg).unwrap().ns.as_ref(),
+            "http://www.w3.org/2000/svg"
         );
+        let foreign_object = dom
+            .descendants(svg)
+            .find(|&node| {
+                dom.qual_name(node)
+                    .is_some_and(|name| name.local.as_ref() == "foreignObject")
+            })
+            .unwrap();
+        assert_eq!(
+            dom.qual_name(foreign_object).unwrap().ns.as_ref(),
+            "http://www.w3.org/2000/svg"
+        );
+        let math = dom.first_descendant_by_tag(body, Tag::Math).unwrap();
+        assert_eq!(
+            dom.qual_name(math).unwrap().ns.as_ref(),
+            "http://www.w3.org/1998/Math/MathML"
+        );
+        let template = dom.first_descendant_by_tag(body, Tag::Template).unwrap();
+        let NodeData::Element(element) = &dom.node(template).data else {
+            panic!("template is not an element");
+        };
+        let template_contents = element.template_contents.get().expect("template contents");
+        assert_eq!(
+            dom.first_child(template_contents)
+                .and_then(|id| dom.tag(id)),
+            Some(Tag::Em)
+        );
+        assert_eq!(dom.text(template_contents), "saved");
     }
 
     #[test]
     fn malformed_html_has_exact_repaired_structure() {
         let dom = Dom::parse_document("<title>T</title><p>one<div>two</p>three").unwrap();
+        let tags: Vec<_> = dom
+            .descendants(dom.root())
+            .filter_map(|node| dom.tag(node))
+            .collect();
         assert_eq!(
-            dom.html(dom.root()).unwrap(),
-            "<html><head><title>T</title></head><body><p>one</p><div>two<p></p>three</div></body></html>"
+            tags,
+            [
+                Tag::Html,
+                Tag::Head,
+                Tag::Title,
+                Tag::Body,
+                Tag::P,
+                Tag::Div,
+                Tag::P
+            ]
         );
+        let title = dom.first_descendant_by_tag(dom.root(), Tag::Title).unwrap();
+        assert_eq!(dom.text(title), "T");
+        let body = dom.body().unwrap();
+        let paragraph = dom.first_descendant_by_tag(body, Tag::P).unwrap();
+        let div = dom.first_descendant_by_tag(body, Tag::Div).unwrap();
+        assert_eq!(dom.text(paragraph), "one");
+        assert_eq!(dom.text(div), "twothree");
+        assert_eq!(dom.parent(paragraph), Some(body));
+        assert_eq!(dom.parent(div), Some(body));
+        let empty_paragraph = dom
+            .children(div)
+            .find(|&node| dom.tag(node) == Some(Tag::P))
+            .unwrap();
+        assert_eq!(dom.text(empty_paragraph), "");
     }
 
     #[test]
@@ -191,10 +245,27 @@ mod tests {
             .collect();
 
         assert_eq!(ids, ["p", "bold", "italic", "italic", "inside", "after"]);
-        assert_eq!(
-            dom.inner_html(dom.body().unwrap()).unwrap(),
-            "<p id=\"p\"><b id=\"bold\">bold<i id=\"italic\">both</i></b><i id=\"italic\"><span id=\"inside\">italic</span></i><span id=\"after\">after</span></p>"
-        );
+        let paragraph = dom.first_descendant_by_tag(dom.root(), Tag::P).unwrap();
+        let bold = dom.first_descendant_by_tag(paragraph, Tag::B).unwrap();
+        let italic_nodes: Vec<_> = dom
+            .descendants(paragraph)
+            .filter(|&node| {
+                dom.tag(node) == Some(Tag::I) && dom.attr(node, AttrName::Id) == Some("italic")
+            })
+            .collect();
+        let inside = dom
+            .descendants(paragraph)
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("inside"))
+            .unwrap();
+        let after = dom
+            .descendants(paragraph)
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("after"))
+            .unwrap();
+        assert_eq!(italic_nodes.len(), 2);
+        assert_eq!(dom.parent(italic_nodes[0]), Some(bold));
+        assert_eq!(dom.parent(italic_nodes[1]), Some(paragraph));
+        assert_eq!(dom.parent(inside), Some(italic_nodes[1]));
+        assert_eq!(dom.parent(after), Some(paragraph));
     }
 
     #[test]

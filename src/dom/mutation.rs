@@ -152,16 +152,6 @@ impl Dom {
             })
         }
     }
-    #[allow(dead_code)]
-    pub(crate) fn retain_attrs(
-        &mut self,
-        node: NodeId,
-        mut keep: impl FnMut(&super::Attribute) -> bool,
-    ) {
-        if let NodeData::Element(element) = &mut self.node_mut(node).data {
-            element.attrs.retain(|attribute| keep(attribute));
-        }
-    }
     #[cfg(test)]
     pub(crate) fn set_inner_html(&mut self, node: NodeId, html: &str) -> Result<(), DomError> {
         let source = Dom::parse_fragment(html, self.tag(node).unwrap_or(Tag::Div))?;

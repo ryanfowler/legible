@@ -754,6 +754,10 @@ pub(crate) fn compile_document(
             push_children(dom, node, transparent_scope, &mut tasks);
             continue;
         };
+        if is_redundant_formatting(&kind, scope.parent.and_then(|parent| builder.kind(parent))) {
+            push_children(dom, node, scope, &mut tasks);
+            continue;
+        }
         let semantic_leaf = matches!(kind, NodeKind::Media(_));
         let cell_span = match &kind {
             NodeKind::TableCell(cell) => Some((cell.colspan, cell.rowspan)),
@@ -1185,6 +1189,15 @@ fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
         }
     }
     count == 1
+}
+
+fn is_redundant_formatting(kind: &NodeKind, parent: Option<&NodeKind>) -> bool {
+    matches!(
+        (kind, parent),
+        (NodeKind::Strong, Some(NodeKind::Strong))
+            | (NodeKind::Emphasis, Some(NodeKind::Emphasis))
+            | (NodeKind::Strikethrough, Some(NodeKind::Strikethrough))
+    )
 }
 
 fn is_block_tag(tag: Tag) -> bool {

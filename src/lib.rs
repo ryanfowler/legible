@@ -60,11 +60,7 @@ mod dom;
 mod error;
 mod extraction;
 mod extractor;
-#[cfg(test)]
-mod html;
 mod logging;
-#[cfg(test)]
-mod markdown;
 mod metadata;
 mod normalize;
 mod page;
@@ -73,8 +69,6 @@ mod quality;
 mod render;
 mod scoring;
 mod specialized;
-#[cfg(test)]
-mod text;
 
 pub use diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,

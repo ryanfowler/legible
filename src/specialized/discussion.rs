@@ -341,14 +341,42 @@ mod tests {
             .append_reply(&source, 0, Some("Ada"), Some("now"), Some(reply_body))
             .unwrap();
         let result = builder.finish("test");
-        let html = result.dom.html(result.root).unwrap();
-
-        assert!(html.contains("data-legible-kind=\"discussion\""));
-        assert!(html.contains("data-legible-primary"));
-        assert!(html.contains("data-legible-replies"));
-        assert!(html.contains("data-legible-reply-body"));
-        assert!(html.contains("<em>text</em>"));
-        assert!(html.contains("<code>code</code>"));
+        assert_eq!(
+            result
+                .dom
+                .attr_by_local_name(result.root, "data-legible-kind"),
+            Some("discussion")
+        );
+        let nodes: Vec<_> = std::iter::once(result.root)
+            .chain(result.dom.descendants(result.root))
+            .collect();
+        assert!(
+            nodes
+                .iter()
+                .any(|&node| result.dom.has_attr(node, AttrName::DataLegiblePrimary))
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|&node| result.dom.has_attr(node, AttrName::DataLegibleReplies))
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|&node| result.dom.has_attr(node, AttrName::DataLegibleReplyBody))
+        );
+        assert!(
+            result
+                .dom
+                .descendants(result.root)
+                .any(|node| result.dom.tag(node) == Some(Tag::Em))
+        );
+        assert!(
+            result
+                .dom
+                .descendants(result.root)
+                .any(|node| result.dom.tag(node) == Some(Tag::Code))
+        );
     }
 
     #[test]
@@ -362,10 +390,18 @@ mod tests {
 
         assert!(builder.set_title(&source, title));
         let result = builder.finish("test");
-        let html = result.dom.html(result.root).unwrap();
-
-        assert!(html.contains("<h1>Block title</h1>"));
-        assert!(!html.contains("<h1><div"));
+        let heading = result
+            .dom
+            .first_descendant_by_tag(result.root, Tag::H1)
+            .unwrap();
+        assert_eq!(result.dom.text(heading), "Block title");
+        assert_ne!(
+            result
+                .dom
+                .first_child(heading)
+                .and_then(|node| result.dom.tag(node)),
+            Some(Tag::Div)
+        );
     }
 
     #[test]
