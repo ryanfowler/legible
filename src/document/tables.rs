@@ -34,6 +34,19 @@ pub(super) struct TableAnalysis {
 impl TableAnalysis {
     /// Classifies every selected table and indexes listing controls once.
     pub(super) fn analyze(dom: &Dom, nodes: &[NodeId]) -> Self {
+        if !nodes.iter().any(|&node| dom.tag(node) == Some(Tag::Table)) {
+            return Self {
+                kinds: Vec::new(),
+                rows: Vec::new(),
+                cells: Vec::new(),
+                captions: Vec::new(),
+                explicit_structure: Vec::new(),
+                cell_facts: Vec::new(),
+                skipped_nodes: Vec::new(),
+                separator_nodes: Vec::new(),
+                text_replacements: Vec::new(),
+            };
+        }
         let mut analysis = Self {
             kinds: vec![None; dom.len()],
             rows: vec![None; dom.len()],

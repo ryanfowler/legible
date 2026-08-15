@@ -93,6 +93,14 @@ mod tests {
     }
 
     #[test]
+    fn removes_object_and_embed_without_other_media() {
+        assert_eq!(
+            markdown(r#"<object data="movie.swf"></object><embed src="movie.swf">"#),
+            ""
+        );
+    }
+
+    #[test]
     fn compiler_skips_unsafe_sources_and_deceptive_youtube_hosts() {
         assert_eq!(
             markdown(

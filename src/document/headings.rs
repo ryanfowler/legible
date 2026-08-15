@@ -4,6 +4,14 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 /// Identifies heading permalink controls with one reverse subtree analysis.
 pub(crate) fn permalink_nodes(dom: &Dom, nodes: &[NodeId]) -> Vec<bool> {
+    if !nodes.iter().any(|&node| {
+        dom.tag(node) == Some(Tag::A)
+            && dom
+                .attr(node, AttrName::Href)
+                .is_some_and(|href| href.trim().starts_with('#'))
+    }) {
+        return vec![false; dom.len()];
+    }
     let mut has_visible_text = vec![false; dom.len()];
     let mut glyph_only = vec![true; dom.len()];
     for &node in nodes.iter().rev() {

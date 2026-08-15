@@ -107,14 +107,38 @@ pub(crate) fn compile_document(
     let mut last_visible = vec![None; dom.len()];
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
     let heading_permalinks = super::headings::permalink_nodes(dom, &nodes);
+    let has_heading_permalinks = heading_permalinks.iter().any(|value| *value);
     let mut heading_levels = vec![None; dom.len()];
-    let mut nearest_heading = vec![None; dom.len()];
-    let mut heading_has_permalink = vec![false; dom.len()];
-    let mut nearest_heading_permalink = vec![None; dom.len()];
-    let mut first_heading_text = vec![None; dom.len()];
-    let mut last_heading_text = vec![None; dom.len()];
+    let mut nearest_heading = if has_heading_permalinks {
+        vec![None; dom.len()]
+    } else {
+        Vec::new()
+    };
+    let mut heading_has_permalink = if has_heading_permalinks {
+        vec![false; dom.len()]
+    } else {
+        Vec::new()
+    };
+    let mut nearest_heading_permalink = if has_heading_permalinks {
+        vec![None; dom.len()]
+    } else {
+        Vec::new()
+    };
+    let mut first_heading_text = if has_heading_permalinks {
+        vec![None; dom.len()]
+    } else {
+        Vec::new()
+    };
+    let mut last_heading_text = if has_heading_permalinks {
+        vec![None; dom.len()]
+    } else {
+        Vec::new()
+    };
     for &node in &nodes {
         heading_levels[node.index()] = heading_level(dom, node);
+        if !has_heading_permalinks {
+            continue;
+        }
         nearest_heading[node.index()] = if heading_levels[node.index()].is_some() {
             Some(node)
         } else {
@@ -136,45 +160,51 @@ pub(crate) fn compile_document(
             }
         }
     }
-    let mut permalink_separates_words = vec![false; dom.len()];
-    let mut previous_heading_character = vec![None; dom.len()];
-    for &node in &nodes {
-        let Some(heading) = nearest_heading[node.index()] else {
-            continue;
-        };
-        if heading_permalinks[node.index()] {
-            permalink_separates_words[node.index()] =
-                previous_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
-        } else if nearest_heading_permalink[node.index()].is_none()
-            && let Some(text) = dom.text_node(node)
-            && let Some(character) = text
-                .chars()
-                .rev()
-                .find(|character| !character.is_whitespace())
-        {
-            previous_heading_character[heading.index()] = Some(character);
+    let mut permalink_separates_words = if has_heading_permalinks {
+        vec![false; dom.len()]
+    } else {
+        Vec::new()
+    };
+    if has_heading_permalinks {
+        let mut previous_heading_character = vec![None; dom.len()];
+        for &node in &nodes {
+            let Some(heading) = nearest_heading[node.index()] else {
+                continue;
+            };
+            if heading_permalinks[node.index()] {
+                permalink_separates_words[node.index()] =
+                    previous_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
+            } else if nearest_heading_permalink[node.index()].is_none()
+                && let Some(text) = dom.text_node(node)
+                && let Some(character) = text
+                    .chars()
+                    .rev()
+                    .find(|character| !character.is_whitespace())
+            {
+                previous_heading_character[heading.index()] = Some(character);
+            }
         }
-    }
-    let mut next_heading_character = vec![None; dom.len()];
-    for &node in nodes.iter().rev() {
-        let Some(heading) = nearest_heading[node.index()] else {
-            continue;
-        };
-        if heading_permalinks[node.index()] {
-            permalink_separates_words[node.index()] &=
-                next_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
-        } else if nearest_heading_permalink[node.index()].is_none()
-            && let Some(text) = dom.text_node(node)
-            && let Some(character) = text.chars().find(|character| !character.is_whitespace())
-        {
-            next_heading_character[heading.index()] = Some(character);
+        let mut next_heading_character = vec![None; dom.len()];
+        for &node in nodes.iter().rev() {
+            let Some(heading) = nearest_heading[node.index()] else {
+                continue;
+            };
+            if heading_permalinks[node.index()] {
+                permalink_separates_words[node.index()] &=
+                    next_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
+            } else if nearest_heading_permalink[node.index()].is_none()
+                && let Some(text) = dom.text_node(node)
+                && let Some(character) = text.chars().find(|character| !character.is_whitespace())
+            {
+                next_heading_character[heading.index()] = Some(character);
+            }
         }
     }
     let multiline_content = super::code::multiline_content(dom, &nodes);
     let images = super::images::analyze(dom, &nodes, context.base_url.as_ref());
     let mut meaningful_heading_content = vec![false; dom.len()];
     for &node in nodes.iter().rev() {
-        if nearest_heading_permalink[node.index()].is_some() {
+        if has_heading_permalinks && nearest_heading_permalink[node.index()].is_some() {
             continue;
         }
         meaningful_heading_content[node.index()] = dom
@@ -361,8 +391,9 @@ pub(crate) fn compile_document(
             }
             continue;
         };
-        let heading_permalink = nearest_heading[node.index()]
-            .is_some_and(|heading| heading != node && heading_permalinks[node.index()]);
+        let heading_permalink = has_heading_permalinks
+            && nearest_heading[node.index()]
+                .is_some_and(|heading| heading != node && heading_permalinks[node.index()]);
         if tables.is_skipped(node)
             || footnotes.is_skipped(node)
             || math.is_skipped(node)
@@ -385,7 +416,9 @@ pub(crate) fn compile_document(
                 .replacement_text(node)
                 .or_else(|| lists.replacement_text(node))
                 .unwrap_or(text);
-            let heading = nearest_heading[node.index()]
+            let heading = has_heading_permalinks
+                .then(|| nearest_heading[node.index()])
+                .flatten()
                 .filter(|heading| heading_has_permalink[heading.index()]);
             let trim_start = footnotes.should_trim_start(node)
                 || heading.is_some_and(|heading| first_heading_text[heading.index()] == Some(node));

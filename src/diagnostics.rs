@@ -202,6 +202,23 @@ pub struct NormalizationCountsInfo {
     pub flattened_layout_tables: usize,
 }
 
+/// Retained-representation measurements for one extraction attempt.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RepresentationMetricsInfo {
+    /// Number of nodes in the parsed source DOM before preparation.
+    pub source_dom_nodes: usize,
+    /// Number of nodes in the selected and cleaned DOM fragment before compilation.
+    pub final_dom_nodes: usize,
+    /// Number of nodes in the compiled semantic document.
+    pub document_nodes: usize,
+    /// Estimated retained bytes for the semantic document.
+    ///
+    /// This value includes vector capacity and owned semantic strings. It does
+    /// not include allocator metadata.
+    pub estimated_document_bytes: usize,
+}
+
 /// Diagnostic data for one extraction attempt.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
@@ -219,6 +236,8 @@ pub struct ExtractionAttempt {
     pub cleanup_actions: Vec<CleanupActionInfo>,
     /// Canonical semantic structures produced by normalization.
     pub normalization: NormalizationCountsInfo,
+    /// Source, final DOM, and retained semantic representation sizes.
+    pub representation: RepresentationMetricsInfo,
     pub accepted: bool,
     pub rejection_reason: Option<AttemptRejectionReason>,
 }
