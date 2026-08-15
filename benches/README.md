@@ -9,6 +9,7 @@ cargo bench --bench extraction
 The suite measures these workloads:
 
 - small, medium, and large prose extraction
+- medium and large ordinary-inline article extraction with normal inline markup
 - large documentation pages
 - syntax-highlighted code pages
 - KaTeX and MathML pages
@@ -23,6 +24,12 @@ The suite measures these workloads:
 - end-to-end raw HTML to Markdown extraction
 - lazy Markdown, text, and HTML rendering
 - deeply nested parser input
+
+The `ordinary-inline` workload uses repeated article sections with `strong`, `em`,
+links, inline `code`, native lists, blockquotes, and simple image figures. It avoids
+tables, footnotes, math, responsive images, callouts, and syntax-highlighter markup.
+The same workload is available in extraction, semantic compilation, end-to-end
+Markdown, and lazy Markdown benchmarks so these phases can be compared directly.
 
 Criterion stores local baselines in `target/criterion`. Use a named baseline before a substantial pipeline change:
 

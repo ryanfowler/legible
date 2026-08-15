@@ -51,6 +51,7 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
             "listing" => html.push_str(&format!(
                 "<article><h2><a href='/entry/{index}'>Entry {index}</a></h2><p>This entry contains useful summary text and stable benchmark content.</p></article>"
             )),
+            "ordinary-inline" => html.push_str(&ordinary_inline_section(index)),
             "malformed" => html.push_str(&format!(
                 "<section><h2>Broken {index}<p>Malformed markup still contains representative prose and useful extraction content.<table><tr><td>{index}<td>value</section>"
             )),
@@ -64,7 +65,29 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
     html
 }
 
+fn ordinary_inline_section(index: usize) -> String {
+    format!(
+        "<section><h2>Section {index}</h2><p>Normal article text with <strong>strong emphasis</strong>, <em>emphasis</em>, <a href='/relative'>relative links</a>, and <code>inline code</code>.</p><blockquote><p>A quoted paragraph keeps ordinary block structure realistic.</p></blockquote><ul><li>First list item</li><li>Second list item</li></ul><figure><img src='/image.jpg' alt='Useful image'><figcaption>A useful image caption.</figcaption></figure></section>"
+    )
+}
+
+fn ordinary_inline_fragment(target_bytes: usize) -> String {
+    let mut html = String::with_capacity(target_bytes + 256);
+    html.push_str("<article><h1>Representative inline article</h1>");
+    let mut index = 0;
+    while html.len() < target_bytes {
+        html.push_str(&ordinary_inline_section(index));
+        index += 1;
+    }
+    html.push_str("</article>");
+    html
+}
+
 fn normalized_fragment(kind: &str, target_bytes: usize) -> String {
+    if kind == "ordinary-inline" {
+        return ordinary_inline_fragment(target_bytes);
+    }
+
     let mut html = String::with_capacity(target_bytes + 256);
     let mut index = 0;
     while html.len() < target_bytes {
@@ -116,6 +139,13 @@ fn bench_extract(c: &mut Criterion) {
             50_000,
             "https://example.com",
         ),
+        (
+            "medium",
+            "ordinary-inline",
+            "ordinary-inline",
+            50_000,
+            "https://example.com",
+        ),
         ("large", "prose", "prose", 500_000, "https://example.com"),
         (
             "large",
@@ -128,6 +158,13 @@ fn bench_extract(c: &mut Criterion) {
             "large",
             "listing",
             "listing",
+            500_000,
+            "https://example.com",
+        ),
+        (
+            "large",
+            "ordinary-inline",
+            "ordinary-inline",
             500_000,
             "https://example.com",
         ),
@@ -167,6 +204,8 @@ fn bench_document_compile(c: &mut Criterion) {
     for (name, kind, bytes) in [
         ("simple-prose", "prose", 4_000),
         ("long-prose", "prose", 250_000),
+        ("ordinary-inline", "ordinary-inline", 50_000),
+        ("ordinary-inline-large", "ordinary-inline", 500_000),
         ("highlighted-code", "code", 100_000),
         ("table-heavy", "tables", 100_000),
         ("documentation", "reference", 100_000),
@@ -210,7 +249,9 @@ fn bench_extract_markdown(c: &mut Criterion) {
         ("small", "prose", "prose", 4_000),
         ("medium", "prose", "prose", 50_000),
         ("medium", "reference", "reference", 50_000),
+        ("medium", "ordinary-inline", "ordinary-inline", 50_000),
         ("large", "prose", "prose", 500_000),
+        ("large", "ordinary-inline", "ordinary-inline", 500_000),
         ("large", "malformed", "malformed", 250_000),
     ] {
         let html = benchmark_page(kind, bytes);
@@ -240,6 +281,13 @@ fn bench_lazy_outputs(c: &mut Criterion) {
         });
         group.bench_function(BenchmarkId::new(kind, "text"), |b| b.iter(|| page.text()));
         group.bench_function(BenchmarkId::new(kind, "html"), |b| b.iter(|| page.html()));
+    }
+    for (size, bytes) in [("medium", 50_000), ("large", 500_000)] {
+        let html = benchmark_page("ordinary-inline", bytes);
+        let page = extract(&html, Some("https://example.com")).unwrap();
+        group.bench_function(BenchmarkId::new(size, "ordinary-inline/markdown"), |b| {
+            b.iter(|| page.markdown())
+        });
     }
     group.finish();
 }
