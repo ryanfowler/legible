@@ -1,4 +1,4 @@
-//! Semantic normalization for retained content.
+//! Source preparation and relevance cleanup for retained content.
 
 mod headings;
 mod images;
@@ -6,35 +6,68 @@ mod lists;
 mod media;
 mod svg;
 
-use crate::cleaning::simplify_nested_elements;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::is_element_without_content;
 
-/// Normalizes retained markup into a predictable tree for all serializers.
+/// Prepares and cleans retained source markup without shaping serializer output.
 ///
-/// The order preserves information that later, more general passes can hide.
-/// Image cleanup keeps responsive source markup for semantic compilation.
-/// Heading roles become native HTML before wrapper cleanup. Code, figure,
-/// list, and table evidence stays available until the compiler consumes it.
+/// The selected DOM keeps semantic source evidence for the document compiler.
+/// These passes only protect meaningful media and remove artifacts that affect
+/// relevance or result quality.
 #[cfg(test)]
 fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    preserve_semantics_before_cleanup(dom, root);
-    normalize_after_cleanup(dom, root, nodes);
+    prepare_media_before_cleanup(dom, root);
+    cleanup_selected_content(dom, root, nodes, false);
 }
 
-/// Normalizes semantic structures that hard cleanup does not remove.
+/// Removes selected-content artifacts that affect extraction quality.
 ///
-/// Run this after `preserve_semantics_before_cleanup`. The earlier pass has
-/// already protected media that cleanup can remove. Semantic source shapes
-/// stay available until semantic compilation.
-pub(crate) fn normalize_after_cleanup(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    images::deduplicate_selected(dom, root, nodes);
-    headings::normalize(dom, root);
+/// Responsive source selection, figure recognition, and heading semantics stay
+/// in source form until semantic compilation.
+pub(crate) fn cleanup_selected_content(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    flatten_javascript_links: bool,
+) {
+    images::remove_duplicates(dom, root, nodes);
+    headings::remove_artifacts(dom, root);
+    if flatten_javascript_links {
+        flatten_javascript_links_for_quality(dom, root);
+    }
 }
 
-/// Captures or protects semantic source data that hard cleanup would otherwise remove.
-pub(crate) fn preserve_semantics_before_cleanup(dom: &mut Dom, root: NodeId) {
-    svg::normalize(dom, root);
+/// Preserves the established DOM-based link-density metric until result metrics use the IR.
+fn flatten_javascript_links_for_quality(dom: &mut Dom, root: NodeId) {
+    let links: Vec<_> = dom
+        .descendants(root)
+        .filter(|&node| {
+            dom.tag(node) == Some(Tag::A)
+                && dom
+                    .attr(node, AttrName::Href)
+                    .is_some_and(|href| href.starts_with("javascript:"))
+        })
+        .collect();
+    for link in links {
+        let replacement = if dom.first_child(link) == dom.last_child(link)
+            && dom
+                .first_child(link)
+                .is_some_and(|child| dom.is_text(child))
+        {
+            dom.create_text(&dom.text(link))
+        } else {
+            dom.create_html_element(Tag::Span).inspect(|&span| {
+                dom.move_children(link, span);
+            })
+        };
+        if let Ok(replacement) = replacement {
+            dom.replace_with(link, replacement);
+        }
+    }
+}
+
+/// Protects meaningful media from hard cleanup.
+pub(crate) fn prepare_media_before_cleanup(dom: &mut Dom, root: NodeId) {
     media::prepare(dom, root);
 }
 
@@ -82,12 +115,8 @@ pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
 
 pub(crate) use crate::document::accessible_math_nodes;
 
-/// Finishes normalization after URL and attribute cleanup.
-///
-/// These passes are intentionally last. They discard empty presentation
-/// wrappers after all semantic passes have consumed their source evidence.
-pub(crate) fn finish_normalization(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    simplify_nested_elements(dom, root, nodes);
+/// Removes empty retained blocks after semantic source protection is complete.
+pub(crate) fn remove_empty_content(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     remove_empty_nodes(dom, root, nodes);
 }
 
@@ -199,7 +228,7 @@ mod tests {
         let root = dom.root();
         let mut nodes = Vec::new();
         normalize_semantics(&mut dom, root, &mut nodes);
-        finish_normalization(&mut dom, root, &mut nodes);
+        remove_empty_content(&mut dom, root, &mut nodes);
         (dom, root)
     }
 

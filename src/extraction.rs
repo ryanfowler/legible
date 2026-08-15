@@ -17,10 +17,10 @@ use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
-    accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes,
-    collect_external_footnotes, finish_normalization, has_primary_heading_semantics,
-    normalize_after_cleanup, normalize_scoring_structure, normalize_svg_before_scoring,
-    preserve_semantics_before_cleanup, remove_decorative_media_before_cleanup,
+    accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes, cleanup_selected_content,
+    collect_external_footnotes, has_primary_heading_semantics, normalize_scoring_structure,
+    normalize_svg_before_scoring, prepare_media_before_cleanup,
+    remove_decorative_media_before_cleanup, remove_empty_content,
 };
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
@@ -50,7 +50,6 @@ pub(crate) struct ContentExtractor<'a> {
     structured_data: StructuredData,
     source_uri: Option<Url>,
     base_uri: Option<Url>,
-    resolve_fragment_links: bool,
     url_error: Option<url::ParseError>,
     best_attempt: Option<BestAttempt>,
     diagnostic_attempts: Option<Vec<ExtractionAttempt>>,
@@ -221,7 +220,6 @@ impl<'a> ContentExtractor<'a> {
             structured_data: StructuredData::default(),
             source_uri: base_uri.clone(),
             base_uri,
-            resolve_fragment_links: false,
             url_error,
             best_attempt: None,
             diagnostic_attempts: options.diagnostics.then(Vec::new),
@@ -258,10 +256,6 @@ impl<'a> ContentExtractor<'a> {
                 .as_ref()
                 .map_or_else(|| Url::parse(href), |document_uri| document_uri.join(href));
             if let Ok(base_uri) = base_uri {
-                self.resolve_fragment_links = self
-                    .source_uri
-                    .as_ref()
-                    .is_some_and(|document_uri| base_uri != *document_uri);
                 self.base_uri = Some(base_uri);
             }
         }
@@ -356,7 +350,7 @@ impl<'a> ContentExtractor<'a> {
         let document = crate::document::compile_document(
             &self.dom,
             extracted_root,
-            &crate::document::CompileContext::new(self.base_uri),
+            &crate::document::CompileContext::new(self.base_uri, self.source_uri.as_ref()),
         )
         .map_err(|_| Error::NoContent)?;
         Ok(ExtractedPage::new(
@@ -796,7 +790,7 @@ impl<'a> ContentExtractor<'a> {
             }
             let excerpt = self.content_excerpt(content_id);
             let access_barrier = is_access_barrier(&self.dom, content_id);
-            self.post_process(content_id, &mut cleaning_nodes);
+            self.final_cleanup(content_id, &mut cleaning_nodes);
             self.capture_normalization_counts(content_id);
             let result_dom = if synthetic {
                 self.dom.copy_subtree_as_fragment(content_id)
@@ -1775,7 +1769,7 @@ impl<'a> ContentExtractor<'a> {
         // Cleanup mutates only the compact selected fragment. Hard cleanup
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
-        preserve_semantics_before_cleanup(&mut self.dom, root);
+        prepare_media_before_cleanup(&mut self.dom, root);
         let before = self.diagnostic_element_count(root);
         remove_decorative_media_before_cleanup(&mut self.dom, root);
         self.record_cleanup_delta(CleanupActionKind::DecorativeMedia, before, root);
@@ -1809,9 +1803,9 @@ impl<'a> ContentExtractor<'a> {
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 
-        // Normalization is separate from relevance cleanup. Serializers receive
-        // stable code, figure, image, footnote, and table structures.
-        normalize_after_cleanup(&mut self.dom, root, nodes);
+        // Remove duplicate media and named placeholders. Keep all output
+        // semantics in source form for the document compiler.
+        cleanup_selected_content(&mut self.dom, root, nodes, self.base_uri.is_some());
 
         // Single traversal collects both paragraphs and line breaks,
         // replacing two separate filters over `descendants`.
@@ -1877,117 +1871,12 @@ impl<'a> ContentExtractor<'a> {
                 }
             })
     }
-    fn post_process(&mut self, root: NodeId, nodes: &mut Vec<NodeId>) {
-        // URI repair, class cleanup, and comment removal share one stable
-        // preorder snapshot. The snapshot also permits structural link changes.
-        nodes.clear();
-        nodes.extend(self.dom.descendants(root));
-        let mut class_buffer = String::new();
-        for &id in nodes.iter() {
-            if self.dom.parent(id).is_none() {
-                continue;
-            }
-            if self.dom.is_comment(id) {
-                self.dom.detach(id);
-                continue;
-            }
-            let Some(tag) = self.dom.tag(id) else {
-                continue;
-            };
-
-            if let Some(base) = self.base_uri.as_ref() {
-                if tag == Tag::A {
-                    if let Some(href) = self.dom.attr(id, AttrName::Href) {
-                        if crate::document::is_local_footnote_reference(&self.dom, id, href) {
-                            // Keep the source form until semantic compilation resolves the
-                            // local reference against its retained definition.
-                        } else if href.starts_with('#') && !self.resolve_fragment_links {
-                            // Fragment links do not need URI resolution when the
-                            // document does not override its base URL.
-                        } else if href.starts_with("javascript:") {
-                            let replacement = if self.dom.first_child(id) == self.dom.last_child(id)
-                                && self
-                                    .dom
-                                    .first_child(id)
-                                    .is_some_and(|child| self.dom.is_text(child))
-                            {
-                                self.dom.create_text(&self.dom.text(id))
-                            } else {
-                                self.dom.create_html_element(Tag::Span).inspect(|&span| {
-                                    self.dom.move_children(id, span);
-                                })
-                            };
-                            if let Ok(replacement) = replacement {
-                                self.dom.replace_with(id, replacement)
-                            }
-                        } else if let Ok(url) = base.join(href) {
-                            self.dom.set_attr(id, AttrName::Href, url.as_str())
-                        }
-                    }
-                } else if matches!(
-                    tag,
-                    Tag::Img | Tag::Picture | Tag::Figure | Tag::Video | Tag::Audio | Tag::Source
-                ) {
-                    for attr in [AttrName::Src, AttrName::Poster] {
-                        if let Some(value) = self.dom.attr(id, attr)
-                            && let Ok(url) = base.join(value)
-                        {
-                            self.dom.set_attr(id, attr, url.as_str())
-                        }
-                    }
-                    if let Some(value) = self.dom.attr(id, AttrName::Srcset) {
-                        let replacement =
-                            regexps::SRCSET_URL.replace_all(value, |captures: &regex::Captures| {
-                                let url = base
-                                    .join(&captures[1])
-                                    .map(|url| url.to_string())
-                                    .unwrap_or_else(|_| captures[1].into());
-                                format!(
-                                    "{}{}{}",
-                                    url,
-                                    captures.get(2).map_or("", |value| value.as_str()),
-                                    captures.get(3).map_or("", |value| value.as_str())
-                                )
-                            });
-                        if let std::borrow::Cow::Owned(replacement) = replacement {
-                            self.dom
-                                .set_attr(id, AttrName::Srcset, replacement.as_str())
-                        }
-                    }
-                }
-            }
-
-            if !self.options.keep_classes
-                && !crate::document::code_class_is_semantic_evidence(&self.dom, id)
-                && !crate::document::figure_class_is_semantic_evidence(&self.dom, id)
-                && !crate::document::table_class_is_semantic_evidence(&self.dom, id)
-                && !crate::document::callout_class_is_semantic_evidence(&self.dom, id)
-                && !crate::document::footnote_class_is_semantic_evidence(&self.dom, id)
-                && !crate::document::math_class_is_semantic_evidence(&self.dom, id)
-                && let Some(classes) = self.dom.attr(id, AttrName::Class)
-            {
-                class_buffer.clear();
-                for class in classes.split_whitespace().filter(|class| {
-                    self.options
-                        .classes_to_preserve
-                        .iter()
-                        .any(|preserved| preserved == class)
-                }) {
-                    if !class_buffer.is_empty() {
-                        class_buffer.push(' ')
-                    }
-                    class_buffer.push_str(class)
-                }
-                if class_buffer.is_empty() {
-                    self.dom.remove_attr(id, AttrName::Class)
-                } else if class_buffer != classes {
-                    self.dom
-                        .set_attr(id, AttrName::Class, class_buffer.as_str())
-                }
-            }
-        }
+    fn final_cleanup(&mut self, root: NodeId, nodes: &mut Vec<NodeId>) {
+        // The compiler resolves URLs, drops source attributes, ignores comments,
+        // and collapses transparent wrappers. Only relevance cleanup mutates the
+        // selected DOM at this stage.
         let before = self.diagnostic_element_count(root);
-        finish_normalization(&mut self.dom, root, nodes);
+        remove_empty_content(&mut self.dom, root, nodes);
         self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
     }
 

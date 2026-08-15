@@ -13,11 +13,27 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompileContext {
     base_url: Option<Url>,
+    resolve_fragment_links: bool,
 }
 
 impl CompileContext {
-    pub(crate) fn new(base_url: Option<Url>) -> Self {
-        Self { base_url }
+    pub(crate) fn new(base_url: Option<Url>, source_url: Option<&Url>) -> Self {
+        let resolve_fragment_links = base_url
+            .as_ref()
+            .zip(source_url)
+            .is_some_and(|(base, source)| base != source);
+        Self {
+            base_url,
+            resolve_fragment_links,
+        }
+    }
+
+    fn link_destination(&self, value: &str) -> Option<Box<str>> {
+        if self.resolve_fragment_links && value.trim().starts_with('#') {
+            let resolved = self.base_url.as_ref()?.join(value.trim()).ok()?;
+            return safe_destination(resolved.as_str(), None, DestinationKind::Link);
+        }
+        safe_destination(value, self.base_url.as_ref(), DestinationKind::Link)
     }
 }
 
@@ -77,7 +93,7 @@ struct TableAnalysis {
     has_rowspan: bool,
 }
 
-/// Compiles the children of a normalized extraction root into semantic nodes.
+/// Compiles the children of a retained source root into semantic nodes.
 pub(crate) fn compile_document(
     dom: &Dom,
     root: NodeId,
@@ -90,8 +106,85 @@ pub(crate) fn compile_document(
     let mut first_visible = vec![None; dom.len()];
     let mut last_visible = vec![None; dom.len()];
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    let heading_permalinks = super::headings::permalink_nodes(dom, &nodes);
+    let mut heading_levels = vec![None; dom.len()];
+    let mut nearest_heading = vec![None; dom.len()];
+    let mut heading_has_permalink = vec![false; dom.len()];
+    let mut nearest_heading_permalink = vec![None; dom.len()];
+    let mut first_heading_text = vec![None; dom.len()];
+    let mut last_heading_text = vec![None; dom.len()];
+    for &node in &nodes {
+        heading_levels[node.index()] = heading_level(dom, node);
+        nearest_heading[node.index()] = if heading_levels[node.index()].is_some() {
+            Some(node)
+        } else {
+            dom.parent(node)
+                .and_then(|parent| nearest_heading[parent.index()])
+        };
+        nearest_heading_permalink[node.index()] = if heading_permalinks[node.index()] {
+            Some(node)
+        } else {
+            dom.parent(node)
+                .and_then(|parent| nearest_heading_permalink[parent.index()])
+        };
+        if let Some(heading) = nearest_heading[node.index()] {
+            if nearest_heading_permalink[node.index()].is_some() {
+                heading_has_permalink[heading.index()] = true;
+            } else if dom.text_node(node).is_some() {
+                first_heading_text[heading.index()].get_or_insert(node);
+                last_heading_text[heading.index()] = Some(node);
+            }
+        }
+    }
+    let mut permalink_separates_words = vec![false; dom.len()];
+    let mut previous_heading_character = vec![None; dom.len()];
+    for &node in &nodes {
+        let Some(heading) = nearest_heading[node.index()] else {
+            continue;
+        };
+        if heading_permalinks[node.index()] {
+            permalink_separates_words[node.index()] =
+                previous_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
+        } else if nearest_heading_permalink[node.index()].is_none()
+            && let Some(text) = dom.text_node(node)
+            && let Some(character) = text
+                .chars()
+                .rev()
+                .find(|character| !character.is_whitespace())
+        {
+            previous_heading_character[heading.index()] = Some(character);
+        }
+    }
+    let mut next_heading_character = vec![None; dom.len()];
+    for &node in nodes.iter().rev() {
+        let Some(heading) = nearest_heading[node.index()] else {
+            continue;
+        };
+        if heading_permalinks[node.index()] {
+            permalink_separates_words[node.index()] &=
+                next_heading_character[heading.index()].is_some_and(char::is_alphanumeric);
+        } else if nearest_heading_permalink[node.index()].is_none()
+            && let Some(text) = dom.text_node(node)
+            && let Some(character) = text.chars().find(|character| !character.is_whitespace())
+        {
+            next_heading_character[heading.index()] = Some(character);
+        }
+    }
     let multiline_content = super::code::multiline_content(dom, &nodes);
     let images = super::images::analyze(dom, &nodes, context.base_url.as_ref());
+    let mut meaningful_heading_content = vec![false; dom.len()];
+    for &node in nodes.iter().rev() {
+        if nearest_heading_permalink[node.index()].is_some() {
+            continue;
+        }
+        meaningful_heading_content[node.index()] = dom
+            .text_node(node)
+            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
+            || dom.tag(node) == Some(Tag::Img) && images.source(node).is_some()
+            || dom
+                .children(node)
+                .any(|child| meaningful_heading_content[child.index()]);
+    }
     let (figures, captions) = super::figures::analyze(dom, &nodes, &images);
     let media = super::media::analyze(dom, &nodes, context.base_url.as_ref());
     let lists = super::lists::ListAnalysis::analyze(dom, &nodes);
@@ -268,12 +361,17 @@ pub(crate) fn compile_document(
             }
             continue;
         };
+        let heading_permalink = nearest_heading[node.index()]
+            .is_some_and(|heading| heading != node && heading_permalinks[node.index()]);
         if tables.is_skipped(node)
             || footnotes.is_skipped(node)
             || math.is_skipped(node)
             || footnotes.is_deferred(node)
+            || heading_permalink
         {
-            if tables.emits_separator(node) {
+            if tables.emits_separator(node)
+                || heading_permalink && permalink_separates_words[node.index()]
+            {
                 builder.append_prose(scope.parent, " ")?;
             }
             continue;
@@ -287,8 +385,15 @@ pub(crate) fn compile_document(
                 .replacement_text(node)
                 .or_else(|| lists.replacement_text(node))
                 .unwrap_or(text);
-            let text = if footnotes.should_trim_start(node) {
-                text.trim_start()
+            let heading = nearest_heading[node.index()]
+                .filter(|heading| heading_has_permalink[heading.index()]);
+            let trim_start = footnotes.should_trim_start(node)
+                || heading.is_some_and(|heading| first_heading_text[heading.index()] == Some(node));
+            let text = if trim_start { text.trim_start() } else { text };
+            let text = if heading
+                .is_some_and(|heading| last_heading_text[heading.index()] == Some(node))
+            {
+                text.trim_end()
             } else {
                 text
             };
@@ -507,7 +612,15 @@ pub(crate) fn compile_document(
         let parent_is_block_group = scope
             .parent
             .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
-        let semantic = if let Some(callout) = &callout {
+        let semantic = if let Some(level) = heading_levels[node.index()] {
+            if !meaningful_heading_content[node.index()] {
+                None
+            } else if block_descendants[node.index()] {
+                Some(NodeKind::BlockGroup)
+            } else {
+                Some(NodeKind::Heading { level })
+            }
+        } else if let Some(callout) = &callout {
             callout_kind(callout.kind).map(|kind| {
                 NodeKind::Callout(Callout {
                     kind,
@@ -527,17 +640,6 @@ pub(crate) fn compile_document(
                 Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
                 Tag::P if block_descendants[node.index()] => Some(NodeKind::BlockGroup),
                 Tag::P | Tag::Address | Tag::Caption => Some(NodeKind::Paragraph),
-                Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
-                    if block_descendants[node.index()] =>
-                {
-                    Some(NodeKind::BlockGroup)
-                }
-                Tag::H1 => Some(NodeKind::Heading { level: 1 }),
-                Tag::H2 => Some(NodeKind::Heading { level: 2 }),
-                Tag::H3 => Some(NodeKind::Heading { level: 3 }),
-                Tag::H4 => Some(NodeKind::Heading { level: 4 }),
-                Tag::H5 => Some(NodeKind::Heading { level: 5 }),
-                Tag::H6 => Some(NodeKind::Heading { level: 6 }),
                 Tag::Blockquote => dom
                     .attr(node, AttrName::DataCallout)
                     .and_then(callout_kind)
@@ -581,12 +683,7 @@ pub(crate) fn compile_document(
                         && meaningful_content[node.index()] =>
                 {
                     dom.attr(node, AttrName::Href).and_then(|destination| {
-                        safe_destination(
-                            destination,
-                            context.base_url.as_ref(),
-                            DestinationKind::Link,
-                        )
-                        .map(|destination| {
+                        context.link_destination(destination).map(|destination| {
                             NodeKind::Link(Link {
                                 destination,
                                 title: dom.attr(node, AttrName::Title).map(Into::into),
@@ -595,9 +692,9 @@ pub(crate) fn compile_document(
                     })
                 }
                 _ if is_block_tag(tag)
-                    && !(tag == Tag::Div
+                    && !(matches!(tag, Tag::Div | Tag::Section)
                         && parent_is_block_group
-                        && dom.children(node).count() == 1) =>
+                        && has_single_content_child(dom, node)) =>
                 {
                     Some(NodeKind::BlockGroup)
                 }
@@ -1035,6 +1132,23 @@ fn is_inline_dom_node(dom: &Dom, node: NodeId, block_descendants: &[bool]) -> bo
         })
 }
 
+fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
+    let mut count = 0_u8;
+    for child in dom.children(node) {
+        let meaningful = dom.is_element(child)
+            || dom
+                .text_node(child)
+                .is_some_and(|text| !text.trim().is_empty());
+        if meaningful {
+            count += 1;
+            if count > 1 {
+                return false;
+            }
+        }
+    }
+    count == 1
+}
+
 fn is_block_tag(tag: Tag) -> bool {
     matches!(
         tag,
@@ -1115,6 +1229,29 @@ fn table_alignment(value: &str) -> Option<TableAlignment> {
     }
 }
 
+fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
+    let native = match dom.tag(node) {
+        Some(Tag::H1) => Some(1),
+        Some(Tag::H2) => Some(2),
+        Some(Tag::H3) => Some(3),
+        Some(Tag::H4) => Some(4),
+        Some(Tag::H5) => Some(5),
+        Some(Tag::H6) => Some(6),
+        _ => None,
+    };
+    native.or_else(|| {
+        dom.attr(node, AttrName::Role)
+            .filter(|roles| {
+                roles
+                    .split_ascii_whitespace()
+                    .any(|role| role.eq_ignore_ascii_case("heading"))
+            })
+            .and_then(|_| dom.attr_by_local_name(node, "aria-level"))
+            .and_then(|level| level.trim().parse::<u8>().ok())
+            .filter(|level| (1..=6).contains(level))
+    })
+}
+
 fn callout_kind(value: &str) -> Option<CalloutKind> {
     match value.to_ascii_lowercase().as_str() {
         "note" => Some(CalloutKind::Note),
@@ -1133,8 +1270,50 @@ mod tests {
 
     fn compile(html: &str, base: Option<&str>) -> Document {
         let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
-        let context = CompileContext::new(base.map(|value| Url::parse(value).unwrap()));
+        let base = base.map(|value| Url::parse(value).unwrap());
+        let context = CompileContext::new(base.clone(), base.as_ref());
         compile_document(&dom, dom.root(), &context).unwrap()
+    }
+
+    #[test]
+    fn compiles_heading_roles_and_omits_permalink_controls() {
+        let document = compile(
+            r##"<div role="heading" aria-level="3">Overview <a class="heading-anchor" href="#overview">#</a></div><h2>Release<span><a href="#release">#</a></span>guide</h2><h2><a href="/guide">Read the guide</a></h2>"##,
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "Heading(level=3)\n",
+                "  Text(\"Overview\")\n",
+                "Heading(level=2)\n",
+                "  Text(\"Release guide\")\n",
+                "Heading(level=2)\n",
+                "  Link(destination=\"/guide\", title=None)\n",
+                "    Text(\"Read the guide\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn omits_headings_that_contain_only_permalink_controls() {
+        let document = compile(
+            r##"<h2><a href="#native">#</a></h2><div role="heading" aria-level="3"><a class="heading-anchor" href="#aria"></a></div><p>Content.</p>"##,
+            None,
+        );
+        assert_eq!(document.debug_tree(), "Paragraph\n  Text(\"Content.\")\n");
+    }
+
+    #[test]
+    fn collapses_transparent_div_and_section_wrapper_chains() {
+        let document = compile(
+            "<div> \n <section>\n<div><p>Content.</p></div>\n</section> </div>",
+            None,
+        );
+        assert_eq!(
+            document.debug_tree(),
+            "BlockGroup\n  Paragraph\n    Text(\"Content.\")\n"
+        );
     }
 
     #[test]
@@ -1237,6 +1416,20 @@ mod tests {
                 "      Paragraph\n",
                 "        Text(\"Source note. \")\n",
             )
+        );
+    }
+
+    #[test]
+    fn overriding_base_urls_resolve_fragment_links() {
+        let dom = Dom::parse_fragment(r##"<p><a href="#part">Part</a></p>"##, Tag::Div).unwrap();
+        let source = Url::parse("https://example.test/article").unwrap();
+        let base = Url::parse("https://cdn.example.test/content/").unwrap();
+        let context = CompileContext::new(Some(base), Some(&source));
+        let document = compile_document(&dom, dom.root(), &context).unwrap();
+        assert!(
+            document
+                .debug_tree()
+                .contains("destination=\"https://cdn.example.test/content/#part\"")
         );
     }
 

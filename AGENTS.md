@@ -38,7 +38,7 @@ The extraction pipeline flows through these stages:
 4. **Specialized Recognition** (`specialized/`) - High-confidence listing and discussion extraction
 5. **Content Extraction** (`extraction.rs`) - Strategy retries, candidate selection, and content consolidation
 6. **Content Cleaning** (`cleaning.rs`) - Hard cleanup, contextual boilerplate cleanup, and multi-signal heuristic cleanup
-7. **Semantic Normalization** (`normalize.rs`) - Image, code, figure, footnote, table, and wrapper normalization
+7. **Semantic Compilation** (`document/`) - Direct source recognition and compilation into the semantic document
 
 ### Key Modules
 
@@ -50,13 +50,13 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
-| `normalize.rs` / `normalize/` | Ordered preparation passes for SVG charts, media, images, headings, and wrappers |
+| `normalize.rs` / `normalize/` | Source preparation and relevance cleanup for SVG charts, media, duplicate images, and heading artifacts |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
 | `document/footnotes.rs` / `document/math.rs` / `document/callouts.rs` | Direct semantic footnote, math, and callout recognition for the compiler |
 | `quality.rs` | Source-relative quality, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, and specialized extractor diagnostics |
-| `document/` | Public read-only semantic IR plus internal normalized-DOM compiler, source recognition for code, figures, images, and media, validation, and stable test debug output; production pages retain this document instead of a DOM |
+| `document/` | Public read-only semantic IR plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this document instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -81,7 +81,7 @@ These invariants are costly to violate:
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove non-math scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage. Keep math source until semantic compilation.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
-- **Separate cleanup and normalization.** Cleanup decides what to remove. Normalization makes retained markup predictable for serializers.
+- **Keep final DOM mutation focused on relevance.** Cleanup decides what to remove. The semantic compiler resolves URLs, drops source attributes, ignores comments, collapses transparent wrappers, and emits output semantics.
 - **Use static image evidence together.** Small dimensions are a signal. Protect described images, math, responsive sources, and captioned figures.
 - **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal. Breadcrumb, subscription, related-content, and document-chrome cleanup must also use structure and document position. Preserve article-contained regions, pricing content, meaningful media, and identity text.

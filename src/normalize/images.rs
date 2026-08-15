@@ -761,7 +761,7 @@ fn decorative_image_name(dom: &Dom, node: NodeId) -> bool {
 ///
 /// Source selection is not performed here. The semantic compiler chooses one
 /// responsive or lazy resource and discards the implementation wrappers.
-pub(super) fn deduplicate_selected(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+pub(super) fn remove_duplicates(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
     let selected_sources = crate::document::selected_image_sources_for_cleanup(dom, &source_nodes);
     nodes.clear();
@@ -1660,7 +1660,7 @@ mod tests {
     fn normalized(html: &str) -> (Dom, NodeId) {
         let mut dom = Dom::parse_document(html).unwrap();
         let root = dom.body().unwrap();
-        deduplicate_selected(&mut dom, root, &mut Vec::new());
+        remove_duplicates(&mut dom, root, &mut Vec::new());
         (dom, root)
     }
 
