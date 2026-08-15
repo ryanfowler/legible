@@ -10,6 +10,8 @@ pub(crate) struct NodeStats {
     pub(crate) has_text: bool,
     pub(crate) has_non_whitespace: bool,
     pub(crate) has_alphanumeric: bool,
+    pub(crate) alphabetic_chars: u32,
+    pub(crate) digit_chars: u32,
     pub(crate) starts_with_whitespace: bool,
     pub(crate) ends_with_whitespace: bool,
     pub(crate) ends_with_dot: bool,

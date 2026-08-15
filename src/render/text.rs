@@ -1,6 +1,6 @@
 //! Normalized text rendering from the semantic document.
 
-use crate::document::{Document, DocumentStats};
+use crate::document::Document;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TextOptions {
@@ -14,13 +14,10 @@ pub(crate) fn render_text(document: &Document, capacity: usize, options: &TextOp
         options.block_newlines,
         options.preserve_line_breaks,
         Some(capacity),
+        false,
     )
     .0
     .unwrap_or_default()
-}
-
-pub(crate) fn measure_text(document: &Document) -> DocumentStats {
-    crate::document::stats::walk_text(document, false, false, None).1
 }
 
 #[cfg(test)]
@@ -39,7 +36,7 @@ mod tests {
         builder.append_prose(parent, "deep").unwrap();
         let document = builder.finish();
         assert_eq!(render_text(&document, 0, &TextOptions::default()), "deep");
-        assert_eq!(measure_text(&document).text_length, 4);
+        assert_eq!(document.text_length(), 4);
     }
 
     #[test]
@@ -66,7 +63,7 @@ mod tests {
         builder.append_prose(Some(final_paragraph), "y").unwrap();
         let document = builder.finish();
         let text = render_text(&document, 0, &TextOptions::default());
-        let stats = measure_text(&document);
+        let stats = document.stats();
         assert_eq!(text, "Hello world a b x y");
         assert_eq!(stats.text_length, text.chars().count());
         assert_eq!(stats.word_count, 6);

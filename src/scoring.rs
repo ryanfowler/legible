@@ -36,7 +36,15 @@ fn stats_for_text(text: &str) -> NodeStats {
         // testing each punctuation byte in the stateful hot loop.
         comma_count = memchr::memchr_iter(b',', bytes).count();
         sentence_end_count = memchr::memchr3_iter(b'.', b'!', b'?', bytes).count();
-        s.has_alphanumeric = bytes.iter().any(u8::is_ascii_alphanumeric);
+        let mut alphabetic_chars = 0_usize;
+        let mut digit_chars = 0_usize;
+        for &byte in bytes {
+            s.has_alphanumeric |= byte.is_ascii_alphanumeric();
+            alphabetic_chars += usize::from(byte.is_ascii_alphabetic());
+            digit_chars += usize::from(byte.is_ascii_digit());
+        }
+        s.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
+        s.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
         let has_control_whitespace = memchr::memchr3(b'\t', b'\n', b'\r', bytes).is_some()
             || memchr::memchr2(0x0b, 0x0c, bytes).is_some();
         if !has_control_whitespace {
@@ -92,6 +100,10 @@ fn stats_for_text(text: &str) -> NodeStats {
             } else {
                 s.has_non_whitespace = true;
                 s.has_alphanumeric |= c.is_alphanumeric();
+                s.alphabetic_chars = s
+                    .alphabetic_chars
+                    .saturating_add(u32::from(c.is_alphabetic()));
+                s.digit_chars = s.digit_chars.saturating_add(u32::from(c.is_numeric()));
                 word_count += usize::from(prev);
                 dot = c == '.';
                 comma_count += usize::from(
@@ -154,6 +166,8 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     }
     a.comma_count = a.comma_count.saturating_add(b.comma_count);
     a.sentence_end_count = a.sentence_end_count.saturating_add(b.sentence_end_count);
+    a.alphabetic_chars = a.alphabetic_chars.saturating_add(b.alphabetic_chars);
+    a.digit_chars = a.digit_chars.saturating_add(b.digit_chars);
     a.has_non_whitespace |= b.has_non_whitespace;
     a.has_alphanumeric |= b.has_alphanumeric;
     a.ends_with_whitespace = b.ends_with_whitespace;

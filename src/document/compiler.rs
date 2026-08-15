@@ -683,10 +683,15 @@ pub(crate) fn compile_document(
                         && meaningful_content[node.index()] =>
                 {
                     dom.attr(node, AttrName::Href).and_then(|destination| {
+                        let trimmed = destination.trim_matches(|character: char| {
+                            character.is_ascii_whitespace() || character.is_control()
+                        });
+                        let fragment_only = trimmed.starts_with('#') && trimmed.len() > 1;
                         context.link_destination(destination).map(|destination| {
                             NodeKind::Link(Link {
                                 destination,
                                 title: dom.attr(node, AttrName::Title).map(Into::into),
+                                fragment_only,
                             })
                         })
                     })
@@ -1421,7 +1426,7 @@ mod tests {
 
     #[test]
     fn overriding_base_urls_resolve_fragment_links() {
-        let dom = Dom::parse_fragment(r##"<p><a href="#part">Part</a></p>"##, Tag::Div).unwrap();
+        let dom = Dom::parse_fragment(r##"<p><a href=" #part ">Part</a></p>"##, Tag::Div).unwrap();
         let source = Url::parse("https://example.test/article").unwrap();
         let base = Url::parse("https://cdn.example.test/content/").unwrap();
         let context = CompileContext::new(Some(base), Some(&source));
@@ -1431,6 +1436,8 @@ mod tests {
                 .debug_tree()
                 .contains("destination=\"https://cdn.example.test/content/#part\"")
         );
+        assert_eq!(document.stats().link_text_length, 4);
+        assert_eq!(document.stats().link_density, 0.3);
     }
 
     #[test]

@@ -309,6 +309,7 @@ mod tests {
                 NodeKind::Link(Link {
                     destination: "https://example.test/?a=1&b=2".into(),
                     title: Some("a \"title\"".into()),
+                    fragment_only: false,
                 }),
             )
             .unwrap();

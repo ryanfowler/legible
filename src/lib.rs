@@ -82,9 +82,9 @@ pub use diagnostics::{
     NormalizationCountsInfo, QualityInfo, RootInfo, RootSelectionReasonInfo,
 };
 pub use document::{
-    Callout, CalloutKind, CodeBlock, Document, DocumentNode, FootnoteDefinition, FootnoteId, Image,
-    Link, List, ListKind, MathFormat, MathValue, Media, MediaKind, NodeKind, Table, TableAlignment,
-    TableCell, TaskMarker, TextValue,
+    Callout, CalloutKind, CodeBlock, Document, DocumentNode, DocumentStats, FootnoteDefinition,
+    FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media, MediaKind, NodeKind,
+    Table, TableAlignment, TableCell, TaskMarker, TextValue,
 };
 pub use error::{Error, Result};
 pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};
