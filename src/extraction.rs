@@ -87,12 +87,16 @@ fn remove_title_brand_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingP
 }
 
 struct BestAttempt {
-    document: crate::document::Document,
+    content: FrozenContent,
     quality: ExtractionQuality,
     excerpt: Option<String>,
     direction: Option<String>,
     strategy: ExtractionStrategy,
     diagnostic_index: Option<usize>,
+}
+
+struct FrozenContent {
+    dom: Dom,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -332,9 +336,8 @@ impl<'a> ContentExtractor<'a> {
         if let Some(diagnostics) = &mut self.metadata_diagnostics {
             diagnostics.complete_with_fallbacks(&self.metadata);
         }
-        // The selected attempt already compiled the compact fragment for its
-        // result metrics. Reuse that document instead of compiling the final
-        // fragment a second time.
+        // Normal extraction compiles only the selected candidate. Diagnostic
+        // extraction compiles every attempt so it can report semantic metrics.
         let diagnostics = self
             .diagnostic_attempts
             .take()
@@ -793,28 +796,42 @@ impl<'a> ContentExtractor<'a> {
             }
             .map_err(|_| Error::NoContent)?;
             let final_dom_nodes = result_dom.len();
-            let result_document = crate::document::compile_document(
-                &result_dom,
-                result_dom.root(),
-                &crate::document::CompileContext::new(
-                    self.base_uri.clone(),
-                    self.source_uri.as_ref(),
-                ),
-            )
-            .map_err(|_| Error::NoContent)?;
+            // Normal extraction only needs the semantic document for a candidate
+            // that can win. Diagnostics still compile every attempt so that they
+            // retain complete semantic metrics.
+            let result_document = if self.diagnostic_attempts.is_some() {
+                Some(
+                    crate::document::compile_document(
+                        &result_dom,
+                        result_dom.root(),
+                        &crate::document::CompileContext::new(
+                            self.base_uri.clone(),
+                            self.source_uri.as_ref(),
+                        ),
+                    )
+                    .map_err(|_| Error::NoContent)?,
+                )
+            } else {
+                None
+            };
             let representation =
-                self.diagnostic_attempts
+                result_document
                     .as_ref()
-                    .map(|_| RepresentationMetricsInfo {
+                    .map(|document| RepresentationMetricsInfo {
                         source_dom_nodes: self.source_dom_nodes,
                         final_dom_nodes,
-                        document_nodes: result_document.len(),
-                        estimated_document_bytes: result_document.retained_bytes_estimate(),
+                        document_nodes: document.len(),
+                        estimated_document_bytes: document.retained_bytes_estimate(),
                     });
-            let result_metrics = ContentMetrics::measure_document(&result_document);
-            let result_semantic_counts = candidate_semantic_metrics
-                .as_ref()
-                .map(|_| SemanticStructureCounts::measure(&result_document));
+            let result_metrics = result_document.as_ref().map_or_else(
+                || ContentMetrics::measure_fast(&result_dom, result_dom.root()),
+                ContentMetrics::measure_document,
+            );
+            let result_semantic_counts = result_document.as_ref().and_then(|document| {
+                candidate_semantic_metrics
+                    .as_ref()
+                    .map(|_| SemanticStructureCounts::measure(document))
+            });
             let semantic_coverage = candidate_semantic_metrics.as_ref().and_then(|source| {
                 result_semantic_counts
                     .as_ref()
@@ -884,10 +901,20 @@ impl<'a> ContentExtractor<'a> {
                     true,
                     None,
                 );
-                return Ok(ExtractedContent {
-                    excerpt,
-                    document: result_document,
-                });
+                let document = if let Some(document) = result_document {
+                    document
+                } else {
+                    crate::document::compile_document(
+                        &result_dom,
+                        result_dom.root(),
+                        &crate::document::CompileContext::new(
+                            self.base_uri.clone(),
+                            self.source_uri.as_ref(),
+                        ),
+                    )
+                    .map_err(|_| Error::NoContent)?
+                };
+                return Ok(ExtractedContent { excerpt, document });
             }
 
             let rejection = Self::attempt_rejection_reason(
@@ -925,7 +952,7 @@ impl<'a> ContentExtractor<'a> {
                     attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
                 }
                 self.best_attempt = Some(BestAttempt {
-                    document: result_document,
+                    content: FrozenContent { dom: result_dom },
                     quality,
                     excerpt,
                     direction: self.page_direction.clone(),
@@ -948,9 +975,15 @@ impl<'a> ContentExtractor<'a> {
             attempts[index].accepted = true;
             attempts[index].rejection_reason = None;
         }
+        let document = crate::document::compile_document(
+            &best.content.dom,
+            best.content.dom.root(),
+            &crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref()),
+        )
+        .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
             excerpt: best.excerpt,
-            document: best.document,
+            document,
         })
     }
     fn root_info(

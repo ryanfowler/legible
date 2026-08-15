@@ -159,6 +159,34 @@ impl ContentMetrics {
     }
 
     pub(crate) fn measure(dom: &Dom, root: NodeId) -> Self {
+        let mut metrics = Self::measure_dom(dom, root);
+        let (references, definitions, expressions) =
+            crate::document::semantic_normalization_counts(dom, root);
+        metrics.footnote_reference_count = references;
+        metrics.footnote_definition_count = definitions;
+        metrics.math_count = expressions;
+        metrics
+    }
+
+    /// Measures the structural and text quality signals without semantic
+    /// normalization counts. Extraction uses this before it knows whether a
+    /// candidate can win. The compiler remains responsible for final semantic
+    /// metrics on the selected result.
+    pub(crate) fn measure_fast(dom: &Dom, root: NodeId) -> Self {
+        let mut metrics = Self::measure_dom(dom, root);
+        if std::iter::once(root)
+            .chain(dom.descendants(root))
+            .any(|node| crate::document::semantic_source_evidence(dom, node))
+        {
+            // Preserve enough context to avoid rejecting short semantic
+            // content before the compiler can classify it.
+            metrics.structured_block_count += 1;
+            metrics.contextual_structure = true;
+        }
+        metrics
+    }
+
+    fn measure_dom(dom: &Dom, root: NodeId) -> Self {
         let mut store = NodeStateStore::new();
         store.enable_link_lengths();
         let text = get_or_compute_stats(dom, root, &mut store);
@@ -172,11 +200,6 @@ impl ContentMetrics {
                 );
             }
         }
-        let (references, definitions, expressions) =
-            crate::document::semantic_normalization_counts(dom, root);
-        metrics.footnote_reference_count = references;
-        metrics.footnote_definition_count = definitions;
-        metrics.math_count = expressions;
         metrics
     }
 
@@ -1142,6 +1165,18 @@ mod tests {
             let root = dom.root();
             assert!(
                 !is_incoherent_short_result(ContentMetrics::measure(&dom, root)),
+                "{html}"
+            );
+        }
+
+        for html in [
+            r#"<div class="warning"><p>42</p></div>"#,
+            r#"<p><span data-legible-math="inline" data-latex="42">42</span></p>"#,
+        ] {
+            let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+            let root = dom.root();
+            assert!(
+                !is_incoherent_short_result(ContentMetrics::measure_fast(&dom, root)),
                 "{html}"
             );
         }

@@ -99,13 +99,16 @@ pub(crate) fn compile_document(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
+    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    if is_plain_prose_fragment(dom, &nodes) {
+        return compile_plain_prose_fragment(dom, root, context);
+    }
     let mut block_descendants = vec![false; dom.len()];
     let mut code_blocks = vec![false; dom.len()];
     let mut meaningful_content = vec![false; dom.len()];
     let mut visible_text_content = vec![false; dom.len()];
     let mut first_visible = vec![None; dom.len()];
     let mut last_visible = vec![None; dom.len()];
-    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
     let heading_permalinks = super::headings::permalink_nodes(dom, &nodes);
     let has_heading_permalinks = heading_permalinks.iter().any(|value| *value);
     let mut heading_levels = vec![None; dom.len()];
@@ -863,6 +866,113 @@ pub(crate) fn compile_document(
     Ok(document)
 }
 
+fn is_plain_prose_fragment(dom: &Dom, nodes: &[NodeId]) -> bool {
+    let mut has_text = false;
+    for &node in nodes {
+        if let Some(text) = dom.text_node(node) {
+            has_text |= !text.trim().is_empty();
+            let Some(parent) = dom.parent(node) else {
+                return false;
+            };
+            if !matches!(
+                dom.tag(parent),
+                Some(Tag::P | Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            ) {
+                return false;
+            }
+            continue;
+        }
+        if dom.is_comment(node) {
+            continue;
+        }
+        let Some(tag) = dom.tag(node) else {
+            continue;
+        };
+        if dom.attr(node, AttrName::Role).is_some() || super::semantic_source_evidence(dom, node) {
+            return false;
+        }
+        if !matches!(
+            tag,
+            Tag::Div
+                | Tag::Section
+                | Tag::Article
+                | Tag::Main
+                | Tag::P
+                | Tag::Blockquote
+                | Tag::H1
+                | Tag::H2
+                | Tag::H3
+                | Tag::H4
+                | Tag::H5
+                | Tag::H6
+        ) {
+            return false;
+        }
+        if matches!(
+            tag,
+            Tag::P | Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
+        ) && dom.children(node).any(|child| dom.is_element(child))
+        {
+            return false;
+        }
+    }
+    has_text
+}
+
+fn compile_plain_prose_fragment(
+    dom: &Dom,
+    root: NodeId,
+    _context: &CompileContext,
+) -> Result<Document, CompileError> {
+    let mut builder = DocumentBuilder::with_capacity(dom.len());
+    let mut tasks = dom
+        .children_rev(root)
+        .map(|node| (node, None))
+        .collect::<Vec<_>>();
+    while let Some((node, parent)) = tasks.pop() {
+        if let Some(text) = dom.text_node(node) {
+            builder.append_prose(parent, text)?;
+            continue;
+        }
+        if dom.is_comment(node) {
+            continue;
+        }
+        let Some(tag) = dom.tag(node) else {
+            continue;
+        };
+        let kind = match tag {
+            Tag::P => Some(NodeKind::Paragraph),
+            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => dom
+                .has_non_whitespace_text(node)
+                .then(|| NodeKind::Heading {
+                    level: heading_level(dom, node).unwrap_or(1),
+                }),
+            Tag::Blockquote => Some(NodeKind::BlockQuote),
+            Tag::Div | Tag::Section | Tag::Article | Tag::Main
+                if !(matches!(tag, Tag::Div | Tag::Section)
+                    && parent.is_some_and(|parent| {
+                        matches!(builder.kind(parent), Some(NodeKind::BlockGroup))
+                    })
+                    && has_single_content_child(dom, node)) =>
+            {
+                Some(NodeKind::BlockGroup)
+            }
+            Tag::Div | Tag::Section => None,
+            _ => None,
+        };
+        let Some(kind) = kind else {
+            tasks.extend(dom.children_rev(node).map(|child| (child, parent)));
+            continue;
+        };
+        let semantic = builder.append(parent, kind)?;
+        tasks.extend(dom.children_rev(node).map(|child| (child, Some(semantic))));
+    }
+    let document = builder.finish();
+    #[cfg(any(test, debug_assertions))]
+    document.validate()?;
+    Ok(document)
+}
+
 fn media_separators(
     dom: &Dom,
     root: NodeId,
@@ -1365,6 +1475,18 @@ mod tests {
             document.debug_tree(),
             "BlockGroup\n  Paragraph\n    Text(\"Content.\")\n"
         );
+    }
+
+    #[test]
+    fn plain_prose_fast_path_does_not_bypass_source_semantics() {
+        let document = compile(
+            r#"<div class="admonition warning"><p>Warning</p><p>Take care.</p></div><div class="warning"><p>Warning</p><p>Also take care.</p></div><blockquote data-legible-callout="warning"><p>Another warning.</p></blockquote><p data-legible-math="inline" data-latex="x^2">x 2</p><div id="footnotes"><p id="fn1">A note.</p></div>"#,
+            None,
+        );
+        let tree = document.debug_tree();
+        assert_eq!(tree.matches("Callout(kind=Warning").count(), 3, "{tree}");
+        assert!(tree.contains("DisplayMath(source=\"x^2\""), "{tree}");
+        assert!(tree.contains("FootnoteDefinition"), "{tree}");
     }
 
     #[test]

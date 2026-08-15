@@ -2,10 +2,8 @@
 //!
 //! The renderer uses an explicit task stack. It has no dependency on the HTML DOM.
 
-use smallvec::SmallVec;
-use std::collections::HashMap;
-
 use crate::document::{Document, DocumentNodeId, FootnoteId, ListKind, NodeKind, TableAlignment};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MarkdownConfig {
@@ -70,7 +68,7 @@ struct MarkdownRenderer<'a> {
     tasks: Vec<Task>,
     list_depth: usize,
     table_depth: usize,
-    visible: HashMap<DocumentNodeId, bool>,
+    visible: Vec<bool>,
     config: MarkdownConfig,
 }
 
@@ -130,7 +128,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn visible(&self, root: DocumentNodeId) -> bool {
-        self.visible.get(&root).copied().unwrap_or(false)
+        self.visible[root.index()]
     }
 
     fn next_text_char(&self, id: DocumentNodeId) -> Option<char> {
@@ -789,8 +787,8 @@ impl<'a> MarkdownRenderer<'a> {
     }
 }
 
-fn compute_visibility(document: &Document, images: bool) -> HashMap<DocumentNodeId, bool> {
-    let mut visible = HashMap::with_capacity(document.len());
+fn compute_visibility(document: &Document, images: bool) -> Vec<bool> {
+    let mut visible = vec![false; document.node_capacity()];
     let mut tasks = Vec::with_capacity(32);
     tasks.extend(document.root_ids().map(|root| (root, false)));
     while let Some((id, visited)) = tasks.pop() {
@@ -812,11 +810,9 @@ fn compute_visibility(document: &Document, images: bool) -> HashMap<DocumentNode
                 .as_deref()
                 .is_some_and(has_visible_inline_text),
             NodeKind::InlineMath(_) | NodeKind::DisplayMath(_) | NodeKind::Media(_) => true,
-            _ => document
-                .child_ids(id)
-                .any(|child| visible.get(&child).copied().unwrap_or(false)),
+            _ => document.child_ids(id).any(|child| visible[child.index()]),
         };
-        visible.insert(id, value);
+        visible[id.index()] = value;
     }
     visible
 }
