@@ -52,6 +52,7 @@ mod images;
 mod lists;
 mod math;
 mod media;
+mod ordinary;
 pub(crate) mod stats;
 mod tables;
 mod text;

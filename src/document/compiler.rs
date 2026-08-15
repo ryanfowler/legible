@@ -28,12 +28,16 @@ impl CompileContext {
         }
     }
 
-    fn link_destination(&self, value: &str) -> Option<Box<str>> {
+    pub(super) fn link_destination(&self, value: &str) -> Option<Box<str>> {
         if self.resolve_fragment_links && value.trim().starts_with('#') {
             let resolved = self.base_url.as_ref()?.join(value.trim()).ok()?;
             return safe_destination(resolved.as_str(), None, DestinationKind::Link);
         }
         safe_destination(value, self.base_url.as_ref(), DestinationKind::Link)
+    }
+
+    pub(super) fn image_destination(&self, value: &str) -> Option<Box<str>> {
+        safe_destination(value, self.base_url.as_ref(), DestinationKind::Resource)
     }
 }
 
@@ -99,12 +103,20 @@ pub(crate) fn compile_document(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
+    if let Some(inventory) = super::ordinary::inventory(dom, root) {
+        return super::ordinary::compile(dom, root, context, &inventory);
+    }
+    compile_complex_document(dom, root, context)
+}
+
+fn compile_complex_document(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+) -> Result<Document, CompileError> {
     let mut nodes = Vec::with_capacity(dom.len());
     nodes.push(root);
     nodes.extend(dom.descendants(root));
-    if is_plain_prose_fragment(dom, &nodes) {
-        return compile_plain_prose_fragment(dom, root, context);
-    }
     let mut block_descendants = vec![false; dom.len()];
     let mut code_blocks = vec![false; dom.len()];
     let mut meaningful_content = vec![false; dom.len()];
@@ -883,113 +895,6 @@ pub(crate) fn compile_document(
     Ok(document)
 }
 
-fn is_plain_prose_fragment(dom: &Dom, nodes: &[NodeId]) -> bool {
-    let mut has_text = false;
-    for &node in nodes {
-        if let Some(text) = dom.text_node(node) {
-            has_text |= !text.trim().is_empty();
-            let Some(parent) = dom.parent(node) else {
-                return false;
-            };
-            if !matches!(
-                dom.tag(parent),
-                Some(Tag::P | Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-            ) {
-                return false;
-            }
-            continue;
-        }
-        if dom.is_comment(node) {
-            continue;
-        }
-        let Some(tag) = dom.tag(node) else {
-            continue;
-        };
-        if dom.attr(node, AttrName::Role).is_some() || super::semantic_source_evidence(dom, node) {
-            return false;
-        }
-        if !matches!(
-            tag,
-            Tag::Div
-                | Tag::Section
-                | Tag::Article
-                | Tag::Main
-                | Tag::P
-                | Tag::Blockquote
-                | Tag::H1
-                | Tag::H2
-                | Tag::H3
-                | Tag::H4
-                | Tag::H5
-                | Tag::H6
-        ) {
-            return false;
-        }
-        if matches!(
-            tag,
-            Tag::P | Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
-        ) && dom.children(node).any(|child| dom.is_element(child))
-        {
-            return false;
-        }
-    }
-    has_text
-}
-
-fn compile_plain_prose_fragment(
-    dom: &Dom,
-    root: NodeId,
-    _context: &CompileContext,
-) -> Result<Document, CompileError> {
-    let mut builder = DocumentBuilder::with_capacity(dom.len());
-    let mut tasks = dom
-        .children_rev(root)
-        .map(|node| (node, None))
-        .collect::<Vec<_>>();
-    while let Some((node, parent)) = tasks.pop() {
-        if let Some(text) = dom.text_node(node) {
-            builder.append_prose(parent, text)?;
-            continue;
-        }
-        if dom.is_comment(node) {
-            continue;
-        }
-        let Some(tag) = dom.tag(node) else {
-            continue;
-        };
-        let kind = match tag {
-            Tag::P => Some(NodeKind::Paragraph),
-            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => dom
-                .has_non_whitespace_text(node)
-                .then(|| NodeKind::Heading {
-                    level: heading_level(dom, node).unwrap_or(1),
-                }),
-            Tag::Blockquote => Some(NodeKind::BlockQuote),
-            Tag::Div | Tag::Section | Tag::Article | Tag::Main
-                if !(matches!(tag, Tag::Div | Tag::Section)
-                    && parent.is_some_and(|parent| {
-                        matches!(builder.kind(parent), Some(NodeKind::BlockGroup))
-                    })
-                    && has_single_content_child(dom, node)) =>
-            {
-                Some(NodeKind::BlockGroup)
-            }
-            Tag::Div | Tag::Section => None,
-            _ => None,
-        };
-        let Some(kind) = kind else {
-            tasks.extend(dom.children_rev(node).map(|child| (child, parent)));
-            continue;
-        };
-        let semantic = builder.append(parent, kind)?;
-        tasks.extend(dom.children_rev(node).map(|child| (child, Some(semantic))));
-    }
-    let document = builder.finish();
-    #[cfg(any(test, debug_assertions))]
-    document.validate()?;
-    Ok(document)
-}
-
 fn media_separators(
     dom: &Dom,
     root: NodeId,
@@ -1301,7 +1206,7 @@ fn is_inline_dom_node(dom: &Dom, node: NodeId, block_descendants: &[bool]) -> bo
         })
 }
 
-fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
+pub(super) fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
     let mut count = 0_u8;
     for child in dom.children(node) {
         let meaningful = dom.is_element(child)
@@ -1318,7 +1223,7 @@ fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
     count == 1
 }
 
-fn is_redundant_formatting(kind: &NodeKind, parent: Option<&NodeKind>) -> bool {
+pub(super) fn is_redundant_formatting(kind: &NodeKind, parent: Option<&NodeKind>) -> bool {
     matches!(
         (kind, parent),
         (NodeKind::Strong, Some(NodeKind::Strong))
@@ -1327,7 +1232,7 @@ fn is_redundant_formatting(kind: &NodeKind, parent: Option<&NodeKind>) -> bool {
     )
 }
 
-fn is_block_tag(tag: Tag) -> bool {
+pub(super) fn is_block_tag(tag: Tag) -> bool {
     matches!(
         tag,
         Tag::Address
@@ -1379,7 +1284,7 @@ fn footnote_id(
     Ok(id)
 }
 
-fn semantic_image(dom: &Dom, node: NodeId, source: Box<str>) -> Image {
+pub(super) fn semantic_image(dom: &Dom, node: NodeId, source: Box<str>) -> Image {
     Image {
         source,
         alt: super::images::canonical_label(dom.attr_by_local_name(node, "alt")),
@@ -1407,7 +1312,7 @@ fn table_alignment(value: &str) -> Option<TableAlignment> {
     }
 }
 
-fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
+pub(super) fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
     let native = match dom.tag(node) {
         Some(Tag::H1) => Some(1),
         Some(Tag::H2) => Some(2),
@@ -1451,6 +1356,259 @@ mod tests {
         let base = base.map(|value| Url::parse(value).unwrap());
         let context = CompileContext::new(base.clone(), base.as_ref());
         compile_document(&dom, dom.root(), &context).unwrap()
+    }
+
+    fn uses_ordinary_compiler(html: &str) -> bool {
+        let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        super::super::ordinary::supports(&dom, dom.root())
+    }
+
+    fn compare_ordinary_and_complex(html: &str, base: Option<&str>) {
+        let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let base = base.map(|value| Url::parse(value).unwrap());
+        let context = CompileContext::new(base.clone(), base.as_ref());
+        let inventory = super::super::ordinary::inventory(&dom, dom.root())
+            .expect("source must support ordinary compilation");
+        let ordinary =
+            super::super::ordinary::compile(&dom, dom.root(), &context, &inventory).unwrap();
+        let complex = compile_complex_document(&dom, dom.root(), &context).unwrap();
+        assert_eq!(ordinary.debug_tree(), complex.debug_tree());
+    }
+
+    #[test]
+    fn ordinary_compiler_handles_common_inline_and_block_semantics() {
+        let html = r#"<h2>Read <em>this <strong>guide</strong></em></h2><p>Use <code>x = 1</code> with <del>old</del> and <a href="/relative">relative</a> or <a href="https://elsewhere.test/page">absolute</a> links.</p><blockquote><p>Quoted text.</p></blockquote><ul><li>One</li><li>Two</li></ul><ol start="4"><li>Four</li></ol><pre>plain code
+</pre>"#;
+        assert!(uses_ordinary_compiler(html));
+        let document = compile(html, Some("https://example.test/base/"));
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "Heading(level=2)\n",
+                "  Text(\"Read \")\n",
+                "  Emphasis\n",
+                "    Text(\"this \")\n",
+                "    Strong\n",
+                "      Text(\"guide\")\n",
+                "Paragraph\n",
+                "  Text(\"Use \")\n",
+                "  InlineCode(\"x = 1\")\n",
+                "  Text(\" with \")\n",
+                "  Strikethrough\n",
+                "    Text(\"old\")\n",
+                "  Text(\" and \")\n",
+                "  Link(destination=\"https://example.test/relative\", title=None)\n",
+                "    Text(\"relative\")\n",
+                "  Text(\" or \")\n",
+                "  Link(destination=\"https://elsewhere.test/page\", title=None)\n",
+                "    Text(\"absolute\")\n",
+                "  Text(\" links.\")\n",
+                "BlockQuote\n",
+                "  Paragraph\n",
+                "    Text(\"Quoted text.\")\n",
+                "List(kind=Unordered, start=None)\n",
+                "  ListItem\n",
+                "    Text(\"One\")\n",
+                "  ListItem\n",
+                "    Text(\"Two\")\n",
+                "List(kind=Ordered, start=Some(4))\n",
+                "  ListItem\n",
+                "    Text(\"Four\")\n",
+                "CodeBlock(language=None, text=\"plain code\\n\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn ordinary_compiler_handles_figures_details_and_definition_lists() {
+        let html = r#"<figure><img src="/chart.png" alt="Chart" width="640" height="320"><figcaption>Quarterly result</figcaption></figure><details><summary>More</summary><p>Details.</p></details><dl><dt>Term</dt><dd>Definition.</dd></dl>"#;
+        assert!(uses_ordinary_compiler(html));
+        let document = compile(html, Some("https://example.test/docs/"));
+        assert_eq!(
+            document.debug_tree(),
+            concat!(
+                "Figure\n",
+                "  Image(source=\"https://example.test/chart.png\", alt=\"Chart\", title=None, width=Some(640), height=Some(320))\n",
+                "  Figcaption\n",
+                "    Text(\"Quarterly result\")\n",
+                "Details\n",
+                "  Summary\n",
+                "    Text(\"More\")\n",
+                "  Paragraph\n",
+                "    Text(\"Details.\")\n",
+                "DefinitionList\n",
+                "  DefinitionTerm\n",
+                "    Text(\"Term\")\n",
+                "  DefinitionDescription\n",
+                "    Text(\"Definition.\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn ordinary_compiler_preserves_boundaries_and_uri_policy() {
+        let html = r#"<p>one<span>two</span>three <a href="javascript:alert(1)">unsafe</a> <img src="ftp://example.test/image.png" alt="fallback"></p>"#;
+        assert!(uses_ordinary_compiler(html));
+        let document = compile(html, None);
+        assert_eq!(
+            document.debug_tree(),
+            concat!("Paragraph\n", "  Text(\"onetwo three unsafe fallback\")\n",)
+        );
+    }
+
+    #[test]
+    fn ordinary_compiler_matches_complex_for_article_collections() {
+        compare_ordinary_and_complex(
+            r#"<article><h1>Archive design</h1><p>The guide explains how the archive stores each record.</p><section class="related-content-tout"><h2>Collection</h2><p>This collection is part of the guide.</p><a href="/archive">Open the archive</a></section><h2>Validation</h2><p>The validation step compares every stored record.</p></article>"#,
+            Some("https://example.test/docs/page.html"),
+        );
+    }
+
+    #[test]
+    fn complex_source_evidence_bypasses_the_ordinary_compiler() {
+        for html in [
+            r##"<p>Note<sup class="footnote-reference"><a href="#fn1">1</a></sup></p>"##,
+            r#"<math><mi>x</mi></math>"#,
+            r#"<div class="admonition warning"><p>Careful.</p></div>"#,
+            r#"<picture><source srcset="large.png"><img src="small.png"></picture>"#,
+            r#"<table><tr><td>Cell</td></tr></table>"#,
+            r#"<table class="highlighttable"><tr><td class="linenos"><pre>1</pre></td><td><pre>code</pre></td></tr></table>"#,
+            r#"<div role="list"><div role="listitem">One</div></div>"#,
+            r#"<p><img src="formula.svg" alt="x^2"></p>"#,
+        ] {
+            assert!(
+                !uses_ordinary_compiler(html),
+                "unexpected ordinary route: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_native_structures_and_image_sources_use_complex_compilation() {
+        for html in [
+            "<ul>stray text<li>item</li></ul>",
+            "<figure><img src='plot.png'><figcaption>Plot</figcaption>trailing text</figure>",
+            "<p><img src='null' alt='fallback'></p>",
+            "<p><img src='undefined' alt='fallback'></p>",
+        ] {
+            assert!(
+                !uses_ordinary_compiler(html),
+                "unexpected ordinary route: {html}"
+            );
+        }
+        assert_eq!(
+            compile("<p><img src='null' alt='fallback'></p>", None).text(),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn ordinary_compiler_keeps_comment_sensitive_inline_boundaries() {
+        compare_ordinary_and_complex("<p><span>a</span><!-- marker -->b</p>", None);
+        compare_ordinary_and_complex(
+            "<p><em>a</em><span><img src='x.png' alt='icon'>b</span></p>",
+            None,
+        );
+        assert_eq!(
+            compile("<p><span>a</span><!-- marker -->b</p>", None).text(),
+            "ab"
+        );
+    }
+
+    #[test]
+    fn empty_code_uses_the_complex_compiler_boundary_behavior() {
+        for html in [
+            "<p><em>a</em><span><code></code></span>b</p>",
+            "<p><em>a</em><span><code>  </code></span>b</p>",
+        ] {
+            compare_ordinary_and_complex(html, None);
+        }
+        assert_eq!(
+            compile("<p><em>a</em><span><code></code></span>b</p>", None).text(),
+            "ab"
+        );
+        assert_eq!(
+            compile("<p><em>a</em><span><code>  </code></span>b</p>", None).text(),
+            "a b"
+        );
+    }
+
+    #[test]
+    fn phrasing_elements_with_block_children_use_complex_compilation() {
+        for tag in [
+            "abbr", "address", "bdi", "bdo", "cite", "dfn", "kbd", "mark", "q", "samp", "small",
+            "span", "sub", "sup", "time", "u", "var",
+        ] {
+            let html = format!("<{tag}><div>block</div></{tag}>");
+            assert!(
+                !uses_ordinary_compiler(&html),
+                "unexpected ordinary route: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn misplaced_native_structural_elements_use_complex_compilation() {
+        for html in [
+            "<details><div><summary>Nested</summary></div></details>",
+            "<dl>stray text<dt>Term</dt><dd>Definition</dd></dl>",
+        ] {
+            assert!(
+                !uses_ordinary_compiler(html),
+                "unexpected ordinary route: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_boundary_with_deep_image_markup_remains_linear() {
+        const DEPTH: usize = 10_000;
+        let mut html = String::from("<p>x<span>");
+        for index in 0..DEPTH {
+            html.push_str(if index % 2 == 0 { "<strong>" } else { "<em>" });
+        }
+        html.push_str("<img src='image.png' alt='image'>");
+        for index in (0..DEPTH).rev() {
+            html.push_str(if index % 2 == 0 { "</strong>" } else { "</em>" });
+        }
+        html.push_str("</span>y</p>");
+
+        compare_ordinary_and_complex(&html, None);
+    }
+
+    #[test]
+    fn transparent_boundary_with_deep_punctuation_markup_remains_linear() {
+        const DEPTH: usize = 10_000;
+        let mut html = String::from("<p><em>x</em><span>");
+        for index in 0..DEPTH {
+            html.push_str(if index % 2 == 0 { "<strong>" } else { "<em>" });
+        }
+        html.push_str("!value");
+        for index in (0..DEPTH).rev() {
+            html.push_str(if index % 2 == 0 { "</strong>" } else { "</em>" });
+        }
+        html.push_str("</span></p>");
+
+        assert!(uses_ordinary_compiler(&html));
+        assert_eq!(compile(&html, None).text(), "x!value");
+    }
+
+    #[test]
+    fn deeply_nested_ordinary_inline_markup_is_stack_safe() {
+        const DEPTH: usize = 20_000;
+        let mut html = String::from("<p>");
+        for _ in 0..DEPTH {
+            html.push_str("<span>");
+        }
+        html.push_str("deep");
+        for _ in 0..DEPTH {
+            html.push_str("</span>");
+        }
+        html.push_str("</p>");
+
+        assert!(uses_ordinary_compiler(&html));
+        let document = compile(&html, None);
+        assert_eq!(document.text(), "deep");
     }
 
     #[test]

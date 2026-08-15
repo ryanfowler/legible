@@ -54,6 +54,7 @@ The extraction pipeline flows through these stages:
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
 | `document/footnotes.rs` / `document/math.rs` / `document/callouts.rs` | Direct semantic footnote, math, and callout recognition for the compiler |
+| `document/ordinary.rs` | Conservative feature routing and stack-safe streaming compilation for ordinary HTML semantics |
 | `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
 | `document/` | Public read-only semantic IR plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this document instead of a DOM |
@@ -90,7 +91,7 @@ These invariants are costly to violate:
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Canonicalize discussions once.** Specialized discussion extractors must use the shared builder for primary posts, reply metadata, rich reply bodies, and retained nesting.
 - **Compile output semantics directly.** Footnote, math, and callout source recognition belongs in `document/`. Keep only source protection and external footnote adoption before cleanup.
-- **Keep the plain-prose fast path narrow.** It may bypass semantic analyses only when the retained fragment has no semantic source evidence, roles, or inline structure that needs interpretation.
+- **Route ordinary semantics conservatively.** Use the streaming compiler for supported native HTML only when a cheap source scan finds no inferred semantic dialect. Any ambiguous source evidence must use the complex compiler.
 - **Defer rejected-attempt compilation.** Normal extraction uses cheap DOM quality metrics until a candidate can win. Diagnostics may compile every attempt to report semantic metrics.
 - **Use dense semantic indexes.** Renderers should use node-indexed storage for per-document state instead of hash maps when semantic node IDs are dense.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
