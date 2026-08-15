@@ -116,8 +116,20 @@ pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
 pub(crate) use crate::document::accessible_math_nodes;
 
 /// Removes empty retained blocks after semantic source protection is complete.
+#[cfg(test)]
 pub(crate) fn remove_empty_content(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    remove_empty_nodes(dom, root, nodes);
+    let mut source_facts = Some(crate::document::SemanticSourceFacts::analyze(dom, root));
+    remove_empty_content_with_source_facts(dom, root, nodes, &mut source_facts);
+}
+
+/// Removes empty blocks while updating facts shared with semantic compilation.
+pub(crate) fn remove_empty_content_with_source_facts(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    source_facts: &mut Option<crate::document::SemanticSourceFacts>,
+) {
+    remove_empty_nodes(dom, root, nodes, source_facts);
 }
 
 fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
@@ -136,30 +148,73 @@ fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
         })
 }
 
-fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    nodes.clear();
-    nodes.extend(dom.descendants(root));
+fn remove_empty_nodes(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    source_facts: &mut Option<crate::document::SemanticSourceFacts>,
+) {
+    if let Some(source_facts) = source_facts.as_ref() {
+        nodes.clear();
+        nodes.extend(source_facts.nodes().iter().copied());
+    } else {
+        nodes.clear();
+        nodes.extend(dom.descendants(root));
+    }
 
     // Whitespace-only syntax token elements contain significant code text.
     // Record code ancestry in one preorder pass so empty-node cleanup does not
-    // need an ancestor scan for each element. Multiline orphan code remains in
-    // source form until the semantic compiler consumes it.
+    // need an ancestor scan for each element. Shared source facts avoid
+    // recomputing this evidence in the semantic compiler.
+    let mut legacy_multiline = source_facts
+        .is_none()
+        .then(|| crate::document::code_multiline_content(dom, nodes));
+    let mut legacy_code_blocks = source_facts.is_none().then(|| vec![false; dom.len()]);
+    let mut share_source_facts = false;
     let mut in_preformatted_code = vec![false; dom.len()];
-    let multiline_content = crate::document::code_multiline_content(dom, nodes);
-    let mut multiline_code = vec![false; dom.len()];
-    let mut has_text = vec![false; dom.len()];
-    for &node in nodes.iter() {
-        multiline_code[node.index()] = crate::document::is_multiline_code_with_evidence(
-            dom,
-            node,
-            multiline_content[node.index()],
-        );
-        in_preformatted_code[node.index()] = dom.parent(node).is_some_and(|parent| {
-            dom.tag(parent) == Some(Tag::Pre)
-                || multiline_code[parent.index()]
-                || in_preformatted_code[parent.index()]
-        });
+    let source_facts_were_provided = source_facts.is_some();
+    if let (Some(multiline), Some(code_blocks)) =
+        (legacy_multiline.as_ref(), legacy_code_blocks.as_mut())
+    {
+        for &node in nodes.iter() {
+            let multiline = multiline[node.index()];
+            code_blocks[node.index()] =
+                crate::document::is_multiline_code_with_evidence(dom, node, multiline);
+            share_source_facts |= matches!(dom.tag(node), Some(Tag::Code | Tag::Pre)) && multiline;
+            in_preformatted_code[node.index()] = dom.parent(node).is_some_and(|parent| {
+                dom.tag(parent) == Some(Tag::Pre)
+                    || code_blocks[parent.index()]
+                    || in_preformatted_code[parent.index()]
+            });
+        }
     }
+    if share_source_facts
+        && let (Some(multiline), Some(code_blocks)) =
+            (legacy_multiline.take(), legacy_code_blocks.take())
+    {
+        *source_facts = Some(crate::document::SemanticSourceFacts::from_precomputed(
+            dom,
+            root,
+            nodes,
+            multiline,
+            code_blocks,
+        ));
+    }
+    if source_facts_were_provided || share_source_facts {
+        for &node in nodes.iter() {
+            in_preformatted_code[node.index()] = dom.parent(node).is_some_and(|parent| {
+                let parent_is_code = source_facts.as_ref().is_some_and(|source_facts| {
+                    source_facts.is_code_block(parent)
+                        || dom.tag(parent) == Some(Tag::Code)
+                            && source_facts.multiline_content(parent)
+                });
+                dom.tag(parent) == Some(Tag::Pre)
+                    || parent_is_code
+                    || in_preformatted_code[parent.index()]
+            });
+        }
+    }
+    let mut has_text = vec![false; dom.len()];
     for &node in nodes.iter().rev() {
         has_text[node.index()] |= dom.text_node(node).is_some_and(|text| !text.is_empty());
         if has_text[node.index()]
@@ -199,8 +254,15 @@ fn remove_empty_nodes(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
                     Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
                 ) && !has_visible_heading_content(dom, node))
         {
+            let parent = dom.parent(node);
             dom.detach(node);
+            if let Some(source_facts) = source_facts.as_mut() {
+                source_facts.node_detached(node, parent);
+            }
         }
+    }
+    if let Some(source_facts) = source_facts.as_mut() {
+        source_facts.refresh_after_cleanup(dom);
     }
 }
 
