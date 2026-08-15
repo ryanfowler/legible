@@ -47,6 +47,7 @@ mod code;
 mod compiler;
 mod figures;
 mod footnotes;
+mod headings;
 mod images;
 mod lists;
 mod math;
@@ -59,17 +60,16 @@ mod validate;
 
 pub(crate) use builder::{BuildError, DocumentBuilder};
 pub(crate) use code::{
-    class_is_semantic_evidence as code_class_is_semantic_evidence,
     count_blocks as source_code_block_count,
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
     multiline_content as code_multiline_content,
 };
 pub(crate) use compiler::{CompileContext, compile_document};
-pub(crate) use figures::class_is_semantic_evidence as figure_class_is_semantic_evidence;
 pub(crate) use footnotes::{
     Definitions as ExternalFootnoteDefinitions, adopt_external as adopt_external_footnotes,
     collect_external as collect_external_footnotes,
 };
+pub(crate) use headings::permalink_nodes as heading_permalink_nodes;
 pub(crate) use math::accessible_math_nodes;
 pub(crate) fn media_cleanup_evidence(
     dom: &crate::dom::Dom,
@@ -85,31 +85,6 @@ pub(crate) fn selected_image_sources_for_cleanup(
     images::analyze(dom, nodes, None).sources
 }
 pub(crate) use stats::DocumentStats;
-pub(crate) fn callout_class_is_semantic_evidence(
-    dom: &crate::dom::Dom,
-    node: crate::dom::NodeId,
-) -> bool {
-    callouts::class_is_semantic_evidence(dom, node)
-}
-pub(crate) fn is_local_footnote_reference(
-    dom: &crate::dom::Dom,
-    node: crate::dom::NodeId,
-    href: &str,
-) -> bool {
-    footnotes::is_local_reference(dom, node, href)
-}
-pub(crate) fn footnote_class_is_semantic_evidence(
-    dom: &crate::dom::Dom,
-    node: crate::dom::NodeId,
-) -> bool {
-    footnotes::class_is_semantic_evidence(dom, node)
-}
-pub(crate) fn math_class_is_semantic_evidence(
-    dom: &crate::dom::Dom,
-    node: crate::dom::NodeId,
-) -> bool {
-    math::class_is_semantic_evidence(dom, node)
-}
 pub(crate) fn math_source_is_protected(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
     math::is_source_evidence(dom, node)
 }
@@ -121,9 +96,7 @@ pub(crate) fn semantic_source_is_protected(
         || footnotes::is_source_evidence(dom, node)
         || math::is_source_evidence(dom, node)
 }
-pub(crate) use tables::{
-    class_is_semantic_evidence as table_class_is_semantic_evidence, repeated_listing_start,
-};
+pub(crate) use tables::repeated_listing_start;
 pub(crate) use uri::{DestinationKind, safe_destination};
 
 pub(crate) fn semantic_normalization_counts(

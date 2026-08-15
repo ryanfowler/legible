@@ -16,7 +16,7 @@ The suite measures these workloads:
 - listing and malformed pages
 - metadata-heavy pages
 - large Guardian and Wikipedia compatibility fixtures
-- normalized DOM to semantic document compilation
+- retained source DOM to semantic document compilation
 - semantic compression counts in compiler benchmark IDs
 - end-to-end raw HTML to Markdown extraction
 - lazy Markdown, text, and HTML rendering

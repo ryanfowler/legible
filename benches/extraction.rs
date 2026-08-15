@@ -154,9 +154,8 @@ fn bench_document_compile(c: &mut Criterion) {
         let html = normalized_fragment(kind, bytes);
         let dom = dom::Dom::parse_fragment(&html, dom::Tag::Div).unwrap();
         let root = dom.root();
-        let context = document::CompileContext::new(Some(
-            url::Url::parse("https://example.com/docs/page").unwrap(),
-        ));
+        let base = url::Url::parse("https://example.com/docs/page").unwrap();
+        let context = document::CompileContext::new(Some(base.clone()), Some(&base));
         let semantic_nodes = document::compile_document(&dom, root, &context)
             .unwrap()
             .len();

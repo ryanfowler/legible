@@ -1,31 +1,72 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
 
-pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
-    normalize_roles(dom, root);
+/// Removes heading controls and named placeholders that are irrelevant to quality metrics.
+pub(super) fn remove_artifacts(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
 
-    // Permalink controls are presentation. A normal link in a heading remains
-    // content, including a fragment link whose label is not a permalink glyph.
-    // Skip the per-heading subtree walk when the document has no anchors.
-    let has_anchor = dom
-        .descendants(root)
-        .any(|node| dom.tag(node) == Some(Tag::A));
-    if has_anchor {
-        for &(heading, _) in &nodes {
-            if dom.parent(heading).is_none() || !is_heading(dom.tag(heading)) {
+    // The compiler also ignores permalink controls when it compiles an
+    // arbitrary source fragment. Remove them here so DOM-based result metrics
+    // measure the same visible heading content during extraction retries. Use
+    // one ancestry index instead of scanning each heading subtree.
+    if nodes.iter().any(|&(node, _)| dom.tag(node) == Some(Tag::A)) {
+        let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+        let heading_permalinks = crate::document::heading_permalink_nodes(dom, &source_nodes);
+        let mut nearest_heading = vec![None; dom.len()];
+        let mut affected_headings = vec![false; dom.len()];
+        nearest_heading[root.index()] = heading_level(dom, root).map(|_| root);
+        let mut permalinks = SmallVec::<[NodeId; 8]>::new();
+        for &(node, _) in &nodes {
+            nearest_heading[node.index()] = if heading_level(dom, node).is_some() {
+                Some(node)
+            } else {
+                dom.parent(node)
+                    .and_then(|parent| nearest_heading[parent.index()])
+            };
+            if let Some(heading) = nearest_heading[node.index()]
+                && heading_permalinks[node.index()]
+            {
+                affected_headings[heading.index()] = true;
+                permalinks.push(node);
+            }
+        }
+        for permalink in permalinks {
+            dom.detach(permalink);
+        }
+
+        let mut first_text = vec![None; dom.len()];
+        let mut last_text = vec![None; dom.len()];
+        for node in dom.descendants(root) {
+            let Some(parent) = dom.parent(node) else {
+                continue;
+            };
+            let Some(heading) = nearest_heading[parent.index()] else {
+                continue;
+            };
+            if affected_headings[heading.index()] && dom.text_node(node).is_some() {
+                first_text[heading.index()].get_or_insert(node);
+                last_text[heading.index()] = Some(node);
+            }
+        }
+        for (heading, affected) in affected_headings.into_iter().enumerate() {
+            if !affected {
                 continue;
             }
-            let links: SmallVec<[NodeId; 4]> = dom
-                .descendants(heading)
-                .filter(|&node| dom.tag(node) == Some(Tag::A) && is_permalink(dom, node))
-                .collect();
-            let removed_permalink = !links.is_empty();
-            for link in links {
-                dom.detach(link);
+            if let Some(node) = first_text[heading] {
+                let value = dom
+                    .text_node(node)
+                    .unwrap_or_default()
+                    .trim_start()
+                    .to_owned();
+                dom.set_text(node, &value);
             }
-            if removed_permalink {
-                trim_heading_edges(dom, heading);
+            if let Some(node) = last_text[heading] {
+                let value = dom
+                    .text_node(node)
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_owned();
+                dom.set_text(node, &value);
             }
         }
     }
@@ -34,7 +75,7 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
     // remove an ordinary final heading because index pages can end in one.
     for &(heading, _) in nodes.iter().rev() {
         if dom.parent(heading).is_some()
-            && is_heading(dom.tag(heading))
+            && heading_level(dom, heading).is_some()
             && is_trailing_artifact(dom, heading)
         {
             dom.detach(heading);
@@ -69,30 +110,6 @@ pub(super) fn has_primary_role(dom: &Dom, node: NodeId) -> bool {
             .is_some_and(|level| matches!(level, 1 | 2))
 }
 
-fn trim_heading_edges(dom: &mut Dom, heading: NodeId) {
-    let text_nodes: SmallVec<[NodeId; 4]> = dom
-        .descendants(heading)
-        .filter(|&node| dom.text_node(node).is_some())
-        .collect();
-    let Some(&first) = text_nodes.first() else {
-        return;
-    };
-    let first_value = dom
-        .text_node(first)
-        .unwrap_or_default()
-        .trim_start()
-        .to_owned();
-    dom.set_text(first, &first_value);
-    if let Some(&last) = text_nodes.last() {
-        let last_value = dom
-            .text_node(last)
-            .unwrap_or_default()
-            .trim_end()
-            .to_owned();
-        dom.set_text(last, &last_value);
-    }
-}
-
 fn has_role(dom: &Dom, node: NodeId, expected: &str) -> bool {
     dom.attr(node, AttrName::Role).is_some_and(|roles| {
         roles
@@ -113,36 +130,25 @@ fn heading_tag(level: u8) -> Option<Tag> {
     }
 }
 
-fn is_heading(tag: Option<Tag>) -> bool {
-    matches!(
-        tag,
-        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-    )
-}
-
-fn is_permalink(dom: &Dom, link: NodeId) -> bool {
-    if !dom
-        .attr(link, AttrName::Href)
-        .is_some_and(|href| href.trim().starts_with('#'))
-    {
-        return false;
+fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
+    match dom.tag(node) {
+        Some(Tag::H1) => Some(1),
+        Some(Tag::H2) => Some(2),
+        Some(Tag::H3) => Some(3),
+        Some(Tag::H4) => Some(4),
+        Some(Tag::H5) => Some(5),
+        Some(Tag::H6) => Some(6),
+        _ => dom
+            .attr(node, AttrName::Role)
+            .filter(|roles| {
+                roles
+                    .split_ascii_whitespace()
+                    .any(|role| role.eq_ignore_ascii_case("heading"))
+            })
+            .and_then(|_| dom.attr_by_local_name(node, "aria-level"))
+            .and_then(|level| level.trim().parse::<u8>().ok())
+            .filter(|level| (1..=6).contains(level)),
     }
-    let label = dom.text(link);
-    let glyph_only = !label.trim().is_empty()
-        && label
-            .trim()
-            .chars()
-            .all(|character| matches!(character, '#' | '¶' | '§' | '🔗' | ' '));
-    let named_as_permalink = [AttrName::AriaLabel, AttrName::Title, AttrName::Class]
-        .into_iter()
-        .filter_map(|name| dom.attr(link, name))
-        .any(|value| {
-            let value = value.to_ascii_lowercase();
-            value.contains("permalink")
-                || value.contains("anchor-link")
-                || value.contains("heading-anchor")
-        });
-    glyph_only || named_as_permalink && label.trim().is_empty()
 }
 
 fn is_trailing_artifact(dom: &Dom, heading: NodeId) -> bool {
@@ -185,18 +191,17 @@ mod tests {
     fn normalized(html: &str) -> (Dom, NodeId) {
         let mut dom = Dom::parse_document(html).unwrap();
         let root = dom.body().unwrap();
-        normalize(&mut dom, root);
+        remove_artifacts(&mut dom, root);
         (dom, root)
     }
 
     #[test]
-    fn converts_heading_roles_and_removes_permalinks() {
+    fn removes_aria_heading_permalink_without_rewriting_the_role() {
         let (dom, root) = normalized(
             r##"<div role="heading" aria-level="2">Setup <a href="#setup">#</a></div>"##,
         );
-        let heading = dom.first_descendant_by_tag(root, Tag::H2).unwrap();
-        assert_eq!(dom.text(heading).trim(), "Setup");
-        assert!(dom.first_descendant_by_tag(root, Tag::A).is_none());
+        assert!(dom.first_descendant_by_tag(root, Tag::H2).is_none());
+        assert_eq!(dom.text(root).trim(), "Setup");
     }
 
     #[test]
@@ -212,9 +217,24 @@ mod tests {
     }
 
     #[test]
+    fn nested_heading_cleanup_uses_a_linear_ancestry_index() {
+        const DEPTH: usize = 5_000;
+        let mut html = r#"<div role="heading" aria-level="2">"#.repeat(DEPTH);
+        html.push_str(r##"Title<a href="#title">#</a>"##);
+        html.push_str(&"</div>".repeat(DEPTH));
+        let (dom, root) = normalized(&html);
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::A))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn removes_only_named_trailing_heading_artifacts() {
         let (dom, root) = normalized(
-            r#"<h2>Kept final heading</h2><h3 class="trailing-heading">Placeholder</h3>"#,
+            r#"<h2>Kept final heading</h2><div role="heading" aria-level="3" class="trailing-heading">Placeholder</div>"#,
         );
         assert_eq!(dom.text(root), "Kept final heading");
     }

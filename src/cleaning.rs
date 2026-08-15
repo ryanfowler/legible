@@ -8,8 +8,8 @@ use crate::dom::{AttrName, Dom, NodeId, NodeStats, Tag};
 use crate::page_kind::PageKind;
 use crate::scoring::{
     get_inner_text, get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
-    has_hidden_utility_class, has_single_tag_inside_element, has_static_hidden_marker,
-    is_element_without_content, is_hidden_utility_class, is_phrasing_content,
+    has_hidden_utility_class, has_static_hidden_marker, is_hidden_utility_class,
+    is_phrasing_content,
 };
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
@@ -738,49 +738,6 @@ pub fn unwrap_noscript_images(dom: &mut Dom) {
         }
         dom.insert_before(id, new_media);
         dom.detach(id);
-    }
-}
-pub fn simplify_nested_elements(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
-    nodes.clear();
-    nodes.extend(dom.descendants(root));
-    for &id in nodes.iter().rev() {
-        if !matches!(dom.tag(id), Some(Tag::Div | Tag::Section)) {
-            continue;
-        }
-        if dom
-            .attr(id, AttrName::Id)
-            .is_some_and(|value| value.starts_with("legible-content"))
-            || crate::document::code_class_is_semantic_evidence(dom, id)
-            || crate::document::figure_class_is_semantic_evidence(dom, id)
-            || crate::document::callout_class_is_semantic_evidence(dom, id)
-            || crate::document::footnote_class_is_semantic_evidence(dom, id)
-            || crate::document::math_class_is_semantic_evidence(dom, id)
-        {
-            continue;
-        }
-        if is_element_without_content(dom, id)
-            && !crate::document::math_source_is_protected(dom, id)
-        {
-            dom.detach(id);
-            continue;
-        }
-        if has_single_tag_inside_element(dom, id, Tag::Div)
-            || has_single_tag_inside_element(dom, id, Tag::Section)
-        {
-            if let Some(child) = dom.element_children(id).next() {
-                let attrs: Vec<_> = dom
-                    .attrs(id)
-                    .iter()
-                    .map(|a| (a.name.clone(), a.value.clone()))
-                    .collect();
-                for (a, v) in attrs {
-                    if dom.attr_by_local_name(child, a.local.as_ref()).is_none() {
-                        dom.set_attr_qual(child, a, v)
-                    }
-                }
-                dom.replace_with(id, child);
-            }
-        }
     }
 }
 /// Removes content that is not useful in a retained semantic fragment.

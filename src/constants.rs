@@ -47,10 +47,6 @@ pub mod regexps {
     /// Tokenizes text on word boundaries.
     pub static TOKENIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\W+").unwrap());
 
-    /// Matches srcset URL patterns.
-    pub static SRCSET_URL: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(\S+)(\s+[\d.]+[xw])?(\s*(?:,|$))").unwrap());
-
     /// RegexSet for class weight scoring - combines NEGATIVE (index 0) and POSITIVE (index 1).
     /// Allows single-pass matching instead of 4 separate regex calls.
     pub static CLASS_WEIGHT_SET: LazyLock<RegexSet> = LazyLock::new(|| {
