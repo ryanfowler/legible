@@ -100,6 +100,43 @@ pub(crate) fn semantic_source_is_protected(
 /// Returns true when a source node may carry meaning that the plain-prose
 /// compiler must preserve for semantic analysis.
 pub(crate) fn semantic_source_evidence(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
+    // Most source nodes cannot carry any of the semantic annotations below.
+    // Avoid running the recognizers for ordinary prose wrappers. This is a hot
+    // path for the plain-prose compiler and keeps the recognizer itself cheap
+    // for callers that scan a complete fragment.
+    let Some(tag) = dom.tag(node) else {
+        return false;
+    };
+    let has_class_or_id = dom.attr(node, crate::dom::AttrName::Class).is_some()
+        || dom.attr(node, crate::dom::AttrName::Id).is_some();
+    let has_role = dom.attr(node, crate::dom::AttrName::Role).is_some();
+    let has_semantic_data = [
+        "data-latex",
+        "data-tex",
+        "data-math",
+        "data-formula",
+        "data-type",
+        "data-callout",
+        "data-footnote",
+        "data-footnote-ref",
+        "data-footnotes",
+    ]
+    .into_iter()
+    .any(|name| dom.attr_by_local_name(node, name).is_some());
+    let has_semantic_tag = matches!(
+        tag,
+        crate::dom::Tag::A
+            | crate::dom::Tag::Img
+            | crate::dom::Tag::Label
+            | crate::dom::Tag::Math
+            | crate::dom::Tag::Script
+    ) || dom
+        .qual_name(node)
+        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"));
+    if !has_class_or_id && !has_role && !has_semantic_data && !has_semantic_tag {
+        return false;
+    }
+
     semantic_source_is_protected(dom, node)
         || callouts::class_is_semantic_evidence(dom, node)
         || footnotes::class_is_semantic_evidence(dom, node)
