@@ -74,16 +74,10 @@ pub(crate) fn walk_text(
     )
 }
 
-pub(crate) fn render_document_text(document: &Document) -> String {
-    walk_text(
-        document,
-        false,
-        false,
-        Some(document.stats().text_length),
-        false,
-    )
-    .0
-    .unwrap_or_default()
+pub(crate) fn render_document_text(document: &Document, capacity: usize) -> String {
+    walk_text(document, false, false, Some(capacity), false)
+        .0
+        .unwrap_or_default()
 }
 
 pub(crate) fn compute_document_stats(document: &Document) -> DocumentStats {

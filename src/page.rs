@@ -79,11 +79,7 @@ impl ExtractedPage {
 
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
-        crate::render::text::render_text(
-            &self.document,
-            self.document.text_length(),
-            &crate::render::text::TextOptions::default(),
-        )
+        self.document.text()
     }
 
     /// Renders the extracted content as canonical semantic HTML.
@@ -143,7 +139,10 @@ impl HtmlBuilder<'_> {
     /// Renders the configured HTML output.
     pub fn render(self) -> String {
         let _ = self.sanitize;
-        crate::render::html::render_html(&self.page.document, self.page.document.text_length())
+        crate::render::html::render_html(
+            &self.page.document,
+            self.page.document.output_capacity_hint(),
+        )
     }
 }
 
@@ -171,7 +170,7 @@ impl MarkdownBuilder<'_> {
     pub fn render(self) -> String {
         crate::render::markdown::render_markdown(
             &self.page.document,
-            self.page.document.text_length(),
+            self.page.document.output_capacity_hint(),
             crate::render::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
@@ -240,6 +239,44 @@ mod tests {
     }
 
     #[test]
+    fn first_markdown_render_does_not_initialize_stats() {
+        let page = extract("<main><p>Markdown output.</p></main>", None).unwrap();
+
+        assert!(!page.document().stats_initialized());
+        assert_eq!(page.markdown(), "Markdown output.\n");
+        assert!(!page.document().stats_initialized());
+    }
+
+    #[test]
+    fn first_html_render_does_not_initialize_stats() {
+        let page = extract("<main><p>HTML output.</p></main>", None).unwrap();
+
+        assert!(!page.document().stats_initialized());
+        assert_eq!(page.html(), "<div><p>HTML output.</p></div>");
+        assert!(!page.document().stats_initialized());
+    }
+
+    #[test]
+    fn first_text_render_initializes_stats_during_the_text_walk() {
+        let page = extract("<main><p>Text output.</p></main>", None).unwrap();
+
+        assert!(!page.document().stats_initialized());
+        assert_eq!(page.text(), "Text output.");
+        assert!(page.document().stats_initialized());
+        assert_eq!(page.text_length(), 12);
+        assert_eq!(page.word_count(), 2);
+    }
+
+    #[test]
+    fn cached_stats_keep_text_rendering_deterministic() {
+        let page = extract("<main><p>Cached text.</p></main>", None).unwrap();
+
+        assert_eq!(page.word_count(), 2);
+        assert_eq!(page.text(), "Cached text.");
+        assert_eq!(page.text(), "Cached text.");
+    }
+
+    #[test]
     fn semantic_metrics_are_cached_on_the_document() {
         let page = extract("<main><p>Markdown only output.</p></main>", None).unwrap();
 
@@ -274,6 +311,18 @@ mod tests {
         assert!(markdown.contains("Hello world."));
         assert!(!markdown.contains("]("));
         assert!(!markdown.contains("!["));
+    }
+
+    #[test]
+    fn disabled_images_do_not_make_an_image_only_heading_visible() {
+        let page = extract(
+            "<main><h2><img src='diagram.png' alt='Diagram'></h2><p>Content.</p></main>",
+            None,
+        )
+        .unwrap();
+        let markdown = page.markdown_builder().images(false).render();
+
+        assert_eq!(markdown, "Content.\n");
     }
 
     #[test]

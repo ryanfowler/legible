@@ -216,6 +216,7 @@ pub struct Document {
     nodes: Vec<ArenaNode>,
     roots: Vec<DocumentNodeId>,
     footnotes: Vec<FootnoteRecord>,
+    output_capacity_hint: usize,
     stats: OnceLock<DocumentStats>,
 }
 
@@ -237,7 +238,14 @@ impl Document {
 
     /// Returns the normalized text for the complete document.
     pub fn text(&self) -> String {
-        stats::render_document_text(self)
+        if let Some(stats) = self.stats.get() {
+            return stats::render_document_text(self, stats.text_length);
+        }
+
+        let (text, stats) =
+            stats::walk_text(self, false, false, Some(self.output_capacity_hint), true);
+        let _ = self.stats.set(stats);
+        text.unwrap_or_default()
     }
 
     /// Returns the number of characters in [`Self::text`].
@@ -394,6 +402,15 @@ impl Document {
         self.nodes.capacity()
     }
 
+    pub(crate) fn output_capacity_hint(&self) -> usize {
+        self.output_capacity_hint
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats_initialized(&self) -> bool {
+        self.stats.get().is_some()
+    }
+
     pub(crate) fn node_slot_size() -> usize {
         std::mem::size_of::<ArenaNode>()
     }
@@ -508,6 +525,36 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
+    fn output_capacity_hint(&self) -> usize {
+        match self {
+            Self::Text(text) | Self::InlineCode(text) => text.0.len(),
+            Self::CodeBlock(code) => code
+                .text
+                .len()
+                .saturating_add(optional_boxed_str_len(&code.language)),
+            Self::Link(link) => link
+                .destination
+                .len()
+                .saturating_add(optional_boxed_str_len(&link.title)),
+            Self::Image(image) => image
+                .source
+                .len()
+                .saturating_add(image.alt.len())
+                .saturating_add(optional_boxed_str_len(&image.title)),
+            Self::Callout(callout) => optional_boxed_str_len(&callout.title),
+            Self::TaskMarker(marker) => optional_boxed_str_len(&marker.fallback_label),
+            Self::InlineMath(math) | Self::DisplayMath(math) => math
+                .source
+                .len()
+                .saturating_add(optional_boxed_str_len(&math.fallback_text)),
+            Self::Media(media) => media
+                .source
+                .len()
+                .saturating_add(optional_boxed_str_len(&media.title)),
+            _ => 0,
+        }
+    }
+
     fn retained_value_bytes(&self) -> usize {
         match self {
             Self::Text(text) | Self::InlineCode(text) => text.0.capacity(),
