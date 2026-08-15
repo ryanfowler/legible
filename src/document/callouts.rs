@@ -58,18 +58,22 @@ impl CalloutAnalysis {
     }
 }
 
-/// Returns true when cleanup must retain source evidence for compilation.
-pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {
+/// Returns source and candidate callout evidence from one bounded check.
+pub(crate) fn source_evidence(dom: &Dom, node: NodeId) -> (bool, bool) {
     if !matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section)) {
-        return false;
+        return (false, false);
     }
     let (structural, kind) = callout_evidence(dom, node);
-    structural && kind.is_some()
+    (structural && kind.is_some(), kind.is_some())
+}
+
+/// Returns true when cleanup must retain source evidence for compilation.
+pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {
+    source_evidence(dom, node).0
 }
 
 pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {
-    matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
-        && callout_evidence(dom, node).1.is_some()
+    source_evidence(dom, node).1
 }
 
 fn callout_evidence(dom: &Dom, node: NodeId) -> (bool, Option<&'static str>) {

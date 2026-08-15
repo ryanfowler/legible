@@ -151,8 +151,12 @@ pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         }
     }
 }
-fn is_directly_protected(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
-    crate::document::semantic_source_is_protected(dom, id)
+fn is_directly_protected(
+    dom: &Dom,
+    id: NodeId,
+    evidence: &crate::document::SourceEvidence,
+) -> bool {
+    evidence.is_semantic_source(id)
         || dom.attr(id, AttrName::DataFootnote).is_some()
         || dom.attr(id, AttrName::DataFootnotes).is_some()
         || dom.attr(id, AttrName::DataMath).is_some()
@@ -169,27 +173,26 @@ fn is_directly_protected(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateSto
                     | Tag::Dl
             )
         )
-        || dom.tag(id) == Some(Tag::Table) && store.is_data_table(id) == Some(true)
+        || dom.tag(id) == Some(Tag::Table) && evidence.data_table(id)
 }
 
-fn is_protected_content(dom: &Dom, id: NodeId, store: &crate::dom::NodeStateStore) -> bool {
+fn is_protected_content(dom: &Dom, id: NodeId, evidence: &crate::document::SourceEvidence) -> bool {
     std::iter::once(id)
         .chain(dom.ancestors(id))
-        .any(|node| is_directly_protected(dom, node, store))
+        .any(|node| is_directly_protected(dom, node, evidence))
 }
 
 fn protected_masks(
     dom: &Dom,
     root: NodeId,
-    store: &crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
 ) -> (Vec<bool>, Vec<bool>) {
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    let accessible_math = crate::document::accessible_math_nodes(dom, &snapshot);
     let mut directly_protected = vec![false; dom.len()];
-    directly_protected[root.index()] = is_directly_protected(dom, root, store);
+    directly_protected[root.index()] = is_directly_protected(dom, root, evidence);
     for &(node, _) in &snapshot {
         directly_protected[node.index()] =
-            is_directly_protected(dom, node, store) || accessible_math[node.index()];
+            is_directly_protected(dom, node, evidence) || evidence.accessible_math(node);
     }
     let mut contains_protected = vec![false; dom.len()];
     for &(node, _) in snapshot.iter().rev() {
@@ -219,11 +222,11 @@ fn has_protected_ancestor(
     dom: &Dom,
     id: NodeId,
     root: NodeId,
-    store: &crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
 ) -> bool {
     dom.ancestors(id)
         .take_while(|&ancestor| ancestor != root)
-        .any(|ancestor| is_protected_content(dom, ancestor, store))
+        .any(|ancestor| is_protected_content(dom, ancestor, evidence))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -807,13 +810,13 @@ pub(crate) fn hard_cleanup(
     root: NodeId,
     allowed_media: &Regex,
     relax_static_visibility: bool,
+    evidence: &crate::document::SourceEvidence,
     nodes: &mut Vec<NodeId>,
 ) {
     nodes.clear();
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
     nodes.extend(snapshot.iter().map(|(node, _)| *node));
     let (media_sources, _) = crate::document::media_cleanup_evidence(dom, nodes);
-    let accessible_math = crate::document::accessible_math_nodes(dom, &snapshot);
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_none() {
             continue;
@@ -847,8 +850,7 @@ pub(crate) fn hard_cleanup(
                         class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
                     })
                 });
-        let math_source =
-            crate::document::math_source_is_protected(dom, node) || accessible_math[node.index()];
+        let math_source = evidence.math(node) || evidence.accessible_math(node);
         let hidden =
             dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image && !math_source
                 || !relax_static_visibility && static_visibility && !math_source
@@ -918,7 +920,7 @@ pub(crate) fn hard_cleanup(
             tag,
             Tag::Input | Tag::Textarea | Tag::Select | Tag::Button | Tag::Datalist | Tag::Option
         ) && !content_checkbox
-            && !crate::document::semantic_source_is_protected(dom, node);
+            && !evidence.is_semantic_source(node);
         let disallowed_embed = matches!(tag, Tag::Object | Tag::Embed | Tag::Iframe)
             && !has_allowed_media(dom, node, allowed_media)
             && !media_sources[node.index()];
@@ -937,6 +939,7 @@ pub(crate) fn heuristic_cleanup(
     root: NodeId,
     page_kind: PageKind,
     store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
 ) {
@@ -1002,7 +1005,6 @@ pub(crate) fn heuristic_cleanup(
         }
     }
 
-    mark_data_tables(dom, root, store, &mut Vec::new());
     if remove_explicit_peripheral_sections(dom, root, &snapshot, &link_counts, store) {
         store.clear_stats();
     }
@@ -1012,14 +1014,14 @@ pub(crate) fn heuristic_cleanup(
     if remove_job_company_profiles(dom, root, page_kind, &snapshot, store) {
         store.clear_stats();
     }
-    if remove_direct_peripheral_siblings(dom, root, &snapshot, &link_counts, store) {
+    if remove_direct_peripheral_siblings(dom, root, &snapshot, &link_counts, store, evidence) {
         store.clear_stats();
     }
     let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
     let protected_masks = snapshot
         .iter()
         .any(|&(_, depth)| depth > 64)
-        .then(|| protected_masks(dom, root, store));
+        .then(|| protected_masks(dom, root, evidence));
 
     // Keep only outermost candidates. A classifier can inspect the complete
     // subtree once instead of rescanning every nested wrapper.
@@ -1050,8 +1052,8 @@ pub(crate) fn heuristic_cleanup(
                 .as_ref()
                 .is_some_and(|(_, path)| path[node.index()])
             || protected_masks.is_none()
-                && (is_protected_content(dom, node, store)
-                    || has_protected_ancestor(dom, node, root, store))
+                && (is_protected_content(dom, node, evidence)
+                    || has_protected_ancestor(dom, node, root, evidence))
         {
             continue;
         }
@@ -1079,7 +1081,7 @@ pub(crate) fn heuristic_cleanup(
         let protected = protected_masks.as_ref().map_or_else(
             || {
                 dom.descendants(node)
-                    .any(|descendant| is_protected_content(dom, descendant, store))
+                    .any(|descendant| is_protected_content(dom, descendant, evidence))
             },
             |(subtrees, _)| subtrees[node.index()],
         );
@@ -1294,13 +1296,13 @@ pub(crate) fn heuristic_cleanup(
                 && !job_profile
                 && !collection_promotion
             {
-                hoist_protected_children(dom, node, store);
+                hoist_protected_children(dom, node, store, evidence);
             }
             detach_and_invalidate_stats(dom, node, store);
         }
     }
 
-    remove_contextual_boilerplate(dom, root, store, text_buffer, nodes);
+    remove_contextual_boilerplate(dom, root, store, evidence, text_buffer, nodes);
 }
 
 /// Removes document-level navigation and footer material that survives root
@@ -1315,6 +1317,7 @@ pub(crate) fn remove_global_chrome(
     dom: &mut Dom,
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
 ) -> bool {
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
     if snapshot.is_empty() {
@@ -1370,6 +1373,9 @@ pub(crate) fn remove_global_chrome(
                 .get(&aggregate.signature)
                 .is_some_and(|count| *count >= 2);
         if !semantic_navigation && !named_chrome && !repeated {
+            continue;
+        }
+        if evidence.contains_semantic(node) {
             continue;
         }
         let stats = get_or_compute_stats(dom, node, store);
@@ -2305,6 +2311,7 @@ fn remove_direct_peripheral_siblings(
     snapshot: &[(NodeId, u32)],
     link_counts: &[u8],
     store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
 ) -> bool {
     let mut seen = vec![false; dom.len()];
     seen[root.index()] = true;
@@ -2324,12 +2331,12 @@ fn remove_direct_peripheral_siblings(
         if dom.parent(parent).is_none() && parent != root {
             continue;
         }
-        if is_protected_content(dom, parent, store)
-            || has_protected_ancestor(dom, parent, root, store)
+        if is_protected_content(dom, parent, evidence)
+            || has_protected_ancestor(dom, parent, root, evidence)
         {
             continue;
         }
-        changed |= remove_direct_peripheral_children(dom, parent, link_counts, store);
+        changed |= remove_direct_peripheral_children(dom, parent, link_counts, store, evidence);
     }
     changed
 }
@@ -2339,6 +2346,7 @@ fn remove_direct_peripheral_children(
     parent: NodeId,
     link_counts: &[u8],
     store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
 ) -> bool {
     let parent_name = node_name(dom, parent);
     let children: Vec<_> = dom.element_children(parent).collect();
@@ -2361,7 +2369,7 @@ fn remove_direct_peripheral_children(
             }
             let stats = get_or_compute_stats(dom, sibling, store);
             let sibling_links = link_counts[sibling.index()];
-            if is_protected_content(dom, sibling, store)
+            if is_protected_content(dom, sibling, evidence)
                 || sibling_links == 0 && stats.has_non_whitespace
             {
                 break;
@@ -2412,14 +2420,14 @@ fn remove_direct_peripheral_children(
     let mut changed = false;
     for (&node, remove) in children.iter().zip(remove) {
         if remove && dom.parent(node).is_some() {
-            if is_protected_content(dom, node, store) {
+            if is_protected_content(dom, node, evidence) {
                 continue;
             }
             let protected = dom
                 .descendants(node)
-                .any(|descendant| is_protected_content(dom, descendant, store));
+                .any(|descendant| is_protected_content(dom, descendant, evidence));
             if protected {
-                hoist_protected_children(dom, node, store);
+                hoist_protected_children(dom, node, store, evidence);
             }
             detach_and_invalidate_stats(dom, node, store);
             changed = true;
@@ -3093,6 +3101,7 @@ fn remove_contextual_boilerplate(
     dom: &mut Dom,
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
 ) {
@@ -3116,7 +3125,7 @@ fn remove_contextual_boilerplate(
     get_or_compute_stats(dom, root, store);
 
     for &node in nodes.iter().rev() {
-        if dom.parent(node).is_none() || is_protected_content(dom, node, store) {
+        if dom.parent(node).is_none() || is_protected_content(dom, node, evidence) {
             continue;
         }
         if store
@@ -3213,15 +3222,16 @@ fn hoist_protected_children(
     dom: &mut Dom,
     wrapper: NodeId,
     store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
 ) {
     let protected: SmallVec<[NodeId; 4]> = dom
         .descendants(wrapper)
         .filter(|&node| {
-            is_protected_content(dom, node, store)
+            is_protected_content(dom, node, evidence)
                 && !dom
                     .ancestors(node)
                     .take_while(|&ancestor| ancestor != wrapper)
-                    .any(|ancestor| is_protected_content(dom, ancestor, store))
+                    .any(|ancestor| is_protected_content(dom, ancestor, evidence))
         })
         .collect();
     for node in protected {
@@ -3757,12 +3767,15 @@ mod tests {
         let mut text = String::new();
         let allowed = Regex::new("video\\.example").unwrap();
         clean_styles(&mut dom, root, &mut nodes);
-        hard_cleanup(&mut dom, root, &allowed, false, &mut nodes);
+        mark_data_tables(&dom, root, &mut store, &mut nodes);
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &store);
+        hard_cleanup(&mut dom, root, &allowed, false, &evidence, &mut nodes);
         heuristic_cleanup(
             &mut dom,
             root,
             PageKind::Unknown,
             &mut store,
+            &evidence,
             &mut text,
             &mut nodes,
         );
@@ -3822,11 +3835,13 @@ mod tests {
         )
         .unwrap();
         let root = dom.root();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
         hard_cleanup(
             &mut dom,
             root,
             &Regex::new("$").unwrap(),
             false,
+            &evidence,
             &mut Vec::new(),
         );
         let inputs: Vec<_> = dom
@@ -4017,11 +4032,13 @@ mod tests {
         .unwrap();
         let root = dom.root();
         let image = dom.first_descendant_by_tag(root, Tag::Img).unwrap();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
         hard_cleanup(
             &mut dom,
             root,
             &Regex::new("$").unwrap(),
             false,
+            &evidence,
             &mut Vec::new(),
         );
         assert!(dom.parent(image).is_some());
@@ -4046,11 +4063,13 @@ mod tests {
         )
         .unwrap();
         let root = dom.root();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
         hard_cleanup(
             &mut dom,
             root,
             &Regex::new("$").unwrap(),
             false,
+            &evidence,
             &mut Vec::new(),
         );
         assert!(dom.first_descendant_by_tag(root, Tag::Img).is_some());

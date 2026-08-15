@@ -1,6 +1,7 @@
 //! Shared source facts for complex semantic compilation.
 
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
+use std::collections::HashSet;
 
 use super::compiler::{heading_level, is_block_tag};
 
@@ -52,6 +53,357 @@ pub(super) struct FeatureInventory {
     pub(super) callouts: Vec<NodeId>,
     pub(super) math: Vec<NodeId>,
     pub(super) footnotes: Vec<NodeId>,
+}
+
+/// Dense source evidence shared by cleanup and semantic compilation.
+///
+/// The recognizers for rich source semantics are deliberately run once for a
+/// retained fragment. Cleanup only detaches nodes, so these source-relative
+/// facts remain valid while the fragment is reduced and compiled.
+pub(crate) struct SourceEvidence {
+    callout: Vec<bool>,
+    callout_candidate: Vec<bool>,
+    footnote: Vec<bool>,
+    footnote_candidate: Vec<bool>,
+    math: Vec<bool>,
+    accessible_math: Vec<bool>,
+    contains_semantic: Vec<bool>,
+    data_table: Vec<bool>,
+}
+
+impl SourceEvidence {
+    pub(crate) fn analyze(dom: &Dom, root: NodeId, store: &NodeStateStore) -> Self {
+        let mut nodes = Vec::with_capacity(dom.len());
+        nodes.push((root, 0));
+        nodes.extend(dom.element_descendants_snapshot_with_depth(root));
+        const CALLOUT: u8 = 1 << 0;
+        const FOOTNOTE: u8 = 1 << 1;
+        const MATH: u8 = 1 << 2;
+        let fragment_ids: HashSet<&str> = nodes
+            .iter()
+            .filter_map(|&(node, _)| dom.attr(node, AttrName::Id))
+            .collect();
+        let mut gated = Vec::new();
+        let mut table_nodes = Vec::new();
+        for &(node, _) in &nodes {
+            if dom.tag(node) == Some(Tag::Table) {
+                table_nodes.push(node);
+            }
+            let mut gate = 0;
+            if may_have_callout_evidence(dom, node) {
+                gate |= CALLOUT;
+            }
+            if has_footnote_source_gate(dom, node, &fragment_ids) {
+                gate |= FOOTNOTE;
+            }
+            if may_have_math_evidence(dom, node) {
+                gate |= MATH;
+            }
+            if gate != 0 {
+                gated.push((node, gate));
+            }
+        }
+        if gated.is_empty() && table_nodes.is_empty() {
+            return Self {
+                callout: Vec::new(),
+                callout_candidate: Vec::new(),
+                footnote: Vec::new(),
+                footnote_candidate: Vec::new(),
+                math: Vec::new(),
+                accessible_math: Vec::new(),
+                contains_semantic: Vec::new(),
+                data_table: Vec::new(),
+            };
+        }
+
+        let has_math_candidate = gated.iter().any(|&(_, gate)| gate & MATH != 0);
+        let has_callout_candidate = gated.iter().any(|&(_, gate)| gate & CALLOUT != 0);
+        let has_footnote_candidate = gated.iter().any(|&(_, gate)| gate & FOOTNOTE != 0);
+        let mut callout = if has_callout_candidate {
+            vec![false; dom.len()]
+        } else {
+            Vec::new()
+        };
+        let mut callout_candidate = if has_callout_candidate {
+            vec![false; dom.len()]
+        } else {
+            Vec::new()
+        };
+        let mut footnote = if has_footnote_candidate {
+            vec![false; dom.len()]
+        } else {
+            Vec::new()
+        };
+        let mut footnote_candidate = if has_footnote_candidate {
+            vec![false; dom.len()]
+        } else {
+            Vec::new()
+        };
+        let mut math = if has_math_candidate {
+            vec![false; dom.len()]
+        } else {
+            Vec::new()
+        };
+        let mut data_table = if !table_nodes.is_empty() {
+            vec![false; dom.len()]
+        } else {
+            Vec::new()
+        };
+
+        let has_semantic_candidates = !gated.is_empty();
+        let has_protected_candidates = has_semantic_candidates || !table_nodes.is_empty();
+        for (node, gate) in gated {
+            if gate & CALLOUT != 0 {
+                let (source, candidate) = super::callouts::source_evidence(dom, node);
+                let explicit = dom.attr(node, AttrName::DataCallout).is_some()
+                    || dom.attr_by_local_name(node, "data-callout").is_some();
+                callout[node.index()] = source || explicit;
+                callout_candidate[node.index()] = candidate || explicit;
+            }
+            if gate & FOOTNOTE != 0 {
+                let explicit = dom.attr(node, AttrName::DataFootnote).is_some()
+                    || dom.attr(node, AttrName::DataFootnoteRef).is_some()
+                    || dom.attr(node, AttrName::DataFootnotes).is_some()
+                    || dom.attr_by_local_name(node, "data-footnote").is_some()
+                    || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
+                    || dom.attr_by_local_name(node, "data-footnotes").is_some();
+                footnote[node.index()] =
+                    super::footnotes::is_source_evidence(dom, node) || explicit;
+                footnote_candidate[node.index()] =
+                    super::footnotes::has_possible_footnote_evidence(dom, node) || explicit;
+            }
+            if gate & MATH != 0 {
+                math[node.index()] = super::math::is_source_evidence(dom, node);
+            }
+        }
+        for node in table_nodes {
+            data_table[node.index()] = store.is_data_table(node) == Some(true);
+        }
+
+        let accessible_math = if has_math_candidate {
+            super::math::accessible_math_nodes(dom, &nodes)
+        } else {
+            Vec::new()
+        };
+        let mut contains_semantic = if !has_protected_candidates {
+            Vec::new()
+        } else {
+            vec![false; dom.len()]
+        };
+        for &(node, _) in nodes.iter().rev() {
+            let mut value = callout.get(node.index()).copied().unwrap_or(false)
+                || footnote.get(node.index()).copied().unwrap_or(false)
+                || math.get(node.index()).copied().unwrap_or(false)
+                || accessible_math.get(node.index()).copied().unwrap_or(false)
+                || data_table.get(node.index()).copied().unwrap_or(false);
+            for child in dom.element_children(node) {
+                value |= contains_semantic[child.index()];
+            }
+            contains_semantic[node.index()] = value;
+        }
+        Self {
+            callout,
+            callout_candidate,
+            footnote,
+            footnote_candidate,
+            math,
+            accessible_math,
+            contains_semantic,
+            data_table,
+        }
+    }
+
+    pub(crate) fn callout(&self, node: NodeId) -> bool {
+        self.callout.get(node.index()).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn callout_candidate(&self, node: NodeId) -> bool {
+        self.callout_candidate
+            .get(node.index())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn footnote(&self, node: NodeId) -> bool {
+        self.footnote.get(node.index()).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn footnote_candidate(&self, node: NodeId) -> bool {
+        self.footnote_candidate
+            .get(node.index())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn math(&self, node: NodeId) -> bool {
+        self.math.get(node.index()).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn accessible_math(&self, node: NodeId) -> bool {
+        self.accessible_math
+            .get(node.index())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn contains_semantic(&self, node: NodeId) -> bool {
+        self.contains_semantic
+            .get(node.index())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn data_table(&self, node: NodeId) -> bool {
+        self.data_table.get(node.index()).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn is_semantic_source(&self, node: NodeId) -> bool {
+        self.callout(node) || self.footnote(node) || self.math(node) || self.accessible_math(node)
+    }
+}
+
+fn may_have_callout_evidence(dom: &Dom, node: NodeId) -> bool {
+    dom.attr(node, AttrName::DataCallout).is_some()
+        || dom.attr_by_local_name(node, "data-callout").is_some()
+        || matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+            && (dom
+                .attr(node, AttrName::Role)
+                .is_some_and(likely_callout_name)
+                || [AttrName::Class, AttrName::Id]
+                    .into_iter()
+                    .filter_map(|attribute| dom.attr(node, attribute))
+                    .any(likely_callout_name))
+}
+
+fn has_footnote_attributes(dom: &Dom, node: NodeId) -> bool {
+    dom.attr(node, AttrName::DataFootnote).is_some()
+        || dom.attr(node, AttrName::DataFootnoteRef).is_some()
+        || dom.attr(node, AttrName::DataFootnotes).is_some()
+        || dom.attr_by_local_name(node, "data-footnote").is_some()
+        || dom.attr_by_local_name(node, "data-footnotes").is_some()
+        || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
+        || dom
+            .attr_by_local_name(node, "data-type")
+            .is_some_and(likely_footnote_name)
+        || [AttrName::Class, AttrName::Id, AttrName::Role, AttrName::Rel]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(node, attribute))
+            .any(likely_footnote_name)
+}
+
+fn fragment_target(dom: &Dom, node: NodeId) -> Option<&str> {
+    dom.tag(node)
+        .is_some_and(|tag| tag == Tag::A)
+        .then(|| dom.attr(node, AttrName::Href))
+        .flatten()
+        .and_then(|href| href.trim().rsplit_once('#').map(|(_, target)| target))
+        .filter(|target| !target.is_empty())
+}
+
+fn has_footnote_source_gate(dom: &Dom, node: NodeId, fragment_ids: &HashSet<&str>) -> bool {
+    has_footnote_attributes(dom, node)
+        || fragment_target(dom, node).is_some_and(|target| fragment_ids.contains(target))
+        || dom
+            .attr(node, AttrName::Id)
+            .is_some_and(|id| fragment_ids.contains(id))
+}
+
+fn may_have_math_evidence(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::Math)
+        || dom.tag(node) == Some(Tag::Script)
+            && dom.attr(node, AttrName::Type).is_some_and(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                value == "text/tex" || value == "math/tex" || value.starts_with("math/tex;")
+            })
+        || dom.tag(node) == Some(Tag::Img)
+            && ([AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|attribute| dom.attr(node, attribute))
+                .any(likely_math_name)
+                || dom
+                    .attr(node, AttrName::Src)
+                    .is_some_and(likely_math_source))
+        || dom.qual_name(node).is_some_and(|name| {
+            let local = name.local.as_ref();
+            local.eq_ignore_ascii_case("annotation") || local.eq_ignore_ascii_case("mjx-container")
+        })
+        || dom.attr_by_local_name(node, "data-latex").is_some()
+        || dom.attr_by_local_name(node, "data-tex").is_some()
+        || dom.attr(node, AttrName::DataMath).is_some()
+        || dom.attr_by_local_name(node, "data-math").is_some()
+        || dom.attr_by_local_name(node, "data-formula").is_some()
+        || [AttrName::Class, AttrName::Id]
+            .into_iter()
+            .filter_map(|attribute| dom.attr(node, attribute))
+            .any(likely_math_name)
+}
+
+fn has_name_token(value: &str, names: &[&str]) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            !token.is_empty()
+                && names.iter().any(|name| {
+                    token.eq_ignore_ascii_case(name)
+                        || token
+                            .get(..name.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+                })
+        })
+}
+
+fn likely_callout_name(value: &str) -> bool {
+    has_name_token(
+        value,
+        &[
+            "admonition",
+            "callout",
+            "alert",
+            "note",
+            "warning",
+            "caution",
+            "important",
+            "danger",
+            "tip",
+            "info",
+        ],
+    )
+}
+
+fn likely_footnote_name(value: &str) -> bool {
+    has_name_token(
+        value,
+        &[
+            "foot",
+            "fn",
+            "sn",
+            "note",
+            "noteref",
+            "backref",
+            "endnote",
+            "sidenote",
+            "marginnote",
+            "reference",
+            "refnote",
+            "cite",
+            "ftn",
+            "ftnt",
+        ],
+    )
+}
+
+fn likely_math_name(value: &str) -> bool {
+    has_name_token(
+        value,
+        &[
+            "math", "katex", "mathjax", "tex2jax", "equation", "formula", "latex",
+        ],
+    )
+}
+
+fn likely_math_source(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("equation") || value.contains("formula")
 }
 
 /// Source facts that cleanup and semantic compilation can share.
@@ -281,7 +633,7 @@ pub(super) struct SemanticFacts {
 impl SemanticFacts {
     /// Scans source evidence in preorder and propagates generic facts in reverse order.
     pub(super) fn analyze(dom: &Dom, root: NodeId) -> Self {
-        Self::analyze_with_source_facts(dom, root, None)
+        Self::analyze_with_source_facts(dom, root, None, None)
     }
 
     /// Scans source evidence while reusing facts computed before final cleanup.
@@ -289,6 +641,7 @@ impl SemanticFacts {
         dom: &Dom,
         root: NodeId,
         source_facts: Option<&SemanticSourceFacts>,
+        source_evidence: Option<&SourceEvidence>,
     ) -> Self {
         let mut nodes = Vec::with_capacity(dom.len());
         nodes.push(root);
@@ -339,17 +692,24 @@ impl SemanticFacts {
             if tag == Tag::Table {
                 inventory.tables.push(node);
             }
-            if matches!(tag, Tag::Aside | Tag::Div | Tag::Section)
-                && super::callouts::class_is_semantic_evidence(dom, node)
+            if source_evidence.is_some_and(|evidence| evidence.callout_candidate(node))
+                || source_evidence.is_none()
+                    && matches!(tag, Tag::Aside | Tag::Div | Tag::Section)
+                    && super::callouts::class_is_semantic_evidence(dom, node)
             {
                 inventory.callouts.push(node);
             }
-            if super::math::is_source_evidence(dom, node)
-                || super::math::class_is_semantic_evidence(dom, node)
+            if source_evidence.is_some_and(|evidence| evidence.math(node))
+                || source_evidence.is_none()
+                    && (super::math::is_source_evidence(dom, node)
+                        || super::math::class_is_semantic_evidence(dom, node))
             {
                 inventory.math.push(node);
             }
-            if super::footnotes::has_possible_footnote_evidence(dom, node) {
+            if source_evidence.is_some_and(|evidence| evidence.footnote_candidate(node))
+                || source_evidence.is_none()
+                    && super::footnotes::has_possible_footnote_evidence(dom, node)
+            {
                 inventory.footnotes.push(node);
             }
         }
@@ -622,6 +982,49 @@ fn is_permalink_glyph(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_evidence_is_dense_and_reuses_semantic_gates() {
+        let dom = Dom::parse_fragment(
+            r##"<div><p class="ordinary">Text</p><aside class="admonition warning"><p>Warning</p></aside><p data-latex="x^2">x squared</p><p><a role="doc-noteref" href="#note">1</a></p><p><a href="article.html#fn1">2</a></p><aside id="note" role="doc-footnote">A note.</aside><p id="fn1">A second note.</p><table role="table"><tr><th>Value</th></tr></table></div>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let mut store = NodeStateStore::new();
+        let mut tables = Vec::new();
+        crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut tables);
+        let evidence = SourceEvidence::analyze(&dom, dom.root(), &store);
+        let ordinary = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Class) == Some("ordinary"))
+            .unwrap();
+        let warning = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Class) == Some("admonition warning"))
+            .unwrap();
+        let math = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::DataLatex).is_some())
+            .unwrap();
+        let conventional_reference = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Href) == Some("article.html#fn1"))
+            .unwrap();
+        let conventional_definition = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("fn1"))
+            .unwrap();
+        let table = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Table))
+            .unwrap();
+        assert!(!evidence.is_semantic_source(ordinary));
+        assert!(evidence.callout_candidate(warning));
+        assert!(evidence.math(math));
+        assert!(evidence.footnote_candidate(conventional_reference));
+        assert!(evidence.footnote_candidate(conventional_definition));
+        assert!(evidence.data_table(table));
+    }
 
     #[test]
     fn inventories_features_and_propagates_shared_facts() {

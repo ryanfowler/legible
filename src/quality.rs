@@ -176,7 +176,7 @@ impl ContentMetrics {
         let mut metrics = Self::measure_dom(dom, root);
         if std::iter::once(root)
             .chain(dom.descendants(root))
-            .any(|node| crate::document::semantic_source_evidence(dom, node))
+            .any(|node| crate::document::semantic_source_evidence(dom, node, None))
         {
             // Preserve enough context to avoid rejecting short semantic
             // content before the compiler can classify it.

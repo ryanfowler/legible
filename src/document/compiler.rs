@@ -8,7 +8,7 @@ use super::{
     DocumentNodeId, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media,
     NodeKind, Table, TableAlignment, TableCell, TaskMarker, ValidationError, safe_destination,
 };
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompileContext {
@@ -112,10 +112,27 @@ pub(crate) fn compile_document_with_optional_source_facts(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
 ) -> Result<Document, CompileError> {
-    if let Some(inventory) = super::ordinary::inventory(dom, root) {
-        return super::ordinary::compile(dom, root, context, &inventory);
+    compile_document_with_optional_source_facts_and_evidence(dom, root, context, source_facts, None)
+}
+
+pub(crate) fn compile_document_with_optional_source_facts_and_evidence(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: Option<&super::facts::SourceEvidence>,
+) -> Result<Document, CompileError> {
+    let owned_evidence;
+    let source_evidence = if let Some(source_evidence) = source_evidence {
+        source_evidence
+    } else {
+        owned_evidence = super::facts::SourceEvidence::analyze(dom, root, &NodeStateStore::new());
+        &owned_evidence
+    };
+    if let Some(inventory) = super::ordinary::inventory(dom, root, source_evidence) {
+        return super::ordinary::compile(dom, root, context, &inventory, source_evidence);
     }
-    compile_complex_document(dom, root, context, source_facts)
+    compile_complex_document(dom, root, context, source_facts, source_evidence)
 }
 
 /// Compiles and releases an owned retained-source fragment.
@@ -138,7 +155,29 @@ pub(crate) fn compile_document_owned_with_optional_source_facts(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
 ) -> Result<Document, CompileError> {
-    compile_document_with_optional_source_facts(&dom, root, context, source_facts)
+    compile_document_with_optional_source_facts_and_evidence(
+        &dom,
+        root,
+        context,
+        source_facts,
+        None,
+    )
+}
+
+pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
+    dom: Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: &super::facts::SourceEvidence,
+) -> Result<Document, CompileError> {
+    compile_document_with_optional_source_facts_and_evidence(
+        &dom,
+        root,
+        context,
+        source_facts,
+        Some(source_evidence),
+    )
 }
 
 fn compile_complex_document(
@@ -146,8 +185,14 @@ fn compile_complex_document(
     root: NodeId,
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: &super::facts::SourceEvidence,
 ) -> Result<Document, CompileError> {
-    let mut facts = super::facts::SemanticFacts::analyze_with_source_facts(dom, root, source_facts);
+    let mut facts = super::facts::SemanticFacts::analyze_with_source_facts(
+        dom,
+        root,
+        source_facts,
+        Some(source_evidence),
+    );
     let images = super::images::analyze_with_inventory(
         dom,
         facts.nodes(),
@@ -172,10 +217,11 @@ fn compile_complex_document(
         root,
         &facts.inventory().footnotes,
     );
-    let math = super::math::MathAnalysis::analyze_with_inventory(
+    let math = super::math::MathAnalysis::analyze_with_inventory_and_evidence(
         dom,
         facts.nodes(),
         &facts.inventory().math,
+        Some(source_evidence),
     );
     if !facts.inventory().math.is_empty() || !facts.inventory().footnotes.is_empty() {
         facts.include_semantic_meaning(dom, |node| {
@@ -1257,11 +1303,20 @@ mod tests {
         let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
         let base = base.map(|value| Url::parse(value).unwrap());
         let context = CompileContext::new(base.clone(), base.as_ref());
-        let inventory = super::super::ordinary::inventory(&dom, dom.root())
+        let source_evidence =
+            super::super::facts::SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
+        let inventory = super::super::ordinary::inventory(&dom, dom.root(), &source_evidence)
             .expect("source must support ordinary compilation");
-        let ordinary =
-            super::super::ordinary::compile(&dom, dom.root(), &context, &inventory).unwrap();
-        let complex = compile_complex_document(&dom, dom.root(), &context, None).unwrap();
+        let ordinary = super::super::ordinary::compile(
+            &dom,
+            dom.root(),
+            &context,
+            &inventory,
+            &source_evidence,
+        )
+        .unwrap();
+        let complex =
+            compile_complex_document(&dom, dom.root(), &context, None, &source_evidence).unwrap();
         assert_eq!(ordinary.debug_tree(), complex.debug_tree());
     }
 
@@ -1552,6 +1607,15 @@ mod tests {
         assert_eq!(tree.matches("Callout(kind=Warning").count(), 3, "{tree}");
         assert!(tree.contains("DisplayMath(source=\"x^2\""), "{tree}");
         assert!(tree.contains("FootnoteDefinition"), "{tree}");
+    }
+
+    #[test]
+    fn routes_an_explicit_blockquote_callout_to_semantic_compilation() {
+        let document = compile(
+            r#"<blockquote data-legible-callout="warning"><p>Warning text.</p></blockquote>"#,
+            None,
+        );
+        assert!(document.debug_tree().starts_with("Callout(kind=Warning"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ impl MathAnalysis {
         if !nodes.iter().any(|&node| has_own_math_evidence(dom, node)) {
             return Self::empty();
         }
-        Self::analyze_detected(dom, nodes)
+        Self::analyze_detected(dom, nodes, None)
     }
 
     pub(crate) fn analyze_with_inventory(
@@ -25,10 +25,19 @@ impl MathAnalysis {
         nodes: &[NodeId],
         candidates: &[NodeId],
     ) -> Self {
+        Self::analyze_with_inventory_and_evidence(dom, nodes, candidates, None)
+    }
+
+    pub(crate) fn analyze_with_inventory_and_evidence(
+        dom: &Dom,
+        nodes: &[NodeId],
+        candidates: &[NodeId],
+        source_evidence: Option<&super::facts::SourceEvidence>,
+    ) -> Self {
         if candidates.is_empty() {
             Self::empty()
         } else {
-            Self::analyze_detected(dom, nodes)
+            Self::analyze_detected(dom, nodes, source_evidence)
         }
     }
 
@@ -39,7 +48,11 @@ impl MathAnalysis {
         }
     }
 
-    fn analyze_detected(dom: &Dom, nodes: &[NodeId]) -> Self {
+    fn analyze_detected(
+        dom: &Dom,
+        nodes: &[NodeId],
+        source_evidence: Option<&super::facts::SourceEvidence>,
+    ) -> Self {
         let mut has_annotation = vec![false; dom.len()];
         for &node in nodes.iter().rev() {
             has_annotation[node.index()] = is_tex_annotation(dom, node)
@@ -53,8 +66,11 @@ impl MathAnalysis {
             let inherited = dom
                 .parent(node)
                 .is_some_and(|parent| inside_container[parent.index()]);
-            let evidence = has_own_math_evidence(dom, node)
-                || has_math_wrapper_class(dom, node) && has_annotation[node.index()];
+            let own_evidence = source_evidence
+                .map(|evidence| evidence.math(node))
+                .unwrap_or_else(|| has_own_math_evidence(dom, node));
+            let evidence =
+                own_evidence || has_math_wrapper_class(dom, node) && has_annotation[node.index()];
             let container =
                 evidence && (is_math_root(dom, node) || has_math_wrapper_class(dom, node));
             inside_container[node.index()] = inherited || container;

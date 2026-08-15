@@ -38,7 +38,7 @@ pub(crate) fn cleanup_selected_content(
 }
 
 /// Preserves the established DOM-based link-density metric until result metrics use the IR.
-fn flatten_javascript_links_for_quality(dom: &mut Dom, root: NodeId) {
+pub(crate) fn flatten_javascript_links_for_quality(dom: &mut Dom, root: NodeId) {
     let links: Vec<_> = dom
         .descendants(root)
         .filter(|&node| {
@@ -119,7 +119,9 @@ pub(crate) use crate::document::accessible_math_nodes;
 #[cfg(test)]
 pub(crate) fn remove_empty_content(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     let mut source_facts = Some(crate::document::SemanticSourceFacts::analyze(dom, root));
-    remove_empty_content_with_source_facts(dom, root, nodes, &mut source_facts);
+    let source_evidence =
+        crate::document::SourceEvidence::analyze(dom, root, &crate::dom::NodeStateStore::new());
+    remove_empty_content_with_source_facts(dom, root, nodes, &mut source_facts, &source_evidence);
 }
 
 /// Removes empty blocks while updating facts shared with semantic compilation.
@@ -128,8 +130,9 @@ pub(crate) fn remove_empty_content_with_source_facts(
     root: NodeId,
     nodes: &mut Vec<NodeId>,
     source_facts: &mut Option<crate::document::SemanticSourceFacts>,
+    source_evidence: &crate::document::SourceEvidence,
 ) {
-    remove_empty_nodes(dom, root, nodes, source_facts);
+    remove_empty_nodes(dom, root, nodes, source_facts, source_evidence);
 }
 
 fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
@@ -153,6 +156,7 @@ fn remove_empty_nodes(
     root: NodeId,
     nodes: &mut Vec<NodeId>,
     source_facts: &mut Option<crate::document::SemanticSourceFacts>,
+    source_evidence: &crate::document::SourceEvidence,
 ) {
     if let Some(source_facts) = source_facts.as_ref() {
         nodes.clear();
@@ -229,7 +233,8 @@ fn remove_empty_nodes(
             in_preformatted_code[node.index()] && has_text[node.index()];
         if dom.parent(node).is_some()
             && !significant_code_whitespace
-            && !crate::document::math_source_is_protected(dom, node)
+            && !source_evidence.math(node)
+            && !source_evidence.accessible_math(node)
             && matches!(
                 dom.tag(node),
                 Some(
