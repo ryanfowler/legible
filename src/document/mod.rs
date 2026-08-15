@@ -96,6 +96,32 @@ pub(crate) fn semantic_source_is_protected(
         || footnotes::is_source_evidence(dom, node)
         || math::is_source_evidence(dom, node)
 }
+
+/// Returns true when a source node may carry meaning that the plain-prose
+/// compiler must preserve for semantic analysis.
+pub(crate) fn semantic_source_evidence(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
+    semantic_source_is_protected(dom, node)
+        || callouts::class_is_semantic_evidence(dom, node)
+        || footnotes::class_is_semantic_evidence(dom, node)
+        || footnotes::has_possible_footnote_evidence(dom, node)
+        || [
+            crate::dom::AttrName::DataCallout,
+            crate::dom::AttrName::DataFootnote,
+            crate::dom::AttrName::DataFootnoteRef,
+            crate::dom::AttrName::DataFootnotes,
+            crate::dom::AttrName::DataMath,
+        ]
+        .into_iter()
+        .any(|attribute| dom.attr(node, attribute).is_some())
+        || dom
+            .attr_by_local_name(node, "data-type")
+            .is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "footnote" | "noteref" | "footnotes"
+                )
+            })
+}
 pub(crate) use tables::repeated_listing_start;
 pub(crate) use uri::{DestinationKind, safe_destination};
 
@@ -142,7 +168,7 @@ use std::sync::OnceLock;
 pub(crate) struct DocumentNodeId(u32);
 
 impl DocumentNodeId {
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }

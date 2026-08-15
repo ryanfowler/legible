@@ -197,7 +197,7 @@ impl FootnoteAnalysis {
     }
 }
 
-fn has_possible_footnote_evidence(dom: &Dom, node: NodeId) -> bool {
+pub(crate) fn has_possible_footnote_evidence(dom: &Dom, node: NodeId) -> bool {
     let tag_evidence = match dom.tag(node) {
         Some(Tag::A) => {
             is_explicit_reference(dom, node)
