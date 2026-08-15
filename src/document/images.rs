@@ -199,6 +199,10 @@ fn usable_attribute(value: Option<&str>) -> Option<&str> {
     })
 }
 
+pub(super) fn is_simple_source(value: &str) -> bool {
+    usable_attribute(Some(value)).is_some() && !is_placeholder(value)
+}
+
 fn is_placeholder(value: &str) -> bool {
     let source = value.trim().to_ascii_lowercase();
     if source.starts_with("data:") {
