@@ -1,6 +1,5 @@
 //! Canonical semantic HTML rendering.
 
-use smallvec::SmallVec;
 use std::fmt::Write as _;
 
 use crate::document::{Document, DocumentNodeId, ListKind, MediaKind, NodeKind};
@@ -8,6 +7,7 @@ use crate::document::{Document, DocumentNodeId, ListKind, MediaKind, NodeKind};
 pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
     enum Task {
         Node(DocumentNodeId, bool),
+        Siblings(DocumentNodeId, bool),
         Close(&'static str),
     }
 
@@ -20,229 +20,228 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
             .map(|root| Task::Node(root, false)),
     );
     while let Some(task) = tasks.pop() {
-        match task {
+        let (id, parent_is_list) = match task {
             Task::Close(tag) => {
                 output.push_str("</");
                 output.push_str(tag);
                 output.push('>');
+                continue;
             }
-            Task::Node(id, parent_is_list) => {
-                let Some(node) = document.node(id) else {
-                    continue;
-                };
-                let close = match node.kind() {
-                    NodeKind::Text(text) => {
-                        escape_text(&mut output, text);
-                        None
-                    }
-                    NodeKind::Paragraph => open(&mut output, "p"),
-                    NodeKind::BlockGroup => open(&mut output, "div"),
-                    NodeKind::Heading { level } => {
-                        let tag = match level {
-                            1 => "h1",
-                            2 => "h2",
-                            3 => "h3",
-                            4 => "h4",
-                            5 => "h5",
-                            _ => "h6",
-                        };
-                        open(&mut output, tag)
-                    }
-                    NodeKind::BlockQuote | NodeKind::Callout(_) => open(&mut output, "blockquote"),
-                    NodeKind::Strong => open(&mut output, "strong"),
-                    NodeKind::Emphasis => open(&mut output, "em"),
-                    NodeKind::Strikethrough => open(&mut output, "del"),
-                    NodeKind::List(list) => match list.kind {
-                        ListKind::Unordered => open(&mut output, "ul"),
-                        ListKind::Ordered => {
-                            output.push_str("<ol");
-                            if let Some(start) = list.start.filter(|start| *start != 1) {
-                                write!(output, " start=\"{start}\"").unwrap();
-                            }
-                            output.push('>');
-                            Some("ol")
-                        }
-                    },
-                    NodeKind::ListItem => open(&mut output, "li"),
-                    NodeKind::Table(_) => open(&mut output, "table"),
-                    NodeKind::TableCaption => open(&mut output, "caption"),
-                    NodeKind::TableRow => open(&mut output, "tr"),
-                    NodeKind::TableCell(cell) => {
-                        let tag = if cell.header { "th" } else { "td" };
-                        output.push('<');
-                        output.push_str(tag);
-                        if cell.colspan > 1 {
-                            write!(output, " colspan=\"{}\"", cell.colspan).unwrap();
-                        }
-                        if cell.rowspan > 1 {
-                            write!(output, " rowspan=\"{}\"", cell.rowspan).unwrap();
-                        }
-                        if let Some(alignment) = cell.alignment {
-                            let value = match alignment {
-                                crate::document::TableAlignment::Left => "left",
-                                crate::document::TableAlignment::Center => "center",
-                                crate::document::TableAlignment::Right => "right",
-                            };
-                            write!(output, " align=\"{value}\"").unwrap();
-                        }
-                        output.push('>');
-                        Some(tag)
-                    }
-                    NodeKind::Figure => open(&mut output, "figure"),
-                    NodeKind::Figcaption => open(&mut output, "figcaption"),
-                    NodeKind::Details => open(&mut output, "details"),
-                    NodeKind::Summary => open(&mut output, "summary"),
-                    NodeKind::DefinitionList => open(&mut output, "dl"),
-                    NodeKind::DefinitionTerm => open(&mut output, "dt"),
-                    NodeKind::DefinitionDescription => open(&mut output, "dd"),
-                    NodeKind::FootnoteDefinition(footnote) => {
-                        let tag = if parent_is_list { "li" } else { "aside" };
-                        output.push('<');
-                        output.push_str(tag);
-                        output.push_str(" id=\"footnote-");
-                        if let Some(definition) = document.footnote(*footnote) {
-                            escape_attribute(&mut output, definition.label());
-                        }
-                        output.push('"');
-                        if !parent_is_list {
-                            output.push_str(" role=\"doc-footnote\"");
-                        }
-                        output.push('>');
-                        Some(tag)
-                    }
-                    NodeKind::Link(link) => {
-                        output.push_str("<a href=\"");
-                        escape_attribute(&mut output, &link.destination);
-                        output.push('"');
-                        if let Some(title) = &link.title {
-                            output.push_str(" title=\"");
-                            escape_attribute(&mut output, title);
-                            output.push('"');
-                        }
-                        output.push('>');
-                        Some("a")
-                    }
-                    NodeKind::CodeBlock(code) => {
-                        output.push_str("<pre><code");
-                        if let Some(language) = &code.language {
-                            output.push_str(" class=\"language-");
-                            escape_attribute(&mut output, language);
-                            output.push('"');
-                        }
-                        output.push('>');
-                        escape_text(&mut output, &code.text);
-                        output.push_str("</code></pre>");
-                        None
-                    }
-                    NodeKind::InlineCode(code) => {
-                        output.push_str("<code>");
-                        escape_text(&mut output, code);
-                        output.push_str("</code>");
-                        None
-                    }
-                    NodeKind::Image(image) => {
-                        output.push_str("<img src=\"");
-                        escape_attribute(&mut output, &image.source);
-                        output.push_str("\" alt=\"");
-                        escape_attribute(&mut output, &image.alt);
-                        output.push('"');
-                        if let Some(title) = &image.title {
-                            output.push_str(" title=\"");
-                            escape_attribute(&mut output, title);
-                            output.push('"');
-                        }
-                        if let Some(width) = image.width {
-                            write!(output, " width=\"{width}\"").unwrap();
-                        }
-                        if let Some(height) = image.height {
-                            write!(output, " height=\"{height}\"").unwrap();
-                        }
-                        output.push('>');
-                        None
-                    }
-                    NodeKind::HardBreak => {
-                        output.push_str("<br>");
-                        None
-                    }
-                    NodeKind::ThematicBreak => {
-                        output.push_str("<hr>");
-                        None
-                    }
-                    NodeKind::FootnoteReference(footnote) => {
-                        if let Some(definition) = document.footnote(*footnote) {
-                            output.push_str("<sup><a href=\"#footnote-");
-                            escape_attribute(&mut output, definition.label());
-                            output.push_str("\" role=\"doc-noteref\">");
-                            escape_text(&mut output, definition.label());
-                            output.push_str("</a></sup>");
-                        }
-                        None
-                    }
-                    NodeKind::TaskMarker(marker) => {
-                        output.push_str("<input type=\"checkbox\" disabled=\"\"");
-                        if marker.checked {
-                            output.push_str(" checked=\"\"");
-                        }
-                        if let Some(label) = &marker.fallback_label {
-                            output.push_str(" aria-label=\"");
-                            escape_attribute(&mut output, label);
-                            output.push('"');
-                        }
-                        output.push('>');
-                        if let Some(label) = &marker.fallback_label {
-                            escape_text(&mut output, label);
-                        }
-                        None
-                    }
-                    NodeKind::InlineMath(math) => {
-                        output.push_str("<span class=\"math\">");
-                        escape_text(&mut output, &math.source);
-                        output.push_str("</span>");
-                        None
-                    }
-                    NodeKind::DisplayMath(math) => {
-                        output.push_str("<span class=\"math display-math\">");
-                        escape_text(&mut output, &math.source);
-                        output.push_str("</span>");
-                        None
-                    }
-                    NodeKind::Media(media) => {
-                        match media.kind {
-                            MediaKind::Audio => {
-                                output.push_str("<audio controls src=\"");
-                                escape_attribute(&mut output, &media.source);
-                                output.push_str("\"></audio>");
-                            }
-                            MediaKind::Video => {
-                                output.push_str("<video controls src=\"");
-                                escape_attribute(&mut output, &media.source);
-                                output.push_str("\"></video>");
-                            }
-                            MediaKind::Embedded => {
-                                output.push_str("<a href=\"");
-                                escape_attribute(&mut output, &media.source);
-                                output.push_str("\">");
-                                escape_text(
-                                    &mut output,
-                                    media.title.as_deref().unwrap_or(&media.source),
-                                );
-                                output.push_str("</a>");
-                            }
-                        }
-                        None
-                    }
-                };
-                if let Some(tag) = close {
-                    tasks.push(Task::Close(tag));
-                    let children: SmallVec<[_; 16]> = document.child_ids(id).collect();
-                    let parent_is_list = matches!(node.kind(), NodeKind::List(_));
-                    tasks.extend(
-                        children
-                            .into_iter()
-                            .rev()
-                            .map(|child| Task::Node(child, parent_is_list)),
-                    );
+            Task::Node(id, parent_is_list) => (id, parent_is_list),
+            Task::Siblings(id, parent_is_list) => {
+                if let Some(sibling) = document.next_sibling(id) {
+                    tasks.push(Task::Siblings(sibling, parent_is_list));
                 }
+                (id, parent_is_list)
+            }
+        };
+        let Some(node) = document.node(id) else {
+            continue;
+        };
+        let close = match node.kind() {
+            NodeKind::Text(text) => {
+                escape_text(&mut output, text);
+                None
+            }
+            NodeKind::Paragraph => open(&mut output, "p"),
+            NodeKind::BlockGroup => open(&mut output, "div"),
+            NodeKind::Heading { level } => {
+                let tag = match level {
+                    1 => "h1",
+                    2 => "h2",
+                    3 => "h3",
+                    4 => "h4",
+                    5 => "h5",
+                    _ => "h6",
+                };
+                open(&mut output, tag)
+            }
+            NodeKind::BlockQuote | NodeKind::Callout(_) => open(&mut output, "blockquote"),
+            NodeKind::Strong => open(&mut output, "strong"),
+            NodeKind::Emphasis => open(&mut output, "em"),
+            NodeKind::Strikethrough => open(&mut output, "del"),
+            NodeKind::List(list) => match list.kind {
+                ListKind::Unordered => open(&mut output, "ul"),
+                ListKind::Ordered => {
+                    output.push_str("<ol");
+                    if let Some(start) = list.start.filter(|start| *start != 1) {
+                        write!(output, " start=\"{start}\"").unwrap();
+                    }
+                    output.push('>');
+                    Some("ol")
+                }
+            },
+            NodeKind::ListItem => open(&mut output, "li"),
+            NodeKind::Table(_) => open(&mut output, "table"),
+            NodeKind::TableCaption => open(&mut output, "caption"),
+            NodeKind::TableRow => open(&mut output, "tr"),
+            NodeKind::TableCell(cell) => {
+                let tag = if cell.header { "th" } else { "td" };
+                output.push('<');
+                output.push_str(tag);
+                if cell.colspan > 1 {
+                    write!(output, " colspan=\"{}\"", cell.colspan).unwrap();
+                }
+                if cell.rowspan > 1 {
+                    write!(output, " rowspan=\"{}\"", cell.rowspan).unwrap();
+                }
+                if let Some(alignment) = cell.alignment {
+                    let value = match alignment {
+                        crate::document::TableAlignment::Left => "left",
+                        crate::document::TableAlignment::Center => "center",
+                        crate::document::TableAlignment::Right => "right",
+                    };
+                    write!(output, " align=\"{value}\"").unwrap();
+                }
+                output.push('>');
+                Some(tag)
+            }
+            NodeKind::Figure => open(&mut output, "figure"),
+            NodeKind::Figcaption => open(&mut output, "figcaption"),
+            NodeKind::Details => open(&mut output, "details"),
+            NodeKind::Summary => open(&mut output, "summary"),
+            NodeKind::DefinitionList => open(&mut output, "dl"),
+            NodeKind::DefinitionTerm => open(&mut output, "dt"),
+            NodeKind::DefinitionDescription => open(&mut output, "dd"),
+            NodeKind::FootnoteDefinition(footnote) => {
+                let tag = if parent_is_list { "li" } else { "aside" };
+                output.push('<');
+                output.push_str(tag);
+                output.push_str(" id=\"footnote-");
+                if let Some(definition) = document.footnote(*footnote) {
+                    escape_attribute(&mut output, definition.label());
+                }
+                output.push('"');
+                if !parent_is_list {
+                    output.push_str(" role=\"doc-footnote\"");
+                }
+                output.push('>');
+                Some(tag)
+            }
+            NodeKind::Link(link) => {
+                output.push_str("<a href=\"");
+                escape_attribute(&mut output, &link.destination);
+                output.push('"');
+                if let Some(title) = &link.title {
+                    output.push_str(" title=\"");
+                    escape_attribute(&mut output, title);
+                    output.push('"');
+                }
+                output.push('>');
+                Some("a")
+            }
+            NodeKind::CodeBlock(code) => {
+                output.push_str("<pre><code");
+                if let Some(language) = &code.language {
+                    output.push_str(" class=\"language-");
+                    escape_attribute(&mut output, language);
+                    output.push('"');
+                }
+                output.push('>');
+                escape_text(&mut output, &code.text);
+                output.push_str("</code></pre>");
+                None
+            }
+            NodeKind::InlineCode(code) => {
+                output.push_str("<code>");
+                escape_text(&mut output, code);
+                output.push_str("</code>");
+                None
+            }
+            NodeKind::Image(image) => {
+                output.push_str("<img src=\"");
+                escape_attribute(&mut output, &image.source);
+                output.push_str("\" alt=\"");
+                escape_attribute(&mut output, &image.alt);
+                output.push('"');
+                if let Some(title) = &image.title {
+                    output.push_str(" title=\"");
+                    escape_attribute(&mut output, title);
+                    output.push('"');
+                }
+                if let Some(width) = image.width {
+                    write!(output, " width=\"{width}\"").unwrap();
+                }
+                if let Some(height) = image.height {
+                    write!(output, " height=\"{height}\"").unwrap();
+                }
+                output.push('>');
+                None
+            }
+            NodeKind::HardBreak => {
+                output.push_str("<br>");
+                None
+            }
+            NodeKind::ThematicBreak => {
+                output.push_str("<hr>");
+                None
+            }
+            NodeKind::FootnoteReference(footnote) => {
+                if let Some(definition) = document.footnote(*footnote) {
+                    output.push_str("<sup><a href=\"#footnote-");
+                    escape_attribute(&mut output, definition.label());
+                    output.push_str("\" role=\"doc-noteref\">");
+                    escape_text(&mut output, definition.label());
+                    output.push_str("</a></sup>");
+                }
+                None
+            }
+            NodeKind::TaskMarker(marker) => {
+                output.push_str("<input type=\"checkbox\" disabled=\"\"");
+                if marker.checked {
+                    output.push_str(" checked=\"\"");
+                }
+                if let Some(label) = &marker.fallback_label {
+                    output.push_str(" aria-label=\"");
+                    escape_attribute(&mut output, label);
+                    output.push('"');
+                }
+                output.push('>');
+                if let Some(label) = &marker.fallback_label {
+                    escape_text(&mut output, label);
+                }
+                None
+            }
+            NodeKind::InlineMath(math) => {
+                output.push_str("<span class=\"math\">");
+                escape_text(&mut output, &math.source);
+                output.push_str("</span>");
+                None
+            }
+            NodeKind::DisplayMath(math) => {
+                output.push_str("<span class=\"math display-math\">");
+                escape_text(&mut output, &math.source);
+                output.push_str("</span>");
+                None
+            }
+            NodeKind::Media(media) => {
+                match media.kind {
+                    MediaKind::Audio => {
+                        output.push_str("<audio controls src=\"");
+                        escape_attribute(&mut output, &media.source);
+                        output.push_str("\"></audio>");
+                    }
+                    MediaKind::Video => {
+                        output.push_str("<video controls src=\"");
+                        escape_attribute(&mut output, &media.source);
+                        output.push_str("\"></video>");
+                    }
+                    MediaKind::Embedded => {
+                        output.push_str("<a href=\"");
+                        escape_attribute(&mut output, &media.source);
+                        output.push_str("\">");
+                        escape_text(&mut output, media.title.as_deref().unwrap_or(&media.source));
+                        output.push_str("</a>");
+                    }
+                }
+                None
+            }
+        };
+        if let Some(tag) = close {
+            tasks.push(Task::Close(tag));
+            let parent_is_list = matches!(node.kind(), NodeKind::List(_));
+            if let Some(child) = document.first_child(id) {
+                tasks.push(Task::Siblings(child, parent_is_list));
             }
         }
     }
