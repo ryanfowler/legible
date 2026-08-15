@@ -66,11 +66,14 @@ pub(crate) use code::{
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
     multiline_content as code_multiline_content,
 };
+#[allow(unused_imports)]
 pub(crate) use compiler::{
     CompileContext, compile_document, compile_document_owned_with_optional_source_facts,
+    compile_document_owned_with_optional_source_facts_and_evidence,
     compile_document_with_optional_source_facts,
+    compile_document_with_optional_source_facts_and_evidence,
 };
-pub(crate) use facts::SemanticSourceFacts;
+pub(crate) use facts::{SemanticSourceFacts, SourceEvidence};
 pub(crate) use footnotes::{
     Definitions as ExternalFootnoteDefinitions, adopt_external as adopt_external_footnotes,
     collect_external as collect_external_footnotes,
@@ -91,13 +94,13 @@ pub(crate) fn selected_image_sources_for_cleanup(
     images::analyze(dom, nodes, None).sources
 }
 pub use stats::DocumentStats;
-pub(crate) fn math_source_is_protected(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
-    math::is_source_evidence(dom, node)
-}
 pub(crate) fn semantic_source_is_protected(
     dom: &crate::dom::Dom,
     node: crate::dom::NodeId,
 ) -> bool {
+    if !has_source_recognizer_gate(dom, node) {
+        return false;
+    }
     callouts::is_source_evidence(dom, node)
         || footnotes::is_source_evidence(dom, node)
         || math::is_source_evidence(dom, node)
@@ -105,42 +108,32 @@ pub(crate) fn semantic_source_is_protected(
 
 /// Returns true when a source node may carry meaning that the plain-prose
 /// compiler must preserve for semantic analysis.
-pub(crate) fn semantic_source_evidence(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
+pub(crate) fn semantic_source_evidence(
+    dom: &crate::dom::Dom,
+    node: crate::dom::NodeId,
+    source_evidence: Option<&SourceEvidence>,
+) -> bool {
     // Most source nodes cannot carry any of the semantic annotations below.
     // Avoid running the recognizers for ordinary prose wrappers. This is a hot
     // path for the plain-prose compiler and keeps the recognizer itself cheap
     // for callers that scan a complete fragment.
-    let Some(tag) = dom.tag(node) else {
+    if !has_source_recognizer_gate(dom, node) {
         return false;
-    };
-    let has_class_or_id = dom.attr(node, crate::dom::AttrName::Class).is_some()
-        || dom.attr(node, crate::dom::AttrName::Id).is_some();
-    let has_role = dom.attr(node, crate::dom::AttrName::Role).is_some();
-    let has_semantic_data = [
-        "data-latex",
-        "data-tex",
-        "data-math",
-        "data-formula",
-        "data-type",
-        "data-callout",
-        "data-footnote",
-        "data-footnote-ref",
-        "data-footnotes",
-    ]
-    .into_iter()
-    .any(|name| dom.attr_by_local_name(node, name).is_some());
-    let has_semantic_tag = matches!(
-        tag,
-        crate::dom::Tag::A
-            | crate::dom::Tag::Img
-            | crate::dom::Tag::Label
-            | crate::dom::Tag::Math
-            | crate::dom::Tag::Script
-    ) || dom
-        .qual_name(node)
-        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"));
-    if !has_class_or_id && !has_role && !has_semantic_data && !has_semantic_tag {
-        return false;
+    }
+
+    if let Some(source_evidence) = source_evidence {
+        return source_evidence.is_semantic_source(node)
+            || source_evidence.callout_candidate(node)
+            || source_evidence.footnote_candidate(node)
+            || [
+                crate::dom::AttrName::DataCallout,
+                crate::dom::AttrName::DataFootnote,
+                crate::dom::AttrName::DataFootnoteRef,
+                crate::dom::AttrName::DataFootnotes,
+                crate::dom::AttrName::DataMath,
+            ]
+            .into_iter()
+            .any(|attribute| dom.attr(node, attribute).is_some());
     }
 
     semantic_source_is_protected(dom, node)
@@ -165,6 +158,49 @@ pub(crate) fn semantic_source_evidence(dom: &crate::dom::Dom, node: crate::dom::
                 )
             })
 }
+
+fn has_source_recognizer_gate(dom: &crate::dom::Dom, node: crate::dom::NodeId) -> bool {
+    let Some(tag) = dom.tag(node) else {
+        return false;
+    };
+    let has_class_or_id = dom.attr(node, crate::dom::AttrName::Class).is_some()
+        || dom.attr(node, crate::dom::AttrName::Id).is_some();
+    let has_role = dom.attr(node, crate::dom::AttrName::Role).is_some();
+    let has_semantic_data = [
+        "data-latex",
+        "data-tex",
+        "data-math",
+        "data-formula",
+        "data-type",
+        "data-callout",
+        "data-footnote",
+        "data-footnote-ref",
+        "data-footnotes",
+    ]
+    .into_iter()
+    .any(|name| dom.attr_by_local_name(node, name).is_some())
+        || dom.attr(node, crate::dom::AttrName::DataCallout).is_some()
+        || dom.attr(node, crate::dom::AttrName::DataFootnote).is_some()
+        || dom
+            .attr(node, crate::dom::AttrName::DataFootnoteRef)
+            .is_some()
+        || dom
+            .attr(node, crate::dom::AttrName::DataFootnotes)
+            .is_some()
+        || dom.attr(node, crate::dom::AttrName::DataMath).is_some();
+    let has_semantic_tag = matches!(
+        tag,
+        crate::dom::Tag::A
+            | crate::dom::Tag::Img
+            | crate::dom::Tag::Label
+            | crate::dom::Tag::Math
+            | crate::dom::Tag::Script
+    ) || dom
+        .qual_name(node)
+        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"));
+    has_class_or_id || has_role || has_semantic_data || has_semantic_tag
+}
+
 pub(crate) use tables::repeated_listing_start;
 pub(crate) use uri::{DestinationKind, safe_destination};
 

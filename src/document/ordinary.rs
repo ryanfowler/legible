@@ -37,7 +37,11 @@ pub(super) struct Inventory {
 }
 
 /// Inventories source features when they can be emitted without global analysis.
-pub(super) fn inventory(dom: &Dom, root: NodeId) -> Option<Inventory> {
+pub(super) fn inventory(
+    dom: &Dom,
+    root: NodeId,
+    source_evidence: &super::facts::SourceEvidence,
+) -> Option<Inventory> {
     let mut first_visible: Vec<(NodeId, Option<char>)> = Vec::new();
     let mut node_count = 0;
     let mut frames = vec![ScanFrame {
@@ -86,7 +90,7 @@ pub(super) fn inventory(dom: &Dom, root: NodeId) -> Option<Inventory> {
         let Some(tag) = dom.tag(node) else {
             continue;
         };
-        if requires_complex_source(dom, node, tag, context) {
+        if requires_complex_source(dom, node, tag, context, source_evidence) {
             return None;
         }
 
@@ -158,10 +162,18 @@ pub(super) fn inventory(dom: &Dom, root: NodeId) -> Option<Inventory> {
 
 #[cfg(test)]
 pub(super) fn supports(dom: &Dom, root: NodeId) -> bool {
-    inventory(dom, root).is_some()
+    let evidence =
+        super::facts::SourceEvidence::analyze(dom, root, &crate::dom::NodeStateStore::new());
+    inventory(dom, root, &evidence).is_some()
 }
 
-fn requires_complex_source(dom: &Dom, node: NodeId, tag: Tag, context: ScanContext) -> bool {
+fn requires_complex_source(
+    dom: &Dom,
+    node: NodeId,
+    tag: Tag,
+    context: ScanContext,
+    source_evidence: &super::facts::SourceEvidence,
+) -> bool {
     if dom.attr(node, AttrName::Role).is_some() {
         return true;
     }
@@ -192,14 +204,14 @@ fn requires_complex_source(dom: &Dom, node: NodeId, tag: Tag, context: ScanConte
                 | "data-math"
                 | "data-tex"
                 | "data-type"
-        )
+        ) || attribute.name.local.as_ref().starts_with("data-legible-")
     });
     let fragment_link = tag == Tag::A
         && dom
             .attr(node, AttrName::Href)
             .is_some_and(|value| value.trim().starts_with('#'));
     if (has_class_or_id || has_semantic_data || fragment_link || tag == Tag::Img)
-        && super::semantic_source_evidence(dom, node)
+        && super::semantic_source_evidence(dom, node, Some(source_evidence))
     {
         return true;
     }
@@ -417,6 +429,7 @@ pub(super) fn compile(
     root: NodeId,
     context: &CompileContext,
     inventory: &Inventory,
+    _source_evidence: &super::facts::SourceEvidence,
 ) -> Result<Document, CompileError> {
     let mut builder = DocumentBuilder::with_capacity(inventory.node_count);
     let mut inventory_cursor = 0;

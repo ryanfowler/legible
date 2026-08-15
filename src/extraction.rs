@@ -98,6 +98,7 @@ struct BestAttempt {
 struct FrozenContent {
     dom: Dom,
     source_facts: Option<crate::document::SemanticSourceFacts>,
+    source_evidence: crate::document::SourceEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -761,7 +762,7 @@ impl<'a> ContentExtractor<'a> {
 
             let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
             let video = regexps::VIDEOS.clone();
-            let candidate_semantic_metrics = self.prep_article(
+            let (candidate_semantic_metrics, source_evidence) = self.prep_article(
                 content_id,
                 selection.node != body && strategy != ExtractionStrategy::BodyFallback,
                 &video,
@@ -788,7 +789,8 @@ impl<'a> ContentExtractor<'a> {
             }
             let excerpt = self.content_excerpt(content_id);
             let access_barrier = is_access_barrier(&self.dom, content_id);
-            let mut source_facts = self.final_cleanup(content_id, &mut cleaning_nodes);
+            let mut source_facts =
+                self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
             self.capture_normalization_counts(content_id);
             // The selected region is already a compact fragment. Remove the
             // internal selection boundary when the output contract excludes
@@ -809,7 +811,7 @@ impl<'a> ContentExtractor<'a> {
             // retain complete semantic metrics.
             let result_document = if self.diagnostic_attempts.is_some() {
                 Some(
-                    crate::document::compile_document_with_optional_source_facts(
+                    crate::document::compile_document_with_optional_source_facts_and_evidence(
                         &self.dom,
                         result_root,
                         &crate::document::CompileContext::new(
@@ -817,6 +819,7 @@ impl<'a> ContentExtractor<'a> {
                             self.source_uri.as_ref(),
                         ),
                         source_facts.as_ref(),
+                        Some(&source_evidence),
                     )
                     .map_err(|_| Error::NoContent)?,
                 )
@@ -914,7 +917,7 @@ impl<'a> ContentExtractor<'a> {
                 let document = if let Some(document) = result_document {
                     document
                 } else {
-                    crate::document::compile_document_owned_with_optional_source_facts(
+                    crate::document::compile_document_owned_with_optional_source_facts_and_evidence(
                         content,
                         result_root,
                         &crate::document::CompileContext::new(
@@ -922,6 +925,7 @@ impl<'a> ContentExtractor<'a> {
                             self.source_uri.as_ref(),
                         ),
                         source_facts.as_ref(),
+                        &source_evidence,
                     )
                     .map_err(|_| Error::NoContent)?
                 };
@@ -966,6 +970,7 @@ impl<'a> ContentExtractor<'a> {
                     content: FrozenContent {
                         dom: std::mem::replace(&mut self.dom, source_dom),
                         source_facts,
+                        source_evidence,
                     },
                     quality,
                     excerpt,
@@ -995,13 +1000,18 @@ impl<'a> ContentExtractor<'a> {
             attempts[index].rejection_reason = None;
         }
         let root = best.content.dom.root();
-        let document = crate::document::compile_document_owned_with_optional_source_facts(
-            best.content.dom,
-            root,
-            &crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref()),
-            best.content.source_facts.as_ref(),
-        )
-        .map_err(|_| Error::NoContent)?;
+        let document =
+            crate::document::compile_document_owned_with_optional_source_facts_and_evidence(
+                best.content.dom,
+                root,
+                &crate::document::CompileContext::new(
+                    self.base_uri.clone(),
+                    self.source_uri.as_ref(),
+                ),
+                best.content.source_facts.as_ref(),
+                &best.content.source_evidence,
+            )
+            .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
             excerpt: best.excerpt,
             document,
@@ -1853,7 +1863,10 @@ impl<'a> ContentExtractor<'a> {
         _match_buffer: &mut String,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
-    ) -> Option<SemanticStructureCounts> {
+    ) -> (
+        Option<SemanticStructureCounts>,
+        crate::document::SourceEvidence,
+    ) {
         // Cleanup mutates only the compact selected fragment. Hard cleanup
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
@@ -1862,12 +1875,16 @@ impl<'a> ContentExtractor<'a> {
         remove_decorative_media_before_cleanup(&mut self.dom, root);
         self.record_cleanup_delta(CleanupActionKind::DecorativeMedia, before, root);
         clean_styles(&mut self.dom, root, nodes);
+        mark_data_tables(&self.dom, root, &mut self.node_data, nodes);
+        let source_evidence =
+            crate::document::SourceEvidence::analyze(&self.dom, root, &self.node_data);
         let before = self.diagnostic_element_count(root);
         hard_cleanup(
             &mut self.dom,
             root,
             video,
             self.strategy == ExtractionStrategy::RelaxedVisibility,
+            &source_evidence,
             nodes,
         );
         self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
@@ -1879,13 +1896,15 @@ impl<'a> ContentExtractor<'a> {
             .as_ref()
             .filter(|_| credible_semantic_candidate)
             .and_then(|_| {
-                crate::document::compile_document(
+                crate::document::compile_document_with_optional_source_facts_and_evidence(
                     &self.dom,
                     root,
                     &crate::document::CompileContext::new(
                         self.base_uri.clone(),
                         self.source_uri.as_ref(),
                     ),
+                    None,
+                    Some(&source_evidence),
                 )
                 .ok()
                 .map(|document| SemanticStructureCounts::measure(&document))
@@ -1898,6 +1917,7 @@ impl<'a> ContentExtractor<'a> {
                     root,
                     self.page_kind,
                     &mut self.node_data,
+                    &source_evidence,
                     text_buffer,
                     nodes,
                 );
@@ -1906,7 +1926,7 @@ impl<'a> ContentExtractor<'a> {
             // Global chrome is high-confidence cleanup. Apply it to every
             // extraction strategy, including broad and fallback attempts.
             let before = self.diagnostic_element_count(root);
-            remove_global_chrome(&mut self.dom, root, &mut self.node_data);
+            remove_global_chrome(&mut self.dom, root, &mut self.node_data, &source_evidence);
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 
@@ -1930,7 +1950,8 @@ impl<'a> ContentExtractor<'a> {
                 matches!(
                     self.dom.tag(node),
                     Some(Tag::Img | Tag::Embed | Tag::Object | Tag::Iframe)
-                ) || crate::document::math_source_is_protected(&self.dom, node)
+                ) || source_evidence.math(node)
+                    || source_evidence.accessible_math(node)
             });
             if !media && !has_non_empty_inner_text(&self.dom, paragraph) {
                 self.dom.detach(paragraph);
@@ -1943,7 +1964,7 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.detach(line_break);
             }
         }
-        candidate_semantic_metrics
+        (candidate_semantic_metrics, source_evidence)
     }
     fn content_excerpt(&self, root: NodeId) -> Option<String> {
         let mut buffer = String::new();
@@ -1982,6 +2003,7 @@ impl<'a> ContentExtractor<'a> {
     fn final_cleanup(
         &mut self,
         root: NodeId,
+        evidence: &crate::document::SourceEvidence,
         nodes: &mut Vec<NodeId>,
     ) -> Option<crate::document::SemanticSourceFacts> {
         // The compiler resolves URLs, drops source attributes, ignores comments,
@@ -1989,7 +2011,13 @@ impl<'a> ContentExtractor<'a> {
         // selected DOM at this stage.
         let before = self.diagnostic_element_count(root);
         let mut source_facts = None;
-        remove_empty_content_with_source_facts(&mut self.dom, root, nodes, &mut source_facts);
+        remove_empty_content_with_source_facts(
+            &mut self.dom,
+            root,
+            nodes,
+            &mut source_facts,
+            evidence,
+        );
         self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
         source_facts
     }
@@ -3028,7 +3056,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let hidden_detail = "The streamed article explains configuration, validation, compatibility, deployment, and recovery with practical detail. ".repeat(30);
         let visible_detail = "The page includes a visible summary with enough metadata and introductory context for normal extraction, but the complete article is still being streamed into the hidden fragment. ".repeat(3);
         let html = format!(
-            r#"<body><main><header><h1>Streamed article</h1><p>{visible_detail}</p></header><div hidden id="S:0"><p>{hidden_detail}</p><h2>Implementation</h2><p>The second streamed paragraph gives the final implementation details and conclusion.</p></div></main></body>"#
+            r##"<body><main><header><h1>Streamed article</h1><p>{visible_detail}</p></header><div hidden id="S:0"><p>{hidden_detail} Equation <span data-legible-math="inline" data-latex="x^2">x 2</span><sup><a role="doc-noteref" href="#fn1">1</a></sup></p><aside id="fn1" role="doc-footnote">The equation note remains useful.</aside><h2>Implementation</h2><p>The second streamed paragraph gives the final implementation details and conclusion.</p></div></main></body>"##
         );
         let page = crate::Extractor::builder()
             .diagnostics(true)
@@ -3038,6 +3066,9 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
 
         assert!(page.text().contains("streamed article explains"));
         assert!(page.text().contains("Implementation"));
+        let markdown = page.markdown();
+        assert!(markdown.contains("$x^2$"), "{markdown}");
+        assert!(markdown.contains("[^fn1]"), "{markdown}");
         assert_eq!(
             page.diagnostics().unwrap().selected_strategy,
             ExtractionStrategyInfo::RelaxedVisibility
