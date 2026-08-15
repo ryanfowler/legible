@@ -25,8 +25,8 @@ use crate::normalize::{
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
 use crate::quality::{
-    ContentMetrics, ExtractionQuality, interactive_shell_evidence, is_access_barrier,
-    is_incoherent_short_result, is_interactive_shell,
+    ContentMetrics, ExtractionQuality, SemanticStructureCounts, interactive_shell_evidence,
+    is_access_barrier, is_incoherent_short_result, is_interactive_shell, semantic_coverage,
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
@@ -753,8 +753,9 @@ impl<'a> ContentExtractor<'a> {
 
             let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
             let video = regexps::VIDEOS.clone();
-            self.prep_article(
+            let candidate_semantic_metrics = self.prep_article(
                 content_id,
+                selection.node != body && strategy != ExtractionStrategy::BodyFallback,
                 &video,
                 &mut match_buffer,
                 &mut text_buffer,
@@ -797,6 +798,14 @@ impl<'a> ContentExtractor<'a> {
             )
             .map_err(|_| Error::NoContent)?;
             let result_metrics = ContentMetrics::measure_document(&result_document);
+            let result_semantic_counts = candidate_semantic_metrics
+                .as_ref()
+                .map(|_| SemanticStructureCounts::measure(&result_document));
+            let semantic_coverage = candidate_semantic_metrics.as_ref().and_then(|source| {
+                result_semantic_counts
+                    .as_ref()
+                    .and_then(|result| semantic_coverage(source, result))
+            });
             let interactive_shell = is_interactive_shell(result_metrics, shell_evidence);
             let incoherent_short = is_incoherent_short_result(result_metrics);
             let attempt_source_metrics = if strategy == ExtractionStrategy::RelaxedVisibility {
@@ -856,6 +865,7 @@ impl<'a> ContentExtractor<'a> {
                     attempt_source_metrics,
                     result_metrics,
                     quality,
+                    semantic_coverage,
                     true,
                     None,
                 );
@@ -880,6 +890,7 @@ impl<'a> ContentExtractor<'a> {
                 attempt_source_metrics,
                 result_metrics,
                 quality,
+                semantic_coverage,
                 false,
                 Some(rejection),
             );
@@ -992,6 +1003,7 @@ impl<'a> ContentExtractor<'a> {
         source: ContentMetrics,
         result: ContentMetrics,
         quality: ExtractionQuality,
+        semantic_coverage: Option<crate::diagnostics::SemanticCoverageInfo>,
         accepted: bool,
         rejection_reason: Option<AttemptRejectionReason>,
     ) -> Option<usize> {
@@ -1008,6 +1020,7 @@ impl<'a> ContentExtractor<'a> {
                 good: quality.is_good(),
                 suspiciously_small: quality.is_suspiciously_small(),
             },
+            semantic_coverage,
             cleanup_actions: self.diagnostic_cleanup_actions.clone(),
             normalization: self.diagnostic_normalization,
             accepted,
@@ -1762,11 +1775,12 @@ impl<'a> ContentExtractor<'a> {
     fn prep_article(
         &mut self,
         root: NodeId,
+        credible_semantic_candidate: bool,
         video: &Regex,
         _match_buffer: &mut String,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
-    ) {
+    ) -> Option<SemanticStructureCounts> {
         // Cleanup mutates only the compact selected fragment. Hard cleanup
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
@@ -1784,6 +1798,25 @@ impl<'a> ContentExtractor<'a> {
             nodes,
         );
         self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
+        // Semantic coverage starts after high-confidence removal of active,
+        // hidden, and decorative source structures. It then measures what the
+        // relevance cleanup retains from this credible selected candidate.
+        let candidate_semantic_metrics = self
+            .diagnostic_attempts
+            .as_ref()
+            .filter(|_| credible_semantic_candidate)
+            .and_then(|_| {
+                crate::document::compile_document(
+                    &self.dom,
+                    root,
+                    &crate::document::CompileContext::new(
+                        self.base_uri.clone(),
+                        self.source_uri.as_ref(),
+                    ),
+                )
+                .ok()
+                .map(|document| SemanticStructureCounts::measure(&document))
+            });
         if self.page_kind.uses_article_cleanup() {
             if self.strategy.conditional_cleanup() {
                 let before = self.diagnostic_element_count(root);
@@ -1837,6 +1870,7 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.detach(line_break);
             }
         }
+        candidate_semantic_metrics
     }
     fn content_excerpt(&self, root: NodeId) -> Option<String> {
         let mut buffer = String::new();
@@ -2797,6 +2831,41 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         assert_eq!(
             diagnostics.attempts[0].selected_root.classes,
             ["docs", "content"]
+        );
+        assert!(diagnostics.attempts[0].semantic_coverage.is_none());
+    }
+
+    #[test]
+    fn diagnostics_report_full_semantic_coverage_for_a_technical_document() {
+        let html = r#"<body><main><h2>Install</h2><p>This guide explains the complete installation procedure.</p><pre><code>cargo install sample</code></pre><h2>Options</h2><ul><li>First option</li><li>Second option</li><li>Third option</li></ul><h2>Results</h2><table><tr><th>Name</th><th>Value</th></tr><tr><td>status</td><td>ready</td></tr></table></main></body>"#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(html, None)
+            .unwrap();
+        let attempt = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        let coverage = attempt.semantic_coverage.as_ref().unwrap();
+
+        assert_eq!(coverage.score, 1.0);
+        assert_eq!(coverage.categories.len(), 4);
+        assert_eq!(
+            coverage
+                .categories
+                .iter()
+                .map(|category| category.category)
+                .collect::<Vec<_>>(),
+            [
+                crate::diagnostics::SemanticCoverageCategory::CodeBlocks,
+                crate::diagnostics::SemanticCoverageCategory::DataTables,
+                crate::diagnostics::SemanticCoverageCategory::SubstantialListItems,
+                crate::diagnostics::SemanticCoverageCategory::Headings,
+            ]
         );
     }
 

@@ -37,7 +37,9 @@ The report keeps each dimension separate:
 - Reference precision, recall, and F1 use normalized tokens when `reference.md` exists.
 - Reliability records success, expected failure behavior, errors, panics, tool failures, and determinism.
 
-The report also records words, links, link density, headings, images, code blocks, tables, lists, footnotes, math, and known junk phrases. Performance remains separate from quality. Use `cargo bench --bench extraction` for extraction and lazy-renderer performance.
+The report also records words, links, link density, headings, images, code blocks, tables, lists, footnotes, math, and known junk phrases. Legible results also record candidate-to-result semantic coverage when the selected candidate has strong structural evidence. The semantic coverage record names each category and gives its source count, result count, and bounded ratio. This value is diagnostic data. It does not affect extraction acceptance.
+
+Performance remains separate from quality. Use `cargo bench --bench extraction` for extraction and lazy-renderer performance.
 
 ## Corpus categories
 
@@ -92,5 +94,13 @@ the fixture count, extractor revisions, quality dimensions, and reliability. It
 does not include large per-fixture artifacts.
 
 The runner invokes Cargo with `--offline`. After the Node and Rust dependencies are present, a benchmark run uses no network access.
+
+Use the JSON report to inspect low semantic coverage:
+
+```bash
+jq -r '.results[] | select(.legible.semantic_coverage != null and .legible.semantic_coverage.score < 1) | [.fixture, .legible.semantic_coverage] | @json' target/quality-report.json
+```
+
+The initial calibration used all 125 fixtures. It excluded high-confidence decorative and active content before it measured the selected candidate. It also required at least three source headings and three source list items. These limits removed false warnings from avatar, logo, newsletter, and duplicate-title fixtures. Named code, table, footnote, and math fixtures kept full coverage. Examples include `code-heavy-line-numbers`, `article-results-table`, and `essay-footnotes`. Do not make this score an acceptance signal until a later corpus review finds a stable threshold and a real extraction improvement.
 
 The runner exits with a nonzero status when either extractor has a reliability failure. This rule also applies to an intentional comparator difference. For example, Legible correctly returns `NoContent` for the access-barrier shell, but the pinned Defuddle comparator returns the gate prompt. Inspect `report.json` to distinguish a Legible failure from a recorded comparator failure.

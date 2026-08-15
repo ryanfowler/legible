@@ -99,6 +99,50 @@ pub struct QualityInfo {
     pub suspiciously_small: bool,
 }
 
+/// A semantic structure category used for source-to-result coverage.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticCoverageCategory {
+    /// Preformatted source code blocks.
+    CodeBlocks,
+    /// Tables classified as data tables.
+    DataTables,
+    /// List items when the selected candidate contains at least three.
+    SubstantialListItems,
+    /// Figures and images, counted without double-counting figure images.
+    Visuals,
+    /// Heading structure when the candidate contains at least three headings.
+    Headings,
+    /// Definitions that resolve references from retained content.
+    FootnoteDefinitions,
+    /// Inline and display math expressions.
+    MathExpressions,
+}
+
+/// Source-to-result coverage for one semantic structure category.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SemanticCategoryCoverageInfo {
+    /// The semantic structure category.
+    pub category: SemanticCoverageCategory,
+    /// The number of useful structures in the selected source candidate.
+    pub source_count: usize,
+    /// The number of matching structures in the result document.
+    pub result_count: usize,
+    /// The bounded result-to-source ratio.
+    pub coverage: f64,
+}
+
+/// Semantic coverage measured across eligible structures in one candidate.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticCoverageInfo {
+    /// The mean bounded coverage across the reported categories.
+    pub score: f64,
+    /// Coverage details for each eligible source category.
+    pub categories: Vec<SemanticCategoryCoverageInfo>,
+}
+
 /// The reason that an extraction attempt did not win.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,6 +211,10 @@ pub struct ExtractionAttempt {
     pub source: ContentMetricsInfo,
     pub result: ContentMetricsInfo,
     pub quality: QualityInfo,
+    /// Diagnostics-only semantic coverage for the selected source candidate.
+    ///
+    /// This value does not affect attempt acceptance.
+    pub semantic_coverage: Option<SemanticCoverageInfo>,
     /// Major cleanup stages that removed one or more elements.
     pub cleanup_actions: Vec<CleanupActionInfo>,
     /// Canonical semantic structures produced by normalization.

@@ -377,6 +377,7 @@ export function outputMetrics(markdown, details = {}) {
       normalizeText(markdown).includes(phrase),
     ),
     metadata: details.metadata ?? null,
+    semantic_coverage: details.semantic_coverage ?? null,
   };
 }
 
@@ -595,6 +596,7 @@ export function scoreExtraction(extraction, fixture) {
     headings_h5: metrics.headings_h5,
     headings_h6: metrics.headings_h6,
     junk_phrases: metrics.junk_phrases,
+    semantic_coverage: metrics.semantic_coverage,
   };
 }
 
