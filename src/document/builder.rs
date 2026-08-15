@@ -24,6 +24,7 @@ pub(crate) struct DocumentBuilder {
     pending_root_space: bool,
     footnotes: Vec<FootnoteRecord>,
     footnote_index: HashMap<FootnoteId, usize>,
+    output_capacity_hint: usize,
 }
 
 impl DocumentBuilder {
@@ -36,6 +37,7 @@ impl DocumentBuilder {
             pending_root_space: false,
             footnotes: Vec::new(),
             footnote_index: HashMap::new(),
+            output_capacity_hint: 0,
         }
     }
 
@@ -61,6 +63,7 @@ impl DocumentBuilder {
             {
                 if !text.ends_with(' ') {
                     text.as_mut_string().push(' ');
+                    self.output_capacity_hint = self.output_capacity_hint.saturating_add(1);
                 }
             } else {
                 self.append_raw(parent, NodeKind::Text(TextValue::new(" ")))?;
@@ -76,11 +79,15 @@ impl DocumentBuilder {
     ) -> Result<DocumentNodeId, BuildError> {
         let raw = u32::try_from(self.nodes.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let id = DocumentNodeId(raw);
+        let output_capacity_hint = kind.output_capacity_hint();
         self.nodes.push(ArenaNode {
             kind,
             first_child: None,
             next_sibling: None,
         });
+        self.output_capacity_hint = self
+            .output_capacity_hint
+            .saturating_add(output_capacity_hint);
         self.last_children.push(None);
         self.pending_spaces.push(false);
 
@@ -133,6 +140,7 @@ impl DocumentBuilder {
         if let Some(previous) = previous
             && let NodeKind::Text(existing) = &mut self.nodes[previous.index()].kind
         {
+            self.output_capacity_hint = self.output_capacity_hint.saturating_add(normalized.len());
             super::text::merge_prose(existing.as_mut_string(), &normalized);
             return Ok(Some(previous));
         }
@@ -158,6 +166,7 @@ impl DocumentBuilder {
             return Err(BuildError::DuplicateFootnoteDefinition);
         }
         self.footnote_index.insert(id, self.footnotes.len());
+        self.output_capacity_hint = self.output_capacity_hint.saturating_add(label.len());
         self.footnotes.push(FootnoteRecord {
             id,
             label: label.into(),
@@ -190,6 +199,7 @@ impl DocumentBuilder {
             nodes,
             roots,
             footnotes,
+            output_capacity_hint: self.output_capacity_hint,
             stats: OnceLock::new(),
         }
     }
