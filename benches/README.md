@@ -1,12 +1,25 @@
 # Performance benchmarks
 
-Run the full suite with:
+## Development check
+
+Run the small benchmark set after performance-sensitive changes:
+
+```bash
+cargo bench --bench smoke
+```
+
+It measures medium and large article extraction, end-to-end Markdown
+extraction, and lazy Markdown rendering. It uses short Criterion windows, so
+use it to catch large regressions, not to make final performance claims.
+
+The full suite is intentionally slower. Run it for focused performance work,
+baseline updates, or before changing a performance-sensitive implementation:
 
 ```bash
 cargo bench --bench extraction
 ```
 
-The suite measures these workloads:
+The full suite measures these workloads:
 
 - small, medium, and large prose extraction
 - medium and large ordinary-inline article extraction with normal inline markup

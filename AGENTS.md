@@ -11,7 +11,8 @@ cargo test test_name   # Run a specific test (test names are sanitized from test
 cargo fmt              # Format code - run after making changes
 cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
-cargo bench --bench extraction # Run compatibility performance benchmarks
+cargo bench --bench smoke      # Run the quick performance smoke benchmarks
+cargo bench --bench extraction # Run the full compatibility performance suite
 cargo +nightly fuzz run <target> # Run a fuzz target (requires nightly + cargo-fuzz)
 prettier -w .          # Format other files
 node scripts/compare-extractors/performance.mjs  # Compare extractors
@@ -156,6 +157,18 @@ The internal `fuzzing` feature exposes semantic document validation only to fuzz
 
 ## Performance
 
-`benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input. See `benches/README.md` for baseline commands and regression guardrails.
+Use `cargo bench --bench smoke` for the normal development performance check. It
+covers medium and large article extraction, end-to-end Markdown extraction, and
+lazy Markdown rendering. It uses short Criterion measurement windows. Use it to
+catch large regressions, not to make final performance claims.
+
+Do not run the full benchmark suite for every change. Run
+`cargo bench --bench extraction` for performance-sensitive work, baseline
+updates, or when a change affects a workload that the smoke set does not cover.
+Use the full suite's focused Criterion filter when possible. See
+`benches/README.md` for workload coverage, baseline commands, and regression
+guardrails.
+
+`benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input.
 
 Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text, cached candidate statistics, and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. The semantic compiler skips multiline and media separator passes when their source evidence is absent. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.
