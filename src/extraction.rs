@@ -100,6 +100,7 @@ struct FrozenContent {
     dom: Dom,
     source_facts: Option<crate::document::SemanticSourceFacts>,
     source_evidence: crate::document::SourceEvidence,
+    retained_nodes: Option<Vec<NodeId>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -790,9 +791,15 @@ impl<'a> ContentExtractor<'a> {
             }
             let excerpt = self.content_excerpt(content_id);
             let access_barrier = is_access_barrier(&self.dom, content_id);
-            let mut source_facts =
+            let (mut source_facts, mut retained_nodes) =
                 self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
             self.capture_normalization_counts(content_id);
+            if synthetic
+                && content_id != self.dom.root()
+                && let Some(retained_nodes) = retained_nodes.as_mut()
+            {
+                retained_nodes.insert(0, content_id);
+            }
             // The selected region is already a compact fragment. Remove the
             // internal selection boundary when the output contract excludes
             // it. This makes the fragment itself the final compiler input and
@@ -812,7 +819,7 @@ impl<'a> ContentExtractor<'a> {
             // retain complete semantic metrics.
             let result_document = if self.diagnostic_attempts.is_some() {
                 Some(
-                    crate::document::compile_document_with_optional_source_facts_and_evidence(
+                    crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
                         &self.dom,
                         result_root,
                         &crate::document::CompileContext::new(
@@ -821,6 +828,7 @@ impl<'a> ContentExtractor<'a> {
                         ),
                         source_facts.as_ref(),
                         Some(&source_evidence),
+                        retained_nodes.as_deref(),
                     )
                     .map_err(|_| Error::NoContent)?,
                 )
@@ -918,7 +926,7 @@ impl<'a> ContentExtractor<'a> {
                 let document = if let Some(document) = result_document {
                     document
                 } else {
-                    crate::document::compile_document_owned_with_optional_source_facts_and_evidence(
+                    crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
                         content,
                         result_root,
                         &crate::document::CompileContext::new(
@@ -927,6 +935,7 @@ impl<'a> ContentExtractor<'a> {
                         ),
                         source_facts.as_ref(),
                         &source_evidence,
+                        retained_nodes.as_deref(),
                     )
                     .map_err(|_| Error::NoContent)?
                 };
@@ -972,6 +981,7 @@ impl<'a> ContentExtractor<'a> {
                         dom: std::mem::replace(&mut self.dom, source_dom),
                         source_facts,
                         source_evidence,
+                        retained_nodes,
                     },
                     quality,
                     excerpt,
@@ -1000,17 +1010,24 @@ impl<'a> ContentExtractor<'a> {
             attempts[index].accepted = true;
             attempts[index].rejection_reason = None;
         }
-        let root = best.content.dom.root();
+        let FrozenContent {
+            dom,
+            source_facts,
+            source_evidence,
+            retained_nodes,
+        } = best.content;
+        let root = dom.root();
         let document =
-            crate::document::compile_document_owned_with_optional_source_facts_and_evidence(
-                best.content.dom,
+            crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+                dom,
                 root,
                 &crate::document::CompileContext::new(
                     self.base_uri.clone(),
                     self.source_uri.as_ref(),
                 ),
-                best.content.source_facts.as_ref(),
-                &best.content.source_evidence,
+                source_facts.as_ref(),
+                &source_evidence,
+                retained_nodes.as_deref(),
             )
             .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
@@ -2016,13 +2033,16 @@ impl<'a> ContentExtractor<'a> {
         root: NodeId,
         evidence: &crate::document::SourceEvidence,
         nodes: &mut Vec<NodeId>,
-    ) -> Option<crate::document::SemanticSourceFacts> {
+    ) -> (
+        Option<crate::document::SemanticSourceFacts>,
+        Option<Vec<NodeId>>,
+    ) {
         // The compiler resolves URLs, drops source attributes, ignores comments,
         // and collapses transparent wrappers. Only relevance cleanup mutates the
         // selected DOM at this stage.
         let before = self.diagnostic_element_count(root);
         let mut source_facts = None;
-        remove_empty_content_with_source_facts(
+        let retained_nodes = remove_empty_content_with_source_facts(
             &mut self.dom,
             root,
             nodes,
@@ -2030,7 +2050,7 @@ impl<'a> ContentExtractor<'a> {
             evidence,
         );
         self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
-        source_facts
+        (source_facts, retained_nodes)
     }
 
     fn diagnostic_element_count(&self, root: NodeId) -> Option<usize> {
@@ -2525,6 +2545,42 @@ mod tests {
 
         assert!(page.markdown().contains("semantic compiler consumes"));
         assert_eq!(Dom::fragment_copy_count(), 1);
+    }
+
+    #[test]
+    fn retained_stream_keeps_the_non_synthetic_boundary_for_both_compilers() {
+        let ordinary = crate::extract(
+            r#"<body><main><article><h1>Boundary preservation</h1><p>This ordinary article contains enough complete prose to select the article as the content boundary and keep its semantic wrapper in canonical output.</p><p>A second paragraph confirms that the retained source stream preserves the same outer structure.</p></article></main></body>"#,
+            None,
+        )
+        .unwrap();
+        assert!(ordinary.html().starts_with("<div>"));
+
+        let complex = crate::extract(
+            r#"<body><main><article><h1>Complex boundary preservation</h1><p>This article contains enough complete prose to select the article and a mathematical expression <math><mi>x</mi></math> that requires complex semantic lowering.</p><p>A second paragraph keeps the extracted result substantial.</p></article></main></body>"#,
+            None,
+        )
+        .unwrap();
+        assert!(complex.html().starts_with("<div>"));
+    }
+
+    #[test]
+    fn retained_stream_keeps_the_synthetic_body_boundary() {
+        let ordinary = crate::extract(
+            "<body><h1>Old page</h1>Useful text<br>Second useful line</body>",
+            None,
+        )
+        .unwrap();
+        assert!(ordinary.html().starts_with("<div>"));
+        assert!(ordinary.text().contains("Second useful line"));
+
+        let complex = crate::extract(
+            r#"<body><h1>Formula page</h1><p>This body fallback has enough complete prose to remain meaningful and includes <math><mi>x</mi></math> for complex lowering.</p></body>"#,
+            None,
+        )
+        .unwrap();
+        assert!(complex.html().starts_with("<div>"));
+        assert!(complex.text().contains("body fallback"));
     }
 
     #[test]

@@ -158,11 +158,37 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence(
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: Option<&super::facts::SourceEvidence>,
 ) -> Result<Document, CompileError> {
+    compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+        dom,
+        root,
+        context,
+        source_facts,
+        source_evidence,
+        None,
+    )
+}
+
+pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: Option<&super::facts::SourceEvidence>,
+    retained_nodes: Option<&[NodeId]>,
+) -> Result<Document, CompileError> {
     // Ordinary pages do not need the rich source-evidence inventory. Run a
     // cheap gate first, then let the lowering pass validate the few structural
     // cases that cannot be classified from a flat source scan.
-    if let Some(source_node_count) = super::ordinary::ordinary_source_gate(dom, root) {
-        match super::ordinary::compile(dom, root, context, source_node_count) {
+    if let Some(source_node_count) =
+        super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_nodes)
+    {
+        match super::ordinary::compile_with_retained_nodes(
+            dom,
+            root,
+            context,
+            source_node_count,
+            retained_nodes,
+        ) {
             Ok(document) => return Ok(document),
             Err(CompileError::RequiresComplex) => {}
             Err(error) => return Err(error),
@@ -176,7 +202,14 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence(
         owned_evidence = super::facts::SourceEvidence::analyze(dom, root, &NodeStateStore::new());
         &owned_evidence
     };
-    compile_complex_document(dom, root, context, source_facts, source_evidence)
+    compile_complex_document(
+        dom,
+        root,
+        context,
+        source_facts,
+        source_evidence,
+        retained_nodes,
+    )
 }
 
 /// Compiles and releases an owned retained-source fragment.
@@ -189,7 +222,7 @@ pub(crate) fn compile_document_owned(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
-    compile_document_owned_impl(dom, root, context, None, None)
+    compile_document_owned_impl(dom, root, context, None, None, None)
 }
 
 /// Compiles an owned fragment while reusing source facts from final cleanup.
@@ -199,7 +232,7 @@ pub(crate) fn compile_document_owned_with_optional_source_facts(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
 ) -> Result<Document, CompileError> {
-    compile_document_owned_impl(dom, root, context, source_facts, None)
+    compile_document_owned_impl(dom, root, context, source_facts, None, None)
 }
 
 pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
@@ -209,7 +242,32 @@ pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
 ) -> Result<Document, CompileError> {
-    compile_document_owned_impl(dom, root, context, source_facts, Some(source_evidence))
+    compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+        dom,
+        root,
+        context,
+        source_facts,
+        source_evidence,
+        None,
+    )
+}
+
+pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+    dom: Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: &super::facts::SourceEvidence,
+    retained_nodes: Option<&[NodeId]>,
+) -> Result<Document, CompileError> {
+    compile_document_owned_impl(
+        dom,
+        root,
+        context,
+        source_facts,
+        Some(source_evidence),
+        retained_nodes,
+    )
 }
 
 fn compile_document_owned_impl(
@@ -218,9 +276,18 @@ fn compile_document_owned_impl(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: Option<&super::facts::SourceEvidence>,
+    retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
-    if let Some(source_node_count) = super::ordinary::ordinary_source_gate(&dom, root) {
-        match super::ordinary::compile(&dom, root, context, source_node_count) {
+    if let Some(source_node_count) =
+        super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, retained_nodes)
+    {
+        match super::ordinary::compile_with_retained_nodes(
+            &dom,
+            root,
+            context,
+            source_node_count,
+            retained_nodes,
+        ) {
             Ok(document) => return Ok(document),
             Err(CompileError::RequiresComplex) => {}
             Err(error) => return Err(error),
@@ -234,7 +301,14 @@ fn compile_document_owned_impl(
         owned_evidence = super::facts::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
         &owned_evidence
     };
-    let analysis = analyze_complex_document(&dom, root, context, source_facts, source_evidence);
+    let analysis = analyze_complex_document(
+        &dom,
+        root,
+        context,
+        source_facts,
+        source_evidence,
+        retained_nodes,
+    );
     let mut owned_source_texts = super::code::take_owned_source_texts(
         &mut dom,
         &analysis.facts.inventory().owned_code_sources,
@@ -277,7 +351,8 @@ pub(crate) fn complex_storage_metrics_for_benchmark(
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
 ) -> ComplexStorageMetrics {
-    let analysis = analyze_complex_document(dom, root, context, source_facts, source_evidence);
+    let analysis =
+        analyze_complex_document(dom, root, context, source_facts, source_evidence, None);
     let dense_bytes = analysis
         .figures
         .capacity()
@@ -307,8 +382,16 @@ fn compile_complex_document(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
+    retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
-    let analysis = analyze_complex_document(dom, root, context, source_facts, source_evidence);
+    let analysis = analyze_complex_document(
+        dom,
+        root,
+        context,
+        source_facts,
+        source_evidence,
+        retained_nodes,
+    );
     lower_complex_document(dom, root, context, analysis, None)
 }
 
@@ -318,12 +401,14 @@ fn analyze_complex_document(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
+    retained_nodes: Option<&[NodeId]>,
 ) -> ComplexSourceAnalysis {
     let mut facts = super::facts::SemanticFacts::analyze_with_source_facts(
         dom,
         root,
         source_facts,
         Some(source_evidence),
+        retained_nodes,
     );
     let images = super::images::analyze_with_inventory(
         dom,
@@ -1646,9 +1731,25 @@ mod tests {
             super::super::ordinary::ordinary_source_gate(&dom, dom.root()).unwrap(),
         )
         .unwrap();
+        let retained_nodes: Vec<_> = dom.descendants(dom.root()).collect();
+        let retained = super::super::ordinary::compile_with_retained_nodes(
+            &dom,
+            dom.root(),
+            &context,
+            super::super::ordinary::ordinary_source_gate_with_retained_nodes(
+                &dom,
+                dom.root(),
+                Some(&retained_nodes),
+            )
+            .unwrap(),
+            Some(&retained_nodes),
+        )
+        .unwrap();
         let complex =
-            compile_complex_document(&dom, dom.root(), &context, None, &source_evidence).unwrap();
+            compile_complex_document(&dom, dom.root(), &context, None, &source_evidence, None)
+                .unwrap();
         assert_eq!(ordinary.debug_tree(), complex.debug_tree());
+        assert_eq!(ordinary.debug_tree(), retained.debug_tree());
     }
 
     #[test]
@@ -1747,7 +1848,8 @@ mod tests {
         )
         .unwrap();
         let complex =
-            compile_complex_document(&dom, dom.root(), &context, None, &source_evidence).unwrap();
+            compile_complex_document(&dom, dom.root(), &context, None, &source_evidence, None)
+                .unwrap();
         assert_eq!(ordinary.text(), "x bc");
         assert_eq!(ordinary.text(), complex.text());
     }
