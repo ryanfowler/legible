@@ -67,6 +67,7 @@ The extraction pipeline flows through these stages:
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
 | `render/markdown.rs` / `render/text.rs` / `render/html.rs` | Stack-safe format renderers from the semantic document |
+| `benches/support/compact_ir.rs` | Benchmark-only adapters for compact preorder and event-tape representation experiments |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
@@ -99,6 +100,7 @@ These invariants are costly to violate:
 - **Cache semantic source evidence.** Build the dense callout, footnote, math, accessible-math, and data-table evidence mask once for each retained fragment. Pass it through hard cleanup, heuristic cleanup, final cleanup, and semantic compilation. Use cheap tag and attribute gates before rich recognizers.
 - **Defer rejected-attempt compilation.** Normal extraction uses cheap DOM quality metrics until a candidate can win. Diagnostics may compile every attempt to report semantic metrics.
 - **Use dense semantic indexes.** Renderers should use node-indexed storage for per-document state instead of hash maps when semantic node IDs are dense.
+- **Keep representation experiments benchmark-only until measured.** The compact IR prototype compares sequential layouts without constraining the production arena.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
 
 ### Common Pitfalls
