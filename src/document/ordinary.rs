@@ -4,9 +4,7 @@ use super::compiler::{
     CompileContext, CompileError, has_single_content_child, heading_level, is_block_tag,
     is_redundant_formatting, semantic_image,
 };
-use super::{
-    CodeBlock, Document, DocumentBuilder, DocumentNodeId, Link, List, ListKind, NodeKind, TextValue,
-};
+use super::{CodeBlock, Document, DocumentBuilder, DocumentNodeId, Link, List, ListKind, NodeKind};
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 #[derive(Clone, Copy, Default)]
@@ -533,10 +531,7 @@ pub(super) fn compile(
         if tag == Tag::Code {
             let text = dom.text(node);
             let first = subtree_first;
-            builder.append(
-                scope.parent,
-                NodeKind::InlineCode(TextValue::new(text.clone())),
-            )?;
+            builder.append_inline_code(scope.parent, &text)?;
             complete_child(
                 frames.last_mut().unwrap(),
                 Some(tag),

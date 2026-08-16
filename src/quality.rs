@@ -459,7 +459,7 @@ fn list_item_signature(document: &Document, root: DocumentNodeId) -> Box<str> {
             continue;
         }
         let text = match arena_node.kind() {
-            NodeKind::Text(text) | NodeKind::InlineCode(text) => Some(text.as_str()),
+            NodeKind::Text(text) | NodeKind::InlineCode(text) => Some(text),
             NodeKind::CodeBlock(code) => Some(code.text()),
             NodeKind::Image(image) => Some(if image.alt().is_empty() {
                 image.source()

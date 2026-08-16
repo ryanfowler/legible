@@ -33,7 +33,7 @@ The full suite measures these workloads:
 - retained-fragment lowering to a semantic document
 - source DOM, actual final pre-IR DOM, IR node, and retained-byte counts in extraction benchmark output
 - semantic compression counts in lowering benchmark IDs
-- retained-byte, semantic-string, root, and node-layout estimates in lowering benchmark output
+- retained-byte, semantic-string, root, and node-layout estimates in lowering benchmark output; the semantic text arena counts as one owned string value
 - benchmark-only compact preorder and event-tape representation prototypes
 - end-to-end raw HTML to Markdown extraction
 - steady-state lazy Markdown, text, and HTML rendering (text statistics are prewarmed)

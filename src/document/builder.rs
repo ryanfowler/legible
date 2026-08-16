@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use super::{
     Callout, CodeBlock, Document, DocumentNodeId, EventOp, FootnoteId, FootnoteRecord, Image, Link,
     List, MathValue, Media, NodeKind, OP_CLOSE, OperationKind, Table, TableCell, TaskMarker,
-    TextValue,
+    TextRef,
 };
 use thiserror::Error;
 
@@ -37,6 +37,11 @@ pub(crate) struct DocumentBuilder {
     last_children: Vec<Option<DocumentNodeId>>,
     pending_spaces: Vec<bool>,
     pending_root_space: bool,
+    /// Prose and inline-code payloads share the retained text arena.
+    text: String,
+    /// Set when deferred builder work creates adjacent ranges that need one
+    /// final source-order materialization.
+    requires_text_materialization: bool,
     footnotes: Vec<FootnoteRecord>,
     footnote_index: HashMap<FootnoteId, usize>,
     output_capacity_hint: usize,
@@ -50,6 +55,8 @@ impl DocumentBuilder {
             last_children: Vec::with_capacity(capacity),
             pending_spaces: Vec::with_capacity(capacity),
             pending_root_space: false,
+            text: String::new(),
+            requires_text_materialization: false,
             footnotes: Vec::new(),
             footnote_index: HashMap::new(),
             output_capacity_hint: 0,
@@ -61,32 +68,29 @@ impl DocumentBuilder {
         parent: Option<DocumentNodeId>,
         kind: NodeKind,
     ) -> Result<DocumentNodeId, BuildError> {
-        if parent.is_some_and(|id| {
-            id.index() >= self.nodes.len() || !source_is_container(&self.nodes[id.index()].kind)
-        }) {
+        if !self.valid_parent(parent) {
             return Err(BuildError::InvalidParent);
         }
-        let pending_space = match parent {
-            Some(id) => std::mem::take(&mut self.pending_spaces[id.index()]),
-            None => std::mem::take(&mut self.pending_root_space),
-        };
-        if pending_space && is_inline_sibling(&kind) {
-            let previous = match parent {
-                Some(id) => self.last_children[id.index()],
-                None => self.roots.last().copied(),
-            };
-            if let Some(previous) = previous
-                && let NodeKind::Text(text) = &mut self.nodes[previous.index()].kind
-            {
-                if !text.ends_with(' ') {
-                    text.as_mut_string().push(' ');
-                    self.output_capacity_hint = self.output_capacity_hint.saturating_add(1);
-                }
-            } else {
-                self.append_raw(parent, NodeKind::Text(TextValue::new(" ")))?;
-            }
+        if self.take_pending_space(parent) && is_inline_sibling(&kind) {
+            self.append_pending_separator(parent)?;
         }
         self.append_raw(parent, kind)
+    }
+
+    /// Appends raw inline code to the same arena as canonical prose.
+    pub(crate) fn append_inline_code(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        value: &str,
+    ) -> Result<DocumentNodeId, BuildError> {
+        if !self.valid_parent(parent) {
+            return Err(BuildError::InvalidParent);
+        }
+        if self.take_pending_space(parent) {
+            self.append_pending_separator(parent)?;
+        }
+        let value = self.append_text(value)?;
+        self.append_raw(parent, NodeKind::InlineCode(value))
     }
 
     fn append_raw(
@@ -125,7 +129,7 @@ impl DocumentBuilder {
         parent: Option<DocumentNodeId>,
         value: &str,
     ) -> Result<Option<DocumentNodeId>, BuildError> {
-        if parent.is_some_and(|id| id.index() >= self.nodes.len()) {
+        if !self.valid_parent(parent) {
             return Err(BuildError::InvalidParent);
         }
         let normalized = super::text::normalize_prose_fragment(value);
@@ -138,7 +142,7 @@ impl DocumentBuilder {
         parent: Option<DocumentNodeId>,
         value: &str,
     ) -> Result<Option<DocumentNodeId>, BuildError> {
-        if parent.is_some_and(|id| id.index() >= self.nodes.len()) {
+        if !self.valid_parent(parent) {
             return Err(BuildError::InvalidParent);
         }
         self.append_normalized_prose_value(parent, Cow::Borrowed(value))
@@ -154,56 +158,151 @@ impl DocumentBuilder {
         }
 
         let value_ref = value.as_ref();
-        let previous = match parent {
-            Some(id) => self.last_children[id.index()],
-            None => self.roots.last().copied(),
-        };
+        let previous = self.previous_child(parent);
         if value_ref == " " {
             if previous.is_some() {
-                match parent {
-                    Some(id) => self.pending_spaces[id.index()] = true,
-                    None => self.pending_root_space = true,
-                }
+                self.set_pending_space(parent, true);
             }
             return Ok(None);
         }
-        let pending_space = match parent {
-            Some(id) => std::mem::take(&mut self.pending_spaces[id.index()]),
-            None => std::mem::take(&mut self.pending_root_space),
-        };
-        let needs_leading_space = pending_space && !value_ref.starts_with(' ');
+        let needs_leading_space = self.take_pending_space(parent) && !value_ref.starts_with(' ');
         if let Some(previous) = previous
-            && let NodeKind::Text(existing) = &mut self.nodes[previous.index()].kind
+            && let NodeKind::Text(existing) = self.nodes[previous.index()].kind
         {
-            let leading_space = needs_leading_space && !existing.ends_with(' ');
-            self.output_capacity_hint = self
-                .output_capacity_hint
-                .saturating_add(value_ref.len().saturating_add(usize::from(leading_space)));
-            if leading_space {
-                existing.as_mut_string().push(' ');
+            let existing_value = self.text_slice(existing);
+            let leading_space = needs_leading_space && !existing_value.ends_with(' ');
+            let value = if existing_value.ends_with(' ') && value_ref.starts_with(' ') {
+                &value_ref[1..]
+            } else {
+                value_ref
+            };
+            if existing.range().end == self.text.len() {
+                let updated = self.extend_text(existing, leading_space, value)?;
+                if let NodeKind::Text(text) = &mut self.nodes[previous.index()].kind {
+                    *text = updated;
+                }
+                return Ok(Some(previous));
             }
-            existing.append_normalized_prose(value_ref);
-            return Ok(Some(previous));
+            if !leading_space && value.is_empty() {
+                return Ok(Some(previous));
+            }
+            let value = self.append_text_with_prefix(value, leading_space)?;
+            self.requires_text_materialization = true;
+            return self.append_raw(parent, NodeKind::Text(value)).map(Some);
         }
 
-        let mut owned = match value {
-            Cow::Borrowed(value) => {
-                let mut owned = String::with_capacity(
-                    value.len().saturating_add(usize::from(needs_leading_space)),
-                );
-                owned.push_str(value);
-                owned
+        let value = self.append_text_with_prefix(value_ref, needs_leading_space)?;
+        self.append_raw(parent, NodeKind::Text(value)).map(Some)
+    }
+
+    fn valid_parent(&self, parent: Option<DocumentNodeId>) -> bool {
+        parent.is_none_or(|id| {
+            id.index() < self.nodes.len() && source_is_container(&self.nodes[id.index()].kind)
+        })
+    }
+
+    fn previous_child(&self, parent: Option<DocumentNodeId>) -> Option<DocumentNodeId> {
+        match parent {
+            Some(id) => self.last_children[id.index()],
+            None => self.roots.last().copied(),
+        }
+    }
+
+    fn take_pending_space(&mut self, parent: Option<DocumentNodeId>) -> bool {
+        match parent {
+            Some(id) => std::mem::take(&mut self.pending_spaces[id.index()]),
+            None => std::mem::take(&mut self.pending_root_space),
+        }
+    }
+
+    fn set_pending_space(&mut self, parent: Option<DocumentNodeId>, value: bool) {
+        match parent {
+            Some(id) => self.pending_spaces[id.index()] = value,
+            None => self.pending_root_space = value,
+        }
+    }
+
+    fn append_pending_separator(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+    ) -> Result<(), BuildError> {
+        let previous = self.previous_child(parent);
+        if let Some(previous) = previous
+            && let NodeKind::Text(existing) = self.nodes[previous.index()].kind
+        {
+            if !self.text_slice(existing).ends_with(' ') {
+                if existing.range().end == self.text.len() {
+                    let updated = self.extend_text(existing, false, " ")?;
+                    if let NodeKind::Text(text) = &mut self.nodes[previous.index()].kind {
+                        *text = updated;
+                    }
+                } else {
+                    let separator = self.append_text(" ")?;
+                    self.requires_text_materialization = true;
+                    self.append_raw(parent, NodeKind::Text(separator))?;
+                }
             }
-            Cow::Owned(value) => value,
+        } else {
+            let separator = self.append_text(" ")?;
+            self.append_raw(parent, NodeKind::Text(separator))?;
+        }
+        Ok(())
+    }
+
+    fn append_text(&mut self, value: &str) -> Result<TextRef, BuildError> {
+        self.append_text_with_prefix(value, false)
+    }
+
+    fn append_text_with_prefix(
+        &mut self,
+        value: &str,
+        leading_space: bool,
+    ) -> Result<TextRef, BuildError> {
+        let start = self.text.len();
+        let length = value
+            .len()
+            .checked_add(usize::from(leading_space))
+            .ok_or(BuildError::CapacityExceeded)?;
+        let reference = TextRef::new(start, length)?;
+        if leading_space {
+            self.text.push(' ');
+        }
+        self.text.push_str(value);
+        self.output_capacity_hint = self.output_capacity_hint.saturating_add(length);
+        Ok(reference)
+    }
+
+    fn extend_text(
+        &mut self,
+        existing: TextRef,
+        leading_space: bool,
+        value: &str,
+    ) -> Result<TextRef, BuildError> {
+        let existing_value = self.text_slice(existing);
+        let leading_space = leading_space && !existing_value.ends_with(' ');
+        let value = if existing_value.ends_with(' ') && value.starts_with(' ') {
+            &value[1..]
+        } else {
+            value
         };
-        if needs_leading_space {
-            owned.insert(0, ' ');
+        if !leading_space && value.is_empty() {
+            return Ok(existing);
         }
-        if owned.is_empty() {
-            return Ok(None);
+        debug_assert_eq!(existing.range().end, self.text.len());
+        let added = value.len() + usize::from(leading_space);
+        let reference = TextRef::new(existing.start as usize, existing.len as usize + added)?;
+        if leading_space {
+            self.text.push(' ');
         }
-        self.append(parent, NodeKind::Text(TextValue::new(owned)))
-            .map(Some)
+        self.text.push_str(value);
+        self.output_capacity_hint = self.output_capacity_hint.saturating_add(added);
+        Ok(reference)
+    }
+
+    fn text_slice(&self, value: TextRef) -> &str {
+        self.text
+            .get(value.range())
+            .expect("text reference must point into the builder arena")
     }
 
     pub(crate) fn kind(&self, id: DocumentNodeId) -> Option<&NodeKind> {
@@ -237,12 +336,18 @@ impl DocumentBuilder {
     }
 
     pub(crate) fn finish(mut self) -> Document {
-        let node_count = self.nodes.len();
-        let mut ops = Vec::with_capacity(node_count.saturating_mul(2));
-        let mut ends = Vec::with_capacity(node_count.saturating_mul(2));
+        let source_text = std::mem::take(&mut self.text);
+        let source_node_count = self.nodes.len();
+        let mut node_count = 0usize;
+        let mut text = self
+            .requires_text_materialization
+            .then(|| String::with_capacity(source_text.len()));
+        let mut ops = Vec::with_capacity(source_node_count.saturating_mul(2));
+        let mut ends = Vec::with_capacity(source_node_count.saturating_mul(2));
         let mut roots = Vec::with_capacity(self.roots.len());
-        let mut remap = vec![DocumentNodeId(0); node_count];
+        let mut remap = vec![DocumentNodeId(0); source_node_count];
         let mut payloads = PayloadTables::default();
+        let mut last_text = None;
         let mut tasks = Vec::with_capacity(32);
         tasks.extend(self.roots.iter().rev().map(|&root| BuildTask::Enter(root)));
 
@@ -255,7 +360,19 @@ impl DocumentBuilder {
                     );
                     let is_container = source_is_container(&kind)
                         || self.nodes[old_id.index()].first_child.is_some();
-                    let new_id = emit_open(&mut ops, &mut ends, &mut payloads, kind);
+                    let previous_operations = ops.len();
+                    let new_id = emit_open(
+                        &mut ops,
+                        &mut ends,
+                        &mut payloads,
+                        &source_text,
+                        text.as_mut(),
+                        &mut last_text,
+                        kind,
+                    );
+                    if ops.len() > previous_operations {
+                        node_count += 1;
+                    }
                     remap[old_id.index()] = new_id;
                     if is_container {
                         tasks.push(BuildTask::Exit(new_id));
@@ -281,6 +398,7 @@ impl DocumentBuilder {
                     });
                     ends.push(0);
                     ends[open_id.index()] = close;
+                    last_text = None;
                 }
             }
         }
@@ -310,10 +428,14 @@ impl DocumentBuilder {
                 .unwrap_or(DocumentNodeId(u32::MAX));
         }
 
+        if let Some(text) = text.as_mut() {
+            compact_excess_string(text);
+        }
+        let text = text.unwrap_or(source_text);
         compact_excess_capacity(&mut ops);
         compact_excess_capacity(&mut ends);
         compact_excess_capacity(&mut roots);
-        compact_excess_capacity(&mut payloads.text_values);
+        compact_excess_capacity(&mut payloads.text_refs);
         compact_excess_capacity(&mut payloads.code_blocks);
         compact_excess_capacity(&mut payloads.links);
         compact_excess_capacity(&mut payloads.images);
@@ -330,7 +452,8 @@ impl DocumentBuilder {
             ops,
             ends,
             roots,
-            text_values: payloads.text_values,
+            text,
+            text_refs: payloads.text_refs,
             code_blocks: payloads.code_blocks,
             links: payloads.links,
             images: payloads.images,
@@ -351,7 +474,7 @@ impl DocumentBuilder {
 
 #[derive(Default)]
 struct PayloadTables {
-    text_values: Vec<TextValue>,
+    text_refs: Vec<TextRef>,
     code_blocks: Vec<CodeBlock>,
     links: Vec<Link>,
     images: Vec<Image>,
@@ -374,8 +497,14 @@ fn emit_open(
     ops: &mut Vec<EventOp>,
     ends: &mut Vec<u32>,
     payloads: &mut PayloadTables,
+    source_text: &str,
+    text: Option<&mut String>,
+    last_text: &mut Option<DocumentNodeId>,
     kind: NodeKind,
 ) -> DocumentNodeId {
+    if !matches!(&kind, NodeKind::Text(_)) {
+        *last_text = None;
+    }
     let (operation, payload, aux) = match kind {
         NodeKind::Paragraph => (OperationKind::Paragraph, 0, 0),
         NodeKind::BlockGroup => (OperationKind::BlockGroup, 0, 0),
@@ -418,19 +547,47 @@ fn emit_open(
             0,
         ),
         NodeKind::FootnoteDefinition(id) => (OperationKind::FootnoteDefinition, id.0, 0),
-        NodeKind::Text(value) => (
-            OperationKind::Text,
-            push_payload(&mut payloads.text_values, value),
-            0,
-        ),
+        NodeKind::Text(value) => {
+            let source = source_text
+                .get(value.range())
+                .expect("builder text reference must be valid");
+            if let Some(text) = text {
+                if let Some(previous) = *last_text {
+                    let payload = ops[previous.index()].payload as usize;
+                    let existing = payloads.text_refs[payload];
+                    payloads.text_refs[payload] = merge_document_text(text, existing, source);
+                    return previous;
+                }
+                let reference = append_document_text(text, source);
+                let index = DocumentNodeId(u32::try_from(ops.len()).unwrap_or(u32::MAX));
+                *last_text = Some(index);
+                (
+                    OperationKind::Text,
+                    push_payload(&mut payloads.text_refs, reference),
+                    0,
+                )
+            } else {
+                (
+                    OperationKind::Text,
+                    push_payload(&mut payloads.text_refs, value),
+                    0,
+                )
+            }
+        }
         NodeKind::Emphasis => (OperationKind::Emphasis, 0, 0),
         NodeKind::Strong => (OperationKind::Strong, 0, 0),
         NodeKind::Strikethrough => (OperationKind::Strikethrough, 0, 0),
-        NodeKind::InlineCode(value) => (
-            OperationKind::InlineCode,
-            push_payload(&mut payloads.text_values, value),
-            0,
-        ),
+        NodeKind::InlineCode(value) => {
+            let source = source_text
+                .get(value.range())
+                .expect("builder text reference must be valid");
+            let reference = text.map_or(value, |text| append_document_text(text, source));
+            (
+                OperationKind::InlineCode,
+                push_payload(&mut payloads.text_refs, reference),
+                0,
+            )
+        }
         NodeKind::Link(value) => (
             OperationKind::Link,
             push_payload(&mut payloads.links, value),
@@ -478,6 +635,29 @@ fn emit_open(
     index
 }
 
+fn append_document_text(text: &mut String, value: &str) -> TextRef {
+    let start = text.len();
+    let reference =
+        TextRef::new(start, value.len()).expect("semantic text arena exceeds u32 capacity");
+    text.push_str(value);
+    reference
+}
+
+fn merge_document_text(text: &mut String, existing: TextRef, value: &str) -> TextRef {
+    let existing_value = text
+        .get(existing.range())
+        .expect("document text reference must be valid");
+    let value = if existing_value.ends_with(' ') && value.starts_with(' ') {
+        &value[1..]
+    } else {
+        value
+    };
+    let reference = TextRef::new(existing.start as usize, existing.len as usize + value.len())
+        .expect("semantic text arena exceeds u32 capacity");
+    text.push_str(value);
+    reference
+}
+
 fn push_payload<T>(values: &mut Vec<T>, value: T) -> u32 {
     let index = u32::try_from(values.len()).unwrap_or(u32::MAX);
     values.push(value);
@@ -509,6 +689,15 @@ fn compact_excess_capacity<T>(values: &mut Vec<T>) {
     let unused_bytes = unused.saturating_mul(size_of::<T>());
     if values.capacity() > values.len().saturating_mul(2) && unused_bytes >= MINIMUM_SAVING_BYTES {
         values.shrink_to_fit();
+    }
+}
+
+fn compact_excess_string(value: &mut String) {
+    const MINIMUM_SAVING_BYTES: usize = 4 * 1024;
+
+    let unused = value.capacity().saturating_sub(value.len());
+    if unused >= MINIMUM_SAVING_BYTES && unused.saturating_mul(4) >= value.capacity() {
+        value.shrink_to_fit();
     }
 }
 
@@ -546,7 +735,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            builder.append(Some(code), NodeKind::Text(TextValue::new("lost"))),
+            builder.append_prose(Some(code), "lost"),
             Err(BuildError::InvalidParent)
         );
     }
@@ -591,6 +780,43 @@ mod tests {
         assert_eq!(
             builder.finish().debug_tree(),
             "Paragraph\n  Text(\"a b\")\n"
+        );
+    }
+
+    #[test]
+    fn prose_and_inline_code_share_one_text_arena() {
+        let mut builder = DocumentBuilder::with_capacity(4);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "first").unwrap();
+        builder.append_prose(Some(paragraph), " ").unwrap();
+        builder.append_inline_code(Some(paragraph), "code").unwrap();
+        builder.append_prose(Some(paragraph), " tail").unwrap();
+
+        let document = builder.finish();
+        assert_eq!(document.text, "first code tail");
+        assert_eq!(document.text_refs.len(), 3);
+        assert_eq!(
+            document.debug_tree(),
+            "Paragraph\n  Text(\"first \")\n  InlineCode(\"code\")\n  Text(\" tail\")\n"
+        );
+    }
+
+    #[test]
+    fn interleaved_builder_appends_merge_at_finish_without_repacking() {
+        let mut builder = DocumentBuilder::with_capacity(4);
+        let first = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(first), "first").unwrap();
+        let second = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(second), "second").unwrap();
+        builder.append_prose(Some(first), " tail").unwrap();
+
+        let document = builder.finish();
+        assert_eq!(document.text, "first tailsecond");
+        assert_eq!(document.len(), 4);
+        document.validate().unwrap();
+        assert_eq!(
+            document.debug_tree(),
+            "Paragraph\n  Text(\"first tail\")\nParagraph\n  Text(\"second\")\n"
         );
     }
 }

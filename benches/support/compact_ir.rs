@@ -690,15 +690,11 @@ fn capture_node(kind: &NodeKind) -> (Kind, u16, Option<Payload>) {
                 id: id.index() as u32,
             }),
         ),
-        NodeKind::Text(text) => (Kind::Text, 0, Some(Payload::Text(text.as_str().into()))),
+        NodeKind::Text(text) => (Kind::Text, 0, Some(Payload::Text((*text).into()))),
         NodeKind::Emphasis => (Kind::Emphasis, 0, None),
         NodeKind::Strong => (Kind::Strong, 0, None),
         NodeKind::Strikethrough => (Kind::Strikethrough, 0, None),
-        NodeKind::InlineCode(text) => (
-            Kind::InlineCode,
-            0,
-            Some(Payload::Text(text.as_str().into())),
-        ),
+        NodeKind::InlineCode(text) => (Kind::InlineCode, 0, Some(Payload::Text((*text).into()))),
         NodeKind::Link(link) => (
             Kind::Link,
             0,
@@ -930,7 +926,7 @@ fn source_view<'a>(document: &'a Document, id: document::DocumentNodeId) -> Opti
         NodeKind::Text(text) => View {
             kind: Kind::Text,
             aux: 0,
-            value: Value::Text(text.as_str()),
+            value: Value::Text(text),
         },
         NodeKind::Emphasis => View {
             kind: Kind::Emphasis,
@@ -950,7 +946,7 @@ fn source_view<'a>(document: &'a Document, id: document::DocumentNodeId) -> Opti
         NodeKind::InlineCode(text) => View {
             kind: Kind::InlineCode,
             aux: 0,
-            value: Value::Text(text.as_str()),
+            value: Value::Text(text),
         },
         NodeKind::Link(link) => View {
             kind: Kind::Link,
