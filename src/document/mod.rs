@@ -361,6 +361,35 @@ impl Document {
         self.roots.iter().copied()
     }
 
+    /// Returns the retained semantic operations in source order.
+    ///
+    /// Renderers use this view for their sequential tape interpreters. Keep
+    /// the operation payload accessors small so the representation remains
+    /// private to the crate.
+    pub(crate) fn operations(&self) -> &[EventOp] {
+        &self.ops
+    }
+
+    pub(crate) fn operation_kind(&self, index: usize) -> Option<OperationKind> {
+        self.ops.get(index).map(|operation| operation.kind())
+    }
+
+    pub(crate) fn operation_view(&self, index: usize) -> Option<NodeKindView<'_>> {
+        let operation = self.ops.get(index)?;
+        if operation.is_close() {
+            return None;
+        }
+        Some(self.kind_ref(DocumentNodeId(index as u32)))
+    }
+
+    pub(crate) fn operation_end(&self, index: usize) -> usize {
+        self.ends.get(index).copied().unwrap_or(index as u32) as usize
+    }
+
+    pub(crate) fn operation_opening_index(&self, operation: EventOp) -> usize {
+        operation.payload() as usize
+    }
+
     pub(crate) fn node(&self, id: DocumentNodeId) -> Option<DocumentNode<'_>> {
         let operation = self.ops.get(id.index())?;
         (!operation.is_close()).then_some(DocumentNode { document: self, id })
@@ -645,7 +674,7 @@ const OP_CLOSE: u8 = 0x80;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-enum OperationKind {
+pub(crate) enum OperationKind {
     Paragraph,
     BlockGroup,
     Heading,
@@ -723,7 +752,7 @@ impl OperationKind {
         })
     }
 
-    fn is_container(self) -> bool {
+    pub(crate) fn is_container(self) -> bool {
         !matches!(
             self,
             Self::CodeBlock
@@ -742,13 +771,25 @@ impl OperationKind {
 }
 
 impl EventOp {
-    fn kind(self) -> OperationKind {
+    pub(crate) fn kind(self) -> OperationKind {
         OperationKind::from_opcode(self.opcode & !OP_CLOSE)
             .expect("semantic tape contains an unknown operation")
     }
 
-    fn is_close(self) -> bool {
+    pub(crate) fn is_close(self) -> bool {
         self.opcode & OP_CLOSE != 0
+    }
+
+    pub(crate) fn payload(self) -> u32 {
+        self.payload
+    }
+
+    pub(crate) fn aux(self) -> u16 {
+        self.aux
+    }
+
+    pub(crate) fn flags(self) -> u8 {
+        self.flags
     }
 }
 

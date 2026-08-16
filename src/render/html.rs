@@ -2,49 +2,42 @@
 
 use std::fmt::Write as _;
 
-use crate::document::{Document, DocumentNodeId, ListKind, MediaKind, NodeKindView as NodeKind};
+use crate::document::{Document, ListKind, MediaKind, NodeKindView as NodeKind, OperationKind};
 
 pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
-    enum Task {
-        Node(DocumentNodeId, bool),
-        Siblings(DocumentNodeId, bool),
-        Close(&'static str),
-    }
-
     let mut output = String::with_capacity(capacity.max(512));
-    let mut tasks = Vec::with_capacity(32);
-    tasks.extend(
-        document
-            .root_ids()
-            .rev()
-            .map(|root| Task::Node(root, false)),
-    );
-    while let Some(task) = tasks.pop() {
-        let (id, parent_is_list) = match task {
-            Task::Close(tag) => {
-                output.push_str("</");
-                output.push_str(tag);
-                output.push('>');
-                continue;
-            }
-            Task::Node(id, parent_is_list) => (id, parent_is_list),
-            Task::Siblings(id, parent_is_list) => {
-                if let Some(sibling) = document.next_sibling(id) {
-                    tasks.push(Task::Siblings(sibling, parent_is_list));
+    let mut containers = Vec::with_capacity(32);
+    for (index, operation) in document.operations().iter().copied().enumerate() {
+        if operation.is_close() {
+            let opening = document.operation_opening_index(operation);
+            let parent_is_list = containers
+                .len()
+                .checked_sub(2)
+                .and_then(|index| containers.get(index))
+                .copied()
+                == Some(OperationKind::List);
+            if let Some(node) = document.operation_view(opening) {
+                if let Some(tag) = html_close_tag(node, parent_is_list) {
+                    output.push_str("</");
+                    output.push_str(tag);
+                    output.push('>');
                 }
-                (id, parent_is_list)
+                containers.pop();
             }
-        };
-        let Some(node) = document.node(id) else {
+            continue;
+        }
+
+        let parent_is_list = containers.last().copied() == Some(OperationKind::List);
+        let Some(node) = document.operation_view(index) else {
             continue;
         };
-        let close = match node.kind() {
+        match node {
             NodeKind::Text(text) => {
                 escape_text(&mut output, text);
-                None
             }
-            NodeKind::Paragraph => open(&mut output, "p"),
-            NodeKind::BlockGroup => open(&mut output, "div"),
+            NodeKind::Paragraph => {
+                open(&mut output, "p");
+            }
             NodeKind::Heading { level } => {
                 let tag = match level {
                     1 => "h1",
@@ -54,27 +47,47 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     5 => "h5",
                     _ => "h6",
                 };
-                open(&mut output, tag)
+                open(&mut output, tag);
             }
-            NodeKind::BlockQuote | NodeKind::Callout(_) => open(&mut output, "blockquote"),
-            NodeKind::Strong => open(&mut output, "strong"),
-            NodeKind::Emphasis => open(&mut output, "em"),
-            NodeKind::Strikethrough => open(&mut output, "del"),
+            NodeKind::BlockGroup => {
+                open(&mut output, "div");
+            }
+            NodeKind::BlockQuote | NodeKind::Callout(_) => {
+                open(&mut output, "blockquote");
+            }
+            NodeKind::Strong => {
+                open(&mut output, "strong");
+            }
+            NodeKind::Emphasis => {
+                open(&mut output, "em");
+            }
+            NodeKind::Strikethrough => {
+                open(&mut output, "del");
+            }
             NodeKind::List(list) => match list.kind {
-                ListKind::Unordered => open(&mut output, "ul"),
+                ListKind::Unordered => {
+                    open(&mut output, "ul");
+                }
                 ListKind::Ordered => {
                     output.push_str("<ol");
                     if let Some(start) = list.start.filter(|start| *start != 1) {
                         write!(output, " start=\"{start}\"").unwrap();
                     }
                     output.push('>');
-                    Some("ol")
                 }
             },
-            NodeKind::ListItem => open(&mut output, "li"),
-            NodeKind::Table(_) => open(&mut output, "table"),
-            NodeKind::TableCaption => open(&mut output, "caption"),
-            NodeKind::TableRow => open(&mut output, "tr"),
+            NodeKind::ListItem => {
+                open(&mut output, "li");
+            }
+            NodeKind::Table(_) => {
+                open(&mut output, "table");
+            }
+            NodeKind::TableCaption => {
+                open(&mut output, "caption");
+            }
+            NodeKind::TableRow => {
+                open(&mut output, "tr");
+            }
             NodeKind::TableCell(cell) => {
                 let tag = if cell.header { "th" } else { "td" };
                 output.push('<');
@@ -94,15 +107,28 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     write!(output, " align=\"{value}\"").unwrap();
                 }
                 output.push('>');
-                Some(tag)
             }
-            NodeKind::Figure => open(&mut output, "figure"),
-            NodeKind::Figcaption => open(&mut output, "figcaption"),
-            NodeKind::Details => open(&mut output, "details"),
-            NodeKind::Summary => open(&mut output, "summary"),
-            NodeKind::DefinitionList => open(&mut output, "dl"),
-            NodeKind::DefinitionTerm => open(&mut output, "dt"),
-            NodeKind::DefinitionDescription => open(&mut output, "dd"),
+            NodeKind::Figure => {
+                open(&mut output, "figure");
+            }
+            NodeKind::Figcaption => {
+                open(&mut output, "figcaption");
+            }
+            NodeKind::Details => {
+                open(&mut output, "details");
+            }
+            NodeKind::Summary => {
+                open(&mut output, "summary");
+            }
+            NodeKind::DefinitionList => {
+                open(&mut output, "dl");
+            }
+            NodeKind::DefinitionTerm => {
+                open(&mut output, "dt");
+            }
+            NodeKind::DefinitionDescription => {
+                open(&mut output, "dd");
+            }
             NodeKind::FootnoteDefinition(footnote) => {
                 let tag = if parent_is_list { "li" } else { "aside" };
                 output.push('<');
@@ -116,7 +142,6 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     output.push_str(" role=\"doc-footnote\"");
                 }
                 output.push('>');
-                Some(tag)
             }
             NodeKind::Link(link) => {
                 output.push_str("<a href=\"");
@@ -128,7 +153,6 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     output.push('"');
                 }
                 output.push('>');
-                Some("a")
             }
             NodeKind::CodeBlock(code) => {
                 output.push_str("<pre><code");
@@ -140,13 +164,11 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 output.push('>');
                 escape_text(&mut output, &code.text);
                 output.push_str("</code></pre>");
-                None
             }
             NodeKind::InlineCode(code) => {
                 output.push_str("<code>");
                 escape_text(&mut output, code);
                 output.push_str("</code>");
-                None
             }
             NodeKind::Image(image) => {
                 output.push_str("<img src=\"");
@@ -166,15 +188,12 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     write!(output, " height=\"{height}\"").unwrap();
                 }
                 output.push('>');
-                None
             }
             NodeKind::HardBreak => {
                 output.push_str("<br>");
-                None
             }
             NodeKind::ThematicBreak => {
                 output.push_str("<hr>");
-                None
             }
             NodeKind::FootnoteReference(footnote) => {
                 if let Some(label) = document.footnote_label(footnote) {
@@ -184,7 +203,6 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     escape_text(&mut output, label);
                     output.push_str("</a></sup>");
                 }
-                None
             }
             NodeKind::TaskMarker(marker) => {
                 output.push_str("<input type=\"checkbox\" disabled=\"\"");
@@ -200,60 +218,102 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 if let Some(label) = &marker.fallback_label {
                     escape_text(&mut output, label);
                 }
-                None
             }
             NodeKind::InlineMath(math) => {
                 output.push_str("<span class=\"math\">");
                 escape_text(&mut output, &math.source);
                 output.push_str("</span>");
-                None
             }
             NodeKind::DisplayMath(math) => {
                 output.push_str("<span class=\"math display-math\">");
                 escape_text(&mut output, &math.source);
                 output.push_str("</span>");
-                None
             }
-            NodeKind::Media(media) => {
-                match media.kind {
-                    MediaKind::Audio => {
-                        output.push_str("<audio controls src=\"");
-                        escape_attribute(&mut output, &media.source);
-                        output.push_str("\"></audio>");
-                    }
-                    MediaKind::Video => {
-                        output.push_str("<video controls src=\"");
-                        escape_attribute(&mut output, &media.source);
-                        output.push_str("\"></video>");
-                    }
-                    MediaKind::Embedded => {
-                        output.push_str("<a href=\"");
-                        escape_attribute(&mut output, &media.source);
-                        output.push_str("\">");
-                        escape_text(&mut output, media.title.as_deref().unwrap_or(&media.source));
-                        output.push_str("</a>");
-                    }
+            NodeKind::Media(media) => match media.kind {
+                MediaKind::Audio => {
+                    output.push_str("<audio controls src=\"");
+                    escape_attribute(&mut output, &media.source);
+                    output.push_str("\"></audio>");
                 }
-                None
-            }
-            NodeKind::Invalid => None,
-        };
-        if let Some(tag) = close {
-            tasks.push(Task::Close(tag));
-            let parent_is_list = matches!(node.kind(), NodeKind::List(_));
-            if let Some(child) = document.first_child(id) {
-                tasks.push(Task::Siblings(child, parent_is_list));
-            }
+                MediaKind::Video => {
+                    output.push_str("<video controls src=\"");
+                    escape_attribute(&mut output, &media.source);
+                    output.push_str("\"></video>");
+                }
+                MediaKind::Embedded => {
+                    output.push_str("<a href=\"");
+                    escape_attribute(&mut output, &media.source);
+                    output.push_str("\">");
+                    escape_text(&mut output, media.title.as_deref().unwrap_or(&media.source));
+                    output.push_str("</a>");
+                }
+            },
+            NodeKind::Invalid => {}
+        }
+        if document
+            .operation_kind(index)
+            .is_some_and(OperationKind::is_container)
+        {
+            containers.push(document.operation_kind(index).unwrap());
         }
     }
     output
 }
 
-fn open(output: &mut String, tag: &'static str) -> Option<&'static str> {
+fn html_close_tag(node: NodeKind, parent_is_list: bool) -> Option<&'static str> {
+    Some(match node {
+        NodeKind::Paragraph => "p",
+        NodeKind::BlockGroup => "div",
+        NodeKind::Heading { level } => match level {
+            1 => "h1",
+            2 => "h2",
+            3 => "h3",
+            4 => "h4",
+            5 => "h5",
+            _ => "h6",
+        },
+        NodeKind::BlockQuote | NodeKind::Callout(_) => "blockquote",
+        NodeKind::List(list) => match list.kind {
+            ListKind::Unordered => "ul",
+            ListKind::Ordered => "ol",
+        },
+        NodeKind::ListItem => "li",
+        NodeKind::Table(_) => "table",
+        NodeKind::TableCaption => "caption",
+        NodeKind::TableRow => "tr",
+        NodeKind::TableCell(cell) => {
+            if cell.header {
+                "th"
+            } else {
+                "td"
+            }
+        }
+        NodeKind::Figure => "figure",
+        NodeKind::Figcaption => "figcaption",
+        NodeKind::Details => "details",
+        NodeKind::Summary => "summary",
+        NodeKind::DefinitionList => "dl",
+        NodeKind::DefinitionTerm => "dt",
+        NodeKind::DefinitionDescription => "dd",
+        NodeKind::FootnoteDefinition(_) => {
+            if parent_is_list {
+                "li"
+            } else {
+                "aside"
+            }
+        }
+        NodeKind::Emphasis => "em",
+        NodeKind::Strong => "strong",
+        NodeKind::Strikethrough => "del",
+        NodeKind::Link(_) => "a",
+        _ => return None,
+    })
+}
+
+fn open(output: &mut String, tag: &'static str) {
     output.push('<');
     output.push_str(tag);
     output.push('>');
-    Some(tag)
 }
 
 fn escape_text(output: &mut String, value: &str) {

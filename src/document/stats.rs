@@ -217,94 +217,80 @@ fn walk_text_from_roots(
     capacity: Option<usize>,
     collect_stats: bool,
 ) -> (Option<String>, TextStats) {
-    enum Task {
-        Node(DocumentNodeId),
-        Siblings(DocumentNodeId),
-        Boundary(Separator),
-        EndLink { fragment: LinkFragment },
-    }
-
     let block = if block_newlines {
         Separator::Newline
     } else {
         Separator::Space
     };
     let mut output = NormalizedOutput::new(capacity, collect_stats);
-    let mut tasks = SmallVec::<[Task; 32]>::new();
-    tasks.extend(roots.iter().rev().copied().map(Task::Node));
-    while let Some(task) = tasks.pop() {
-        let id = match task {
-            Task::Boundary(separator) => {
-                output.separator(separator);
+    for root in roots {
+        let mut index = root.index();
+        let end = document.operation_end(index).saturating_add(1);
+        while index < end {
+            let Some(operation) = document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                let opening = document.operation_opening_index(operation);
+                match document.operation_kind(opening) {
+                    Some(super::OperationKind::Link) => {
+                        if let Some(NodeKind::Link(link)) = document.operation_view(opening) {
+                            output.end_link(LinkFragment {
+                                hash: link.fragment_only,
+                            });
+                        }
+                    }
+                    Some(kind) if is_block_operation(kind) => output.separator(block),
+                    _ => {}
+                }
+                index += 1;
                 continue;
             }
-            Task::EndLink { fragment } => {
-                output.end_link(fragment);
+
+            let Some(node) = document.operation_view(index) else {
+                index += 1;
                 continue;
-            }
-            Task::Node(id) => id,
-            Task::Siblings(id) => {
-                if let Some(sibling) = document.next_sibling(id) {
-                    tasks.push(Task::Siblings(sibling));
-                }
-                id
-            }
-        };
-        let Some(node) = document.node(id) else {
-            continue;
-        };
-        match node.kind() {
-            NodeKind::Text(text) => output.text(text),
-            NodeKind::CodeBlock(code) => {
-                output.separator(block);
-                output.text(&code.text);
-                output.separator(block);
-            }
-            NodeKind::InlineCode(code) => output.text(code),
-            NodeKind::Image(_) | NodeKind::FootnoteReference(_) | NodeKind::ThematicBreak => {}
-            NodeKind::TaskMarker(marker) => {
-                if let Some(label) = &marker.fallback_label {
-                    output.text(label);
-                }
-            }
-            NodeKind::InlineMath(math) => {
-                output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
-            }
-            NodeKind::DisplayMath(math) => {
-                output.separator(block);
-                output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
-                output.separator(block);
-            }
-            NodeKind::Media(media) => {
-                if let Some(title) = &media.title {
-                    output.text(title);
-                }
-            }
-            NodeKind::HardBreak => output.separator(if preserve_line_breaks {
-                Separator::Newline
-            } else {
-                Separator::Space
-            }),
-            NodeKind::Link(link) => {
-                output.begin_link();
-                tasks.push(Task::EndLink {
-                    fragment: LinkFragment {
-                        hash: link.fragment_only,
-                    },
-                });
-                if let Some(child) = document.first_child(id) {
-                    tasks.push(Task::Siblings(child));
-                }
-            }
-            _ => {
-                if is_block(&node.kind()) {
+            };
+            match node {
+                NodeKind::Text(text) => output.text(text),
+                NodeKind::CodeBlock(code) => {
                     output.separator(block);
-                    tasks.push(Task::Boundary(block));
+                    output.text(&code.text);
+                    output.separator(block);
                 }
-                if let Some(child) = document.first_child(id) {
-                    tasks.push(Task::Siblings(child));
+                NodeKind::InlineCode(code) => output.text(code),
+                NodeKind::Image(_) | NodeKind::FootnoteReference(_) | NodeKind::ThematicBreak => {}
+                NodeKind::TaskMarker(marker) => {
+                    if let Some(label) = marker.fallback_label.as_deref() {
+                        output.text(label);
+                    }
+                }
+                NodeKind::InlineMath(math) => {
+                    output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
+                }
+                NodeKind::DisplayMath(math) => {
+                    output.separator(block);
+                    output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
+                    output.separator(block);
+                }
+                NodeKind::Media(media) => {
+                    if let Some(title) = media.title.as_deref() {
+                        output.text(title);
+                    }
+                }
+                NodeKind::HardBreak => output.separator(if preserve_line_breaks {
+                    Separator::Newline
+                } else {
+                    Separator::Space
+                }),
+                NodeKind::Link(_) => output.begin_link(),
+                kind => {
+                    if is_block(&kind) {
+                        output.separator(block);
+                    }
                 }
             }
+            index += 1;
         }
     }
     output.finish()
@@ -329,6 +315,28 @@ fn is_block(kind: &NodeKind) -> bool {
             | NodeKind::DefinitionDescription
             | NodeKind::Callout(_)
             | NodeKind::FootnoteDefinition(_)
+    )
+}
+
+fn is_block_operation(kind: super::OperationKind) -> bool {
+    matches!(
+        kind,
+        super::OperationKind::Paragraph
+            | super::OperationKind::BlockGroup
+            | super::OperationKind::Heading
+            | super::OperationKind::BlockQuote
+            | super::OperationKind::ListItem
+            | super::OperationKind::TableCaption
+            | super::OperationKind::TableRow
+            | super::OperationKind::TableCell
+            | super::OperationKind::Figure
+            | super::OperationKind::Figcaption
+            | super::OperationKind::Details
+            | super::OperationKind::Summary
+            | super::OperationKind::DefinitionTerm
+            | super::OperationKind::DefinitionDescription
+            | super::OperationKind::Callout
+            | super::OperationKind::FootnoteDefinition
     )
 }
 
