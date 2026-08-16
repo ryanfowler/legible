@@ -38,7 +38,7 @@ pub(crate) use compiler::{
     compile_document_with_optional_source_facts,
     compile_document_with_optional_source_facts_and_evidence,
 };
-pub(crate) use facts::{SemanticSourceFacts, SourceEvidence};
+pub(crate) use facts::{SemanticGate, SemanticSourceFacts, SourceEvidence};
 pub(crate) use footnotes::{
     Definitions as ExternalFootnoteDefinitions, adopt_external as adopt_external_footnotes,
     collect_external as collect_external_footnotes,
