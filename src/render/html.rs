@@ -162,7 +162,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     output.push('"');
                 }
                 output.push('>');
-                escape_text(&mut output, &code.text);
+                escape_text(&mut output, code.text());
                 output.push_str("</code></pre>");
             }
             NodeKind::InlineCode(code) => {

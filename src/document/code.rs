@@ -1,11 +1,36 @@
 //! Source recognition for semantic code compilation.
 
+use std::collections::HashMap;
+
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use tendril::StrTendril;
+
+use super::RawCodeText;
+
+pub(crate) type OwnedSourceTexts = HashMap<NodeId, StrTendril>;
+
+const MIN_OWNED_SOURCE_BYTES: usize = 4 * 1024;
 
 /// A code block recovered from source HTML.
 pub(crate) struct RecognizedCode {
     pub(crate) language: Option<String>,
     pub(crate) text: String,
+    source: Option<NodeId>,
+}
+
+impl RecognizedCode {
+    pub(crate) fn content<'a>(&'a self, sources: Option<&'a OwnedSourceTexts>) -> &'a str {
+        self.source
+            .and_then(|node| sources.and_then(|sources| sources.get(&node)))
+            .map_or(&self.text, |text| text.as_ref())
+    }
+
+    pub(crate) fn into_text(self, sources: Option<&mut OwnedSourceTexts>) -> RawCodeText {
+        self.source
+            .and_then(|node| sources.and_then(|sources| sources.remove(&node)))
+            .map(RawCodeText::Source)
+            .unwrap_or_else(|| RawCodeText::Owned(self.text.into_boxed_str()))
+    }
 }
 
 /// Recognizes a preformatted block or a multiline orphan `code` element.
@@ -20,17 +45,7 @@ pub(crate) fn recognize_known_block(
     node: NodeId,
     recognized_as_block: bool,
 ) -> Option<RecognizedCode> {
-    let content = match dom.tag(node) {
-        Some(Tag::Pre) => {
-            if has_single_tag_inside_element(dom, node, Tag::Code) {
-                dom.element_children(node).next().unwrap_or(node)
-            } else {
-                node
-            }
-        }
-        Some(Tag::Code) if recognized_as_block => node,
-        _ => return None,
-    };
+    let content = code_content(dom, node, recognized_as_block)?;
     let mut nested_language = None;
     let text = code_text(dom, content, &mut nested_language);
     let language = if dom.tag(node) == Some(Tag::Pre) {
@@ -39,7 +54,91 @@ pub(crate) fn recognize_known_block(
         language_hint(dom, node)
     }
     .or(nested_language);
-    Some(RecognizedCode { language, text })
+    Some(RecognizedCode {
+        language,
+        text,
+        source: None,
+    })
+}
+
+/// Recognizes a simple block whose complete source is one DOM text node.
+///
+/// The owned compiler calls this after all source analysis is complete. The
+/// source text has already moved into `OwnedSourceTexts`, so this descriptor
+/// avoids rebuilding it as an intermediate `String`.
+pub(crate) fn recognize_owned_known_block(
+    dom: &Dom,
+    node: NodeId,
+    recognized_as_block: bool,
+    sources: &OwnedSourceTexts,
+) -> Option<RecognizedCode> {
+    let content = code_content(dom, node, recognized_as_block)?;
+    let source = plain_text_source(dom, content).filter(|source| sources.contains_key(source))?;
+    let language = if dom.tag(node) == Some(Tag::Pre) {
+        block_language_hint(dom, content, node)
+    } else {
+        language_hint(dom, node)
+    };
+    Some(RecognizedCode {
+        language,
+        text: String::new(),
+        source: Some(source),
+    })
+}
+
+/// Moves large direct text payloads for simple preformatted blocks out of an
+/// owned source DOM. Complex/highlighted blocks remain on the normal
+/// transformation path because their output is assembled from multiple source
+/// nodes. The caller supplies the existing semantic analysis snapshot.
+pub(crate) fn take_owned_source_texts(
+    dom: &mut Dom,
+    candidates: &[(NodeId, NodeId)],
+) -> Option<OwnedSourceTexts> {
+    let mut sources = OwnedSourceTexts::new();
+    for &(_, source) in candidates {
+        if let Some(text) = dom.take_text(source) {
+            sources.insert(source, text);
+        }
+    }
+    (!sources.is_empty()).then_some(sources)
+}
+
+/// Returns a profitable direct text payload for a code block.
+pub(crate) fn owned_source_candidate(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    if dom.tag(node) == Some(Tag::Pre)
+        && dom
+            .ancestors(node)
+            .any(|ancestor| dom.tag(ancestor) == Some(Tag::Table))
+    {
+        return None;
+    }
+    let content = match dom.tag(node) {
+        Some(Tag::Pre) => code_content(dom, node, true)?,
+        Some(Tag::Code) => node,
+        _ => return None,
+    };
+    let source = plain_text_source(dom, content)?;
+    dom.text_node(source)
+        .is_some_and(|text| text.len() >= MIN_OWNED_SOURCE_BYTES)
+        .then_some(source)
+}
+
+fn code_content(dom: &Dom, node: NodeId, recognized_as_block: bool) -> Option<NodeId> {
+    match dom.tag(node) {
+        Some(Tag::Pre) => Some(if has_single_tag_inside_element(dom, node, Tag::Code) {
+            dom.element_children(node).next().unwrap_or(node)
+        } else {
+            node
+        }),
+        Some(Tag::Code) if recognized_as_block => Some(node),
+        _ => None,
+    }
+}
+
+fn plain_text_source(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    let mut children = dom.children(node);
+    let child = children.next()?;
+    (children.next().is_none() && dom.text_node(child).is_some()).then_some(child)
 }
 
 /// Recognizes a syntax-highlighter table with a parallel line-number gutter.
@@ -59,6 +158,7 @@ pub(crate) fn recognize_gutter_table(dom: &Dom, table: NodeId) -> Option<Recogni
     Some(RecognizedCode {
         language: language.or_else(|| language_from_ancestors(dom, first)),
         text,
+        source: None,
     })
 }
 
@@ -689,6 +789,50 @@ after</code></div>"#,
     fn pre_with_mixed_content_does_not_drop_code_siblings() {
         let code = block("<pre>prompt <code>command</code> output <code>status</code></pre>");
         assert_eq!(code.text, "prompt command output status");
+    }
+
+    #[test]
+    fn owned_sources_move_only_simple_block_text() {
+        let source = "source\nline".repeat(1024);
+        let html = format!(
+            "<p><code>inline</code></p><div class='highlight'><pre><code>{source}</code></pre></div>"
+        );
+        let mut dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
+        let root = dom.root();
+        let pre = dom
+            .descendants(root)
+            .find(|&node| dom.tag(node) == Some(Tag::Pre))
+            .unwrap();
+        let inline = dom
+            .descendants(root)
+            .find(|&node| dom.tag(node) == Some(Tag::Code) && dom.parent(node) != Some(pre))
+            .unwrap();
+        let source_node = owned_source_candidate(&dom, pre).unwrap();
+        let mut sources = take_owned_source_texts(&mut dom, &[(pre, source_node)]).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(dom.text(inline), "inline");
+        assert_eq!(dom.text(pre), "");
+        let code = recognize_owned_known_block(&dom, pre, true, &sources).unwrap();
+        assert_eq!(code.content(Some(&sources)), source);
+        match code.into_text(Some(&mut sources)) {
+            RawCodeText::Source(text) => assert_eq!(text.as_ref(), source),
+            RawCodeText::Owned(_) => panic!("simple source should retain its tendril"),
+        }
+    }
+
+    #[test]
+    fn owned_sources_skip_small_block_text() {
+        let mut dom =
+            Dom::parse_fragment("<pre><code>small source</code></pre>", Tag::Div).unwrap();
+        let pre = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Pre))
+            .unwrap();
+
+        assert!(owned_source_candidate(&dom, pre).is_none());
+        assert!(take_owned_source_texts(&mut dom, &[]).is_none());
+        assert_eq!(dom.text(pre), "small source");
     }
 
     #[test]

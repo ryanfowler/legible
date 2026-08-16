@@ -487,12 +487,11 @@ pub(super) fn compile(
                 .find(|character| !character.is_whitespace());
             let frame_index = frames.len() - 1;
             consume_boundary(&mut frames, &mut builder, frame_index, first)?;
+            let language = code.language.as_deref().map(Into::into);
+            let text = code.into_text(None);
             builder.append(
                 scope.parent,
-                NodeKind::CodeBlock(CodeBlock {
-                    language: code.language.map(Into::into),
-                    text: code.text.into(),
-                }),
+                NodeKind::CodeBlock(CodeBlock { language, text }),
             )?;
             complete_child(frames.last_mut().unwrap(), Some(tag), first, last, true);
             continue;

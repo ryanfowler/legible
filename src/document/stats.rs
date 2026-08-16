@@ -36,7 +36,7 @@ impl CompileStats {
                 self.code_block_count += 1;
                 self.structured_block_count += 1;
                 self.has_contextual_structure = true;
-                self.raw_code_bytes = self.raw_code_bytes.saturating_add(code.text.len());
+                self.raw_code_bytes = self.raw_code_bytes.saturating_add(code.text_len());
             }
             OwnedNodeKind::Table(_) => {
                 self.table_count += 1;
@@ -89,7 +89,7 @@ pub(crate) fn visibility_flags(kind: &OwnedNodeKind, text: Option<&str>) -> u8 {
             visibility_flag(text.is_some_and(has_visible_inline_text), HAS_VISIBLE_TEXT)
         }
         OwnedNodeKind::CodeBlock(code) => {
-            visibility_flag(has_visible_inline_text(&code.text), HAS_VISIBLE_TEXT)
+            visibility_flag(has_visible_inline_text(code.text()), HAS_VISIBLE_TEXT)
         }
         OwnedNodeKind::Image(image) => {
             visibility_flag(has_visible_inline_text(&image.alt), HAS_VISIBLE_IMAGE)
@@ -255,7 +255,7 @@ fn walk_text_from_roots(
                 NodeKind::Text(text) => output.text(text),
                 NodeKind::CodeBlock(code) => {
                     output.separator(block);
-                    output.text(&code.text);
+                    output.text(code.text());
                     output.separator(block);
                 }
                 NodeKind::InlineCode(code) => output.text(code),

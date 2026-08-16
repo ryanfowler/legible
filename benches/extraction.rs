@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use legible::{Extractor, extract};
 use std::hint::black_box;
 
@@ -94,6 +94,19 @@ fn ordinary_inline_fragment(target_bytes: usize) -> String {
 fn retained_fragment(kind: &str, target_bytes: usize) -> String {
     if kind == "ordinary-inline" {
         return ordinary_inline_fragment(target_bytes);
+    }
+    if kind == "raw-code" {
+        let mut source = String::with_capacity(target_bytes);
+        let mut index = 0;
+        while source.len() < target_bytes {
+            source.push_str(&format!(
+                "fn example_{index}() {{ println!(\"value {index}\"); }}\n"
+            ));
+            index += 1;
+        }
+        return format!(
+            "<article><h1>Raw code</h1><pre><code class='language-rust'>{source}</code></pre><math><mi>x</mi></math></article>"
+        );
     }
 
     let mut html = String::with_capacity(target_bytes + 256);
@@ -304,6 +317,54 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
     );
 }
 
+fn bench_owned_lowering_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("owned_lowering_comparison");
+    for (name, kind, bytes) in [
+        ("prose", "prose", 100_000),
+        ("large-raw-code", "raw-code", 100_000),
+        ("highlighted-code", "code", 100_000),
+    ] {
+        let html = retained_fragment(kind, bytes);
+        let dom = dom::Dom::parse_fragment(&html, dom::Tag::Div).unwrap();
+        let root = dom.root();
+        let base = url::Url::parse("https://example.com/docs/page").unwrap();
+        let context = document::CompileContext::new(Some(base.clone()), Some(&base));
+        let source_evidence =
+            document::SourceEvidence::analyze(&dom, root, &dom::NodeStateStore::new());
+        let source_facts = document::SemanticSourceFacts::analyze(&dom, root);
+
+        group.bench_with_input(BenchmarkId::new(name, "borrowed"), &dom, |b, dom| {
+            b.iter(|| {
+                document::compile_document_with_optional_source_facts_and_evidence(
+                    black_box(dom),
+                    root,
+                    black_box(&context),
+                    Some(&source_facts),
+                    Some(&source_evidence),
+                )
+                .unwrap()
+            })
+        });
+        group.bench_function(BenchmarkId::new(name, "owned"), |b| {
+            b.iter_batched(
+                || dom.clone(),
+                |owned_dom| {
+                    document::compile_document_owned_with_optional_source_facts_and_evidence(
+                        owned_dom,
+                        root,
+                        black_box(&context),
+                        Some(&source_facts),
+                        &source_evidence,
+                    )
+                    .unwrap()
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 fn bench_extract_markdown(c: &mut Criterion) {
     let mut group = c.benchmark_group("extract_markdown");
     for (size, name, kind, bytes) in [
@@ -439,6 +500,7 @@ criterion_group!(
     benches,
     bench_extract,
     bench_lower_retained_fragment,
+    bench_owned_lowering_comparison,
     bench_extract_markdown,
     bench_lazy_outputs,
     bench_complex_pages,

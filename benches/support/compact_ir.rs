@@ -636,7 +636,7 @@ fn capture_node(kind: &NodeKind) -> (Kind, u16, Option<Payload>) {
             0,
             Some(Payload::CodeBlock {
                 language: code.language.clone(),
-                text: code.text.clone(),
+                text: code.text().into(),
             }),
         ),
         NodeKind::List(list) => (
@@ -825,7 +825,7 @@ fn source_view<'a>(document: &'a Document, id: document::DocumentNodeId) -> Opti
             aux: 0,
             value: Value::CodeBlock {
                 language: code.language.as_deref(),
-                text: &code.text,
+                text: code.text(),
             },
         },
         NodeKind::List(list) => View {

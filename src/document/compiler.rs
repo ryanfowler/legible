@@ -177,7 +177,7 @@ pub(crate) fn compile_document_owned(
     root: NodeId,
     context: &CompileContext,
 ) -> Result<Document, CompileError> {
-    compile_document(&dom, root, context)
+    compile_document_owned_impl(dom, root, context, None, None)
 }
 
 /// Compiles an owned fragment while reusing source facts from final cleanup.
@@ -187,13 +187,7 @@ pub(crate) fn compile_document_owned_with_optional_source_facts(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
 ) -> Result<Document, CompileError> {
-    compile_document_with_optional_source_facts_and_evidence(
-        &dom,
-        root,
-        context,
-        source_facts,
-        None,
-    )
+    compile_document_owned_impl(dom, root, context, source_facts, None)
 }
 
 pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
@@ -203,13 +197,52 @@ pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
 ) -> Result<Document, CompileError> {
-    compile_document_with_optional_source_facts_and_evidence(
-        &dom,
-        root,
-        context,
-        source_facts,
-        Some(source_evidence),
-    )
+    compile_document_owned_impl(dom, root, context, source_facts, Some(source_evidence))
+}
+
+fn compile_document_owned_impl(
+    mut dom: Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: Option<&super::facts::SourceEvidence>,
+) -> Result<Document, CompileError> {
+    if let Some(source_node_count) = super::ordinary::ordinary_source_gate(&dom, root) {
+        match super::ordinary::compile(&dom, root, context, source_node_count) {
+            Ok(document) => return Ok(document),
+            Err(CompileError::RequiresComplex) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    let owned_evidence;
+    let source_evidence = if let Some(source_evidence) = source_evidence {
+        source_evidence
+    } else {
+        owned_evidence = super::facts::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
+        &owned_evidence
+    };
+    let analysis = analyze_complex_document(&dom, root, context, source_facts, source_evidence);
+    let mut owned_source_texts = super::code::take_owned_source_texts(
+        &mut dom,
+        &analysis.facts.inventory().owned_code_sources,
+    );
+    lower_complex_document(&dom, root, context, analysis, owned_source_texts.as_mut())
+}
+
+struct ComplexSourceAnalysis {
+    facts: super::facts::SemanticFacts,
+    images: super::images::ImageAnalysis,
+    figures: Vec<bool>,
+    captions: Vec<bool>,
+    media: super::media::MediaAnalysis,
+    lists: super::lists::ListAnalysis,
+    tables: super::tables::TableAnalysis,
+    callouts: super::callouts::CalloutAnalysis,
+    footnotes: super::footnotes::FootnoteAnalysis,
+    math: super::math::MathAnalysis,
+    media_separators: Vec<bool>,
+    text_after_media_separators: Vec<bool>,
 }
 
 fn compile_complex_document(
@@ -219,6 +252,17 @@ fn compile_complex_document(
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
 ) -> Result<Document, CompileError> {
+    let analysis = analyze_complex_document(dom, root, context, source_facts, source_evidence);
+    lower_complex_document(dom, root, context, analysis, None)
+}
+
+fn analyze_complex_document(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: &super::facts::SourceEvidence,
+) -> ComplexSourceAnalysis {
     let mut facts = super::facts::SemanticFacts::analyze_with_source_facts(
         dom,
         root,
@@ -265,6 +309,43 @@ fn compile_complex_document(
     } else {
         media_separators(dom, root, &media)
     };
+    ComplexSourceAnalysis {
+        facts,
+        images,
+        figures,
+        captions,
+        media,
+        lists,
+        tables,
+        callouts,
+        footnotes,
+        math,
+        media_separators,
+        text_after_media_separators,
+    }
+}
+
+fn lower_complex_document(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    analysis: ComplexSourceAnalysis,
+    mut owned_source_texts: Option<&mut super::code::OwnedSourceTexts>,
+) -> Result<Document, CompileError> {
+    let ComplexSourceAnalysis {
+        facts,
+        images,
+        figures,
+        captions,
+        media,
+        lists,
+        tables,
+        callouts,
+        footnotes,
+        math,
+        media_separators,
+        text_after_media_separators,
+    } = analysis;
     let mut builder = SemanticTapeBuilder::with_capacity(facts.nodes().len());
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
     let mut table_layouts = HashMap::<DocumentNodeId, TableAnalysis>::new();
@@ -578,8 +659,8 @@ fn compile_complex_document(
             builder.append(
                 scope.parent,
                 NodeKind::CodeBlock(CodeBlock {
-                    language: code.language.map(Into::into),
-                    text: code.text.into(),
+                    language: code.language.as_deref().map(Into::into),
+                    text: code.into_text(None),
                 }),
             )?;
             continue;
@@ -620,14 +701,18 @@ fn compile_complex_document(
             }
         }
         if facts.is_code_block(node)
-            && let Some(code) = super::code::recognize_known_block(dom, node, true)
+            && let Some(code) = owned_source_texts
+                .as_deref()
+                .and_then(|sources| {
+                    super::code::recognize_owned_known_block(dom, node, true, sources)
+                })
+                .or_else(|| super::code::recognize_known_block(dom, node, true))
         {
+            let language = code.language.as_deref().map(Into::into);
+            let text = code.into_text(owned_source_texts.as_deref_mut());
             builder.append(
                 scope.parent,
-                NodeKind::CodeBlock(CodeBlock {
-                    language: code.language.map(Into::into),
-                    text: code.text.into(),
-                }),
+                NodeKind::CodeBlock(CodeBlock { language, text }),
             )?;
             continue;
         }
@@ -1449,6 +1534,23 @@ mod tests {
         let root = dom.root();
         let base = Url::parse("https://example.test/base/").unwrap();
         let context = CompileContext::new(Some(base.clone()), Some(&base));
+        let borrowed = compile_document(&dom, root, &context).unwrap();
+
+        let owned = compile_document_owned(dom, root, &context).unwrap();
+
+        assert_eq!(owned.debug_tree(), borrowed.debug_tree());
+        assert_eq!(owned.stats(), borrowed.stats());
+    }
+
+    #[test]
+    fn owned_compilation_preserves_gutter_table_code() {
+        let source = "fn main() { println!(\"owned\"); }\n".repeat(512);
+        let html = format!(
+            r#"<article><h2>Gutter code</h2><table class="lntable"><tbody><tr><td class="lntd"><pre><code><span class="lnt">1</span><span class="lnt">2</span></code></pre></td><td class="lntd"><pre><code class="language-rust">{source}</code></pre></td></tr></tbody></table></article>"#
+        );
+        let dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
+        let root = dom.root();
+        let context = CompileContext::default();
         let borrowed = compile_document(&dom, root, &context).unwrap();
 
         let owned = compile_document_owned(dom, root, &context).unwrap();

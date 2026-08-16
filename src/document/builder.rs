@@ -1019,7 +1019,7 @@ impl SemanticTapeBuilder {
                 .payloads
                 .code_blocks
                 .get(payload as usize)
-                .filter(|value| has_visible_inline_text(&value.text))
+                .filter(|value| has_visible_inline_text(value.text()))
                 .map(|_| super::HAS_VISIBLE_TEXT)
                 .unwrap_or_default(),
             OperationKind::Image => self
