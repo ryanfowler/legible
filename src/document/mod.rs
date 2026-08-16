@@ -510,6 +510,13 @@ pub(crate) enum NodeKind {
 }
 
 impl NodeKind {
+    pub(crate) fn heading_level(&self) -> Option<u8> {
+        match self {
+            Self::Heading { level } => Some(*level),
+            _ => None,
+        }
+    }
+
     fn output_capacity_hint(&self) -> usize {
         match self {
             Self::Text(text) | Self::InlineCode(text) => text.0.len(),
@@ -875,7 +882,7 @@ pub(crate) enum MediaKind {
 pub(crate) struct FootnoteId(u32);
 
 impl FootnoteId {
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 

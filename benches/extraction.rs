@@ -4,6 +4,8 @@ use std::hint::black_box;
 
 // Criterion benchmarks compile as a separate crate. Include the private DOM module so
 // the parser benchmark measures the same parser that extraction uses.
+#[path = "support/compact_ir.rs"]
+mod compact_ir;
 #[allow(unused_imports)]
 #[path = "../src/document/mod.rs"]
 mod document;
@@ -434,6 +436,7 @@ criterion_group!(
     bench_lazy_outputs,
     bench_complex_pages,
     bench_large_compatibility_fixtures,
-    bench_deeply_nested
+    bench_deeply_nested,
+    compact_ir::benchmark
 );
 criterion_main!(benches);

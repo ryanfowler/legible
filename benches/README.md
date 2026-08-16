@@ -34,6 +34,7 @@ The full suite measures these workloads:
 - source DOM, actual final pre-IR DOM, IR node, and retained-byte counts in extraction benchmark output
 - semantic compression counts in lowering benchmark IDs
 - retained-byte, semantic-string, root, and node-layout estimates in lowering benchmark output
+- benchmark-only compact preorder and event-tape representation prototypes
 - end-to-end raw HTML to Markdown extraction
 - steady-state lazy Markdown, text, and HTML rendering (text statistics are prewarmed)
 - deeply nested parser input
@@ -49,6 +50,12 @@ The retained-fragment lowering group isolates semantic compilation from extracti
 and output rendering. Its generated fragments represent cleaned content regions
 without page chrome. Source evidence and shared cleanup facts are prepared before
 timing, as they are in production extraction.
+
+The `compact_ir_prototype` group compares the current arena traversal with
+benchmark-only preorder-node and open/close event-tape adapters. It measures
+Markdown, HTML, and text projections from the same semantic fixtures. The
+fixtures include semantic payload fields and repeated footnote references. See
+`benches/compact-ir-prototype.md` for the layout decision and measurements.
 
 Lazy output groups measure steady-state rendering. Text statistics are initialized
 before timing so their one-time cache initialization is not mixed into the render. The complex groups cover highlighted code, tables, math,
