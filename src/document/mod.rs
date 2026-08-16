@@ -68,6 +68,59 @@ pub(crate) fn selected_image_sources_for_cleanup(
     analysis.into_sources(dom.len())
 }
 pub(crate) use stats::DocumentStats;
+
+/// Owns a cleaned source fragment until semantic output is first requested.
+///
+/// The source inputs stay together so lazy materialization can consume them in
+/// one call and release the DOM as soon as the private document is built.
+pub(crate) struct DocumentSource {
+    dom: crate::dom::Dom,
+    root: crate::dom::NodeId,
+    context: CompileContext,
+    source_facts: Option<SemanticSourceFacts>,
+    source_evidence: SourceEvidence,
+    retained_nodes: Option<Vec<crate::dom::NodeId>>,
+}
+
+impl DocumentSource {
+    pub(crate) fn new(
+        dom: crate::dom::Dom,
+        root: crate::dom::NodeId,
+        context: CompileContext,
+        source_facts: Option<SemanticSourceFacts>,
+        source_evidence: SourceEvidence,
+        retained_nodes: Option<Vec<crate::dom::NodeId>>,
+    ) -> Self {
+        Self {
+            dom,
+            root,
+            context,
+            source_facts,
+            source_evidence,
+            retained_nodes,
+        }
+    }
+
+    pub(crate) fn compile(self) -> Result<Document, compiler::CompileError> {
+        let Self {
+            dom,
+            root,
+            context,
+            source_facts,
+            source_evidence,
+            retained_nodes,
+        } = self;
+        compiler::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+            dom,
+            root,
+            &context,
+            source_facts.as_ref(),
+            &source_evidence,
+            retained_nodes.as_deref(),
+        )
+    }
+}
+
 pub(crate) fn semantic_source_is_protected(
     dom: &crate::dom::Dom,
     node: crate::dom::NodeId,

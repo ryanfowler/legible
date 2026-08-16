@@ -1,9 +1,75 @@
 //! The extracted page and lazy output builders.
 
 use crate::diagnostics::ExtractionDiagnostics;
-use crate::document::Document;
+use crate::document::{Document, DocumentSource};
 use crate::metadata::{Metadata, MetadataDiagnostics};
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
+
+/// Lazily materializes the private semantic document from the final cleaned
+/// source fragment. The source is consumed by the first materialization.
+struct LazyDocument {
+    document: OnceLock<Option<Document>>,
+    source: Mutex<Option<DocumentSource>>,
+}
+
+impl LazyDocument {
+    fn eager(document: Document) -> Self {
+        let document_slot = OnceLock::new();
+        let _ = document_slot.set(Some(document));
+        Self {
+            document: document_slot,
+            source: Mutex::new(None),
+        }
+    }
+
+    fn lazy(source: DocumentSource) -> Self {
+        Self {
+            document: OnceLock::new(),
+            source: Mutex::new(Some(source)),
+        }
+    }
+
+    fn get(&self) -> Option<&Document> {
+        self.document
+            .get_or_init(|| {
+                let source = match self.source.lock() {
+                    Ok(mut source) => source.take(),
+                    Err(poisoned) => poisoned.into_inner().take(),
+                }?;
+                source.compile().ok()
+            })
+            .as_ref()
+    }
+
+    fn with<R>(&self, operation: impl FnOnce(&Document) -> R) -> Option<R> {
+        self.get().map(operation)
+    }
+
+    #[cfg(test)]
+    fn stats_initialized(&self) -> bool {
+        self.document
+            .get()
+            .and_then(Option::as_ref)
+            .is_some_and(|document| document.stats_initialized())
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.with(Document::len).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn retained_bytes_estimate(&self) -> usize {
+        self.with(Document::retained_bytes_estimate)
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn stats(&self) -> crate::document::DocumentStats {
+        self.with(Document::stats).unwrap_or_default()
+    }
+}
 
 /// Relevant page content and metadata.
 ///
@@ -11,7 +77,7 @@ use serde_json::Value;
 /// Calling a render method more than once produces the same output.
 pub struct ExtractedPage {
     metadata: Metadata,
-    document: Document,
+    document: LazyDocument,
     diagnostics: Option<ExtractionDiagnostics>,
     metadata_diagnostics: Option<MetadataDiagnostics>,
     structured_data: Option<Vec<Value>>,
@@ -28,7 +94,23 @@ impl ExtractedPage {
     ) -> Self {
         Self {
             metadata,
-            document,
+            document: LazyDocument::eager(document),
+            diagnostics,
+            metadata_diagnostics,
+            structured_data,
+        }
+    }
+
+    pub(crate) fn new_lazy(
+        source: DocumentSource,
+        metadata: Metadata,
+        diagnostics: Option<ExtractionDiagnostics>,
+        metadata_diagnostics: Option<MetadataDiagnostics>,
+        structured_data: Option<Vec<Value>>,
+    ) -> Self {
+        Self {
+            metadata,
+            document: LazyDocument::lazy(source),
             diagnostics,
             metadata_diagnostics,
             structured_data,
@@ -71,7 +153,7 @@ impl ExtractedPage {
 
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
-        self.document.text()
+        self.document.with(Document::text).unwrap_or_default()
     }
 
     /// Renders the extracted content as canonical semantic HTML.
@@ -99,97 +181,131 @@ impl ExtractedPage {
 
     /// Returns the number of words in the normalized extracted text.
     pub fn word_count(&self) -> usize {
-        self.document.word_count()
+        self.document.with(Document::word_count).unwrap_or_default()
     }
 
     /// Returns the number of characters in the normalized extracted text.
     pub fn text_length(&self) -> usize {
-        self.document.text_length()
+        self.document
+            .with(Document::text_length)
+            .unwrap_or_default()
     }
 
     /// Returns the number of characters contributed by link content.
     pub fn link_text_length(&self) -> usize {
-        self.document.link_text_length()
+        self.document
+            .with(Document::link_text_length)
+            .unwrap_or_default()
     }
 
     /// Returns the fraction of normalized text contributed by links.
     pub fn link_density(&self) -> f64 {
-        self.document.link_density()
+        self.document
+            .with(Document::link_density)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic paragraphs.
     pub fn paragraph_count(&self) -> usize {
-        self.document.paragraph_count()
+        self.document
+            .with(Document::paragraph_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic headings.
     pub fn heading_count(&self) -> usize {
-        self.document.heading_count()
+        self.document
+            .with(Document::heading_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic list items.
     pub fn list_item_count(&self) -> usize {
-        self.document.list_item_count()
+        self.document
+            .with(Document::list_item_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic code blocks.
     pub fn code_block_count(&self) -> usize {
-        self.document.code_block_count()
+        self.document
+            .with(Document::code_block_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic data tables.
     pub fn table_count(&self) -> usize {
-        self.document.table_count()
+        self.document
+            .with(Document::table_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic figures.
     pub fn figure_count(&self) -> usize {
-        self.document.figure_count()
+        self.document
+            .with(Document::figure_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of semantic images.
     pub fn image_count(&self) -> usize {
-        self.document.image_count()
+        self.document
+            .with(Document::image_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of footnote references.
     pub fn footnote_reference_count(&self) -> usize {
-        self.document.footnote_reference_count()
+        self.document
+            .with(Document::footnote_reference_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of footnote definitions.
     pub fn footnote_definition_count(&self) -> usize {
-        self.document.footnote_definition_count()
+        self.document
+            .with(Document::footnote_definition_count)
+            .unwrap_or_default()
     }
 
     /// Returns the number of math expressions.
     pub fn math_count(&self) -> usize {
-        self.document.math_count()
+        self.document.with(Document::math_count).unwrap_or_default()
     }
 
     /// Returns the number of blocks with useful structural evidence.
     pub fn structured_block_count(&self) -> usize {
-        self.document.structured_block_count()
+        self.document
+            .with(Document::structured_block_count)
+            .unwrap_or_default()
     }
 
     /// Returns whether normalized text contains an alphanumeric character.
     pub fn has_alphanumeric_text(&self) -> bool {
-        self.document.stats().has_alphanumeric_text
+        self.document
+            .with(|document| document.stats().has_alphanumeric_text)
+            .unwrap_or_default()
     }
 
     /// Returns the number of alphabetic characters in normalized text.
     pub fn alphabetic_chars(&self) -> usize {
-        self.document.stats().alphabetic_chars
+        self.document
+            .with(|document| document.stats().alphabetic_chars)
+            .unwrap_or_default()
     }
 
     /// Returns the number of numeric characters in normalized text.
     pub fn digit_chars(&self) -> usize {
-        self.document.stats().digit_chars
+        self.document
+            .with(|document| document.stats().digit_chars)
+            .unwrap_or_default()
     }
 
     /// Returns whether the result contains contextual semantic structure.
     pub fn has_contextual_structure(&self) -> bool {
-        self.document.has_contextual_structure()
+        self.document
+            .with(Document::has_contextual_structure)
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -206,7 +322,9 @@ impl ExtractedPage {
     #[doc(hidden)]
     #[cfg(feature = "fuzzing")]
     pub fn validate_document(&self) -> bool {
-        self.document.validate().is_ok()
+        self.document
+            .with(|document| document.validate().is_ok())
+            .unwrap_or(false)
     }
 }
 
@@ -226,10 +344,12 @@ impl HtmlBuilder<'_> {
     /// Renders the configured HTML output.
     pub fn render(self) -> String {
         let _ = self.sanitize;
-        crate::render::html::render_html(
-            &self.page.document,
-            self.page.document.output_capacity_hint(),
-        )
+        self.page
+            .document
+            .with(|document| {
+                crate::render::html::render_html(document, document.output_capacity_hint())
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -255,14 +375,19 @@ impl MarkdownBuilder<'_> {
 
     /// Renders the configured Markdown output.
     pub fn render(self) -> String {
-        crate::render::markdown::render_markdown(
-            &self.page.document,
-            self.page.document.output_capacity_hint(),
-            crate::render::markdown::MarkdownConfig {
-                links: self.links,
-                images: self.images,
-            },
-        )
+        self.page
+            .document
+            .with(|document| {
+                crate::render::markdown::render_markdown(
+                    document,
+                    document.output_capacity_hint(),
+                    crate::render::markdown::MarkdownConfig {
+                        links: self.links,
+                        images: self.images,
+                    },
+                )
+            })
+            .unwrap_or_default()
     }
 }
 

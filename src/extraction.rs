@@ -162,8 +162,12 @@ impl ExtractionStrategy {
 }
 struct ExtractedContent {
     excerpt: Option<String>,
-    /// The compiled semantic result.
-    document: crate::document::Document,
+    content: ExtractedContentState,
+}
+
+enum ExtractedContentState {
+    Eager(crate::document::Document),
+    Lazy(crate::document::DocumentSource),
 }
 
 struct CandidateDiscovery {
@@ -316,7 +320,7 @@ impl<'a> ContentExtractor<'a> {
             .take()
             .or_else(|| metadata::normalize_title(&title))
             .unwrap_or_default();
-        let content = self.extract_content()?;
+        let ExtractedContent { excerpt, content } = self.extract_content()?;
         self.metadata.title = (!self.page_title.is_empty()).then_some(self.page_title);
         if self.metadata.authors.is_empty()
             && let Some(byline) = self
@@ -326,7 +330,7 @@ impl<'a> ContentExtractor<'a> {
         {
             self.metadata.authors.push(byline);
         }
-        self.metadata.description = self.metadata.description.or(content.excerpt);
+        self.metadata.description = self.metadata.description.or(excerpt);
         self.metadata.direction = self.metadata.direction.or_else(|| {
             self.page_direction
                 .as_deref()
@@ -354,13 +358,22 @@ impl<'a> ContentExtractor<'a> {
             .options
             .retain_structured_data
             .then(|| self.structured_data.retained_items());
-        Ok(ExtractedPage::new(
-            content.document,
-            self.metadata,
-            diagnostics,
-            self.metadata_diagnostics,
-            retained_structured_data,
-        ))
+        Ok(match content {
+            ExtractedContentState::Eager(document) => ExtractedPage::new(
+                document,
+                self.metadata,
+                diagnostics,
+                self.metadata_diagnostics,
+                retained_structured_data,
+            ),
+            ExtractedContentState::Lazy(source) => ExtractedPage::new_lazy(
+                source,
+                self.metadata,
+                diagnostics,
+                self.metadata_diagnostics,
+                retained_structured_data,
+            ),
+        })
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let body = self.dom.body().ok_or(Error::NoBody)?;
@@ -923,23 +936,22 @@ impl<'a> ContentExtractor<'a> {
                     None,
                 );
                 let content = std::mem::replace(&mut self.dom, source_dom);
-                let document = if let Some(document) = result_document {
-                    document
+                let content = if let Some(document) = result_document {
+                    ExtractedContentState::Eager(document)
                 } else {
-                    crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+                    ExtractedContentState::Lazy(crate::document::DocumentSource::new(
                         content,
                         result_root,
-                        &crate::document::CompileContext::new(
+                        crate::document::CompileContext::new(
                             self.base_uri.clone(),
                             self.source_uri.as_ref(),
                         ),
-                        source_facts.as_ref(),
-                        &source_evidence,
-                        retained_nodes.as_deref(),
-                    )
-                    .map_err(|_| Error::NoContent)?
+                        source_facts,
+                        source_evidence,
+                        retained_nodes,
+                    ))
                 };
-                return Ok(ExtractedContent { excerpt, document });
+                return Ok(ExtractedContent { excerpt, content });
             }
 
             let rejection = Self::attempt_rejection_reason(
@@ -1032,7 +1044,7 @@ impl<'a> ContentExtractor<'a> {
             .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
             excerpt: best.excerpt,
-            document,
+            content: ExtractedContentState::Eager(document),
         })
     }
     fn root_info(
