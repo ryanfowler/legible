@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 /// These values describe the retained semantic result. Source-only HTML
 /// structure and removed page chrome are not included.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DocumentStats {
+pub(crate) struct DocumentStats {
     /// Number of characters in normalized document text.
     pub text_length: usize,
     /// Number of whitespace-separated words in normalized document text.

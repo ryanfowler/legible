@@ -1687,7 +1687,7 @@ mod tests {
                 "      Text(\"Note text.\")\n",
             )
         );
-        assert_eq!(document.footnotes().len(), 1);
+        assert_eq!(document.footnotes.len(), 1);
     }
 
     #[test]
@@ -1743,9 +1743,10 @@ mod tests {
         );
         assert!(matches!(
             document
-                .roots()
+                .root_ids()
                 .next()
-                .and_then(|root| root.children().next())
+                .and_then(|root| document.child_ids(root).next())
+                .and_then(|node| document.node(node))
                 .map(|node| node.kind()),
             Some(NodeKind::Link(_))
         ));
@@ -1988,7 +1989,11 @@ mod tests {
         let document = compile(&html, None);
         assert_eq!(document.len(), 1);
         assert!(matches!(
-            document.roots().next().map(|node| node.kind()),
+            document
+                .root_ids()
+                .next()
+                .and_then(|root| document.node(root))
+                .map(|node| node.kind()),
             Some(NodeKind::CodeBlock(_))
         ));
     }

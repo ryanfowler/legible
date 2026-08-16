@@ -59,7 +59,7 @@ The extraction pipeline flows through these stages:
 | `document/ordinary.rs` | Conservative feature routing and stack-safe streaming compilation for ordinary HTML semantics |
 | `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
-| `document/` | Public read-only semantic IR plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this document instead of a DOM |
+| `document/` | Private semantic IR plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this representation instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -79,7 +79,7 @@ These invariants are costly to violate:
 - **No `RefCell` after parse.** Parser-only interior mutability stays in `dom/parse.rs`.
 - **Snapshot before mutation.** Collect preorder snapshots when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots when a pass skips text nodes and removed subtrees.
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
-- **Lazy rendering.** `ExtractedPage` owns only the semantic document, not a retained DOM. Render HTML, Markdown, and text lazily from the semantic document. Derive result metrics from cached `DocumentStats`; defer that measurement until a text or metric method needs it. The public `extract` function must not eagerly render output.
+- **Lazy rendering.** `ExtractedPage` owns only the private semantic representation, not a retained DOM. Render HTML, Markdown, and text lazily from that representation. Derive result metrics from cached internal stats; defer that measurement until a text or metric method needs it. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove non-math scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage. Keep math source until semantic compilation.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
@@ -145,10 +145,10 @@ let page = extract(html, None)?;
 
 let extractor = Extractor::builder().structured_data(true).build();
 let page = extractor.extract(html, None)?;
-let document = page.document();
+let markdown = page.markdown();
 ```
 
-`ExtractedPage` owns the semantic `Document`. It provides lazy HTML, Markdown, and text methods plus page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
+`ExtractedPage` owns a private semantic representation. It provides lazy HTML, Markdown, and text methods, scalar metrics, and page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
 
 ## Fuzzing
 

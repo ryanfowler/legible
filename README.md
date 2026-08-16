@@ -4,8 +4,8 @@
 [![Documentation](https://docs.rs/legible/badge.svg)](https://docs.rs/legible)
 
 Legible extracts relevant content and metadata from HTML. It compiles selected HTML
-into a semantic document. It renders Markdown, canonical HTML, or normalized text
-from that document only when you request the format.
+into a private semantic representation. It renders Markdown, canonical HTML, or
+normalized text from that representation only when you request the format.
 
 Legible uses general semantic candidates, source-relative quality checks, and
 conservative fallbacks. Mozilla Readability is an important algorithmic ancestor,
@@ -102,38 +102,22 @@ let extractor = Extractor::builder()
 # let _ = extractor;
 ```
 
-## Inspect semantic content
+## Outputs and metrics
 
-Use `page.document()` when you need structured content. The document is Legible's
-read-only semantic IR. It is not an HTML DOM or a CommonMark AST. Legible removes
-site chrome, CSS classes, IDs, and source implementation wrappers. It normalizes
-retained structures into semantic nodes. This representation is lossy. You cannot
-reconstruct unsupported elements, source attributes, wrapper structure, or source
-whitespace from it.
+Legible's semantic representation is an internal implementation detail. Public
+output contracts are Markdown, canonical semantic HTML, normalized text, metadata,
+and scalar metrics. Content methods return Markdown, canonical semantic HTML, or
+normalized text. Metadata and scalar metrics are also available on `ExtractedPage`:
 
 ```rust
-# let page = legible::extract(r#"<main><h1>Guide</h1><p>See <a href="/api">the API</a>.</p><pre><code>let x = 1;</code></pre><table><tr><th>Name</th></tr><tr><td>x</td></tr></table></main>"#, Some("https://example.com/docs"))?;
-use legible::NodeKind;
-
-let mut nodes: Vec<_> = page.document().roots().rev().collect();
-while let Some(node) = nodes.pop() {
-    match node.kind() {
-        NodeKind::Heading { level } => println!("h{level}: {}", node.text()),
-        NodeKind::Paragraph => println!("paragraph: {}", node.text()),
-        NodeKind::Link(link) => println!("link: {}", link.destination()),
-        NodeKind::CodeBlock(code) => println!("code: {}", code.text()),
-        NodeKind::Table(table) => println!("columns: {:?}", table.column_count()),
-        _ => {}
-    }
-    let children: Vec<_> = node.children().collect();
-    nodes.extend(children.into_iter().rev());
-}
+# let page = legible::extract("<main><p>Page content.</p></main>", None)?;
+println!("{} words", page.word_count());
+println!("{} characters", page.text_length());
+println!("{} images", page.image_count());
 # Ok::<(), legible::Error>(())
 ```
 
-The API exposes semantic values and traversal only. It does not expose source DOM
-IDs or mutation methods. `page.document().stats()` returns cached normalized text,
-link, structure, media, footnote, and math counts for the semantic result.
+The representation can change without a public API change.
 
 ## Render Markdown
 
@@ -175,9 +159,10 @@ Both options are disabled by default.
 
 ## Security
 
-`ExtractedPage::html()` returns canonical semantic HTML. The semantic document cannot
-contain active source elements, event handlers, arbitrary source attributes, or
-unsupported URI schemes. `ExtractedPage::safe_html()` is an alias for the same output.
+`ExtractedPage::html()` returns canonical semantic HTML. The private semantic
+representation cannot contain active source elements, event handlers, arbitrary
+source attributes, or unsupported URI schemes. `ExtractedPage::safe_html()` is an
+alias for the same output.
 
 Markdown output contains no raw HTML. The semantic compiler rejects links and media
 that use unsupported URI schemes. Sanitize HTML that you create from other sources.

@@ -7,8 +7,8 @@ use serde_json::Value;
 
 /// Relevant page content and metadata.
 ///
-/// Output formats are rendered lazily from one semantic document. Calling a
-/// render method more than once produces the same output.
+/// Output formats are rendered lazily from one private semantic representation.
+/// Calling a render method more than once produces the same output.
 pub struct ExtractedPage {
     metadata: Metadata,
     document: Document,
@@ -33,14 +33,6 @@ impl ExtractedPage {
             metadata_diagnostics,
             structured_data,
         }
-    }
-
-    /// Returns the extracted semantic document.
-    ///
-    /// The document omits site chrome and source HTML implementation details.
-    /// Use it when you need structured content instead of a rendered format.
-    pub fn document(&self) -> &Document {
-        &self.document
     }
 
     /// Returns discovered page metadata.
@@ -84,8 +76,8 @@ impl ExtractedPage {
 
     /// Renders the extracted content as canonical semantic HTML.
     ///
-    /// The semantic document cannot contain active source elements, arbitrary
-    /// attributes, or unsupported URI schemes.
+    /// The private semantic representation cannot contain active source elements,
+    /// arbitrary attributes, or unsupported URI schemes.
     pub fn html(&self) -> String {
         self.html_builder().render()
     }
@@ -115,7 +107,102 @@ impl ExtractedPage {
         self.document.text_length()
     }
 
-    /// Checks semantic document invariants for fuzz testing.
+    /// Returns the number of characters contributed by link content.
+    pub fn link_text_length(&self) -> usize {
+        self.document.link_text_length()
+    }
+
+    /// Returns the fraction of normalized text contributed by links.
+    pub fn link_density(&self) -> f64 {
+        self.document.link_density()
+    }
+
+    /// Returns the number of semantic paragraphs.
+    pub fn paragraph_count(&self) -> usize {
+        self.document.paragraph_count()
+    }
+
+    /// Returns the number of semantic headings.
+    pub fn heading_count(&self) -> usize {
+        self.document.heading_count()
+    }
+
+    /// Returns the number of semantic list items.
+    pub fn list_item_count(&self) -> usize {
+        self.document.list_item_count()
+    }
+
+    /// Returns the number of semantic code blocks.
+    pub fn code_block_count(&self) -> usize {
+        self.document.code_block_count()
+    }
+
+    /// Returns the number of semantic data tables.
+    pub fn table_count(&self) -> usize {
+        self.document.table_count()
+    }
+
+    /// Returns the number of semantic figures.
+    pub fn figure_count(&self) -> usize {
+        self.document.figure_count()
+    }
+
+    /// Returns the number of semantic images.
+    pub fn image_count(&self) -> usize {
+        self.document.image_count()
+    }
+
+    /// Returns the number of footnote references.
+    pub fn footnote_reference_count(&self) -> usize {
+        self.document.footnote_reference_count()
+    }
+
+    /// Returns the number of footnote definitions.
+    pub fn footnote_definition_count(&self) -> usize {
+        self.document.footnote_definition_count()
+    }
+
+    /// Returns the number of math expressions.
+    pub fn math_count(&self) -> usize {
+        self.document.math_count()
+    }
+
+    /// Returns the number of blocks with useful structural evidence.
+    pub fn structured_block_count(&self) -> usize {
+        self.document.stats().structured_block_count
+    }
+
+    /// Returns whether normalized text contains an alphanumeric character.
+    pub fn has_alphanumeric_text(&self) -> bool {
+        self.document.stats().has_alphanumeric_text
+    }
+
+    /// Returns the number of alphabetic characters in normalized text.
+    pub fn alphabetic_chars(&self) -> usize {
+        self.document.stats().alphabetic_chars
+    }
+
+    /// Returns the number of numeric characters in normalized text.
+    pub fn digit_chars(&self) -> usize {
+        self.document.stats().digit_chars
+    }
+
+    /// Returns whether the result contains contextual semantic structure.
+    pub fn has_contextual_structure(&self) -> bool {
+        self.document.stats().has_contextual_structure
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_node_count(&self) -> usize {
+        self.document.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_retained_bytes(&self) -> usize {
+        self.document.retained_bytes_estimate()
+    }
+
+    /// Checks private semantic representation invariants for fuzz testing.
     #[doc(hidden)]
     #[cfg(feature = "fuzzing")]
     pub fn validate_document(&self) -> bool {
@@ -231,38 +318,36 @@ mod tests {
         assert_eq!(page.markdown(), page.markdown());
         assert_eq!(page.text(), page.text());
         assert_eq!(page.html(), page.html());
-        assert_eq!(page.document().text(), page.text());
-        assert_eq!(page.document().text_length(), page.text_length());
-        assert_eq!(page.document().word_count(), page.word_count());
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
+        assert_eq!(page.image_count(), 1);
     }
 
     #[test]
     fn first_markdown_render_does_not_initialize_stats() {
         let page = extract("<main><p>Markdown output.</p></main>", None).unwrap();
 
-        assert!(!page.document().stats_initialized());
+        assert!(!page.document.stats_initialized());
         assert_eq!(page.markdown(), "Markdown output.\n");
-        assert!(!page.document().stats_initialized());
+        assert!(!page.document.stats_initialized());
     }
 
     #[test]
     fn first_html_render_does_not_initialize_stats() {
         let page = extract("<main><p>HTML output.</p></main>", None).unwrap();
 
-        assert!(!page.document().stats_initialized());
+        assert!(!page.document.stats_initialized());
         assert_eq!(page.html(), "<div><p>HTML output.</p></div>");
-        assert!(!page.document().stats_initialized());
+        assert!(!page.document.stats_initialized());
     }
 
     #[test]
     fn first_text_render_initializes_stats_during_the_text_walk() {
         let page = extract("<main><p>Text output.</p></main>", None).unwrap();
 
-        assert!(!page.document().stats_initialized());
+        assert!(!page.document.stats_initialized());
         assert_eq!(page.text(), "Text output.");
-        assert!(page.document().stats_initialized());
+        assert!(page.document.stats_initialized());
         assert_eq!(page.text_length(), 12);
         assert_eq!(page.word_count(), 2);
     }
@@ -280,9 +365,9 @@ mod tests {
     fn semantic_metrics_are_cached_on_the_document() {
         let page = extract("<main><p>Markdown only output.</p></main>", None).unwrap();
 
-        let before = page.document().stats();
+        let before = page.document.stats();
         assert!(page.markdown().contains("Markdown only output."));
-        assert_eq!(page.document().stats(), before);
+        assert_eq!(page.document.stats(), before);
         assert_eq!(page.word_count(), 3);
     }
 
@@ -326,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn extracted_page_retains_only_the_semantic_document() {
+    fn extracted_page_retains_only_the_private_semantic_representation() {
         let clutter = "<nav><span>irrelevant</span></nav>".repeat(200);
         let html = format!(
             "<html><body>{clutter}<main><p>This is the relevant page content.</p></main></body></html>"

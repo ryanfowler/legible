@@ -108,8 +108,8 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 output.push('<');
                 output.push_str(tag);
                 output.push_str(" id=\"footnote-");
-                if let Some(definition) = document.footnote(*footnote) {
-                    escape_attribute(&mut output, definition.label());
+                if let Some(label) = document.footnote_label(*footnote) {
+                    escape_attribute(&mut output, label);
                 }
                 output.push('"');
                 if !parent_is_list {
@@ -177,11 +177,11 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 None
             }
             NodeKind::FootnoteReference(footnote) => {
-                if let Some(definition) = document.footnote(*footnote) {
+                if let Some(label) = document.footnote_label(*footnote) {
                     output.push_str("<sup><a href=\"#footnote-");
-                    escape_attribute(&mut output, definition.label());
+                    escape_attribute(&mut output, label);
                     output.push_str("\" role=\"doc-noteref\">");
-                    escape_text(&mut output, definition.label());
+                    escape_text(&mut output, label);
                     output.push_str("</a></sup>");
                 }
                 None
