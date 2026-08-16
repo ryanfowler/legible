@@ -166,9 +166,11 @@ catch large regressions, not to make final performance claims.
 Do not run the full benchmark suite for every change. Run
 `cargo bench --bench extraction` for performance-sensitive work, baseline
 updates, or when a change affects a workload that the smoke set does not cover.
-Use the full suite's focused Criterion filter when possible. See
-`benches/README.md` for workload coverage, baseline commands, and regression
-guardrails.
+Use the full suite's focused Criterion filter when possible. The extraction suite
+separates extraction, retained-fragment lowering, end-to-end Markdown, and lazy
+Markdown/HTML/text rendering. See `benches/README.md` for workload coverage,
+baseline commands, and regression guardrails. The baseline at the private-IR
+migration starting revision is recorded in `benches/private-ir-baseline.md`.
 
 `benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input.
 

@@ -39,11 +39,14 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
             "reference" => html.push_str(&format!(
                 "<section><h2>Method {index}</h2><pre><code>let value_{index} = parse(input);</code></pre><table><tr><th>Field</th><th>Value</th></tr><tr><td>index</td><td>{index}</td></tr></table></section>"
             )),
-            "code" => html.push_str(&format!(
-                "<section><h2>Example {index}</h2><div class='highlight language-rust'><div class='toolbar'><button>Copy</button></div><pre><code><span class='line'><span class='line-number'>{index}</span><span>fn example_{index}() {{</span></span><br><span class='line'>    println!(\"value {index}\");</span><br><span class='line'>}}</span></code></pre></div></section>"
+            "footnotes" => html.push_str(&format!(
+                "<section><h2>Reference {index}</h2><p>This explanation cites a retained definition<sup><a href='#note-{index}' role='doc-noteref'>{index}</a></sup>.</p><aside id='note-{index}' role='doc-footnote'>The reference definition for item {index} contains useful context.</aside></section>"
             )),
             "math" => html.push_str(&format!(
                 "<section><h2>Equation {index}</h2><p>The result follows from <math><mfrac><mi>x</mi><mn>{index}</mn></mfrac></math>.</p><div class='katex'><math aria-hidden='true'><msup><mi>x</mi><mn>2</mn></msup></math><span class='katex-html'>x²</span></div></section>"
+            )),
+            "code" => html.push_str(&format!(
+                "<section><h2>Example {index}</h2><div class='highlight language-rust'><div class='toolbar'><button>Copy</button></div><pre><code><span class='line'><span class='line-number'>{index}</span><span>fn example_{index}() {{</span></span><br><span class='line'>    println!(\"value {index}\");</span><br><span class='line'>}}</span></code></pre></div></section>"
             )),
             "tables" => html.push_str(&format!(
                 "<section><h2>Dataset {index}</h2><table><thead><tr><th>Name</th><th>Value</th><th>Status</th></tr></thead><tbody><tr><td>entry-{index}</td><td>{index}</td><td>ready</td></tr><tr><td>alternate-{index}</td><td>{}</td><td>complete</td></tr></tbody></table><table role='presentation'><tr><td><p>Layout prose {index} contains a complete explanation that must remain readable after normalization.</p></td></tr></table></section>", index + 1
@@ -67,7 +70,7 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
 
 fn ordinary_inline_section(index: usize) -> String {
     format!(
-        "<section><h2>Section {index}</h2><p>Normal article text with <strong>strong emphasis</strong>, <em>emphasis</em>, <a href='/relative'>relative links</a>, and <code>inline code</code>.</p><blockquote><p>A quoted paragraph keeps ordinary block structure realistic.</p></blockquote><ul><li>First list item</li><li>Second list item</li></ul><figure><img src='/image.jpg' alt='Useful image'><figcaption>A useful image caption.</figcaption></figure></section>"
+        "<section><h2>Section {index}</h2><p>Normal article text with <strong>strong emphasis containing <em>nested emphasis</em></strong>, <a href='/relative'>relative links</a>, and <code>inline code</code>.</p><blockquote><p>A quoted paragraph keeps ordinary block structure realistic.</p></blockquote><ul><li>First unordered item</li><li>Second unordered item</li></ul><ol><li>First ordered item</li><li>Second ordered item</li></ol><figure><img src='/image.jpg' alt='Useful image'><figcaption>A useful image caption.</figcaption></figure><details><summary>Additional context</summary><p>The expandable explanation remains ordinary semantic content.</p></details><dl><dt>Term</dt><dd>The definition list gives the common workload a native definition structure.</dd></dl></section>"
     )
 }
 
@@ -83,7 +86,10 @@ fn ordinary_inline_fragment(target_bytes: usize) -> String {
     html
 }
 
-fn normalized_fragment(kind: &str, target_bytes: usize) -> String {
+/// Builds a source fragment with the same semantic shapes as a cleaned retained
+/// region. The fragment excludes page chrome so lowering is measured separately
+/// from extraction and output rendering.
+fn retained_fragment(kind: &str, target_bytes: usize) -> String {
     if kind == "ordinary-inline" {
         return ordinary_inline_fragment(target_bytes);
     }
@@ -94,6 +100,12 @@ fn normalized_fragment(kind: &str, target_bytes: usize) -> String {
         match kind {
             "reference" => html.push_str(&format!(
                 "<section><h2>Method {index}</h2><p>This method parses a representative input value.</p><pre><code class='language-rust' data-language='rust'>let value_{index} = parse(input);</code></pre><table><tr><th>Field</th><th>Value</th></tr><tr><td>index</td><td>{index}</td></tr></table></section>"
+            )),
+            "footnotes" => html.push_str(&format!(
+                "<section><h2>Reference {index}</h2><p>This explanation cites a retained definition<sup><a href='#note-{index}' role='doc-noteref'>{index}</a></sup>.</p><aside id='note-{index}' role='doc-footnote'>The reference definition for item {index} contains useful context.</aside></section>"
+            )),
+            "math" => html.push_str(&format!(
+                "<section><h2>Equation {index}</h2><p>The result follows from <math><mfrac><mi>x</mi><mn>{index}</mn></mfrac></math>.</p><div class='katex'><math aria-hidden='true'><msup><mi>x</mi><mn>2</mn></msup></math><span class='katex-html'>x²</span></div></section>"
             )),
             "code" => html.push_str(&format!(
                 "<section><h2>Example {index}</h2><div class='highlight language-rust'><pre><code><span data-line><span class='line-number'>{index}</span><span>fn example_{index}() {{</span></span><span data-line>    println!(\"value {index}\");</span><span data-line>}}</span></code></pre></div></section>"
@@ -199,24 +211,48 @@ fn bench_extract(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_document_compile(c: &mut Criterion) {
-    let mut group = c.benchmark_group("document_compile");
+fn bench_lower_retained_fragment(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lower_retained_fragment");
+    let mut total_semantic_nodes = 0usize;
+    let mut fixture_count = 0usize;
+
+    eprintln!(
+        "representation/layout: arena_node_bytes={}, node_kind_bytes={}, text_value_bytes={}",
+        std::mem::size_of::<document::ArenaNode>(),
+        std::mem::size_of::<document::NodeKind>(),
+        std::mem::size_of::<document::TextValue>(),
+    );
+
     for (name, kind, bytes) in [
         ("simple-prose", "prose", 4_000),
         ("long-prose", "prose", 250_000),
         ("ordinary-inline", "ordinary-inline", 50_000),
         ("ordinary-inline-large", "ordinary-inline", 500_000),
         ("highlighted-code", "code", 100_000),
+        ("math", "math", 100_000),
         ("table-heavy", "tables", 100_000),
         ("documentation", "reference", 100_000),
+        ("footnotes", "footnotes", 100_000),
         ("listing", "listing", 100_000),
     ] {
-        let html = normalized_fragment(kind, bytes);
+        let html = retained_fragment(kind, bytes);
         let dom = dom::Dom::parse_fragment(&html, dom::Tag::Div).unwrap();
         let root = dom.root();
         let base = url::Url::parse("https://example.com/docs/page").unwrap();
         let context = document::CompileContext::new(Some(base.clone()), Some(&base));
-        let document = document::compile_document(&dom, root, &context).unwrap();
+        // Production extraction reuses source evidence and cleanup facts from
+        // the retained fragment. Build both outside the timed lowering loop.
+        let source_evidence =
+            document::SourceEvidence::analyze(&dom, root, &dom::NodeStateStore::new());
+        let source_facts = document::SemanticSourceFacts::analyze(&dom, root);
+        let document = document::compile_document_with_optional_source_facts_and_evidence(
+            &dom,
+            root,
+            &context,
+            Some(&source_facts),
+            Some(&source_evidence),
+        )
+        .unwrap();
         let semantic_nodes = document.len();
         let retained_bytes = document.retained_bytes_estimate();
         let source_sized_bytes = retained_bytes.saturating_add(
@@ -224,10 +260,15 @@ fn bench_document_compile(c: &mut Criterion) {
                 .saturating_sub(document.node_capacity())
                 .saturating_mul(document::Document::node_slot_size()),
         );
+        total_semantic_nodes = total_semantic_nodes.saturating_add(semantic_nodes);
+        fixture_count += 1;
         eprintln!(
-            "representation/{name}: dom_nodes={}, ir_nodes={semantic_nodes}, ir_capacity={}, retained_bytes={retained_bytes}, source_sized_bytes={source_sized_bytes}",
+            "representation/{name}: dom_nodes={}, ir_nodes={semantic_nodes}, roots={}, ir_capacity={}, retained_bytes={retained_bytes}, semantic_string_bytes={}, semantic_string_values={}, source_sized_bytes={source_sized_bytes}",
             dom.len(),
-            document.node_capacity()
+            document.root_count(),
+            document.node_capacity(),
+            document.semantic_string_bytes(),
+            document.semantic_string_value_count(),
         );
         group.throughput(Throughput::Elements(dom.len() as u64));
         group.bench_with_input(
@@ -235,12 +276,23 @@ fn bench_document_compile(c: &mut Criterion) {
             &dom,
             |b, dom| {
                 b.iter(|| {
-                    document::compile_document(black_box(dom), root, black_box(&context)).unwrap()
+                    document::compile_document_with_optional_source_facts_and_evidence(
+                        black_box(dom),
+                        root,
+                        black_box(&context),
+                        Some(&source_facts),
+                        Some(&source_evidence),
+                    )
+                    .unwrap()
                 })
             },
         );
     }
     group.finish();
+    eprintln!(
+        "representation/summary: fixtures={fixture_count}, average_semantic_nodes={:.1}",
+        total_semantic_nodes as f64 / fixture_count as f64
+    );
 }
 
 fn bench_extract_markdown(c: &mut Criterion) {
@@ -259,7 +311,7 @@ fn bench_extract_markdown(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new(size, name), &html, |b, html| {
             b.iter(|| {
                 let page = extract(black_box(html), Some("https://example.com")).unwrap();
-                page.markdown()
+                black_box(page.markdown())
             })
         });
     }
@@ -276,17 +328,31 @@ fn bench_lazy_outputs(c: &mut Criterion) {
         };
         let html = benchmark_page(source_kind, bytes);
         let page = extract(&html, Some("https://example.com")).unwrap();
+        // Measure steady-state lazy rendering. Text statistics are initialized
+        // once before timing so their one-time cost is not mixed into a render.
+        let _ = page.text();
         group.bench_function(BenchmarkId::new(kind, "markdown"), |b| {
-            b.iter(|| page.markdown())
+            b.iter(|| black_box(page.markdown()))
         });
-        group.bench_function(BenchmarkId::new(kind, "text"), |b| b.iter(|| page.text()));
-        group.bench_function(BenchmarkId::new(kind, "html"), |b| b.iter(|| page.html()));
+        group.bench_function(BenchmarkId::new(kind, "text"), |b| {
+            b.iter(|| black_box(page.text()))
+        });
+        group.bench_function(BenchmarkId::new(kind, "html"), |b| {
+            b.iter(|| black_box(page.html()))
+        });
     }
     for (size, bytes) in [("medium", 50_000), ("large", 500_000)] {
         let html = benchmark_page("ordinary-inline", bytes);
         let page = extract(&html, Some("https://example.com")).unwrap();
+        let _ = page.text();
         group.bench_function(BenchmarkId::new(size, "ordinary-inline/markdown"), |b| {
-            b.iter(|| page.markdown())
+            b.iter(|| black_box(page.markdown()))
+        });
+        group.bench_function(BenchmarkId::new(size, "ordinary-inline/text"), |b| {
+            b.iter(|| black_box(page.text()))
+        });
+        group.bench_function(BenchmarkId::new(size, "ordinary-inline/html"), |b| {
+            b.iter(|| black_box(page.html()))
         });
     }
     group.finish();
@@ -298,6 +364,7 @@ fn bench_complex_pages(c: &mut Criterion) {
     for (name, kind, url) in [
         ("prose", "prose", "https://example.com"),
         ("documentation", "reference", "https://example.com"),
+        ("footnotes-reference", "footnotes", "https://example.com"),
         ("highlighted-code", "code", "https://example.com"),
         ("math", "math", "https://example.com"),
         ("table-heavy", "tables", "https://example.com"),
@@ -362,7 +429,7 @@ fn bench_deeply_nested(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_extract,
-    bench_document_compile,
+    bench_lower_retained_fragment,
     bench_extract_markdown,
     bench_lazy_outputs,
     bench_complex_pages,
