@@ -790,7 +790,7 @@ pub(super) struct SemanticFacts {
 impl SemanticFacts {
     /// Scans source evidence in preorder and propagates generic facts in reverse order.
     pub(super) fn analyze(dom: &Dom, root: NodeId) -> Self {
-        Self::analyze_with_source_facts(dom, root, None, None)
+        Self::analyze_with_source_facts(dom, root, None, None, None)
     }
 
     /// Scans source evidence while reusing facts computed before final cleanup.
@@ -799,10 +799,13 @@ impl SemanticFacts {
         root: NodeId,
         source_facts: Option<&SemanticSourceFacts>,
         source_evidence: Option<&SourceEvidence>,
+        retained_nodes: Option<&[NodeId]>,
     ) -> Self {
         let mut nodes = Vec::with_capacity(dom.len());
         nodes.push(root);
-        if let Some(source_facts) = source_facts {
+        if let Some(retained_nodes) = retained_nodes {
+            nodes.extend(retained_nodes.iter().copied());
+        } else if let Some(source_facts) = source_facts {
             nodes.extend(source_facts.live_nodes(root));
         } else {
             nodes.extend(dom.descendants(root));

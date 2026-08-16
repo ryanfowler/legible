@@ -14,6 +14,21 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 /// is already lowering it. Keeping those decisions together removes the old
 /// full inventory traversal from ordinary pages.
 pub(super) fn ordinary_source_gate(dom: &Dom, root: NodeId) -> Option<usize> {
+    ordinary_source_gate_with_retained_nodes(dom, root, None)
+}
+
+/// Runs the ordinary gate over the source-order stream produced by final
+/// relevance cleanup when one is available. This keeps routing and lowering on
+/// the same retained source without rebuilding a DOM traversal.
+pub(super) fn ordinary_source_gate_with_retained_nodes(
+    dom: &Dom,
+    root: NodeId,
+    retained_nodes: Option<&[NodeId]>,
+) -> Option<usize> {
+    if let Some(nodes) = retained_nodes {
+        return ordinary_source_gate_from_nodes(dom, nodes);
+    }
+
     let mut node_count = 0;
     let mut tasks: Vec<(NodeId, bool)> = dom.children_rev(root).map(|node| (node, false)).collect();
 
@@ -41,6 +56,45 @@ pub(super) fn ordinary_source_gate(dom: &Dom, root: NodeId) -> Option<usize> {
             dom.children_rev(node)
                 .map(|child| (child, child_inside_heading)),
         );
+    }
+    Some(node_count)
+}
+
+fn ordinary_source_gate_from_nodes(dom: &Dom, nodes: &[NodeId]) -> Option<usize> {
+    let mut ancestors = Vec::<(NodeId, bool)>::new();
+    let mut node_count = 0;
+    for &node in nodes {
+        let parent = dom.parent(node);
+        while ancestors
+            .last()
+            .is_some_and(|&(ancestor, _)| parent != Some(ancestor))
+        {
+            ancestors.pop();
+        }
+
+        node_count += 1;
+        if dom.text_node(node).is_some() || dom.is_comment(node) {
+            continue;
+        }
+        let tag = dom.tag(node)?;
+        let inside_heading = ancestors.last().is_some_and(|&(_, value)| value);
+        if has_complex_tag(tag)
+            || has_complex_attributes(dom, node)
+            || tag == Tag::A
+                && dom
+                    .attr(node, AttrName::Href)
+                    .is_some_and(|value| value.trim().starts_with('#'))
+            || tag == Tag::Img
+                && (inside_heading
+                    || !simple_image_source(dom, node)
+                    || super::math::class_is_semantic_evidence(dom, node))
+        {
+            return None;
+        }
+        ancestors.push((
+            node,
+            ancestors.last().is_some_and(|&(_, value)| value) || is_heading(tag),
+        ));
     }
     Some(node_count)
 }
@@ -346,7 +400,7 @@ struct Scope {
 }
 
 enum Visit {
-    Node { node: NodeId, scope: Scope },
+    Node { node: NodeId },
     End,
 }
 
@@ -372,6 +426,19 @@ pub(super) fn compile(
     context: &CompileContext,
     source_node_count: usize,
 ) -> Result<Document, CompileError> {
+    compile_with_retained_nodes(dom, root, context, source_node_count, None)
+}
+
+/// Compiles an ordinary fragment from the final-cleanup source stream when it
+/// is available. The stream contains source nodes in preorder. Leaf semantic
+/// elements still skip their source descendants, matching DOM traversal.
+pub(super) fn compile_with_retained_nodes(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_node_count: usize,
+    retained_nodes: Option<&[NodeId]>,
+) -> Result<Document, CompileError> {
     let mut builder = DocumentBuilder::with_capacity(source_node_count);
     builder.enable_preorder_insertions();
     let mut frames = vec![Frame {
@@ -388,16 +455,17 @@ pub(super) fn compile(
         boundary_pending: false,
         boundary_anchor: None,
     }];
-    let mut tasks = dom
-        .children_rev(root)
-        .map(|node| Visit::Node {
-            node,
-            scope: Scope::default(),
-        })
-        .collect::<Vec<_>>();
+    let mut tasks = retained_nodes.map_or_else(
+        || {
+            dom.children_rev(root)
+                .map(|node| Visit::Node { node })
+                .collect::<Vec<_>>()
+        },
+        |nodes| retained_source_tasks(dom, nodes),
+    );
 
     while let Some(task) = tasks.pop() {
-        let Visit::Node { node, scope } = task else {
+        let Visit::Node { node } = task else {
             let frame = frames.pop().expect("compile frame must match an element");
             if frame.requires_content && !frame.has_content {
                 return Err(CompileError::RequiresComplex);
@@ -413,6 +481,10 @@ pub(super) fn compile(
             );
             continue;
         };
+        let scope = frames
+            .last()
+            .expect("ordinary compiler keeps a root frame")
+            .scope;
         if let Some(text) = dom.text_node(node) {
             if frames
                 .last()
@@ -715,12 +787,14 @@ pub(super) fn compile(
         {
             frames[source].boundary_anchor = Some(semantic);
         }
-        tasks.push(Visit::End);
-        if !matches!(tag, Tag::Hr | Tag::Br) {
-            tasks.extend(dom.children_rev(node).map(|child| Visit::Node {
-                node: child,
-                scope: next,
-            }));
+        if retained_nodes.is_none() {
+            tasks.push(Visit::End);
+            if !matches!(tag, Tag::Hr | Tag::Br) {
+                tasks.extend(
+                    dom.children_rev(node)
+                        .map(|child| Visit::Node { node: child }),
+                );
+            }
         }
     }
 
@@ -730,6 +804,62 @@ pub(super) fn compile(
         return Err(CompileError::RequiresComplex);
     }
     Ok(document)
+}
+
+fn retained_source_tasks(dom: &Dom, nodes: &[NodeId]) -> Vec<Visit> {
+    let mut positions = vec![usize::MAX; dom.len()];
+    for (position, &node) in nodes.iter().enumerate() {
+        positions[node.index()] = position;
+    }
+    let mut subtree_ends: Vec<_> = (0..nodes.len()).map(|position| position + 1).collect();
+    for position in (0..nodes.len()).rev() {
+        let node = nodes[position];
+        if let Some(parent) = dom.parent(node) {
+            let parent_position = positions[parent.index()];
+            if parent_position < position {
+                subtree_ends[parent_position] =
+                    subtree_ends[parent_position].max(subtree_ends[position]);
+            }
+        }
+    }
+
+    let mut events = Vec::with_capacity(nodes.len());
+    let mut open = Vec::new();
+    let mut skipped_until = 0;
+    for (position, &node) in nodes.iter().enumerate() {
+        if position < skipped_until {
+            continue;
+        }
+        while let Some(&ancestor) = open.last() {
+            if dom.parent(node) == Some(ancestor) {
+                break;
+            }
+            events.push(Visit::End);
+            open.pop();
+        }
+        events.push(Visit::Node { node });
+        if ordinary_frame_node(dom, node) {
+            open.push(node);
+        }
+        if ordinary_leaf_node(dom, node) {
+            skipped_until = subtree_ends[position];
+        }
+    }
+    while open.pop().is_some() {
+        events.push(Visit::End);
+    }
+    events.reverse();
+    events
+}
+
+fn ordinary_frame_node(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node)
+        .is_some_and(|tag| !matches!(tag, Tag::Pre | Tag::Code | Tag::Img))
+}
+
+fn ordinary_leaf_node(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node)
+        .is_some_and(|tag| matches!(tag, Tag::Pre | Tag::Code | Tag::Img | Tag::Br | Tag::Hr))
 }
 
 fn complete_child(
