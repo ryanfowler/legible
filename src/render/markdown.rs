@@ -1,10 +1,11 @@
 //! CommonMark/GFM rendering from the semantic document.
-//!
-//! The renderer uses an explicit task stack. It has no dependency on the HTML DOM.
+//
+// The renderer interprets the private semantic tape in source order. It keeps
+// only formatting and structural state that is needed while writing output.
 
 use crate::document::{
-    Document, DocumentNodeId, FootnoteId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, ListKind,
-    NodeKindView as NodeKind, TableAlignment,
+    Document, EventOp, FootnoteId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, ListKind,
+    NodeKindView as NodeKind, OperationKind, TableAlignment,
 };
 use smallvec::SmallVec;
 
@@ -24,44 +25,48 @@ impl Default for MarkdownConfig {
 }
 
 #[derive(Clone, Copy)]
-enum Mode {
+enum CloseAction {
+    None,
     Block,
-    Inline,
+    Quote,
+    List,
+    ListItem,
+    Marker(&'static str),
+    Link(bool),
+    Caption { in_table: bool },
+    Table { active: bool },
+    TableRow { header: bool, top_level: bool },
+    Footnote,
 }
 
-#[derive(Clone, Copy)]
+struct Frame {
+    index: usize,
+    kind: OperationKind,
+    close: CloseAction,
+    direct_children: usize,
+    cells: usize,
+    first_row_seen: bool,
+    list_items: usize,
+}
+
+impl Frame {
+    fn new(index: usize, kind: OperationKind, close: CloseAction) -> Self {
+        Self {
+            index,
+            kind,
+            close,
+            direct_children: 0,
+            cells: 0,
+            first_row_seen: false,
+            list_items: 0,
+        }
+    }
+}
+
 enum ListMarker {
     Bullet,
     Ordered,
     OrderedStart(i32),
-}
-
-enum Task {
-    Node(DocumentNodeId, Mode),
-    Siblings(DocumentNodeId, Mode),
-    ListItems(DocumentNodeId, ListKind, i32, usize),
-    ListItemSiblings(DocumentNodeId),
-    FootnoteSiblings(DocumentNodeId, bool),
-    TableRows(DocumentNodeId, bool),
-    TableHeader(DocumentNodeId),
-    TableCells(DocumentNodeId),
-    Close(Close),
-    ListItem(DocumentNodeId, ListMarker),
-    ItemParagraph(DocumentNodeId),
-    TableCell(DocumentNodeId),
-}
-
-enum Close {
-    Block,
-    Marker(&'static str),
-    Link(DocumentNodeId),
-    Quote,
-    List,
-    ListItem,
-    TableRow,
-    TableHeader(Vec<Option<TableAlignment>>),
-    Table,
-    Footnote,
 }
 
 pub(crate) fn render_markdown(
@@ -75,7 +80,7 @@ pub(crate) fn render_markdown(
 struct MarkdownRenderer<'a> {
     document: &'a Document,
     out: Output,
-    tasks: Vec<Task>,
+    frames: Vec<Frame>,
     list_depth: usize,
     table_depth: usize,
     config: MarkdownConfig,
@@ -86,7 +91,7 @@ impl<'a> MarkdownRenderer<'a> {
         Self {
             document,
             out: Output::new(capacity),
-            tasks: Vec::with_capacity(32),
+            frames: Vec::with_capacity(32),
             list_depth: 0,
             table_depth: 0,
             config,
@@ -94,150 +99,121 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn render(mut self) -> String {
-        self.tasks.extend(
-            self.document
-                .root_ids()
-                .rev()
-                .map(|id| Task::Node(id, Mode::Block)),
-        );
-        while let Some(task) = self.tasks.pop() {
-            match task {
-                Task::Node(id, mode) => self.node(id, mode),
-                Task::Siblings(id, mode) => {
-                    if let Some(sibling) = self.document.next_sibling(id) {
-                        self.tasks.push(Task::Siblings(sibling, mode));
-                    }
-                    self.node(id, mode);
-                }
-                Task::ListItems(id, kind, start, index) => self.list_items(id, kind, start, index),
-                Task::ListItemSiblings(id) => self.list_item_siblings(id),
-                Task::FootnoteSiblings(id, first) => self.footnote_siblings(id, first),
-                Task::TableRows(id, first) => self.table_rows(id, first),
-                Task::TableHeader(row) => self.table_header(row),
-                Task::TableCells(id) => self.table_cells(id),
-                Task::Close(close) => self.close(close),
-                Task::ListItem(id, marker) => self.list_item(id, marker),
-                Task::ItemParagraph(id) => self.item_paragraph(id),
-                Task::TableCell(id) => self.table_cell(id),
+        let mut index = 0;
+        while index < self.document.operations().len() {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                self.close(operation);
+                index += 1;
+                continue;
+            }
+
+            let Some(node) = self.document.operation_view(index) else {
+                index += 1;
+                continue;
+            };
+            if let Some(next) = self.open(index, operation, node) {
+                index = next;
+            } else {
+                index += 1;
             }
         }
         self.out.finish()
     }
 
-    fn push_children(&mut self, id: DocumentNodeId, mode: Mode) {
-        if let Some(child) = self.document.first_child(id) {
-            self.tasks.push(Task::Siblings(child, mode));
-        }
-    }
-
-    fn block_contains_only_footnotes(&self, id: DocumentNodeId) -> bool {
-        let mut children = self.document.child_ids(id).peekable();
-        children.peek().is_some()
-            && children.all(|child| {
-                matches!(
-                    self.document.node(child).map(|node| node.kind()),
-                    Some(NodeKind::FootnoteDefinition(_))
-                )
-            })
-    }
-
-    fn visible(&self, root: DocumentNodeId) -> bool {
-        let flags = self.document.visibility_flags(root);
-        flags & HAS_VISIBLE_TEXT != 0 || self.config.images && flags & HAS_VISIBLE_IMAGE != 0
-    }
-
-    fn next_text_char(&self, id: DocumentNodeId) -> Option<char> {
-        let mut sibling = self.document.next_sibling(id);
-        while let Some(node) = sibling {
-            if let Some(value) = self.first_text_char(node) {
-                return Some(value);
-            }
-            sibling = self.document.next_sibling(node);
-        }
-        None
-    }
-
-    fn first_text_char(&self, root: DocumentNodeId) -> Option<char> {
-        let mut nodes = SmallVec::<[DocumentNodeId; 8]>::new();
-        nodes.push(root);
-        while let Some(id) = nodes.pop() {
-            let node = self.document.node(id)?;
-            match node.kind() {
-                NodeKind::Text(text) => {
-                    if let Some(ch) = text.chars().next() {
-                        return Some(ch);
-                    }
-                }
-                NodeKind::Image(_) if self.config.images => return Some('!'),
-                kind if is_block(&kind) => return None,
-                _ => {
-                    let children: SmallVec<[_; 8]> = self.document.child_ids(id).collect();
-                    nodes.extend(children.into_iter().rev());
-                }
+    fn open(&mut self, index: usize, operation: EventOp, node: NodeKind<'_>) -> Option<usize> {
+        let kind = self.document.operation_kind(index)?;
+        if let Some(parent) = self.frames.last_mut() {
+            parent.direct_children += 1;
+            if parent.kind == OperationKind::List && kind == OperationKind::ListItem {
+                parent.list_items += 1;
             }
         }
-        None
-    }
 
-    fn node(&mut self, id: DocumentNodeId, mode: Mode) {
-        let Some(node) = self.document.node(id) else {
-            return;
-        };
-        match node.kind() {
-            NodeKind::Text(text) => self.out.text(text, self.next_text_char(id)),
+        let end = self.document.operation_end(index);
+        let parent_kind = self.frames.last().map(|frame| frame.kind);
+
+        match node {
+            NodeKind::Text(text) => {
+                self.out.text(text, self.next_text_char(index));
+            }
             NodeKind::Heading { level } => {
-                if !self.visible(id) {
-                    if self.config.images {
-                        self.push_children(id, Mode::Block);
+                if !self.visible(operation) {
+                    if !self.config.images {
+                        return Some(end.saturating_add(1));
                     }
-                    return;
+                    self.push_frame(index, kind, CloseAction::None);
+                    return None;
                 }
                 self.out.ensure_blank_line();
                 self.out.markup_repeat('#', usize::from(level));
                 self.out.markup(" ");
-                self.tasks.push(Task::Close(Close::Block));
-                self.push_children(id, Mode::Inline);
+                self.push_frame(index, kind, CloseAction::Block);
             }
             NodeKind::Paragraph => {
-                if matches!(mode, Mode::Block) {
+                let in_list_item = parent_kind == Some(OperationKind::ListItem);
+                let in_table_cell = parent_kind == Some(OperationKind::TableCell);
+                let in_first_footnote_paragraph = parent_kind
+                    == Some(OperationKind::FootnoteDefinition)
+                    && self
+                        .frames
+                        .last()
+                        .is_some_and(|frame| frame.direct_children == 1);
+                if in_list_item {
+                    self.start_item_paragraph();
+                } else if !in_first_footnote_paragraph && !in_table_cell {
                     self.out.ensure_blank_line();
-                    self.tasks.push(Task::Close(Close::Block));
                 }
-                self.push_children(id, Mode::Inline);
+                self.push_frame(
+                    index,
+                    kind,
+                    if in_first_footnote_paragraph || in_table_cell {
+                        CloseAction::None
+                    } else {
+                        CloseAction::Block
+                    },
+                );
             }
-            NodeKind::TableCaption
-            | NodeKind::Figcaption
+            NodeKind::TableCaption => {
+                self.out.ensure_blank_line();
+                self.push_frame(
+                    index,
+                    kind,
+                    CloseAction::Caption {
+                        in_table: parent_kind == Some(OperationKind::Table),
+                    },
+                );
+            }
+            NodeKind::Figcaption
             | NodeKind::DefinitionTerm
             | NodeKind::DefinitionDescription
             | NodeKind::Summary => {
                 self.out.ensure_blank_line();
-                self.tasks.push(Task::Close(Close::Block));
-                self.push_children(id, Mode::Inline);
+                self.push_frame(index, kind, CloseAction::Block);
             }
             NodeKind::BlockGroup => {
-                if self.block_contains_only_footnotes(id) {
+                if self.block_contains_only_footnotes(index) {
                     self.out.limit_trailing_newlines(3);
-                    self.push_children(id, Mode::Block);
+                    self.push_frame(index, kind, CloseAction::None);
                 } else {
                     if !self.out.in_empty_list_item() {
                         self.out.ensure_blank_line();
                     }
-                    self.tasks.push(Task::Close(Close::Block));
-                    self.push_children(id, Mode::Block);
+                    self.push_frame(index, kind, CloseAction::Block);
                 }
             }
             NodeKind::Figure | NodeKind::Details | NodeKind::DefinitionList => {
                 if !self.out.in_empty_list_item() {
                     self.out.ensure_blank_line();
                 }
-                self.tasks.push(Task::Close(Close::Block));
-                self.push_children(id, Mode::Block);
+                self.push_frame(index, kind, CloseAction::Block);
             }
             NodeKind::BlockQuote | NodeKind::Callout(_) => {
                 self.out.ensure_blank_line();
                 self.out.prefixes.push(Prefix::Quote);
-                self.tasks.push(Task::Close(Close::Quote));
-                self.push_children(id, Mode::Block);
+                self.push_frame(index, kind, CloseAction::Quote);
             }
             NodeKind::HardBreak => self.out.hard_break(),
             NodeKind::ThematicBreak => {
@@ -246,38 +222,53 @@ impl<'a> MarkdownRenderer<'a> {
                 self.out.markup("---");
                 self.out.newline();
             }
-            NodeKind::Strong => self.format(id, "**"),
-            NodeKind::Emphasis => self.format(id, "*"),
-            NodeKind::Strikethrough => self.format(id, "~~"),
+            NodeKind::Strong => self.format(index, kind, operation, "**"),
+            NodeKind::Emphasis => self.format(index, kind, operation, "*"),
+            NodeKind::Strikethrough => self.format(index, kind, operation, "~~"),
             NodeKind::InlineCode(text) => self.code_span(text),
-            NodeKind::CodeBlock(code) => self.code_block(code.language.as_deref(), &code.text),
-            NodeKind::Link(_) => {
+            NodeKind::CodeBlock(code) => self.code_block(code.language(), code.text()),
+            NodeKind::Link(link) => {
                 if self.config.links {
                     self.out.mark_inline_boundary();
                     self.out.open_link();
-                    self.tasks.push(Task::Close(Close::Link(id)));
                 }
-                self.push_children(id, Mode::Inline);
+                self.push_frame(index, kind, CloseAction::Link(self.config.links));
+                let _ = link;
             }
             NodeKind::Image(image) if self.config.images => self.image(image),
             NodeKind::Image(_) => {}
-            NodeKind::List(list) => self.list(id, list.kind, list.start),
-            NodeKind::ListItem => self.push_children(id, Mode::Inline),
-            NodeKind::Table(_) => self.table(id),
-            NodeKind::TableRow => self.table_row(id),
-            NodeKind::TableCell(_) => self.push_children(id, Mode::Inline),
+            NodeKind::List(list) => self.list(index, kind, list.kind, list.start),
+            NodeKind::ListItem => self.list_item(index, kind),
+            NodeKind::Table(_) => self.table(index, kind),
+            NodeKind::TableRow => self.table_row(index, kind),
+            NodeKind::TableCell(_) => {
+                if self.start_table_cell(index) {
+                    return Some(end.saturating_add(1));
+                }
+                self.push_frame(index, kind, CloseAction::None);
+            }
             NodeKind::FootnoteReference(id) => self.footnote_reference(id),
-            NodeKind::FootnoteDefinition(footnote) => self.footnote_definition(id, footnote),
+            NodeKind::FootnoteDefinition(id) => {
+                let Some(label) = self.document.footnote_label(id) else {
+                    return Some(end.saturating_add(1));
+                };
+                self.out.ensure_blank_line();
+                self.out.markup("[^");
+                self.out.footnote_label(label);
+                self.out.markup("]: ");
+                self.out.prefixes.push(Prefix::Indent(4));
+                self.push_frame(index, kind, CloseAction::Footnote);
+            }
             NodeKind::TaskMarker(_) => {}
-            NodeKind::InlineMath(math) => self.math(&math.source, false),
-            NodeKind::DisplayMath(math) => self.math(&math.source, true),
+            NodeKind::InlineMath(math) => self.math(math.source(), false),
+            NodeKind::DisplayMath(math) => self.math(math.source(), true),
             NodeKind::Media(media) => {
-                let title = media.title.as_deref().unwrap_or(&media.source);
+                let title = media.title().unwrap_or(media.source());
                 if self.config.links {
                     self.out.markup("[");
                     self.out.label(title);
                     self.out.markup("](");
-                    self.out.destination(&media.source);
+                    self.out.destination(media.source());
                     self.out.markup(")");
                 } else {
                     self.out.text(title, None);
@@ -285,15 +276,146 @@ impl<'a> MarkdownRenderer<'a> {
             }
             NodeKind::Invalid => {}
         }
+        None
     }
 
-    fn format(&mut self, id: DocumentNodeId, marker: &'static str) {
-        if self.visible(id) {
+    fn close(&mut self, operation: EventOp) {
+        let opening = self.document.operation_opening_index(operation);
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        debug_assert_eq!(frame.index, opening);
+        match frame.close {
+            CloseAction::None => {}
+            CloseAction::Block => self.out.newline(),
+            CloseAction::Marker(marker) => {
+                if self.out.close_marker(marker, marker) {
+                    self.out.mark_inline_boundary();
+                }
+            }
+            CloseAction::Link(enabled) => {
+                if !enabled {
+                    return;
+                }
+                let Some(NodeKind::Link(link)) = self.document.operation_view(opening) else {
+                    return;
+                };
+                if self.out.close_marker("[", "](") {
+                    let trailing = std::mem::take(&mut self.out.pending_space);
+                    self.out.destination(link.destination());
+                    if let Some(title) = link.title() {
+                        self.out.markup(" \"");
+                        self.out.link_title(title);
+                        self.out.markup("\"");
+                    }
+                    self.out.markup(")");
+                    self.out.pending_space = trailing;
+                    self.out.mark_inline_boundary();
+                }
+            }
+            CloseAction::Caption { in_table } => {
+                // A table caption closes its own block and then the table's
+                // surrounding block boundary. Keep both boundaries to match
+                // the former caption task ordering.
+                self.out.newline();
+                if in_table {
+                    self.out.newline();
+                }
+            }
+            CloseAction::Quote => {
+                if self.out.has_current_line_content() {
+                    self.out.newline();
+                }
+                self.out.prefixes.pop();
+            }
+            CloseAction::List => {
+                if self.out.has_current_line_content() {
+                    self.out.newline();
+                }
+                self.list_depth -= 1;
+            }
+            CloseAction::ListItem => {
+                if self.out.has_current_line_content() {
+                    self.out.newline();
+                }
+                self.out.prefixes.pop();
+            }
+            CloseAction::Table { active } => {
+                if active {
+                    self.table_depth -= 1;
+                }
+            }
+            CloseAction::TableRow { header, top_level } => {
+                if top_level {
+                    self.out.markup(" |");
+                }
+                self.out.newline();
+                if header {
+                    self.table_header(opening);
+                }
+            }
+            CloseAction::Footnote => {
+                if self.out.has_current_line_content() {
+                    self.out.newline();
+                }
+                self.out.prefixes.pop();
+            }
+        }
+    }
+
+    fn push_frame(&mut self, index: usize, kind: OperationKind, close: CloseAction) {
+        self.frames.push(Frame::new(index, kind, close));
+    }
+
+    fn visible(&self, operation: EventOp) -> bool {
+        let flags = operation.flags();
+        flags & HAS_VISIBLE_TEXT != 0 || self.config.images && flags & HAS_VISIBLE_IMAGE != 0
+    }
+
+    fn next_text_char(&self, index: usize) -> Option<char> {
+        let mut nested = 0usize;
+        let mut next = index.saturating_add(1);
+        while let Some(operation) = self.document.operations().get(next).copied() {
+            if operation.is_close() {
+                if nested == 0 {
+                    return None;
+                }
+                nested -= 1;
+                next += 1;
+                continue;
+            }
+            let kind = self.document.operation_kind(next)?;
+            if is_block_operation(kind) {
+                next = self.document.operation_end(next).saturating_add(1);
+                continue;
+            }
+            let node = self.document.operation_view(next)?;
+            match node {
+                NodeKind::Text(text) => return text.chars().next(),
+                NodeKind::Image(_) if self.config.images => return Some('!'),
+                _ => {
+                    if kind.is_container() {
+                        nested += 1;
+                    }
+                }
+            }
+            next += 1;
+        }
+        None
+    }
+
+    fn format(
+        &mut self,
+        index: usize,
+        kind: OperationKind,
+        operation: EventOp,
+        marker: &'static str,
+    ) {
+        if self.visible(operation) {
             self.out.mark_inline_boundary();
         }
         self.out.open_marker(marker);
-        self.tasks.push(Task::Close(Close::Marker(marker)));
-        self.push_children(id, Mode::Inline);
+        self.push_frame(index, kind, CloseAction::Marker(marker));
     }
 
     fn code_span(&mut self, text: &str) {
@@ -308,7 +430,7 @@ impl<'a> MarkdownRenderer<'a> {
             self.out.mark_inline_boundary();
             self.out.prepare_inline_boundary(scan.first_char);
         }
-        self.out.markup_repeat('`', fence);
+        self.out.markup_repeat(char::from(96), fence);
         if pad {
             self.out.verbatim(" ");
         }
@@ -321,7 +443,7 @@ impl<'a> MarkdownRenderer<'a> {
         if pad {
             self.out.verbatim(" ");
         }
-        self.out.markup_repeat('`', fence);
+        self.out.markup_repeat(char::from(96), fence);
         if !writer.empty {
             self.out.last_text_char = writer.last_char;
             self.out.mark_inline_boundary();
@@ -333,16 +455,16 @@ impl<'a> MarkdownRenderer<'a> {
         self.out.mark_list_item_content();
         let mut longest = 0;
         let mut current = 0;
-        scan_longest_run(text.as_bytes(), b'`', &mut longest, &mut current);
+        scan_longest_run(text.as_bytes(), b'\x60', &mut longest, &mut current);
         let fence = 3.max(longest + 1);
-        self.out.markup_repeat('`', fence);
+        self.out.markup_repeat(char::from(96), fence);
         if let Some(language) = language {
             self.out.markup(language);
         }
         self.out.newline();
         self.out.verbatim(text.strip_suffix('\n').unwrap_or(text));
         self.out.newline();
-        self.out.markup_repeat('`', fence);
+        self.out.markup_repeat(char::from(96), fence);
         self.out.newline();
     }
 
@@ -350,13 +472,13 @@ impl<'a> MarkdownRenderer<'a> {
         self.out.mark_list_item_content();
         self.out.markup("![");
         if self.table_depth == 1 {
-            self.out.table_label(&image.alt);
+            self.out.table_label(image.alt());
         } else {
-            self.out.label(&image.alt);
+            self.out.label(image.alt());
         }
         self.out.markup("](");
-        self.out.destination(&image.source);
-        if let Some(title) = &image.title {
+        self.out.destination(image.source());
+        if let Some(title) = image.title() {
             self.out.markup(" \"");
             self.out.link_title(title);
             self.out.markup("\"");
@@ -381,7 +503,13 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    fn list(&mut self, id: DocumentNodeId, kind: ListKind, start: Option<i64>) {
+    fn list(
+        &mut self,
+        index: usize,
+        kind: OperationKind,
+        _list_kind: ListKind,
+        _start: Option<i64>,
+    ) {
         if self.out.has_current_line_content() {
             self.out.newline();
         }
@@ -389,42 +517,11 @@ impl<'a> MarkdownRenderer<'a> {
             self.out.ensure_blank_line();
         }
         self.list_depth += 1;
-        self.tasks.push(Task::Close(Close::List));
-        let start = start
-            .and_then(|value| i32::try_from(value).ok())
-            .filter(|value| (1..=999_999_999).contains(value))
-            .unwrap_or(1);
-        if let Some(child) = self.document.first_child(id) {
-            self.tasks.push(Task::ListItems(child, kind, start, 0));
-        }
+        self.push_frame(index, kind, CloseAction::List);
     }
 
-    fn list_items(&mut self, id: DocumentNodeId, kind: ListKind, start: i32, index: usize) {
-        let is_item = matches!(
-            self.document.node(id).map(|node| node.kind()),
-            Some(NodeKind::ListItem)
-        );
-        if let Some(sibling) = self.document.next_sibling(id) {
-            self.tasks.push(Task::ListItems(
-                sibling,
-                kind,
-                start,
-                index.saturating_add(usize::from(is_item)),
-            ));
-        }
-        if is_item {
-            let marker = match kind {
-                ListKind::Unordered => ListMarker::Bullet,
-                ListKind::Ordered if index == 0 && start != 1 => ListMarker::OrderedStart(start),
-                ListKind::Ordered => ListMarker::Ordered,
-            };
-            self.tasks.push(Task::ListItem(id, marker));
-        } else {
-            self.tasks.push(Task::Node(id, Mode::Block));
-        }
-    }
-
-    fn list_item(&mut self, id: DocumentNodeId, marker: ListMarker) {
+    fn list_item(&mut self, index: usize, kind: OperationKind) {
+        let marker = self.next_list_marker();
         if self.out.has_current_line_content() {
             self.out.newline();
         }
@@ -445,12 +542,12 @@ impl<'a> MarkdownRenderer<'a> {
             }
         };
         if let Some((checked, label)) = self
-            .task_marker(id)
+            .task_marker(index)
             .map(|(checked, label)| (checked, label.map(str::to_owned)))
         {
             self.out.markup(if checked { "[x]" } else { "[ ]" });
             self.out.pending_space = true;
-            if !self.list_item_has_text(id)
+            if !self.list_item_has_text(index)
                 && let Some(label) = label
             {
                 self.out.text(&label, None);
@@ -462,231 +559,262 @@ impl<'a> MarkdownRenderer<'a> {
             width: indent,
             has_content: false,
         });
-        self.tasks.push(Task::Close(Close::ListItem));
-        if let Some(child) = self.document.first_child(id) {
-            self.tasks.push(Task::ListItemSiblings(child));
-        }
+        self.push_frame(index, kind, CloseAction::ListItem);
     }
 
-    fn list_item_siblings(&mut self, id: DocumentNodeId) {
-        if let Some(sibling) = self.document.next_sibling(id) {
-            self.tasks.push(Task::ListItemSiblings(sibling));
+    fn table(&mut self, index: usize, kind: OperationKind) {
+        self.out.ensure_blank_line();
+        let active = !self.table_has_spans(index);
+        if active {
+            self.table_depth += 1;
         }
-        if matches!(
-            self.document.node(id).map(|node| node.kind()),
-            Some(NodeKind::TaskMarker(_))
-        ) {
-            return;
-        }
-        if matches!(
-            self.document.node(id).map(|node| node.kind()),
-            Some(NodeKind::Paragraph)
-        ) {
-            self.tasks.push(Task::ItemParagraph(id));
-        } else {
-            self.tasks.push(Task::Node(id, Mode::Inline));
-        }
+        self.push_frame(index, kind, CloseAction::Table { active });
     }
 
-    fn item_paragraph(&mut self, id: DocumentNodeId) {
-        if !self.out.in_empty_list_item() {
-            if self.out.has_current_line_content() {
-                self.out.newline();
-            }
+    fn table_row(&mut self, index: usize, kind: OperationKind) {
+        let top_level = self.table_depth == 1;
+        let header = top_level && self.mark_first_table_row();
+        if self.out.has_current_line_content() {
             self.out.newline();
         }
-        self.tasks.push(Task::Close(Close::Block));
-        self.push_children(id, Mode::Inline);
-    }
-
-    fn task_marker(&self, item: DocumentNodeId) -> Option<(bool, Option<&str>)> {
-        let children: SmallVec<[_; 8]> = self.document.child_ids(item).collect();
-        let mut nodes: SmallVec<[DocumentNodeId; 8]> = children.into_iter().rev().collect();
-        while let Some(id) = nodes.pop() {
-            match self.document.node(id)?.kind() {
-                NodeKind::Text(text) if has_visible_inline_text(text) => return None,
-                NodeKind::TaskMarker(marker) => {
-                    return Some((marker.checked, marker.fallback_label.as_deref()));
-                }
-                NodeKind::List(_) => {}
-                NodeKind::Image(_) | NodeKind::Media(_) => return None,
-                _ => {
-                    let children: SmallVec<[_; 8]> = self.document.child_ids(id).collect();
-                    nodes.extend(children.into_iter().rev());
-                }
-            }
+        if top_level {
+            self.out.markup("| ");
         }
-        None
+        self.push_frame(index, kind, CloseAction::TableRow { header, top_level });
     }
 
-    fn list_item_has_text(&self, item: DocumentNodeId) -> bool {
-        let mut nodes = SmallVec::<[DocumentNodeId; 8]>::new();
-        nodes.extend(self.document.child_ids(item));
-        while let Some(id) = nodes.pop() {
-            match self.document.node(id).map(|node| node.kind()) {
-                Some(NodeKind::Text(text)) if has_visible_inline_text(text) => return true,
-                Some(NodeKind::List(_)) => {}
-                Some(NodeKind::TaskMarker(_)) => {}
-                Some(_) => nodes.extend(self.document.child_ids(id)),
-                None => {}
-            }
+    fn start_table_cell(&mut self, index: usize) -> bool {
+        let Some(row) = self
+            .frames
+            .last_mut()
+            .filter(|frame| frame.kind == OperationKind::TableRow)
+        else {
+            return false;
+        };
+        if row.cells > 0 {
+            self.out
+                .markup(if self.table_depth == 1 { " | " } else { "; " });
+            self.out.last_text_char = None;
+        }
+        row.cells += 1;
+        if self.table_cell_requires_flattening(index) {
+            let text = self.flatten_table_cell(index);
+            self.out.text(text.trim(), None);
+            return true;
         }
         false
     }
 
-    fn table(&mut self, id: DocumentNodeId) {
-        self.out.ensure_blank_line();
-        if self.table_has_spans(id) {
-            self.push_children(id, Mode::Block);
+    fn mark_first_table_row(&mut self) -> bool {
+        let Some(table) = self
+            .frames
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.kind == OperationKind::Table)
+        else {
+            return false;
+        };
+        if !table.first_row_seen {
+            table.first_row_seen = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn table_header(&mut self, row: usize) {
+        if self.table_depth != 1 {
             return;
         }
-        self.table_depth += 1;
-        self.tasks.push(Task::Close(Close::Table));
-        if let Some(child) = self.document.first_child(id) {
-            self.tasks.push(Task::TableRows(child, true));
-            if let Some(caption) = self.document.child_ids(id).find(|child| {
-                matches!(
-                    self.document.node(*child).map(|node| node.kind()),
-                    Some(NodeKind::TableCaption)
-                )
-            }) {
-                self.tasks.push(Task::Close(Close::Block));
-                self.tasks.push(Task::Node(caption, Mode::Block));
+        let values = self.table_row_alignments(row);
+        self.out.markup("| ");
+        for (column, alignment) in values.into_iter().enumerate() {
+            if column > 0 {
+                self.out.markup(" | ");
             }
+            self.out.markup(match alignment {
+                Some(TableAlignment::Left) => ":---",
+                Some(TableAlignment::Center) => ":---:",
+                Some(TableAlignment::Right) => "---:",
+                None => "---",
+            });
         }
+        self.out.markup(" |");
+        self.out.newline();
     }
 
-    fn table_rows(&mut self, id: DocumentNodeId, first: bool) {
-        let is_row = matches!(
-            self.document.node(id).map(|node| node.kind()),
-            Some(NodeKind::TableRow)
-        );
-        if let Some(sibling) = self.document.next_sibling(id) {
-            self.tasks.push(Task::TableRows(sibling, first && !is_row));
-        }
-        if !is_row {
-            return;
-        }
-        if first && self.table_depth == 1 {
-            self.tasks.push(Task::TableHeader(id));
-        }
-        self.tasks.push(Task::Node(id, Mode::Block));
-    }
-
-    fn table_header(&mut self, row: DocumentNodeId) {
-        if self.table_depth == 1 {
-            let alignments = self
+    fn block_contains_only_footnotes(&self, root: usize) -> bool {
+        let mut direct = 0;
+        let mut depth = 0usize;
+        let end = self.document.operation_end(root);
+        let mut index = root.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            if depth == 0 {
+                direct += 1;
+                if self.document.operation_kind(index) != Some(OperationKind::FootnoteDefinition) {
+                    return false;
+                }
+            }
+            if self
                 .document
-                .child_ids(row)
-                .map(
-                    |cell| match self.document.node(cell).map(|node| node.kind()) {
-                        Some(NodeKind::TableCell(value)) => value.alignment,
-                        _ => None,
-                    },
-                )
-                .collect();
-            self.close(Close::TableHeader(alignments));
-        }
-    }
-
-    fn table_row(&mut self, id: DocumentNodeId) {
-        if self.out.has_current_line_content() {
-            self.out.newline();
-        }
-        if self.table_depth == 1 {
-            self.out.markup("| ");
-        }
-        self.tasks.push(Task::Close(Close::TableRow));
-        if let Some(cell) = self.document.first_child(id) {
-            self.tasks.push(Task::TableCells(cell));
-        }
-    }
-
-    fn table_cells(&mut self, id: DocumentNodeId) {
-        let next = self.document.next_sibling(id);
-        if let Some(sibling) = next {
-            self.tasks.push(Task::TableCells(sibling));
-            // A close task avoids exposing HTML-specific cell traversal.
-            self.tasks
-                .push(Task::Close(Close::Marker(if self.table_depth == 1 {
-                    " | "
-                } else {
-                    "; "
-                })));
-        }
-        self.tasks.push(Task::TableCell(id));
-    }
-
-    fn table_has_spans(&self, table: DocumentNodeId) -> bool {
-        self.document.child_ids(table).any(|row| {
-            self.document.child_ids(row).any(|cell| {
-                matches!(
-                    self.document.node(cell).map(|node| node.kind()),
-                    Some(NodeKind::TableCell(value)) if value.colspan > 1 || value.rowspan > 1
-                )
-            })
-        })
-    }
-
-    fn table_cell(&mut self, id: DocumentNodeId) {
-        if !self.table_cell_requires_flattening(id) {
-            self.push_children(id, Mode::Inline);
-            return;
-        }
-
-        let mut text = String::new();
-        let children: SmallVec<[_; 16]> = self.document.child_ids(id).collect();
-        let mut nodes: SmallVec<[DocumentNodeId; 16]> = children.into_iter().rev().collect();
-        while let Some(node_id) = nodes.pop() {
-            let Some(node) = self.document.node(node_id) else {
-                continue;
-            };
-            match node.kind() {
-                NodeKind::Text(value) => text.push_str(value),
-                NodeKind::InlineCode(value) => text.push_str(value),
-                NodeKind::CodeBlock(code) => {
-                    text.push(' ');
-                    text.push_str(&code.text);
-                    text.push(' ');
-                }
-                NodeKind::Image(image) if self.config.images => text.push_str(&image.alt),
-                NodeKind::HardBreak => text.push(' '),
-                NodeKind::FootnoteReference(id) => {
-                    if let Some(label) = self.document.footnote_label(id) {
-                        text.push_str(label);
-                    }
-                }
-                NodeKind::TaskMarker(marker) => {
-                    if let Some(label) = &marker.fallback_label {
-                        text.push_str(label);
-                    }
-                }
-                NodeKind::InlineMath(math) | NodeKind::DisplayMath(math) => {
-                    text.push_str(math.fallback_text.as_deref().unwrap_or(&math.source))
-                }
-                NodeKind::Media(media) => {
-                    text.push_str(media.title.as_deref().unwrap_or(&media.source));
-                }
-                kind => {
-                    if is_block(&kind) {
-                        text.push(' ');
-                    }
-                    let children: SmallVec<[_; 8]> = self.document.child_ids(node_id).collect();
-                    nodes.extend(children.into_iter().rev());
-                }
+                .operation_kind(index)
+                .is_some_and(OperationKind::is_container)
+            {
+                depth += 1;
             }
+            index += 1;
         }
-        self.out.text(text.trim(), None);
+        direct > 0
     }
 
-    fn table_cell_requires_flattening(&self, cell: DocumentNodeId) -> bool {
-        let mut blocks = 0;
-        let mut nodes: SmallVec<[DocumentNodeId; 16]> = self.document.child_ids(cell).collect();
-        while let Some(id) = nodes.pop() {
-            let Some(node) = self.document.node(id) else {
+    fn task_marker(&self, item: usize) -> Option<(bool, Option<&str>)> {
+        let end = self.document.operation_end(item);
+        let mut index = item.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                index += 1;
+                continue;
+            }
+            let Some(node) = self.document.operation_view(index) else {
+                index += 1;
                 continue;
             };
-            match node.kind() {
+            match node {
+                NodeKind::Text(text) if has_visible_inline_text(text) => return None,
+                NodeKind::TaskMarker(marker) => {
+                    return Some((marker.is_checked(), marker.fallback_label()));
+                }
+                NodeKind::List(_) => {
+                    index = self.document.operation_end(index).saturating_add(1);
+                    continue;
+                }
+                NodeKind::Image(_) | NodeKind::Media(_) => return None,
+                _ => {}
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn list_item_has_text(&self, item: usize) -> bool {
+        let end = self.document.operation_end(item);
+        let mut index = item.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                index += 1;
+                continue;
+            }
+            let Some(node) = self.document.operation_view(index) else {
+                index += 1;
+                continue;
+            };
+            match node {
+                NodeKind::Text(text) if has_visible_inline_text(text) => return true,
+                NodeKind::List(_) | NodeKind::TaskMarker(_) => {
+                    index = self.document.operation_end(index).saturating_add(1);
+                    continue;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn table_has_spans(&self, table: usize) -> bool {
+        let end = self.document.operation_end(table);
+        let mut depth = 0usize;
+        let mut index = table.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            if depth == 1
+                && self.document.operation_kind(index) == Some(OperationKind::TableCell)
+                && let Some(NodeKind::TableCell(cell)) = self.document.operation_view(index)
+                && (cell.colspan() > 1 || cell.rowspan() > 1)
+            {
+                return true;
+            }
+            if self
+                .document
+                .operation_kind(index)
+                .is_some_and(OperationKind::is_container)
+            {
+                depth += 1;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn table_row_alignments(&self, row: usize) -> Vec<Option<TableAlignment>> {
+        let mut values = Vec::new();
+        let end = self.document.operation_end(row);
+        let mut depth = 0usize;
+        let mut index = row.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            if depth == 0
+                && let Some(NodeKind::TableCell(cell)) = self.document.operation_view(index)
+            {
+                values.push(cell.alignment());
+            }
+            if self
+                .document
+                .operation_kind(index)
+                .is_some_and(OperationKind::is_container)
+            {
+                depth += 1;
+            }
+            index += 1;
+        }
+        values
+    }
+
+    fn table_cell_requires_flattening(&self, cell: usize) -> bool {
+        let end = self.document.operation_end(cell);
+        let mut blocks = 0;
+        let mut index = cell.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                index += 1;
+                continue;
+            }
+            let Some(node) = self.document.operation_view(index) else {
+                index += 1;
+                continue;
+            };
+            match node {
                 NodeKind::HardBreak
                 | NodeKind::CodeBlock(_)
                 | NodeKind::List(_)
@@ -700,9 +828,70 @@ impl<'a> MarkdownRenderer<'a> {
                 }
                 _ => {}
             }
-            nodes.extend(self.document.child_ids(id));
+            index += 1;
         }
         false
+    }
+
+    fn flatten_table_cell(&self, cell: usize) -> String {
+        let mut text = String::new();
+        let end = self.document.operation_end(cell);
+        let mut index = cell.saturating_add(1);
+        while index < end {
+            let Some(operation) = self.document.operations().get(index).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                index += 1;
+                continue;
+            }
+            let Some(node) = self.document.operation_view(index) else {
+                index += 1;
+                continue;
+            };
+            match node {
+                NodeKind::Text(value) | NodeKind::InlineCode(value) => text.push_str(value),
+                NodeKind::CodeBlock(code) => {
+                    text.push(' ');
+                    text.push_str(code.text());
+                    text.push(' ');
+                }
+                NodeKind::Image(image) if self.config.images => text.push_str(image.alt()),
+                NodeKind::HardBreak => text.push(' '),
+                NodeKind::FootnoteReference(id) => {
+                    if let Some(label) = self.document.footnote_label(id) {
+                        text.push_str(label);
+                    }
+                }
+                NodeKind::TaskMarker(marker) => {
+                    if let Some(label) = marker.fallback_label() {
+                        text.push_str(label);
+                    }
+                }
+                NodeKind::InlineMath(math) | NodeKind::DisplayMath(math) => {
+                    text.push_str(math.fallback_text().unwrap_or(math.source()));
+                }
+                NodeKind::Media(media) => {
+                    text.push_str(media.title().unwrap_or(media.source()));
+                }
+                kind => {
+                    if is_block(&kind) {
+                        text.push(' ');
+                    }
+                }
+            }
+            index += 1;
+        }
+        text
+    }
+
+    fn start_item_paragraph(&mut self) {
+        if !self.out.in_empty_list_item() {
+            if self.out.has_current_line_content() {
+                self.out.newline();
+            }
+            self.out.newline();
+        }
     }
 
     fn footnote_reference(&mut self, id: FootnoteId) {
@@ -713,122 +902,40 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    fn footnote_definition(&mut self, node: DocumentNodeId, id: FootnoteId) {
-        let Some(label) = self.document.footnote_label(id) else {
-            return;
+    fn next_list_marker(&self) -> ListMarker {
+        let list = self
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.kind == OperationKind::List);
+        let (kind, start) = match list {
+            Some(frame) => {
+                if let Some(NodeKind::List(value)) = self.document.operation_view(frame.index) {
+                    (value.kind(), value.start())
+                } else {
+                    (ListKind::Unordered, None)
+                }
+            }
+            None => (ListKind::Unordered, None),
         };
-        self.out.ensure_blank_line();
-        self.out.markup("[^");
-        self.out.footnote_label(label);
-        self.out.markup("]: ");
-        self.out.prefixes.push(Prefix::Indent(4));
-        self.tasks.push(Task::Close(Close::Footnote));
-        if let Some(child) = self.document.first_child(node) {
-            self.tasks.push(Task::FootnoteSiblings(child, true));
-        }
-    }
-
-    fn footnote_siblings(&mut self, id: DocumentNodeId, first: bool) {
-        if let Some(sibling) = self.document.next_sibling(id) {
-            self.tasks.push(Task::FootnoteSiblings(sibling, false));
-        }
-        let mode = if first
-            && matches!(
-                self.document.node(id).map(|node| node.kind()),
-                Some(NodeKind::Paragraph)
-            ) {
-            Mode::Inline
-        } else {
-            Mode::Block
-        };
-        self.tasks.push(Task::Node(id, mode));
-    }
-
-    fn close(&mut self, close: Close) {
-        match close {
-            Close::Block => self.out.newline(),
-            Close::Marker(marker) if matches!(marker, " | " | "; ") => {
-                self.out.markup(marker);
-                self.out.last_text_char = None;
-            }
-            Close::Marker(marker) => {
-                if self.out.close_marker(marker, marker) {
-                    self.out.mark_inline_boundary();
+        let item_index = list.map_or(0, |frame| frame.list_items.saturating_sub(1));
+        match kind {
+            ListKind::Unordered => ListMarker::Bullet,
+            ListKind::Ordered if item_index == 0 => {
+                let value = start
+                    .and_then(|value| i32::try_from(value).ok())
+                    .filter(|value| (1..=999_999_999).contains(value))
+                    .unwrap_or(1);
+                if value == 1 {
+                    ListMarker::Ordered
+                } else {
+                    ListMarker::OrderedStart(value)
                 }
             }
-            Close::Link(id) => {
-                let Some(NodeKind::Link(link)) = self.document.node(id).map(|node| node.kind())
-                else {
-                    return;
-                };
-                if self.out.close_marker("[", "](") {
-                    let trailing = std::mem::take(&mut self.out.pending_space);
-                    self.out.destination(&link.destination);
-                    if let Some(title) = &link.title {
-                        self.out.markup(" \"");
-                        self.out.link_title(title);
-                        self.out.markup("\"");
-                    }
-                    self.out.markup(")");
-                    self.out.pending_space = trailing;
-                    self.out.mark_inline_boundary();
-                }
-            }
-            Close::Quote => {
-                if self.out.has_current_line_content() {
-                    self.out.newline();
-                }
-                self.out.prefixes.pop();
-            }
-            Close::List => {
-                if self.out.has_current_line_content() {
-                    self.out.newline();
-                }
-                self.list_depth -= 1;
-            }
-            Close::ListItem => {
-                if self.out.has_current_line_content() {
-                    self.out.newline();
-                }
-                self.out.prefixes.pop();
-            }
-            Close::TableRow => {
-                if self.table_depth == 1 {
-                    self.out.markup(" |");
-                }
-                self.out.newline();
-            }
-            Close::TableHeader(values) => {
-                if self.table_depth == 1 {
-                    self.out.markup("| ");
-                    for (column, alignment) in values.into_iter().enumerate() {
-                        if column > 0 {
-                            self.out.markup(" | ");
-                        }
-                        self.out.markup(match alignment {
-                            Some(TableAlignment::Left) => ":---",
-                            Some(TableAlignment::Center) => ":---:",
-                            Some(TableAlignment::Right) => "---:",
-                            None => "---",
-                        });
-                    }
-                    self.out.markup(" |");
-                    self.out.newline();
-                }
-            }
-            Close::Table => {
-                self.table_depth -= 1;
-            }
-            Close::Footnote => {
-                if self.out.has_current_line_content() {
-                    self.out.newline();
-                }
-                self.out.prefixes.pop();
-            }
+            ListKind::Ordered => ListMarker::Ordered,
         }
     }
 }
-
 fn escape_math_source(source: &str) -> String {
     let mut escaped = String::with_capacity(source.len());
     for character in source.chars() {
@@ -868,6 +975,34 @@ fn is_block(kind: &NodeKind) -> bool {
             | NodeKind::Callout(_)
             | NodeKind::FootnoteDefinition(_)
             | NodeKind::DisplayMath(_)
+    )
+}
+
+fn is_block_operation(kind: OperationKind) -> bool {
+    matches!(
+        kind,
+        OperationKind::Paragraph
+            | OperationKind::BlockGroup
+            | OperationKind::Heading
+            | OperationKind::BlockQuote
+            | OperationKind::CodeBlock
+            | OperationKind::List
+            | OperationKind::ListItem
+            | OperationKind::Table
+            | OperationKind::TableCaption
+            | OperationKind::TableRow
+            | OperationKind::TableCell
+            | OperationKind::Figure
+            | OperationKind::Figcaption
+            | OperationKind::Details
+            | OperationKind::Summary
+            | OperationKind::ThematicBreak
+            | OperationKind::DefinitionList
+            | OperationKind::DefinitionTerm
+            | OperationKind::DefinitionDescription
+            | OperationKind::Callout
+            | OperationKind::FootnoteDefinition
+            | OperationKind::DisplayMath
     )
 }
 
@@ -1793,6 +1928,88 @@ mod tests {
         let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
         assert_eq!(markdown, "Wide heading\n");
         assert!(!markdown.contains("| ---"));
+    }
+
+    #[test]
+    fn nested_spanning_tables_do_not_degrade_the_outer_table() {
+        let mut builder = DocumentBuilder::with_capacity(10);
+        let outer = builder
+            .append(
+                None,
+                NodeKind::Table(Table {
+                    column_count: Some(1),
+                }),
+            )
+            .unwrap();
+        let outer_row = builder.append(Some(outer), NodeKind::TableRow).unwrap();
+        let outer_cell = builder
+            .append(
+                Some(outer_row),
+                NodeKind::TableCell(TableCell {
+                    header: false,
+                    colspan: 1,
+                    rowspan: 1,
+                    alignment: None,
+                }),
+            )
+            .unwrap();
+        let nested = builder
+            .append(
+                Some(outer_cell),
+                NodeKind::Table(Table {
+                    column_count: Some(2),
+                }),
+            )
+            .unwrap();
+        let nested_row = builder.append(Some(nested), NodeKind::TableRow).unwrap();
+        let nested_cell = builder
+            .append(
+                Some(nested_row),
+                NodeKind::TableCell(TableCell {
+                    header: true,
+                    colspan: 2,
+                    rowspan: 1,
+                    alignment: None,
+                }),
+            )
+            .unwrap();
+        builder.append_prose(Some(nested_cell), "Nested").unwrap();
+
+        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        assert!(markdown.contains("| Nested |"), "{markdown}");
+        assert!(markdown.contains("| --- |"), "{markdown}");
+    }
+
+    #[test]
+    fn list_item_numbering_ignores_direct_footnote_children() {
+        let mut builder = DocumentBuilder::with_capacity(6);
+        let list = builder
+            .append(
+                None,
+                NodeKind::List(List {
+                    kind: ListKind::Ordered,
+                    start: Some(5),
+                }),
+            )
+            .unwrap();
+        let footnote_id = crate::document::FootnoteId::from_index(0).unwrap();
+        let definition = builder
+            .append(Some(list), NodeKind::FootnoteDefinition(footnote_id))
+            .unwrap();
+        let definition_paragraph = builder
+            .append(Some(definition), NodeKind::Paragraph)
+            .unwrap();
+        builder
+            .append_prose(Some(definition_paragraph), "Note")
+            .unwrap();
+        builder
+            .define_footnote(footnote_id, "note", definition)
+            .unwrap();
+        let item = builder.append(Some(list), NodeKind::ListItem).unwrap();
+        builder.append_prose(Some(item), "Item").unwrap();
+
+        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        assert!(markdown.contains("5. Item"), "{markdown}");
     }
 
     #[test]
