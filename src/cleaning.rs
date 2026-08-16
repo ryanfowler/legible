@@ -137,10 +137,25 @@ fn has_allowed_media(dom: &Dom, id: NodeId, allowed: &Regex) -> bool {
         })
 }
 
-pub fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+#[cfg(test)]
+fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
+    let mut semantic_gate = crate::document::SemanticGate::default();
+    clean_styles_with_semantic_gate(dom, root, nodes, &mut semantic_gate);
+}
+
+/// Removes presentational source attributes while collecting the broad
+/// semantic gate during the same traversal. The bit collection is
+/// allocation-free; sparse candidate lists allocate only when evidence exists.
+pub(crate) fn clean_styles_with_semantic_gate(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    semantic_gate: &mut crate::document::SemanticGate,
+) {
     nodes.clear();
     nodes.extend(std::iter::once(root).chain(dom.descendants(root)));
     for &id in nodes.iter() {
+        semantic_gate.observe(dom, id);
         if !dom.is_element(id) || dom.tag(id) == Some(Tag::Svg) {
             continue;
         }

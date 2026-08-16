@@ -1875,10 +1875,20 @@ impl<'a> ContentExtractor<'a> {
         let before = self.diagnostic_element_count(root);
         remove_decorative_media_before_cleanup(&mut self.dom, root);
         self.record_cleanup_delta(CleanupActionKind::DecorativeMedia, before, root);
-        clean_styles(&mut self.dom, root, nodes);
+        let mut semantic_gate = crate::document::SemanticGate::default();
+        clean_styles_with_semantic_gate(&mut self.dom, root, nodes, &mut semantic_gate);
         mark_data_tables(&self.dom, root, &mut self.node_data, nodes);
-        let source_evidence =
-            crate::document::SourceEvidence::analyze(&self.dom, root, &self.node_data);
+        for &node in nodes.iter() {
+            if self.node_data.is_data_table(node) == Some(true) {
+                semantic_gate.add_data_table_node(node);
+            }
+        }
+        let source_evidence = crate::document::SourceEvidence::analyze_with_gate(
+            &self.dom,
+            root,
+            &self.node_data,
+            semantic_gate,
+        );
         let before = self.diagnostic_element_count(root);
         hard_cleanup(
             &mut self.dom,

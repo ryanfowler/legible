@@ -55,16 +55,11 @@ pub(super) struct FeatureInventory {
     pub(super) footnotes: Vec<NodeId>,
 }
 
-/// Small source-gating bits collected before targeted semantic analysis.
+/// Per-node feature bits retained in the sparse source worklist.
 #[derive(Clone, Copy, Default)]
-struct SemanticGate(u8);
+struct NodeGate(u8);
 
-impl SemanticGate {
-    const CALLOUT: u8 = 1 << 0;
-    const FOOTNOTE: u8 = 1 << 1;
-    const MATH: u8 = 1 << 2;
-    const DATA_TABLE: u8 = 1 << 3;
-
+impl NodeGate {
     fn add(&mut self, bit: u8) {
         self.0 |= bit;
     }
@@ -75,6 +70,66 @@ impl SemanticGate {
 
     fn is_empty(self) -> bool {
         self.0 == 0
+    }
+}
+
+/// Small source-gating bits and sparse candidates collected during an existing
+/// cleanup traversal.
+#[derive(Default)]
+pub(crate) struct SemanticGate {
+    bits: u8,
+    candidates: Vec<(NodeId, NodeGate)>,
+    fragment_links: Vec<NodeId>,
+    table_nodes: Vec<NodeId>,
+}
+
+impl SemanticGate {
+    const CALLOUT: u8 = 1 << 0;
+    const FOOTNOTE: u8 = 1 << 1;
+    const MATH: u8 = 1 << 2;
+    const DATA_TABLE: u8 = 1 << 3;
+
+    fn add(&mut self, bit: u8) {
+        self.bits |= bit;
+    }
+
+    pub(crate) fn add_data_table(&mut self) {
+        self.add(Self::DATA_TABLE);
+    }
+
+    pub(crate) fn add_data_table_node(&mut self, node: NodeId) {
+        self.add_data_table();
+        self.table_nodes.push(node);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bits == 0
+    }
+
+    /// Records broad evidence and sparse candidates. Feature-specific
+    /// recognizers run later, and ordinary source does not allocate these
+    /// vectors because they remain empty.
+    pub(crate) fn observe(&mut self, dom: &Dom, node: NodeId) {
+        let mut node_gate = NodeGate::default();
+        if may_have_callout_evidence(dom, node) {
+            self.add(Self::CALLOUT);
+            node_gate.add(Self::CALLOUT);
+        }
+        if has_footnote_attributes(dom, node) {
+            self.add(Self::FOOTNOTE);
+            node_gate.add(Self::FOOTNOTE);
+        }
+        if fragment_target(dom, node).is_some() {
+            self.add(Self::FOOTNOTE);
+            self.fragment_links.push(node);
+        }
+        if may_have_math_evidence(dom, node) {
+            self.add(Self::MATH);
+            node_gate.add(Self::MATH);
+        }
+        if !node_gate.is_empty() {
+            self.candidates.push((node, node_gate));
+        }
     }
 }
 
@@ -97,45 +152,65 @@ pub(crate) struct SourceEvidence {
 }
 
 impl SourceEvidence {
+    /// Analyzes source evidence in one pass when no earlier cleanup traversal
+    /// supplied a gate.
     pub(crate) fn analyze(dom: &Dom, root: NodeId, store: &NodeStateStore) -> Self {
-        let mut gate = SemanticGate::default();
+        Self::analyze_impl(dom, root, store, None)
+    }
+
+    /// Completes targeted source analysis after a cleanup pass has collected
+    /// the broad gate. This scan is needed only when the gate found a feature
+    /// that needs semantic recognition.
+    pub(crate) fn analyze_with_gate(
+        dom: &Dom,
+        root: NodeId,
+        store: &NodeStateStore,
+        gate: SemanticGate,
+    ) -> Self {
+        Self::analyze_impl(dom, root, store, Some(gate))
+    }
+
+    fn analyze_impl(
+        dom: &Dom,
+        root: NodeId,
+        store: &NodeStateStore,
+        precollected_gate: Option<SemanticGate>,
+    ) -> Self {
+        if precollected_gate
+            .as_ref()
+            .is_some_and(SemanticGate::is_empty)
+        {
+            return Self::default();
+        }
+        let gate_was_precollected = precollected_gate.is_some();
+        let mut gate = precollected_gate.unwrap_or_default();
+        if !gate_was_precollected {
+            for node in std::iter::once(root).chain(dom.descendants(root)) {
+                gate.observe(dom, node);
+                if dom.tag(node) == Some(Tag::Table) && store.is_data_table(node) == Some(true) {
+                    gate.add_data_table_node(node);
+                }
+            }
+        }
+
+        let mut gated = std::mem::take(&mut gate.candidates);
+        let table_nodes = std::mem::take(&mut gate.table_nodes);
+        let fragment_node_ids = std::mem::take(&mut gate.fragment_links);
         let mut fragment_targets = None;
-        let mut fragment_links = Vec::new();
-        let mut gated = Vec::new();
-        let mut table_nodes = Vec::new();
-        for node in std::iter::once(root).chain(dom.descendants(root)) {
-            let mut node_gate = SemanticGate::default();
-            if dom.tag(node) == Some(Tag::Table) && store.is_data_table(node) == Some(true) {
-                gate.add(SemanticGate::DATA_TABLE);
-                table_nodes.push(node);
-            }
-            if may_have_callout_evidence(dom, node) {
-                gate.add(SemanticGate::CALLOUT);
-                node_gate.add(SemanticGate::CALLOUT);
-            }
-            if has_footnote_attributes(dom, node) {
-                gate.add(SemanticGate::FOOTNOTE);
-                node_gate.add(SemanticGate::FOOTNOTE);
-            }
+        let mut fragment_links = Vec::with_capacity(fragment_node_ids.len());
+        for node in fragment_node_ids {
             if let Some(target) = fragment_target(dom, node) {
                 fragment_targets
                     .get_or_insert_with(HashSet::new)
                     .insert(target);
                 fragment_links.push((node, target));
             }
-            if may_have_math_evidence(dom, node) {
-                gate.add(SemanticGate::MATH);
-                node_gate.add(SemanticGate::MATH);
-            }
-            if !node_gate.is_empty() {
-                gated.push((node, node_gate));
-            }
         }
 
         // Resolve only the small set of fragment targets. Do not build an
         // index for every source ID, and do not allocate anything when the
-        // source has no fragment references. The first scan already recorded
-        // all other feature candidates, so this pass only handles references.
+        // source has no fragment references. The cleanup pass already
+        // recorded all feature candidates, so this pass only handles targets.
         if let Some(targets) = fragment_targets {
             let mut resolved_targets = HashSet::new();
             let mut footnote_nodes = HashSet::new();
@@ -163,7 +238,7 @@ impl SourceEvidence {
                     gated.iter().map(|&(node, _)| node).collect();
                 for node in footnote_nodes {
                     if gated_nodes.insert(node) {
-                        let mut node_gate = SemanticGate::default();
+                        let mut node_gate = NodeGate::default();
                         node_gate.add(SemanticGate::FOOTNOTE);
                         gated.push((node, node_gate));
                     }
@@ -172,6 +247,12 @@ impl SourceEvidence {
         }
 
         if gate.is_empty() {
+            return Self::default();
+        }
+        // A fragment link can set the broad footnote bit before its target is
+        // resolved. Avoid allocating semantic state when the gated scan found
+        // neither a target nor a feature candidate.
+        if gated.is_empty() && table_nodes.is_empty() {
             return Self::default();
         }
 
@@ -1099,6 +1180,71 @@ mod tests {
         assert!(evidence.footnote_candidate(conventional_reference));
         assert!(evidence.footnote_candidate(conventional_definition));
         assert!(evidence.data_table(table));
+    }
+
+    #[test]
+    fn cleanup_gate_matches_direct_source_evidence_analysis() {
+        let mut dom = Dom::parse_fragment(
+            r##"<div><p class="ordinary">Text</p><aside class="admonition warning"><p>Warning</p></aside><p data-latex="x^2">x squared</p><p><a role="doc-noteref" href="#note">1</a></p><aside id="note" role="doc-footnote">A note.</aside><table role="table"><tr><th>Value</th></tr></table></div>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let mut store = NodeStateStore::new();
+        let mut tables = Vec::new();
+        crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut tables);
+        let root = dom.root();
+        let direct = SourceEvidence::analyze(&dom, root, &store);
+
+        let mut gate = SemanticGate::default();
+        let mut nodes = Vec::new();
+        crate::cleaning::clean_styles_with_semantic_gate(&mut dom, root, &mut nodes, &mut gate);
+        for &node in &tables {
+            if store.is_data_table(node) == Some(true) {
+                gate.add_data_table_node(node);
+            }
+        }
+        let gated = SourceEvidence::analyze_with_gate(&dom, root, &store, gate);
+
+        for node in std::iter::once(root).chain(dom.descendants(root)) {
+            assert_eq!(gated.callout(node), direct.callout(node));
+            assert_eq!(
+                gated.callout_candidate(node),
+                direct.callout_candidate(node)
+            );
+            assert_eq!(gated.footnote(node), direct.footnote(node));
+            assert_eq!(
+                gated.footnote_candidate(node),
+                direct.footnote_candidate(node)
+            );
+            assert_eq!(gated.math(node), direct.math(node));
+            assert_eq!(gated.accessible_math(node), direct.accessible_math(node));
+            assert_eq!(
+                gated.contains_semantic(node),
+                direct.contains_semantic(node)
+            );
+            assert_eq!(gated.data_table(node), direct.data_table(node));
+        }
+
+        let mut plain = Dom::parse_fragment("<div><p>Ordinary text.</p></div>", Tag::Div).unwrap();
+        let plain_root = plain.root();
+        let mut plain_gate = SemanticGate::default();
+        let mut plain_nodes = Vec::new();
+        crate::cleaning::clean_styles_with_semantic_gate(
+            &mut plain,
+            plain_root,
+            &mut plain_nodes,
+            &mut plain_gate,
+        );
+        assert!(plain_gate.is_empty());
+        assert!(
+            !SourceEvidence::analyze_with_gate(
+                &plain,
+                plain_root,
+                &NodeStateStore::new(),
+                plain_gate,
+            )
+            .is_semantic_source(plain_root)
+        );
     }
 
     #[test]
