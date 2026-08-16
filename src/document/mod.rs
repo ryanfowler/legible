@@ -25,7 +25,7 @@ mod text;
 mod uri;
 mod validate;
 
-pub(crate) use builder::{BuildError, DocumentBuilder};
+pub(crate) use builder::{BuildError, DocumentBuilder, SemanticTapeBuilder};
 pub(crate) use code::{
     count_blocks as source_code_block_count,
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
