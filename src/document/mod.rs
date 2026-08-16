@@ -1,43 +1,8 @@
-//! Semantic document intermediate representation.
+//! Private semantic representation and lowering support.
 //!
-//! [`Document`] is a read-only semantic representation. It is not an HTML DOM or a
-//! CommonMark syntax tree. Legible intentionally removes site chrome, source
-//! classes and IDs, arbitrary CSS, and implementation wrappers. It normalizes
-//! retained HTML structures into useful semantic nodes. This representation is
-//! lossy: callers cannot reconstruct unsupported elements, source attributes,
-//! wrapper structure, or source whitespace from it.
-//!
-//! Traverse roots and children to inspect structured extracted content:
-//!
-//! ```rust
-//! use legible::{NodeKind, extract};
-//!
-//! let page = extract(
-//!     r#"<main>
-//!       <h1>API guide</h1>
-//!       <p>Read the <a href="/reference">reference</a>.</p>
-//!       <pre><code class="language-rust">fn main() {}</code></pre>
-//!       <table><tr><th>Name</th></tr><tr><td>value</td></tr></table>
-//!     </main>"#,
-//!     Some("https://example.com/docs"),
-//! )?;
-//!
-//! let document = page.document();
-//! let mut nodes: Vec<_> = document.roots().rev().collect();
-//! while let Some(node) = nodes.pop() {
-//!     match node.kind() {
-//!         NodeKind::Heading { level } => println!("h{level}: {}", node.text()),
-//!         NodeKind::Paragraph => println!("paragraph: {}", node.text()),
-//!         NodeKind::Link(link) => println!("link: {}", link.destination()),
-//!         NodeKind::CodeBlock(code) => println!("code: {}", code.text()),
-//!         NodeKind::Table(table) => println!("table: {:?}", table.column_count()),
-//!         _ => {}
-//!     }
-//!     let children: Vec<_> = node.children().collect();
-//!     nodes.extend(children.into_iter().rev());
-//! }
-//! # Ok::<(), legible::Error>(())
-//! ```
+//! This module is an implementation detail. Keep its storage and traversal APIs
+//! private so the representation can change without changing Legible's public
+//! output contract.
 
 #![allow(dead_code)]
 
@@ -93,7 +58,7 @@ pub(crate) fn selected_image_sources_for_cleanup(
 ) -> Vec<Option<Box<str>>> {
     images::analyze(dom, nodes, None).sources
 }
-pub use stats::DocumentStats;
+pub(crate) use stats::DocumentStats;
 pub(crate) fn semantic_source_is_protected(
     dom: &crate::dom::Dom,
     node: crate::dom::NodeId,
@@ -253,7 +218,7 @@ impl DocumentNodeId {
 }
 
 /// The structured semantic content extracted from one page.
-pub struct Document {
+pub(crate) struct Document {
     nodes: Vec<ArenaNode>,
     roots: Vec<DocumentNodeId>,
     footnotes: Vec<FootnoteRecord>,
@@ -262,14 +227,6 @@ pub struct Document {
 }
 
 impl Document {
-    /// Iterates over the top-level semantic nodes in document order.
-    pub fn roots(&self) -> impl ExactSizeIterator<Item = DocumentNode<'_>> + DoubleEndedIterator {
-        self.roots
-            .iter()
-            .copied()
-            .map(|id| DocumentNode { document: self, id })
-    }
-
     /// Returns measurements derived from the semantic document.
     pub fn stats(&self) -> DocumentStats {
         *self
@@ -359,21 +316,9 @@ impl Document {
         self.stats().math_count
     }
 
-    /// Resolves a footnote ID to its definition.
-    pub fn footnote(&self, id: FootnoteId) -> Option<FootnoteDefinition<'_>> {
+    pub(crate) fn footnote_label(&self, id: FootnoteId) -> Option<&str> {
         self.footnote_record(id)
-            .map(|definition| FootnoteDefinition {
-                document: self,
-                definition,
-            })
-    }
-
-    /// Iterates over footnote definitions in semantic ID order.
-    pub fn footnotes(&self) -> impl ExactSizeIterator<Item = FootnoteDefinition<'_>> {
-        self.footnotes.iter().map(|definition| FootnoteDefinition {
-            document: self,
-            definition,
-        })
+            .map(|definition| definition.label.as_ref())
     }
 
     pub(crate) fn root_ids(
@@ -521,37 +466,10 @@ impl ArenaNode {
     }
 }
 
-/// A read-only view of one semantic node.
-#[derive(Clone, Copy)]
-pub struct DocumentNode<'a> {
-    document: &'a Document,
-    id: DocumentNodeId,
-}
-
-impl<'a> DocumentNode<'a> {
-    /// Returns the semantic kind and its associated value.
-    pub fn kind(self) -> &'a NodeKind {
-        &self.document.nodes[self.id.index()].kind
-    }
-
-    /// Iterates over direct semantic children in document order.
-    pub fn children(self) -> impl Iterator<Item = DocumentNode<'a>> + 'a {
-        self.document.child_ids(self.id).map(|id| DocumentNode {
-            document: self.document,
-            id,
-        })
-    }
-
-    /// Returns normalized text from this node and all its descendants.
-    pub fn text(self) -> String {
-        stats::render_node_text(self.document, self.id)
-    }
-}
-
 /// The semantic meaning of a document node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum NodeKind {
+pub(crate) enum NodeKind {
     Paragraph,
     /// A semantic block boundary with no more specific meaning.
     BlockGroup,
@@ -676,7 +594,7 @@ fn optional_boxed_str_len(value: &Option<Box<str>>) -> usize {
 ///
 /// The wrapper keeps the retained storage format out of the public API.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TextValue(String);
+pub(crate) struct TextValue(String);
 
 impl TextValue {
     pub(crate) fn new(value: impl Into<String>) -> Self {
@@ -712,7 +630,7 @@ impl std::ops::Deref for TextValue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodeBlock {
+pub(crate) struct CodeBlock {
     pub(crate) language: Option<Box<str>>,
     pub(crate) text: Box<str>,
 }
@@ -730,7 +648,7 @@ impl CodeBlock {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Link {
+pub(crate) struct Link {
     pub(crate) destination: Box<str>,
     pub(crate) title: Option<Box<str>>,
     // Retain whether the source link was fragment-only for weighted link density.
@@ -751,7 +669,7 @@ impl Link {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Image {
+pub(crate) struct Image {
     pub(crate) source: Box<str>,
     pub(crate) alt: Box<str>,
     pub(crate) title: Option<Box<str>>,
@@ -783,7 +701,7 @@ impl Image {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct List {
+pub(crate) struct List {
     pub(crate) kind: ListKind,
     pub(crate) start: Option<i64>,
 }
@@ -800,13 +718,13 @@ impl List {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ListKind {
+pub(crate) enum ListKind {
     Ordered,
     Unordered,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Table {
+pub(crate) struct Table {
     /// Exact width when no row spans make grid placement output-specific.
     pub(crate) column_count: Option<u32>,
 }
@@ -819,7 +737,7 @@ impl Table {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TableCell {
+pub(crate) struct TableCell {
     pub(crate) header: bool,
     pub(crate) colspan: u32,
     pub(crate) rowspan: u32,
@@ -846,14 +764,14 @@ impl TableCell {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TableAlignment {
+pub(crate) enum TableAlignment {
     Left,
     Center,
     Right,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Callout {
+pub(crate) struct Callout {
     pub(crate) kind: CalloutKind,
     pub(crate) title: Option<Box<str>>,
 }
@@ -870,7 +788,7 @@ impl Callout {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CalloutKind {
+pub(crate) enum CalloutKind {
     Note,
     Warning,
     Tip,
@@ -880,7 +798,7 @@ pub enum CalloutKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskMarker {
+pub(crate) struct TaskMarker {
     pub(crate) checked: bool,
     pub(crate) fallback_label: Option<Box<str>>,
 }
@@ -897,7 +815,7 @@ impl TaskMarker {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MathValue {
+pub(crate) struct MathValue {
     pub(crate) source: Box<str>,
     pub(crate) format: MathFormat,
     pub(crate) fallback_text: Option<Box<str>>,
@@ -919,13 +837,13 @@ impl MathValue {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MathFormat {
+pub(crate) enum MathFormat {
     Tex,
     Text,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Media {
+pub(crate) struct Media {
     pub(crate) kind: MediaKind,
     pub(crate) source: Box<str>,
     pub(crate) title: Option<Box<str>>,
@@ -947,14 +865,14 @@ impl Media {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MediaKind {
+pub(crate) enum MediaKind {
     Audio,
     Video,
     Embedded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct FootnoteId(u32);
+pub(crate) struct FootnoteId(u32);
 
 impl FootnoteId {
     fn index(self) -> usize {
@@ -973,30 +891,6 @@ pub(crate) struct FootnoteRecord {
     pub(crate) id: FootnoteId,
     pub(crate) label: Box<str>,
     pub(crate) node: DocumentNodeId,
-}
-
-/// A resolved read-only footnote definition.
-#[derive(Clone, Copy)]
-pub struct FootnoteDefinition<'a> {
-    document: &'a Document,
-    definition: &'a FootnoteRecord,
-}
-
-impl<'a> FootnoteDefinition<'a> {
-    /// Returns the opaque semantic footnote ID.
-    pub fn id(self) -> FootnoteId {
-        self.definition.id
-    }
-    pub(crate) fn label(self) -> &'a str {
-        &self.definition.label
-    }
-    /// Returns the semantic definition node.
-    pub fn node(self) -> DocumentNode<'a> {
-        DocumentNode {
-            document: self.document,
-            id: self.definition.node,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1086,13 +980,13 @@ mod tests {
         let document = builder.finish();
         document.validate().unwrap();
         assert_eq!(document.root_ids().count(), 7);
-        let definition = document.footnote(footnote).unwrap();
-        assert_eq!(definition.id(), footnote);
+        let definition = document.footnote_record(footnote).unwrap();
+        assert_eq!(definition.id, footnote);
         assert!(matches!(
-            definition.node().kind(),
-            NodeKind::FootnoteDefinition(id) if *id == footnote
+            document.node(definition.node).map(|node| node.kind()),
+            Some(NodeKind::FootnoteDefinition(id)) if *id == footnote
         ));
-        assert_eq!(document.footnotes().len(), 1);
+        assert_eq!(document.footnotes.len(), 1);
     }
 
     #[test]

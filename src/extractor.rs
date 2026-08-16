@@ -296,10 +296,13 @@ mod tests {
             crate::dom::Dom::parse_document(html).unwrap().len()
         );
         assert!(attempt.representation.final_dom_nodes < attempt.representation.source_dom_nodes);
-        assert_eq!(attempt.representation.document_nodes, page.document().len());
+        assert_eq!(
+            attempt.representation.document_nodes,
+            page.semantic_node_count()
+        );
         assert_eq!(
             attempt.representation.estimated_document_bytes,
-            page.document().retained_bytes_estimate()
+            page.semantic_retained_bytes()
         );
         assert!(attempt.cleanup_actions.iter().any(|action| {
             action.kind == crate::diagnostics::CleanupActionKind::HeuristicCleanup

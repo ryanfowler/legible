@@ -8,7 +8,7 @@ The migration baseline is `main` at `a97e49c460a0ef0e8e4ed271ef2b3f417c7b6184`.
 
 ## Historical pre-IR output contracts
 
-At the recorded pre-IR baseline, `ExtractedPage` retained a compact cleaned DOM fragment and rendered each output on demand. This describes historical behavior only; the current page retains a semantic `Document`.
+At the recorded pre-IR baseline, `ExtractedPage` retained a compact cleaned DOM fragment and rendered each output on demand. This describes historical behavior only; the current page retains a private semantic representation.
 
 - `markdown()` returned CommonMark and GFM output. It did not emit raw HTML. It filtered unsupported link and image URI schemes.
 - `text()` returned normalized plain text. `text_length()` counted its Unicode scalar values. `word_count()` used the same normalized DOM walk.
@@ -20,7 +20,7 @@ The raw `html()` shape was compatibility-sensitive. Unit tests required source a
 
 ## Current migration status
 
-`ExtractedPage` now retains only the semantic `Document`. The final normalized compact DOM fragment is compiled once and then dropped. Markdown, normalized text, and canonical semantic HTML render lazily from the document. `safe_html()` is a compatibility alias for canonical `html()` output.
+`ExtractedPage` now retains only a private semantic representation. The final normalized compact DOM fragment is compiled once and then dropped. Markdown, normalized text, and canonical semantic HTML render lazily from that representation. `safe_html()` is a compatibility alias for canonical `html()` output.
 
 ## Quality baseline
 

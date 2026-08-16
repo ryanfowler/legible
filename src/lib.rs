@@ -1,9 +1,10 @@
 //! Extract relevant content and metadata from HTML.
 //!
-//! Legible compiles selected HTML into a semantic document and renders each requested
+//! Legible compiles selected HTML into a private semantic representation and renders each requested
 //! output format lazily. Markdown is the primary output. Canonical HTML and normalized
-//! plain text come from the same semantic document. Legible does not use a browser, execute JavaScript, fetch
-//! URLs, or make network requests.
+//! plain text come from the same private representation. The public output contract is
+//! Markdown, canonical semantic HTML, normalized text, metadata, and scalar metrics.
+//! Legible does not use a browser, execute JavaScript, fetch URLs, or make network requests.
 //!
 //! ```rust
 //! use legible::extract;
@@ -55,7 +56,7 @@ mod candidate;
 mod cleaning;
 mod constants;
 mod diagnostics;
-pub mod document;
+mod document;
 mod dom;
 mod error;
 mod extraction;
@@ -76,11 +77,6 @@ pub use diagnostics::{
     NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo, RootInfo,
     RootSelectionReasonInfo, SemanticCategoryCoverageInfo, SemanticCoverageCategory,
     SemanticCoverageInfo,
-};
-pub use document::{
-    Callout, CalloutKind, CodeBlock, Document, DocumentNode, DocumentStats, FootnoteDefinition,
-    FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media, MediaKind, NodeKind,
-    Table, TableAlignment, TableCell, TaskMarker, TextValue,
 };
 pub use error::{Error, Result};
 pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};

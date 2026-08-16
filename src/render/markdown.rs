@@ -650,8 +650,8 @@ impl<'a> MarkdownRenderer<'a> {
                 NodeKind::Image(image) if self.config.images => text.push_str(&image.alt),
                 NodeKind::HardBreak => text.push(' '),
                 NodeKind::FootnoteReference(id) => {
-                    if let Some(definition) = self.document.footnote(*id) {
-                        text.push_str(definition.label());
+                    if let Some(label) = self.document.footnote_label(*id) {
+                        text.push_str(label);
                     }
                 }
                 NodeKind::TaskMarker(marker) => {
@@ -704,20 +704,20 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn footnote_reference(&mut self, id: FootnoteId) {
-        if let Some(definition) = self.document.footnote(id) {
+        if let Some(label) = self.document.footnote_label(id) {
             self.out.markup("[^");
-            self.out.footnote_label(definition.label());
+            self.out.footnote_label(label);
             self.out.markup("]");
         }
     }
 
     fn footnote_definition(&mut self, node: DocumentNodeId, id: FootnoteId) {
-        let Some(definition) = self.document.footnote(id) else {
+        let Some(label) = self.document.footnote_label(id) else {
             return;
         };
         self.out.ensure_blank_line();
         self.out.markup("[^");
-        self.out.footnote_label(definition.label());
+        self.out.footnote_label(label);
         self.out.markup("]: ");
         self.out.prefixes.push(Prefix::Indent(4));
         self.tasks.push(Task::Close(Close::Footnote));
