@@ -30,19 +30,30 @@ The full suite measures these workloads:
 - listing and malformed pages
 - metadata-heavy pages
 - large Guardian and Wikipedia compatibility fixtures
-- retained source DOM to semantic document compilation
+- retained-fragment lowering to a semantic document
 - source DOM, actual final pre-IR DOM, IR node, and retained-byte counts in extraction benchmark output
-- semantic compression counts in compiler benchmark IDs
-- retained-byte estimates in compiler benchmark output
+- semantic compression counts in lowering benchmark IDs
+- retained-byte, semantic-string, root, and node-layout estimates in lowering benchmark output
 - end-to-end raw HTML to Markdown extraction
-- lazy Markdown, text, and HTML rendering
+- steady-state lazy Markdown, text, and HTML rendering (text statistics are prewarmed)
 - deeply nested parser input
 
 The `ordinary-inline` workload uses repeated article sections with `strong`, `em`,
-links, inline `code`, native lists, blockquotes, and simple image figures. It avoids
-tables, footnotes, math, responsive images, callouts, and syntax-highlighter markup.
-The same workload is available in extraction, semantic compilation, end-to-end
-Markdown, and lazy Markdown benchmarks so these phases can be compared directly.
+links, inline `code`, native lists, blockquotes, simple image figures,
+`details`/`summary`, and definition lists. It avoids tables, footnotes, math,
+responsive images, callouts, and syntax-highlighter markup. The same workload is
+available in extraction, retained-fragment lowering, end-to-end Markdown, and
+lazy Markdown benchmarks so these phases can be compared directly.
+
+The retained-fragment lowering group isolates semantic compilation from extraction
+and output rendering. Its generated fragments represent cleaned content regions
+without page chrome. Source evidence and shared cleanup facts are prepared before
+timing, as they are in production extraction.
+
+Lazy output groups measure steady-state rendering. Text statistics are initialized
+before timing so their one-time cache initialization is not mixed into the render. The complex groups cover highlighted code, tables, math,
+footnotes, documentation, listings, malformed markup, metadata, JSON-LD, and large
+compatibility fixtures.
 
 Criterion stores local baselines in `target/criterion`. Use a named baseline before a substantial pipeline change:
 
@@ -60,8 +71,8 @@ Use the same machine, Rust toolchain, and power mode for comparisons.
 - Doubling generated input size should take less than 2.5 times as long.
 - Deeply nested parser inputs must remain linear and must not overflow the stack.
 - Extraction-only benchmarks must not render Markdown, HTML, or text. The end-to-end Markdown group measures rendering explicitly. Output rendering stays lazy.
-- Compiler benchmark IDs record selected DOM and semantic IR node counts as `dom-N-ir-N`. The benchmark also prints a `representation/...` line with IR capacity, estimated retained bytes, and the equivalent estimate for a source-sized arena reservation. The estimates include vector capacity and owned semantic strings. Use these values to compare retained-representation compression without changing stable Criterion benchmark IDs.
+- Lowering benchmark IDs record selected DOM and semantic IR node counts as `dom-N-ir-N`. The benchmark also prints a `representation/...` line with IR capacity, estimated retained bytes, semantic string bytes, root counts, and the equivalent estimate for a source-sized arena reservation. The estimates include vector capacity and owned semantic strings. Use these values to compare retained-representation compression without changing stable Criterion benchmark IDs.
 - Extraction benchmarks print an `extraction-representation/...` line from opt-in diagnostics. It reports source DOM nodes, the actual selected and cleaned pre-IR DOM nodes, semantic document nodes, and estimated retained bytes for the same input.
 - A normalization change must not add a repeated full-document scan for each code block, equation, table, or image.
 
-Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline.
+Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline. The current baseline at revision `499e09f3bf2e53164321e991254b9ff124cccb59` is recorded in `benches/private-ir-baseline.md`.

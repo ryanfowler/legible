@@ -411,6 +411,32 @@ impl Document {
         self.nodes.len()
     }
 
+    /// Returns the number of top-level semantic items for benchmark reporting.
+    pub(crate) fn root_count(&self) -> usize {
+        self.roots.len()
+    }
+
+    /// Returns bytes owned by semantic string payloads for benchmark reporting.
+    pub(crate) fn semantic_string_bytes(&self) -> usize {
+        self.nodes
+            .iter()
+            .fold(0usize, |total, node| {
+                total.saturating_add(node.kind.retained_value_bytes())
+            })
+            .saturating_add(self.footnotes.iter().fold(0usize, |total, footnote| {
+                total.saturating_add(footnote.label.len())
+            }))
+    }
+
+    /// Returns owned semantic string values for benchmark reporting.
+    pub(crate) fn semantic_string_value_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|node| node.kind.semantic_string_value_count())
+            .sum::<usize>()
+            .saturating_add(self.footnotes.len())
+    }
+
     pub(crate) fn retained_bytes_estimate(&self) -> usize {
         let arena_bytes = self
             .nodes
@@ -621,6 +647,22 @@ impl NodeKind {
                 .source
                 .len()
                 .saturating_add(optional_boxed_str_len(&media.title)),
+            _ => 0,
+        }
+    }
+
+    fn semantic_string_value_count(&self) -> usize {
+        match self {
+            Self::Text(_) | Self::InlineCode(_) => 1,
+            Self::CodeBlock(code) => 1 + usize::from(code.language.is_some()),
+            Self::Link(link) => 1 + usize::from(link.title.is_some()),
+            Self::Image(image) => 2 + usize::from(image.title.is_some()),
+            Self::Callout(callout) => usize::from(callout.title.is_some()),
+            Self::TaskMarker(marker) => usize::from(marker.fallback_label.is_some()),
+            Self::InlineMath(math) | Self::DisplayMath(math) => {
+                1 + usize::from(math.fallback_text.is_some())
+            }
+            Self::Media(media) => 1 + usize::from(media.title.is_some()),
             _ => 0,
         }
     }
