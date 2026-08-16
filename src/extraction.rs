@@ -34,6 +34,7 @@ use crate::specialized::{self, DocumentContext};
 use html5ever::ns;
 use regex::Regex;
 use smallvec::SmallVec;
+use std::collections::HashSet;
 use url::Url;
 
 pub(crate) struct ContentExtractor<'a> {
@@ -1382,8 +1383,8 @@ impl<'a> ContentExtractor<'a> {
         node_text == sibling_buffer.trim()
     }
 
-    fn is_visible_for_strategy(&self, node: NodeId, accessible_math: &[bool]) -> bool {
-        if accessible_math.get(node.index()).copied().unwrap_or(false) {
+    fn is_visible_for_strategy(&self, node: NodeId, accessible_math: &HashSet<NodeId>) -> bool {
+        if accessible_math.contains(&node) {
             return true;
         }
         let utility_hidden = has_hidden_utility_class_for_discovery(&self.dom, node);
@@ -1448,7 +1449,7 @@ impl<'a> ContentExtractor<'a> {
         match_buffer: &mut String,
         text_buffer: &mut String,
         initial_nodes: &[(NodeId, u32)],
-        accessible_math: &[bool],
+        accessible_math: &HashSet<NodeId>,
         title_plan: &TitleHeadingPlan,
         base_candidates: &CandidateSet,
     ) -> CandidateDiscovery {
