@@ -2,7 +2,9 @@
 //!
 //! The renderer uses an explicit task stack. It has no dependency on the HTML DOM.
 
-use crate::document::{Document, DocumentNodeId, FootnoteId, ListKind, NodeKind, TableAlignment};
+use crate::document::{
+    Document, DocumentNodeId, FootnoteId, ListKind, NodeKindView as NodeKind, TableAlignment,
+};
 use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug)]
@@ -168,7 +170,7 @@ impl<'a> MarkdownRenderer<'a> {
                     }
                 }
                 NodeKind::Image(_) if self.config.images => return Some('!'),
-                kind if is_block(kind) => return None,
+                kind if is_block(&kind) => return None,
                 _ => {
                     let children: SmallVec<[_; 8]> = self.document.child_ids(id).collect();
                     nodes.extend(children.into_iter().rev());
@@ -192,7 +194,7 @@ impl<'a> MarkdownRenderer<'a> {
                     return;
                 }
                 self.out.ensure_blank_line();
-                self.out.markup_repeat('#', usize::from(*level));
+                self.out.markup_repeat('#', usize::from(level));
                 self.out.markup(" ");
                 self.tasks.push(Task::Close(Close::Block));
                 self.push_children(id, Mode::Inline);
@@ -265,8 +267,8 @@ impl<'a> MarkdownRenderer<'a> {
             NodeKind::Table(_) => self.table(id),
             NodeKind::TableRow => self.table_row(id),
             NodeKind::TableCell(_) => self.push_children(id, Mode::Inline),
-            NodeKind::FootnoteReference(id) => self.footnote_reference(*id),
-            NodeKind::FootnoteDefinition(footnote) => self.footnote_definition(id, *footnote),
+            NodeKind::FootnoteReference(id) => self.footnote_reference(id),
+            NodeKind::FootnoteDefinition(footnote) => self.footnote_definition(id, footnote),
             NodeKind::TaskMarker(_) => {}
             NodeKind::InlineMath(math) => self.math(&math.source, false),
             NodeKind::DisplayMath(math) => self.math(&math.source, true),
@@ -282,6 +284,7 @@ impl<'a> MarkdownRenderer<'a> {
                     self.out.text(title, None);
                 }
             }
+            NodeKind::Invalid => {}
         }
     }
 
@@ -650,7 +653,7 @@ impl<'a> MarkdownRenderer<'a> {
                 NodeKind::Image(image) if self.config.images => text.push_str(&image.alt),
                 NodeKind::HardBreak => text.push(' '),
                 NodeKind::FootnoteReference(id) => {
-                    if let Some(label) = self.document.footnote_label(*id) {
+                    if let Some(label) = self.document.footnote_label(id) {
                         text.push_str(label);
                     }
                 }
@@ -666,7 +669,7 @@ impl<'a> MarkdownRenderer<'a> {
                     text.push_str(media.title.as_deref().unwrap_or(&media.source));
                 }
                 kind => {
-                    if is_block(kind) {
+                    if is_block(&kind) {
                         text.push(' ');
                     }
                     let children: SmallVec<[_; 8]> = self.document.child_ids(node_id).collect();
@@ -690,7 +693,7 @@ impl<'a> MarkdownRenderer<'a> {
                 | NodeKind::List(_)
                 | NodeKind::Table(_)
                 | NodeKind::DisplayMath(_) => return true,
-                kind if is_block(kind) => {
+                kind if is_block(&kind) => {
                     blocks += 1;
                     if blocks > 1 {
                         return true;
@@ -828,7 +831,7 @@ impl<'a> MarkdownRenderer<'a> {
 }
 
 fn compute_visibility(document: &Document, images: bool) -> Vec<bool> {
-    let mut visible = vec![false; document.node_capacity()];
+    let mut visible = vec![false; document.operation_capacity()];
     let mut tasks = Vec::with_capacity(32);
     tasks.extend(document.root_ids().map(|root| (root, false)));
     while let Some((id, visited)) = tasks.pop() {

@@ -1,12 +1,17 @@
 # Compact semantic representation prototype
 
-This note records the compact representation experiment. The prototype is
-benchmark-only. It does not change the production compiler or renderer.
+This note records the compact representation experiment that selected the
+production layout. The production semantic document now uses the event tape
+layout described below. The recorded pre-migration measurements remain as
+historical data. The current benchmark compares the production compatibility
+view with the preorder alternative.
 
 ## Layouts
 
-The prototype adapts the current private semantic arena into two layouts.
-Both layouts use the same side payload table and the same owned payload values.
+The prototype adapts the pre-migration private semantic arena into two
+layouts. The current production compatibility view is also measured against
+these layouts. Both layouts use the same side payload table and the same owned
+payload values.
 This keeps the comparison focused on traversal and structural storage. Text is
 not yet stored in a shared arena.
 
@@ -49,8 +54,8 @@ The benchmark was run on `DO-Premium-Intel` with Rust 1.97.1.
 
 | Layout | Header size |
 |---|---:|
-| Current `ArenaNode` | 80 bytes |
-| Current `NodeKind` | 64 bytes |
+| Pre-migration `ArenaNode` | 80 bytes |
+| Pre-migration `NodeKind` | 64 bytes |
 | Preorder node | 12 bytes |
 | Event operation | 8 bytes |
 | Shared prototype payload slot | 64 bytes |
@@ -60,8 +65,8 @@ carry uncommon values. Unit semantic nodes do not allocate a payload slot.
 Footnote payloads store an ID. Each candidate keeps one separate footnote-label
 table, so repeated references do not duplicate the label string.
 
-The current arena uses owned `String` values for text and its existing estimate
-includes string capacity. The prototype uses exact-sized boxed payload strings.
+The pre-migration arena used owned `String` values for text and its existing
+estimate included string capacity. The prototype uses exact-sized boxed payload strings.
 The report provides non-string bytes and string bytes separately. Use the
 non-string values for the structural comparison. The total values are useful
 for retained-storage planning, but they are not a header-only comparison.
@@ -85,8 +90,9 @@ the prototype run. They include vector capacity and owned payload strings.
 ## Traversal result
 
 The benchmark measures a renderer-shaped semantic projection for Markdown,
-HTML, and text. It compares the current arena links with both sequential
-layouts. It verifies that all three projections produce identical output for
+HTML, and text. It compares the production compatibility view with both
+sequential layouts. The recorded arena values below are from the pre-migration
+run. It verifies that all three projections produce identical output for
 each fixture before timing. The projections preserve the semantic fields used
 by the current document, including heading levels, link fragment flags, image
 dimensions, table metadata, callout kinds, code, math, media, and footnote
@@ -103,20 +109,19 @@ every time. The ordinary-inline midpoint results in the recorded run were
 about 54 us, 261 us, and 57 us for event Markdown, HTML, and text. The
 corresponding preorder results were about 91 us, 281 us, and 85 us. The event
 tape also reduced the simple-prose Markdown projection from about 6.2 us for
-the arena to about 3.1 us for events. Results vary with fixture and output
-format.
+the pre-migration arena to about 3.1 us for events. Results vary with
+fixture and output format.
 
 ## Decision
 
-Use the **event tape** as the next production prototype.
+Use the **event tape** as the production semantic representation.
 
 It gives the simplest sequential renderer loop and the strongest measured
 traversal result. Its additional close operations increase structural item
 count, but the retained bytes were within about 2% of the preorder layout on
-the measured fixtures. This is a prototype decision, not a claim about final
-output performance. The next implementation must remeasure it with complete
-Markdown, HTML, and text renderers, then add compile-time visibility flags
-before replacing production storage.
+the measured fixtures. The current builder retains type-specific payload
+side tables and an internal end index for compatibility consumers. A later
+renderer change can consume the operations directly and remove that index.
 
 The benchmark also includes `build-preorder` and `build-events` measurements.
 These include the benchmark adapter and payload lowering. They are separate

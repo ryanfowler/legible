@@ -3,7 +3,7 @@
 use crate::diagnostics::{
     SemanticCategoryCoverageInfo, SemanticCoverageCategory, SemanticCoverageInfo,
 };
-use crate::document::{Document, DocumentNodeId, NodeKind};
+use crate::document::{Document, DocumentNodeId, NodeKindView as NodeKind};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
@@ -358,7 +358,7 @@ impl SemanticStructureCounts {
                 NodeKind::Image(_) if !in_figure => counts.visuals += 1,
                 NodeKind::Heading { .. } => counts.headings += 1,
                 NodeKind::FootnoteReference(id) => {
-                    if let Some(definition) = document.footnote_record(*id) {
+                    if let Some(definition) = document.footnote_record(id) {
                         counts.referenced_footnotes.insert(definition.label.clone());
                     }
                 }

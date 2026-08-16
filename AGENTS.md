@@ -59,7 +59,7 @@ The extraction pipeline flows through these stages:
 | `document/ordinary.rs` | Conservative feature routing and stack-safe streaming compilation for ordinary HTML semantics |
 | `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
-| `document/` | Private semantic IR plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this representation instead of a DOM |
+| `document/` | Private compact semantic event tape plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this representation instead of a DOM |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -100,7 +100,7 @@ These invariants are costly to violate:
 - **Cache semantic source evidence.** Build the dense callout, footnote, math, accessible-math, and data-table evidence mask once for each retained fragment. Pass it through hard cleanup, heuristic cleanup, final cleanup, and semantic compilation. Use cheap tag and attribute gates before rich recognizers.
 - **Defer rejected-attempt compilation.** Normal extraction uses cheap DOM quality metrics until a candidate can win. Diagnostics may compile every attempt to report semantic metrics.
 - **Use dense semantic indexes.** Renderers should use node-indexed storage for per-document state instead of hash maps when semantic node IDs are dense.
-- **Keep representation experiments benchmark-only until measured.** The compact IR prototype compares sequential layouts without constraining the production arena.
+- **Keep the semantic representation compact and private.** Production pages retain an immutable event tape with 8-byte operation headers and type-specific payload tables. Do not add general-purpose tree links to the retained representation. The benchmark prototype remains useful for later renderer comparisons.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
 
 ### Common Pitfalls

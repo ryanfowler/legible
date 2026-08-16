@@ -1748,7 +1748,7 @@ mod tests {
                 .and_then(|root| document.child_ids(root).next())
                 .and_then(|node| document.node(node))
                 .map(|node| node.kind()),
-            Some(NodeKind::Link(_))
+            Some(super::super::NodeKindView::Link(_))
         ));
     }
 
@@ -1994,7 +1994,7 @@ mod tests {
                 .next()
                 .and_then(|root| document.node(root))
                 .map(|node| node.kind()),
-            Some(NodeKind::CodeBlock(_))
+            Some(super::super::NodeKindView::CodeBlock(_))
         ));
     }
 

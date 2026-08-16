@@ -207,7 +207,7 @@ pub(crate) fn table_normalization_counts(
 use std::fmt;
 use std::sync::OnceLock;
 
-/// An index into a [`Document`] arena.
+/// An index into a [`Document`] semantic tape.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct DocumentNodeId(u32);
 
@@ -219,9 +219,27 @@ impl DocumentNodeId {
 
 /// The structured semantic content extracted from one page.
 pub(crate) struct Document {
-    nodes: Vec<ArenaNode>,
+    /// Sequential semantic operations. Container operations are paired with a
+    /// close operation; leaf operations stand alone.
+    ops: Vec<EventOp>,
+    /// The operation index of each node's closing operation, or the node's own
+    /// index for a leaf. This compatibility index keeps legacy internal
+    /// consumers constant-time while renderers migrate to direct tape scans.
+    ends: Vec<u32>,
     roots: Vec<DocumentNodeId>,
+    text_values: Vec<TextValue>,
+    code_blocks: Vec<CodeBlock>,
+    links: Vec<Link>,
+    images: Vec<Image>,
+    lists: Vec<List>,
+    tables: Vec<Table>,
+    table_cells: Vec<TableCell>,
+    callouts: Vec<Callout>,
+    task_markers: Vec<TaskMarker>,
+    math_values: Vec<MathValue>,
+    media: Vec<Media>,
     footnotes: Vec<FootnoteRecord>,
+    node_count: usize,
     output_capacity_hint: usize,
     stats: OnceLock<DocumentStats>,
 }
@@ -327,8 +345,9 @@ impl Document {
         self.roots.iter().copied()
     }
 
-    pub(crate) fn node(&self, id: DocumentNodeId) -> Option<&ArenaNode> {
-        self.nodes.get(id.index())
+    pub(crate) fn node(&self, id: DocumentNodeId) -> Option<DocumentNode<'_>> {
+        let operation = self.ops.get(id.index())?;
+        (!operation.is_close()).then_some(DocumentNode { document: self, id })
     }
 
     pub(crate) fn child_ids(&self, parent: DocumentNodeId) -> Children<'_> {
@@ -339,11 +358,105 @@ impl Document {
     }
 
     pub(crate) fn first_child(&self, parent: DocumentNodeId) -> Option<DocumentNodeId> {
-        self.node(parent).and_then(|node| node.first_child)
+        let child = DocumentNodeId(parent.0.checked_add(1)?);
+        self.node(child)
+            .filter(|_| child.0 < self.node_end(parent))
+            .map(|_| child)
     }
 
     pub(crate) fn next_sibling(&self, node: DocumentNodeId) -> Option<DocumentNodeId> {
-        self.node(node).and_then(|node| node.next_sibling)
+        let next = DocumentNodeId(self.node_end(node).checked_add(1)?);
+        self.node(next).map(|_| next)
+    }
+
+    fn node_end(&self, id: DocumentNodeId) -> u32 {
+        self.ends.get(id.index()).copied().unwrap_or(id.0)
+    }
+
+    fn kind_ref(&self, id: DocumentNodeId) -> NodeKindView<'_> {
+        let operation = &self.ops[id.index()];
+        let payload = operation.payload as usize;
+        match operation.kind() {
+            OperationKind::Paragraph => NodeKindView::Paragraph,
+            OperationKind::BlockGroup => NodeKindView::BlockGroup,
+            OperationKind::Heading => NodeKindView::Heading {
+                level: operation.aux as u8,
+            },
+            OperationKind::BlockQuote => NodeKindView::BlockQuote,
+            OperationKind::CodeBlock => self
+                .code_blocks
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::CodeBlock),
+            OperationKind::List => self
+                .lists
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::List),
+            OperationKind::ListItem => NodeKindView::ListItem,
+            OperationKind::Table => self
+                .tables
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::Table),
+            OperationKind::TableCaption => NodeKindView::TableCaption,
+            OperationKind::TableRow => NodeKindView::TableRow,
+            OperationKind::TableCell => self
+                .table_cells
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::TableCell),
+            OperationKind::Figure => NodeKindView::Figure,
+            OperationKind::Figcaption => NodeKindView::Figcaption,
+            OperationKind::Details => NodeKindView::Details,
+            OperationKind::Summary => NodeKindView::Summary,
+            OperationKind::ThematicBreak => NodeKindView::ThematicBreak,
+            OperationKind::DefinitionList => NodeKindView::DefinitionList,
+            OperationKind::DefinitionTerm => NodeKindView::DefinitionTerm,
+            OperationKind::DefinitionDescription => NodeKindView::DefinitionDescription,
+            OperationKind::Callout => self
+                .callouts
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::Callout),
+            OperationKind::FootnoteDefinition => {
+                NodeKindView::FootnoteDefinition(FootnoteId(operation.payload))
+            }
+            OperationKind::Text => self
+                .text_values
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::Text),
+            OperationKind::Emphasis => NodeKindView::Emphasis,
+            OperationKind::Strong => NodeKindView::Strong,
+            OperationKind::Strikethrough => NodeKindView::Strikethrough,
+            OperationKind::InlineCode => self
+                .text_values
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::InlineCode),
+            OperationKind::Link => self
+                .links
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::Link),
+            OperationKind::Image => self
+                .images
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::Image),
+            OperationKind::HardBreak => NodeKindView::HardBreak,
+            OperationKind::FootnoteReference => {
+                NodeKindView::FootnoteReference(FootnoteId(operation.payload))
+            }
+            OperationKind::TaskMarker => self
+                .task_markers
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::TaskMarker),
+            OperationKind::InlineMath => self
+                .math_values
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::InlineMath),
+            OperationKind::DisplayMath => self
+                .math_values
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::DisplayMath),
+            OperationKind::Media => self
+                .media
+                .get(payload)
+                .map_or(NodeKindView::Invalid, NodeKindView::Media),
+        }
     }
 
     pub(crate) fn footnote_record(&self, id: FootnoteId) -> Option<&FootnoteRecord> {
@@ -353,7 +466,7 @@ impl Document {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.nodes.len()
+        self.node_count
     }
 
     /// Returns the number of top-level semantic items for benchmark reporting.
@@ -363,55 +476,105 @@ impl Document {
 
     /// Returns bytes owned by semantic string payloads for benchmark reporting.
     pub(crate) fn semantic_string_bytes(&self) -> usize {
-        self.nodes
+        self.text_values
             .iter()
-            .fold(0usize, |total, node| {
-                total.saturating_add(node.kind.retained_value_bytes())
-            })
-            .saturating_add(self.footnotes.iter().fold(0usize, |total, footnote| {
-                total.saturating_add(footnote.label.len())
+            .map(|value| value.0.capacity())
+            .chain(self.code_blocks.iter().flat_map(|value| {
+                std::iter::once(value.text.len()).chain(value.language.iter().map(|s| s.len()))
             }))
+            .chain(self.links.iter().flat_map(|value| {
+                std::iter::once(value.destination.len()).chain(value.title.iter().map(|s| s.len()))
+            }))
+            .chain(self.images.iter().flat_map(|value| {
+                [value.source.len(), value.alt.len()]
+                    .into_iter()
+                    .chain(value.title.iter().map(|s| s.len()))
+            }))
+            .chain(
+                self.callouts
+                    .iter()
+                    .filter_map(|value| value.title.as_ref().map(|s| s.len())),
+            )
+            .chain(
+                self.task_markers
+                    .iter()
+                    .filter_map(|value| value.fallback_label.as_ref().map(|s| s.len())),
+            )
+            .chain(self.math_values.iter().flat_map(|value| {
+                std::iter::once(value.source.len())
+                    .chain(value.fallback_text.iter().map(|s| s.len()))
+            }))
+            .chain(self.media.iter().flat_map(|value| {
+                std::iter::once(value.source.len()).chain(value.title.iter().map(|s| s.len()))
+            }))
+            .chain(self.footnotes.iter().map(|value| value.label.len()))
+            .sum()
     }
 
     /// Returns owned semantic string values for benchmark reporting.
     pub(crate) fn semantic_string_value_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .map(|node| node.kind.semantic_string_value_count())
-            .sum::<usize>()
-            .saturating_add(self.footnotes.len())
+        self.text_values.len()
+            + self
+                .code_blocks
+                .iter()
+                .map(|v| 1 + usize::from(v.language.is_some()))
+                .sum::<usize>()
+            + self
+                .links
+                .iter()
+                .map(|v| 1 + usize::from(v.title.is_some()))
+                .sum::<usize>()
+            + self
+                .images
+                .iter()
+                .map(|v| 2 + usize::from(v.title.is_some()))
+                .sum::<usize>()
+            + self.callouts.iter().filter(|v| v.title.is_some()).count()
+            + self
+                .task_markers
+                .iter()
+                .filter(|v| v.fallback_label.is_some())
+                .count()
+            + self
+                .math_values
+                .iter()
+                .map(|v| 1 + usize::from(v.fallback_text.is_some()))
+                .sum::<usize>()
+            + self
+                .media
+                .iter()
+                .map(|v| 1 + usize::from(v.title.is_some()))
+                .sum::<usize>()
+            + self.footnotes.len()
     }
 
     pub(crate) fn retained_bytes_estimate(&self) -> usize {
-        let arena_bytes = self
-            .nodes
-            .capacity()
-            .saturating_mul(std::mem::size_of::<ArenaNode>());
-        let root_bytes = self
-            .roots
-            .capacity()
-            .saturating_mul(std::mem::size_of::<DocumentNodeId>());
-        let footnote_bytes = self
-            .footnotes
-            .capacity()
-            .saturating_mul(std::mem::size_of::<FootnoteRecord>());
-        let node_value_bytes = self.nodes.iter().fold(0usize, |total, node| {
-            total.saturating_add(node.kind.retained_value_bytes())
-        });
-        let footnote_value_bytes = self.footnotes.iter().fold(0usize, |total, footnote| {
-            total.saturating_add(footnote.label.len())
-        });
-
+        let vector_bytes = self.ops.capacity() * std::mem::size_of::<EventOp>()
+            + self.ends.capacity() * std::mem::size_of::<u32>()
+            + self.roots.capacity() * std::mem::size_of::<DocumentNodeId>()
+            + self.text_values.capacity() * std::mem::size_of::<TextValue>()
+            + self.code_blocks.capacity() * std::mem::size_of::<CodeBlock>()
+            + self.links.capacity() * std::mem::size_of::<Link>()
+            + self.images.capacity() * std::mem::size_of::<Image>()
+            + self.lists.capacity() * std::mem::size_of::<List>()
+            + self.tables.capacity() * std::mem::size_of::<Table>()
+            + self.table_cells.capacity() * std::mem::size_of::<TableCell>()
+            + self.callouts.capacity() * std::mem::size_of::<Callout>()
+            + self.task_markers.capacity() * std::mem::size_of::<TaskMarker>()
+            + self.math_values.capacity() * std::mem::size_of::<MathValue>()
+            + self.media.capacity() * std::mem::size_of::<Media>()
+            + self.footnotes.capacity() * std::mem::size_of::<FootnoteRecord>();
         std::mem::size_of::<Self>()
-            .saturating_add(arena_bytes)
-            .saturating_add(root_bytes)
-            .saturating_add(footnote_bytes)
-            .saturating_add(node_value_bytes)
-            .saturating_add(footnote_value_bytes)
+            .saturating_add(vector_bytes)
+            .saturating_add(self.semantic_string_bytes())
     }
 
-    pub(crate) fn node_capacity(&self) -> usize {
-        self.nodes.capacity()
+    pub(crate) fn operation_capacity(&self) -> usize {
+        self.ops.capacity()
+    }
+
+    pub(crate) fn end_capacity(&self) -> usize {
+        self.ends.capacity()
     }
 
     pub(crate) fn output_capacity_hint(&self) -> usize {
@@ -424,7 +587,7 @@ impl Document {
     }
 
     pub(crate) fn node_slot_size() -> usize {
-        std::mem::size_of::<ArenaNode>()
+        std::mem::size_of::<EventOp>()
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
@@ -434,6 +597,137 @@ impl Document {
     #[cfg(test)]
     pub(crate) fn debug_tree(&self) -> String {
         debug_tree(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct EventOp {
+    payload: u32,
+    aux: u16,
+    opcode: u8,
+    flags: u8,
+}
+
+const OP_CLOSE: u8 = 0x80;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum OperationKind {
+    Paragraph,
+    BlockGroup,
+    Heading,
+    BlockQuote,
+    CodeBlock,
+    List,
+    ListItem,
+    Table,
+    TableCaption,
+    TableRow,
+    TableCell,
+    Figure,
+    Figcaption,
+    Details,
+    Summary,
+    ThematicBreak,
+    DefinitionList,
+    DefinitionTerm,
+    DefinitionDescription,
+    Callout,
+    FootnoteDefinition,
+    Text,
+    Emphasis,
+    Strong,
+    Strikethrough,
+    InlineCode,
+    Link,
+    Image,
+    HardBreak,
+    FootnoteReference,
+    TaskMarker,
+    InlineMath,
+    DisplayMath,
+    Media,
+}
+
+impl OperationKind {
+    fn from_opcode(opcode: u8) -> Option<Self> {
+        Some(match opcode & !OP_CLOSE {
+            0 => Self::Paragraph,
+            1 => Self::BlockGroup,
+            2 => Self::Heading,
+            3 => Self::BlockQuote,
+            4 => Self::CodeBlock,
+            5 => Self::List,
+            6 => Self::ListItem,
+            7 => Self::Table,
+            8 => Self::TableCaption,
+            9 => Self::TableRow,
+            10 => Self::TableCell,
+            11 => Self::Figure,
+            12 => Self::Figcaption,
+            13 => Self::Details,
+            14 => Self::Summary,
+            15 => Self::ThematicBreak,
+            16 => Self::DefinitionList,
+            17 => Self::DefinitionTerm,
+            18 => Self::DefinitionDescription,
+            19 => Self::Callout,
+            20 => Self::FootnoteDefinition,
+            21 => Self::Text,
+            22 => Self::Emphasis,
+            23 => Self::Strong,
+            24 => Self::Strikethrough,
+            25 => Self::InlineCode,
+            26 => Self::Link,
+            27 => Self::Image,
+            28 => Self::HardBreak,
+            29 => Self::FootnoteReference,
+            30 => Self::TaskMarker,
+            31 => Self::InlineMath,
+            32 => Self::DisplayMath,
+            33 => Self::Media,
+            _ => return None,
+        })
+    }
+
+    fn is_container(self) -> bool {
+        !matches!(
+            self,
+            Self::CodeBlock
+                | Self::Text
+                | Self::InlineCode
+                | Self::ThematicBreak
+                | Self::Image
+                | Self::HardBreak
+                | Self::FootnoteReference
+                | Self::TaskMarker
+                | Self::InlineMath
+                | Self::DisplayMath
+                | Self::Media
+        )
+    }
+}
+
+impl EventOp {
+    fn kind(self) -> OperationKind {
+        OperationKind::from_opcode(self.opcode & !OP_CLOSE)
+            .expect("semantic tape contains an unknown operation")
+    }
+
+    fn is_close(self) -> bool {
+        self.opcode & OP_CLOSE != 0
+    }
+}
+
+pub(crate) struct DocumentNode<'a> {
+    document: &'a Document,
+    id: DocumentNodeId,
+}
+
+impl<'a> DocumentNode<'a> {
+    pub(crate) fn kind(&self) -> NodeKindView<'a> {
+        self.document.kind_ref(self.id)
     }
 }
 
@@ -447,22 +741,8 @@ impl Iterator for Children<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let id = self.next?;
-        self.next = self.document.node(id).and_then(|node| node.next_sibling);
+        self.next = self.document.next_sibling(id);
         Some(id)
-    }
-}
-
-/// One semantic node and its arena links.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ArenaNode {
-    kind: NodeKind,
-    first_child: Option<DocumentNodeId>,
-    next_sibling: Option<DocumentNodeId>,
-}
-
-impl ArenaNode {
-    pub(crate) fn kind(&self) -> &NodeKind {
-        &self.kind
     }
 }
 
@@ -589,6 +869,57 @@ impl NodeKind {
             }
             Self::Media(media) => 1 + usize::from(media.title.is_some()),
             _ => 0,
+        }
+    }
+}
+
+/// A borrowed view of one compact tape operation. Payload values live in
+/// type-specific side tables and are borrowed only for the duration of a
+/// view.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NodeKindView<'a> {
+    Paragraph,
+    BlockGroup,
+    Heading { level: u8 },
+    BlockQuote,
+    CodeBlock(&'a CodeBlock),
+    List(&'a List),
+    ListItem,
+    Table(&'a Table),
+    TableCaption,
+    TableRow,
+    TableCell(&'a TableCell),
+    Figure,
+    Figcaption,
+    Details,
+    Summary,
+    ThematicBreak,
+    DefinitionList,
+    DefinitionTerm,
+    DefinitionDescription,
+    Callout(&'a Callout),
+    FootnoteDefinition(FootnoteId),
+    Text(&'a TextValue),
+    Emphasis,
+    Strong,
+    Strikethrough,
+    InlineCode(&'a TextValue),
+    Link(&'a Link),
+    Image(&'a Image),
+    HardBreak,
+    FootnoteReference(FootnoteId),
+    TaskMarker(&'a TaskMarker),
+    InlineMath(&'a MathValue),
+    DisplayMath(&'a MathValue),
+    Media(&'a Media),
+    Invalid,
+}
+
+impl NodeKindView<'_> {
+    pub(crate) fn heading_level(self) -> Option<u8> {
+        match self {
+            Self::Heading { level } => Some(level),
+            _ => None,
         }
     }
 }
@@ -991,9 +1322,30 @@ mod tests {
         assert_eq!(definition.id, footnote);
         assert!(matches!(
             document.node(definition.node).map(|node| node.kind()),
-            Some(NodeKind::FootnoteDefinition(id)) if *id == footnote
+            Some(NodeKindView::FootnoteDefinition(id)) if id == footnote
         ));
         assert_eq!(document.footnotes.len(), 1);
+    }
+
+    #[test]
+    fn event_tape_uses_compact_headers_and_explicit_closes() {
+        assert_eq!(std::mem::size_of::<EventOp>(), 8);
+
+        let mut builder = DocumentBuilder::with_capacity(2);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "tape").unwrap();
+        let document = builder.finish();
+
+        assert_eq!(document.len(), 2);
+        assert_eq!(document.ops.len(), 3);
+        assert_eq!(document.ops[0].opcode & OP_CLOSE, 0);
+        assert_ne!(document.ops[2].opcode & OP_CLOSE, 0);
+        assert_eq!(document.ends[0], 2);
+        assert_eq!(
+            document.first_child(DocumentNodeId(0)),
+            Some(DocumentNodeId(1))
+        );
+        assert_eq!(document.next_sibling(DocumentNodeId(0)), None);
     }
 
     #[test]
@@ -1039,9 +1391,9 @@ mod tests {
     fn validation_rejects_cycles_and_invalid_cells() {
         let mut builder = DocumentBuilder::with_capacity(2);
         let first = builder.append(None, NodeKind::Paragraph).unwrap();
-        let second = builder.append(Some(first), NodeKind::Strong).unwrap();
+        builder.append(Some(first), NodeKind::Strong).unwrap();
         let mut cycle = builder.finish();
-        cycle.nodes[second.index()].next_sibling = Some(second);
+        cycle.ends[first.index()] = u32::MAX;
         assert!(cycle.validate().is_err());
 
         let mut builder = DocumentBuilder::with_capacity(1);
@@ -1074,7 +1426,7 @@ fn debug_tree(document: &Document) -> String {
             continue;
         };
         output.push_str(&"  ".repeat(depth));
-        write_kind(&mut output, &node.kind);
+        write_kind(&mut output, node.kind());
         output.push('\n');
         let children: Vec<_> = document.child_ids(id).collect();
         tasks.extend(
@@ -1088,7 +1440,8 @@ fn debug_tree(document: &Document) -> String {
 }
 
 #[cfg(test)]
-fn write_kind(output: &mut String, kind: &NodeKind) {
+fn write_kind(output: &mut String, kind: NodeKindView<'_>) {
+    use NodeKindView as NodeKind;
     use std::fmt::Write as _;
     match kind {
         NodeKind::Text(value) => write!(output, "Text({:?})", value.as_str()).unwrap(),
