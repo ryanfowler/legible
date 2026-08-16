@@ -43,6 +43,7 @@ impl NodeFacts {
 /// Sparse worklists built during the shared preorder scan.
 #[derive(Default)]
 pub(super) struct FeatureInventory {
+    pub(super) owned_code_sources: Vec<(NodeId, NodeId)>,
     pub(super) headings: Vec<NodeId>,
     pub(super) fragment_links: Vec<NodeId>,
     pub(super) images: Vec<NodeId>,
@@ -813,6 +814,16 @@ impl SemanticFacts {
             let Some(tag) = dom.tag(node) else {
                 continue;
             };
+            let is_code_block = source_facts.map_or_else(
+                || {
+                    tag == Tag::Pre
+                        || tag == Tag::Code && super::code::is_multiline_orphan(dom, node)
+                },
+                |facts| facts.is_code_block(node),
+            );
+            if is_code_block && let Some(source) = super::code::owned_source_candidate(dom, node) {
+                inventory.owned_code_sources.push((node, source));
+            }
             let level = heading_level(dom, node).unwrap_or(0);
             facts[node.index()].heading_level = level;
             if level != 0 {

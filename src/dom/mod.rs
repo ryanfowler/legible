@@ -38,6 +38,20 @@ mod tests {
     }
 
     #[test]
+    fn owned_payloads_can_move_text() {
+        let mut dom = Dom::parse_fragment("<p title='payload'>large source</p>", Tag::Div).unwrap();
+        let paragraph = dom.first_descendant_by_tag(dom.root(), Tag::P).unwrap();
+        let text = dom.first_child(paragraph).unwrap();
+
+        let moved_text = dom.take_text(text).unwrap();
+
+        assert_eq!(moved_text.as_ref(), "large source");
+        assert_eq!(dom.text_node(text), Some(""));
+        assert_eq!(dom.attr(paragraph, AttrName::Title), Some("payload"));
+        dom.validate().unwrap();
+    }
+
+    #[test]
     fn mutation_preserves_links_and_ids() {
         let mut dom = Dom::parse_document("<div id=a><p>one</p><p>two</p></div>").unwrap();
         let root = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();

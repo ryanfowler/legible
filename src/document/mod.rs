@@ -210,6 +210,7 @@ pub(crate) fn table_normalization_counts(
 
 use std::fmt;
 use std::sync::OnceLock;
+use tendril::StrTendril;
 
 /// An index into a [`Document`] semantic tape.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -541,7 +542,7 @@ impl Document {
     pub(crate) fn semantic_string_bytes(&self) -> usize {
         std::iter::once(self.text.capacity())
             .chain(self.code_blocks.iter().flat_map(|value| {
-                std::iter::once(value.text.len()).chain(value.language.iter().map(|s| s.len()))
+                std::iter::once(value.text_len()).chain(value.language.iter().map(|s| s.len()))
             }))
             .chain(self.links.iter().flat_map(|value| {
                 std::iter::once(value.destination.len()).chain(value.title.iter().map(|s| s.len()))
@@ -874,8 +875,7 @@ impl NodeKind {
         match self {
             Self::Text(_) | Self::InlineCode(_) => 0,
             Self::CodeBlock(code) => code
-                .text
-                .len()
+                .text_len()
                 .saturating_add(optional_boxed_str_len(&code.language)),
             Self::Link(link) => link
                 .destination
@@ -904,7 +904,7 @@ impl NodeKind {
         match self {
             Self::Text(_) | Self::InlineCode(_) => 0,
             Self::CodeBlock(code) => {
-                optional_boxed_str_len(&code.language).saturating_add(code.text.len())
+                optional_boxed_str_len(&code.language).saturating_add(code.text_len())
             }
             Self::Link(link) => link
                 .destination
@@ -1025,9 +1025,33 @@ impl TextRef {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RawCodeText {
+    Owned(Box<str>),
+    Source(StrTendril),
+}
+
+impl From<&str> for RawCodeText {
+    fn from(value: &str) -> Self {
+        Self::Owned(value.into())
+    }
+}
+
+impl From<String> for RawCodeText {
+    fn from(value: String) -> Self {
+        Self::Owned(value.into_boxed_str())
+    }
+}
+
+impl From<StrTendril> for RawCodeText {
+    fn from(value: StrTendril) -> Self {
+        Self::Source(value)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodeBlock {
     pub(crate) language: Option<Box<str>>,
-    pub(crate) text: Box<str>,
+    pub(crate) text: RawCodeText,
 }
 
 impl CodeBlock {
@@ -1038,7 +1062,14 @@ impl CodeBlock {
 
     /// Returns the normalized preformatted code.
     pub fn text(&self) -> &str {
-        &self.text
+        match &self.text {
+            RawCodeText::Owned(text) => text,
+            RawCodeText::Source(text) => text.as_ref(),
+        }
+    }
+
+    pub(crate) fn text_len(&self) -> usize {
+        self.text().len()
     }
 }
 
@@ -1506,7 +1537,8 @@ fn write_kind(output: &mut String, kind: NodeKindView<'_>) {
         NodeKind::CodeBlock(code) => write!(
             output,
             "CodeBlock(language={:?}, text={:?})",
-            code.language, code.text
+            code.language,
+            code.text()
         )
         .unwrap(),
         NodeKind::List(list) => {

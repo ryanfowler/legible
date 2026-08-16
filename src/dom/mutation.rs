@@ -124,6 +124,18 @@ impl Dom {
             *value = StrTendril::from(text);
         }
     }
+
+    /// Moves a text node's source buffer out of the DOM.
+    ///
+    /// Owned semantic lowering uses this only after source analysis is
+    /// complete. The empty replacement keeps the node valid for any
+    /// diagnostics that inspect the consumed fragment before it is dropped.
+    pub(crate) fn take_text(&mut self, node: NodeId) -> Option<StrTendril> {
+        match &mut self.node_mut(node).data {
+            NodeData::Text(value) => Some(std::mem::replace(value, StrTendril::new())),
+            _ => None,
+        }
+    }
     pub(crate) fn rename_html(&mut self, node: NodeId, tag: Tag) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.tag = tag;
@@ -146,6 +158,7 @@ impl Dom {
             }
         }
     }
+
     pub(crate) fn set_attr_qual(&mut self, node: NodeId, name: QualName, value: StrTendril) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             if let Some(a) = e.attrs.iter_mut().find(|a| a.name == name) {
