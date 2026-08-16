@@ -4,6 +4,7 @@ use url::Url;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
+use super::sparse::{SparseNodeSet, SparseNodeValues};
 use super::{DestinationKind, safe_destination};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,17 +21,31 @@ struct Candidate<'a> {
 }
 
 pub(crate) struct ImageAnalysis {
-    pub(super) sources: Vec<Option<Box<str>>>,
-    synthetic: Vec<bool>,
+    sources: SparseNodeValues<Box<str>>,
+    synthetic: SparseNodeSet,
 }
 
 impl ImageAnalysis {
     pub(crate) fn source(&self, node: NodeId) -> Option<&str> {
-        self.sources.get(node.index()).and_then(Option::as_deref)
+        self.sources.get(node).map(|source| source.as_ref())
     }
 
     pub(crate) fn is_synthetic(&self, node: NodeId) -> bool {
-        self.synthetic.get(node.index()).copied().unwrap_or(false)
+        self.synthetic.contains(node)
+    }
+
+    pub(crate) fn into_sources(self, node_count: usize) -> Vec<Option<Box<str>>> {
+        let mut sources = (0..node_count).map(|_| None).collect::<Vec<_>>();
+        for (node, source) in self.sources.into_iter() {
+            sources[node.index()] = Some(source);
+        }
+        sources
+    }
+
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.sources
+            .allocated_bytes()
+            .saturating_add(self.synthetic.allocated_bytes())
     }
 }
 
@@ -59,8 +74,8 @@ fn analyze_inner(
 ) -> ImageAnalysis {
     if !has_candidates {
         return ImageAnalysis {
-            sources: Vec::new(),
-            synthetic: Vec::new(),
+            sources: SparseNodeValues::new(),
+            synthetic: SparseNodeSet::new(),
         };
     }
     let mut nearest_picture = vec![None; dom.len()];
@@ -93,26 +108,42 @@ fn analyze_inner(
                 .any(|child| descendant_images[child.index()]);
     }
 
-    let mut sources = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
-    let mut synthetic = vec![false; dom.len()];
+    let mut sources = SparseNodeValues::with_capacity(
+        nodes
+            .iter()
+            .filter(|&&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure)))
+            .count(),
+    );
+    let mut synthetic_nodes = Vec::new();
     for &node in nodes {
-        match dom.tag(node) {
-            Some(Tag::Img) => {
-                sources[node.index()] = nearest_picture[node.index()]
-                    .and_then(|picture| picture_sources[picture.index()].clone())
-                    .or_else(|| select_node_source(dom, node, base_url));
-            }
+        let source = match dom.tag(node) {
+            Some(Tag::Img) => nearest_picture[node.index()]
+                .and_then(|picture| picture_sources[picture.index()].clone())
+                .or_else(|| select_node_source(dom, node, base_url)),
             Some(Tag::Picture | Tag::Figure) if !descendant_images[node.index()] => {
-                sources[node.index()] = if dom.tag(node) == Some(Tag::Picture) {
+                let source = if dom.tag(node) == Some(Tag::Picture) {
                     picture_sources[node.index()].clone()
                 } else {
                     select_node_source(dom, node, base_url)
                 };
-                synthetic[node.index()] = sources[node.index()].is_some();
+                if source.is_some() {
+                    synthetic_nodes.push(node);
+                }
+                source
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(source) = source {
+            sources.push(node, source);
         }
     }
+    sources.sort();
+    sources.build_dense_index_if_dense(dom.len());
+    let mut synthetic = SparseNodeSet::with_capacity(synthetic_nodes.len());
+    for node in synthetic_nodes {
+        synthetic.push(node);
+    }
+    synthetic.sort();
     ImageAnalysis { sources, synthetic }
 }
 

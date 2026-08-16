@@ -11,6 +11,8 @@ use super::{
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 
+use super::sparse::SparseNodeSet;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompileContext {
     base_url: Option<Url>,
@@ -119,6 +121,16 @@ struct TableAnalysis {
     current_width: u32,
     maximum_width: u32,
     has_rowspan: bool,
+}
+
+struct OpenTable {
+    node: DocumentNodeId,
+    analysis: TableAnalysis,
+}
+
+struct DeferredCaption {
+    node: NodeId,
+    scope: Scope,
 }
 
 /// Compiles the children of a retained source root into semantic nodes.
@@ -233,6 +245,8 @@ fn compile_document_owned_impl(
 struct ComplexSourceAnalysis {
     facts: super::facts::SemanticFacts,
     images: super::images::ImageAnalysis,
+    // These flags are queried for every source node during lowering. Keep the
+    // dense form because sparse lookups were slower on the complex benchmarks.
     figures: Vec<bool>,
     captions: Vec<bool>,
     media: super::media::MediaAnalysis,
@@ -241,8 +255,50 @@ struct ComplexSourceAnalysis {
     callouts: super::callouts::CalloutAnalysis,
     footnotes: super::footnotes::FootnoteAnalysis,
     math: super::math::MathAnalysis,
-    media_separators: Vec<bool>,
-    text_after_media_separators: Vec<bool>,
+    media_separators: SparseNodeSet,
+    text_after_media_separators: SparseNodeSet,
+}
+
+/// Capacity evidence for the analysis state held immediately before lowering.
+/// This is benchmark-only evidence. It excludes allocator metadata and the
+/// short-lived parser and cleanup buffers.
+pub(crate) struct ComplexStorageMetrics {
+    pub(crate) source_nodes: usize,
+    pub(crate) lowering_passes: usize,
+    pub(crate) conditional_separator_passes: usize,
+    pub(crate) dense_bytes: usize,
+    pub(crate) sparse_bytes: usize,
+}
+
+pub(crate) fn complex_storage_metrics_for_benchmark(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    source_facts: Option<&super::facts::SemanticSourceFacts>,
+    source_evidence: &super::facts::SourceEvidence,
+) -> ComplexStorageMetrics {
+    let analysis = analyze_complex_document(dom, root, context, source_facts, source_evidence);
+    let dense_bytes = analysis
+        .figures
+        .capacity()
+        .saturating_add(analysis.captions.capacity())
+        .saturating_mul(std::mem::size_of::<bool>());
+    let sparse_bytes = analysis
+        .images
+        .storage_bytes()
+        .saturating_add(analysis.media.storage_bytes())
+        .saturating_add(analysis.callouts.storage_bytes())
+        .saturating_add(analysis.footnotes.storage_bytes())
+        .saturating_add(analysis.math.storage_bytes())
+        .saturating_add(analysis.media_separators.allocated_bytes())
+        .saturating_add(analysis.text_after_media_separators.allocated_bytes());
+    ComplexStorageMetrics {
+        source_nodes: analysis.facts.nodes().len(),
+        lowering_passes: 1,
+        conditional_separator_passes: usize::from(!analysis.media.is_empty()),
+        dense_bytes,
+        sparse_bytes,
+    }
 }
 
 fn compile_complex_document(
@@ -305,7 +361,7 @@ fn analyze_complex_document(
         });
     }
     let (media_separators, text_after_media_separators) = if media.is_empty() {
-        (vec![false; dom.len()], vec![false; dom.len()])
+        (SparseNodeSet::new(), SparseNodeSet::new())
     } else {
         media_separators(dom, root, &media)
     };
@@ -348,9 +404,9 @@ fn lower_complex_document(
     } = analysis;
     let mut builder = SemanticTapeBuilder::with_capacity(facts.nodes().len());
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
-    let mut table_layouts = HashMap::<DocumentNodeId, TableAnalysis>::new();
+    let mut open_tables: Vec<OpenTable> = Vec::new();
     let mut deferred_footnote_group = None;
-    let mut deferred_captions = HashMap::<DocumentNodeId, Vec<(NodeId, Scope)>>::new();
+    let mut deferred_captions = HashMap::<DocumentNodeId, Vec<DeferredCaption>>::new();
     let scope = Scope {
         parent: None,
         list: None,
@@ -362,7 +418,7 @@ fn lower_complex_document(
         link: None,
         preserve_isolated_whitespace: false,
     };
-    let deferred_nodes: Vec<_> = facts
+    let mut tasks = facts
         .nodes()
         .iter()
         .filter_map(|&node| {
@@ -371,9 +427,6 @@ fn lower_complex_document(
                 .filter(|_| footnotes.is_deferred(node))
                 .map(|label| (node, label))
         })
-        .collect();
-    let mut tasks = deferred_nodes
-        .into_iter()
         .rev()
         .enumerate()
         .map(|(reverse_index, (node, label))| Task::DeferredFootnote {
@@ -412,13 +465,17 @@ fn lower_complex_document(
                 }
                 Task::Close { node } => {
                     builder.close(node)?;
+                    if let Some(table) = open_tables.pop_if(|table| table.node == node)
+                        && let Some(value) = builder.table_mut(table.node)
+                    {
+                        value.column_count =
+                            (!table.analysis.has_rowspan).then_some(table.analysis.maximum_width);
+                    }
                     if let Some(captions) = deferred_captions.remove(&node) {
-                        tasks.extend(
-                            captions
-                                .into_iter()
-                                .rev()
-                                .map(|(node, scope)| Task::Node { node, scope }),
-                        );
+                        tasks.extend(captions.into_iter().rev().map(|caption| Task::Node {
+                            node: caption.node,
+                            scope: caption.scope,
+                        }));
                     }
                 }
                 Task::Listing { list, plan, scope } => {
@@ -535,7 +592,10 @@ fn lower_complex_document(
             deferred_captions
                 .entry(wrapper)
                 .or_default()
-                .push((node, deferred_scope));
+                .push(DeferredCaption {
+                    node,
+                    scope: deferred_scope,
+                });
             continue;
         }
         let heading_permalink = facts.is_heading_permalink(node);
@@ -572,7 +632,7 @@ fn lower_complex_document(
             if !whitespace_only
                 && !text.chars().next().is_some_and(char::is_whitespace)
                 && (inline_word_boundary_before(dom, node, &facts)
-                    || text_after_media_separators[node.index()])
+                    || text_after_media_separators.contains(node))
             {
                 builder.append_normalized_prose(scope.parent, " ")?;
             }
@@ -767,7 +827,7 @@ fn lower_complex_document(
         }
         if matches!(tag, Tag::Iframe | Tag::Video | Tag::Audio) {
             if let Some(media) = media.item(node) {
-                if media_separators[node.index()] {
+                if media_separators.contains(node) {
                     builder.append_normalized_prose(scope.parent, " ")?;
                 }
                 builder.append(
@@ -972,23 +1032,30 @@ fn lower_complex_document(
             Tag::Table => {
                 next_scope.table = Some(semantic_node);
                 next_scope.row = None;
-                table_layouts.insert(semantic_node, TableAnalysis::default());
+                open_tables.push(OpenTable {
+                    node: semantic_node,
+                    analysis: TableAnalysis::default(),
+                });
             }
             Tag::Tr => {
                 next_scope.row = Some(semantic_node);
                 if let Some(table) = scope.table {
-                    table_layouts
-                        .get_mut(&table)
+                    open_tables
+                        .last_mut()
+                        .filter(|entry| entry.node == table)
                         .expect("semantic table scope has an analysis")
+                        .analysis
                         .current_width = 0;
                 }
             }
             Tag::Td | Tag::Th => {
                 if let Some(table) = scope.table {
                     let (colspan, rowspan) = cell_span.unwrap_or((1, 1));
-                    let analysis = table_layouts
-                        .get_mut(&table)
-                        .expect("semantic table scope has an analysis");
+                    let analysis = &mut open_tables
+                        .last_mut()
+                        .filter(|entry| entry.node == table)
+                        .expect("semantic table scope has an analysis")
+                        .analysis;
                     analysis.current_width = analysis
                         .current_width
                         .checked_add(colspan)
@@ -1032,11 +1099,6 @@ fn lower_complex_document(
         }
     }
 
-    for (table, analysis) in table_layouts {
-        if let Some(value) = builder.table_mut(table) {
-            value.column_count = (!analysis.has_rowspan).then_some(analysis.maximum_width);
-        }
-    }
     let document = builder.finish();
     #[cfg(any(test, debug_assertions))]
     document.validate()?;
@@ -1047,7 +1109,7 @@ fn media_separators(
     dom: &Dom,
     root: NodeId,
     media: &super::media::MediaAnalysis,
-) -> (Vec<bool>, Vec<bool>) {
+) -> (SparseNodeSet, SparseNodeSet) {
     enum Visit {
         Node(NodeId),
         EndBlock,
@@ -1059,8 +1121,8 @@ fn media_separators(
         Media,
     }
 
-    let mut before_media = vec![false; dom.len()];
-    let mut after_media = vec![false; dom.len()];
+    let mut before_media = SparseNodeSet::new();
+    let mut after_media = SparseNodeSet::new();
     let mut previous = PreviousInline::None;
     let mut tasks = Vec::new();
     tasks.extend(dom.children_rev(root).map(Visit::Node));
@@ -1071,7 +1133,9 @@ fn media_separators(
         };
         if let Some(text) = dom.text_node(node) {
             let starts_word = text.chars().next().is_some_and(char::is_alphanumeric);
-            after_media[node.index()] = matches!(previous, PreviousInline::Media) && starts_word;
+            if matches!(previous, PreviousInline::Media) && starts_word {
+                after_media.push(node);
+            }
             previous = if text.chars().last().is_some_and(char::is_alphanumeric) {
                 PreviousInline::Word
             } else {
@@ -1083,8 +1147,9 @@ fn media_separators(
             continue;
         };
         if media.item(node).is_some() {
-            before_media[node.index()] =
-                matches!(previous, PreviousInline::Word | PreviousInline::Media);
+            if matches!(previous, PreviousInline::Word | PreviousInline::Media) {
+                before_media.push(node);
+            }
             previous = PreviousInline::Media;
             continue;
         }
@@ -1096,6 +1161,10 @@ fn media_separators(
         }
         tasks.extend(dom.children_rev(node).map(Visit::Node));
     }
+    before_media.sort();
+    after_media.sort();
+    before_media.build_dense_index(dom.len());
+    after_media.build_dense_index(dom.len());
     (before_media, after_media)
 }
 

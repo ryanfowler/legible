@@ -1,5 +1,7 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
+use super::sparse::SparseNodeValues;
+
 #[derive(Clone, Debug)]
 pub(crate) struct RecognizedCallout {
     pub(crate) kind: &'static str,
@@ -9,16 +11,30 @@ pub(crate) struct RecognizedCallout {
 }
 
 pub(crate) struct CalloutAnalysis {
-    values: Vec<Option<RecognizedCallout>>,
+    values: SparseNodeValues<RecognizedCallout>,
+    bounded_text_bytes: usize,
 }
 
 impl CalloutAnalysis {
     pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], candidates: &[NodeId]) -> Self {
         if candidates.is_empty() {
-            return Self { values: Vec::new() };
+            return Self {
+                values: SparseNodeValues::new(),
+                bounded_text_bytes: 0,
+            };
         }
+        let mut values = SparseNodeValues::with_capacity(candidates.len());
         let labels = bounded_subtree_text(dom, nodes);
-        let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
+        let bounded_text_bytes = labels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Option<Box<str>>>())
+            .saturating_add(
+                labels
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .map(|value| value.len())
+                    .sum::<usize>(),
+            );
         for &node in candidates {
             let (structural, candidate_kind) = callout_evidence(dom, node);
             let Some(kind) = candidate_kind else {
@@ -26,8 +42,8 @@ impl CalloutAnalysis {
             };
             let title_node = dom.element_children(node).next();
             let explicit_name = title_node.is_some_and(|child| explicitly_named(dom, child));
-            let label = title_node
-                .and_then(|child| labels[child.index()].as_deref())
+            let title_text = title_node.and_then(|child| labels[child.index()].as_deref());
+            let label = title_text
                 .map(|text| text.trim().trim_end_matches(':'))
                 .filter(|text| explicit_name || text.len() <= 16);
             if !structural && !label.is_some_and(|label| canonical_kind(label) == Some(kind)) {
@@ -36,25 +52,39 @@ impl CalloutAnalysis {
             let explicit_title = title_node
                 .filter(|_| label.is_some_and(|label| canonical_kind(label) == Some(kind)));
             let title = explicit_title
-                .and_then(|title| labels[title.index()].as_deref())
+                .and(title_text)
                 .map(|title| title.trim().trim_end_matches(':').to_owned())
                 .unwrap_or_else(|| title_case(kind));
             let title_is_strong = explicit_title.is_some_and(|title| {
                 dom.element_children(title)
                     .any(|child| matches!(dom.tag(child), Some(Tag::Strong | Tag::B)))
             });
-            values[node.index()] = Some(RecognizedCallout {
-                kind,
-                title: title.into(),
-                title_node: explicit_title,
-                title_is_strong,
-            });
+            values.push(
+                node,
+                RecognizedCallout {
+                    kind,
+                    title: title.into(),
+                    title_node: explicit_title,
+                    title_is_strong,
+                },
+            );
         }
-        Self { values }
+        values.sort();
+        values.build_dense_index_if_dense(dom.len());
+        Self {
+            values,
+            bounded_text_bytes,
+        }
     }
 
     pub(crate) fn value(&self, node: NodeId) -> Option<&RecognizedCallout> {
-        self.values.get(node.index()).and_then(Option::as_ref)
+        self.values.get(node)
+    }
+
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.values
+            .allocated_bytes()
+            .saturating_add(self.bounded_text_bytes)
     }
 }
 
@@ -141,7 +171,7 @@ fn title_case(kind: &str) -> String {
     title
 }
 
-/// Computes a bounded normalized text prefix for every subtree in one reverse pass.
+/// Computes bounded normalized text prefixes for every subtree in one pass.
 fn bounded_subtree_text(dom: &Dom, nodes: &[NodeId]) -> Vec<Option<Box<str>>> {
     const LIMIT: usize = 32;
     let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();

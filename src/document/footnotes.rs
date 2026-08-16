@@ -2,6 +2,8 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
+use super::sparse::SparseNodeValues;
+
 #[derive(Clone)]
 struct Reference {
     node: NodeId,
@@ -17,8 +19,10 @@ struct Definition {
 }
 
 pub(crate) struct FootnoteAnalysis {
-    references: Vec<Option<Box<str>>>,
-    definitions: Vec<Option<Box<str>>>,
+    references: SparseNodeValues<Box<str>>,
+    definitions: SparseNodeValues<Box<str>>,
+    reference_slots: Vec<u32>,
+    definition_slots: Vec<u32>,
     skipped: Vec<bool>,
     deferred: Vec<bool>,
     trim_start: Vec<bool>,
@@ -47,8 +51,10 @@ impl FootnoteAnalysis {
 
     fn empty() -> Self {
         Self {
-            references: Vec::new(),
-            definitions: Vec::new(),
+            references: SparseNodeValues::new(),
+            definitions: SparseNodeValues::new(),
+            reference_slots: Vec::new(),
+            definition_slots: Vec::new(),
             skipped: Vec::new(),
             deferred: Vec::new(),
             trim_start: Vec::new(),
@@ -115,14 +121,16 @@ impl FootnoteAnalysis {
                     .filter_map(|node| dom.attr(node, AttrName::Id).map(str::to_owned))
             })
             .collect();
-        let mut semantic_references: Vec<Option<Box<str>>> = (0..dom.len()).map(|_| None).collect();
-        let mut semantic_definitions: Vec<Option<Box<str>>> =
-            (0..dom.len()).map(|_| None).collect();
+        let mut semantic_references: SparseNodeValues<Box<str>> =
+            SparseNodeValues::with_capacity(references.len());
+        let mut semantic_definitions: SparseNodeValues<Box<str>> =
+            SparseNodeValues::with_capacity(definitions.len());
+        let mut selected_definitions = vec![false; dom.len()];
         let mut skipped = vec![false; dom.len()];
         let mut deferred = vec![false; dom.len()];
-        for reference in references {
+        for reference in &references {
             if let Some(label) = labels.get(&reference.key) {
-                semantic_references[reference.node.index()] = Some(label.clone().into());
+                semantic_references.push(reference.node, label.clone().into());
             }
         }
         for (index, definition) in definitions.iter().enumerate() {
@@ -133,7 +141,8 @@ impl FootnoteAnalysis {
             let Some(label) = labels.get(&definition.key) else {
                 continue;
             };
-            semantic_definitions[definition.node.index()] = Some(label.clone().into());
+            semantic_definitions.push(definition.node, label.clone().into());
+            selected_definitions[definition.node.index()] = true;
             deferred[definition.node.index()] = definition.inline;
             mark_definition_chrome(dom, definition, label, &reference_ids, &mut skipped);
         }
@@ -142,11 +151,10 @@ impl FootnoteAnalysis {
         let mut transparent = vec![false; dom.len()];
         for definition in definitions
             .iter()
-            .filter(|definition| semantic_definitions[definition.node.index()].is_some())
+            .filter(|definition| selected_definitions[definition.node.index()])
         {
             for child in dom.element_children(definition.node) {
-                if dom.tag(child) == Some(Tag::Div) && semantic_definitions[child.index()].is_none()
-                {
+                if dom.tag(child) == Some(Tag::Div) && !selected_definitions[child.index()] {
                     transparent[child.index()] = true;
                 }
             }
@@ -154,7 +162,7 @@ impl FootnoteAnalysis {
         let mut trim_start = vec![false; dom.len()];
         for definition in definitions
             .iter()
-            .filter(|definition| semantic_definitions[definition.node.index()].is_some())
+            .filter(|definition| selected_definitions[definition.node.index()])
         {
             if let Some(text) = dom.descendants(definition.node).find(|&node| {
                 dom.text_node(node).is_some()
@@ -166,14 +174,20 @@ impl FootnoteAnalysis {
                 trim_start[text.index()] = true;
             }
         }
+        semantic_references.sort();
+        semantic_definitions.sort();
+        let reference_slots = dense_slots(&semantic_references, dom.len());
+        let definition_slots = dense_slots(&semantic_definitions, dom.len());
+
         let available = semantic_definitions
             .iter()
-            .flatten()
-            .map(|label| label.to_string())
+            .map(|(_, label)| label.to_string())
             .collect();
         Self {
             references: semantic_references,
             definitions: semantic_definitions,
+            reference_slots,
+            definition_slots,
             skipped,
             deferred,
             trim_start,
@@ -183,13 +197,15 @@ impl FootnoteAnalysis {
     }
 
     pub(crate) fn reference(&self, node: NodeId) -> Option<&str> {
-        self.references.get(node.index()).and_then(Option::as_deref)
+        sparse_slot(&self.reference_slots, node)
+            .and_then(|slot| self.references.get_at(slot))
+            .map(|label| label.as_ref())
     }
 
     pub(crate) fn definition(&self, node: NodeId) -> Option<&str> {
-        self.definitions
-            .get(node.index())
-            .and_then(Option::as_deref)
+        sparse_slot(&self.definition_slots, node)
+            .and_then(|slot| self.definitions.get_at(slot))
+            .map(|label| label.as_ref())
     }
 
     pub(crate) fn is_skipped(&self, node: NodeId) -> bool {
@@ -211,6 +227,39 @@ impl FootnoteAnalysis {
     pub(crate) fn has_definition(&self, label: &str) -> bool {
         self.available.contains(label)
     }
+
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.references
+            .allocated_bytes()
+            .saturating_add(self.definitions.allocated_bytes())
+            .saturating_add(
+                self.reference_slots
+                    .capacity()
+                    .saturating_add(self.definition_slots.capacity())
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(
+                self.skipped
+                    .capacity()
+                    .saturating_add(self.deferred.capacity())
+                    .saturating_add(self.trim_start.capacity())
+                    .saturating_add(self.transparent.capacity())
+                    .saturating_mul(std::mem::size_of::<bool>()),
+            )
+    }
+}
+
+fn dense_slots<T>(values: &SparseNodeValues<T>, length: usize) -> Vec<u32> {
+    let mut slots = vec![u32::MAX; length];
+    for (slot, (node, _)) in values.iter().enumerate() {
+        slots[node.index()] = slot as u32;
+    }
+    slots
+}
+
+fn sparse_slot(slots: &[u32], node: NodeId) -> Option<usize> {
+    let slot = *slots.get(node.index())?;
+    (slot != u32::MAX).then_some(slot as usize)
 }
 
 pub(crate) fn has_possible_footnote_evidence(dom: &Dom, node: NodeId) -> bool {

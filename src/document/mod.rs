@@ -19,6 +19,7 @@ mod lists;
 mod math;
 mod media;
 mod ordinary;
+mod sparse;
 pub(crate) mod stats;
 mod tables;
 mod text;
@@ -41,6 +42,7 @@ pub(crate) use compiler::{
     compile_document_owned_with_optional_source_facts_and_evidence,
     compile_document_with_optional_source_facts,
     compile_document_with_optional_source_facts_and_evidence,
+    complex_storage_metrics_for_benchmark,
 };
 pub(crate) use facts::{SemanticGate, SemanticSourceFacts, SourceEvidence};
 pub(crate) use footnotes::{
@@ -60,7 +62,8 @@ pub(crate) fn selected_image_sources_for_cleanup(
     dom: &crate::dom::Dom,
     nodes: &[crate::dom::NodeId],
 ) -> Vec<Option<Box<str>>> {
-    images::analyze(dom, nodes, None).sources
+    let analysis = images::analyze(dom, nodes, None);
+    analysis.into_sources(dom.len())
 }
 pub(crate) use stats::DocumentStats;
 pub(crate) fn semantic_source_is_protected(

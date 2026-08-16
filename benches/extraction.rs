@@ -47,6 +47,9 @@ fn benchmark_page(kind: &str, target_bytes: usize) -> String {
             "math" => html.push_str(&format!(
                 "<section><h2>Equation {index}</h2><p>The result follows from <math><mfrac><mi>x</mi><mn>{index}</mn></mfrac></math>.</p><div class='katex'><math aria-hidden='true'><msup><mi>x</mi><mn>2</mn></msup></math><span class='katex-html'>x²</span></div></section>"
             )),
+            "media" => html.push_str(&format!(
+                "<section><h2>Media {index}</h2><p>Supporting context surrounds an embedded resource.</p><iframe src='https://example.com/embed/{index}' title='Example video'></iframe><p>More context follows the media element.</p></section>"
+            )),
             "code" => html.push_str(&format!(
                 "<section><h2>Example {index}</h2><div class='highlight language-rust'><div class='toolbar'><button>Copy</button></div><pre><code><span class='line'><span class='line-number'>{index}</span><span>fn example_{index}() {{</span></span><br><span class='line'>    println!(\"value {index}\");</span><br><span class='line'>}}</span></code></pre></div></section>"
             )),
@@ -260,6 +263,22 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
         let source_evidence =
             document::SourceEvidence::analyze(&dom, root, &dom::NodeStateStore::new());
         let source_facts = document::SemanticSourceFacts::analyze(&dom, root);
+        let storage = document::complex_storage_metrics_for_benchmark(
+            &dom,
+            root,
+            &context,
+            Some(&source_facts),
+            &source_evidence,
+        );
+        eprintln!(
+            "complex-storage/{name}: source_nodes={}, lowering_passes={}, conditional_separator_passes={}, dense_bytes={}, sparse_bytes={}, tracked_analysis_bytes={}",
+            storage.source_nodes,
+            storage.lowering_passes,
+            storage.conditional_separator_passes,
+            storage.dense_bytes,
+            storage.sparse_bytes,
+            storage.dense_bytes.saturating_add(storage.sparse_bytes),
+        );
         let document = document::compile_document_with_optional_source_facts_and_evidence(
             &dom,
             root,
@@ -437,6 +456,7 @@ fn bench_complex_pages(c: &mut Criterion) {
         ("footnotes-reference", "footnotes", "https://example.com"),
         ("highlighted-code", "code", "https://example.com"),
         ("math", "math", "https://example.com"),
+        ("media-heavy", "media", "https://example.com"),
         ("table-heavy", "tables", "https://example.com"),
         ("listing", "listing", "https://example.com"),
         ("malformed", "malformed", "https://example.com"),
