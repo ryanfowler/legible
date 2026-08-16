@@ -1,5 +1,123 @@
-use super::{Document, DocumentNodeId, NodeKindView as NodeKind};
+use super::{
+    Document, DocumentNodeId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, NodeKind as OwnedNodeKind,
+    NodeKindView as NodeKind,
+};
 use smallvec::SmallVec;
+
+/// Structural measurements collected while semantic operations are emitted.
+///
+/// These values do not depend on output rendering. Keeping them beside the
+/// tape avoids a second semantic traversal when callers request a count.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CompileStats {
+    pub paragraph_count: usize,
+    pub heading_count: usize,
+    pub list_item_count: usize,
+    pub code_block_count: usize,
+    pub table_count: usize,
+    pub figure_count: usize,
+    pub image_count: usize,
+    pub footnote_reference_count: usize,
+    pub footnote_definition_count: usize,
+    pub math_count: usize,
+    pub structured_block_count: usize,
+    pub has_contextual_structure: bool,
+    pub semantic_text_bytes: usize,
+    pub raw_code_bytes: usize,
+}
+
+impl CompileStats {
+    pub(crate) fn record_kind(&mut self, kind: &OwnedNodeKind) {
+        match kind {
+            OwnedNodeKind::Paragraph => self.paragraph_count += 1,
+            OwnedNodeKind::Heading { .. } => self.heading_count += 1,
+            OwnedNodeKind::ListItem => self.list_item_count += 1,
+            OwnedNodeKind::CodeBlock(code) => {
+                self.code_block_count += 1;
+                self.structured_block_count += 1;
+                self.has_contextual_structure = true;
+                self.raw_code_bytes = self.raw_code_bytes.saturating_add(code.text.len());
+            }
+            OwnedNodeKind::Table(_) => {
+                self.table_count += 1;
+                self.structured_block_count += 1;
+            }
+            OwnedNodeKind::TableCell(cell) => {
+                self.has_contextual_structure |= cell.header;
+            }
+            OwnedNodeKind::Figure => {
+                self.figure_count += 1;
+                self.structured_block_count += 1;
+            }
+            OwnedNodeKind::Image(_) => self.image_count += 1,
+            OwnedNodeKind::FootnoteReference(_) => self.footnote_reference_count += 1,
+            OwnedNodeKind::FootnoteDefinition(_) => self.footnote_definition_count += 1,
+            OwnedNodeKind::InlineMath(_) | OwnedNodeKind::DisplayMath(_) => {
+                self.math_count += 1;
+                self.structured_block_count += 1;
+                self.has_contextual_structure = true;
+            }
+            OwnedNodeKind::BlockQuote
+            | OwnedNodeKind::Details
+            | OwnedNodeKind::DefinitionList
+            | OwnedNodeKind::List(_)
+            | OwnedNodeKind::Callout(_) => self.structured_block_count += 1,
+            _ => {}
+        }
+    }
+
+    pub(crate) fn add_semantic_text_bytes(&mut self, bytes: usize) {
+        self.semantic_text_bytes = self.semantic_text_bytes.saturating_add(bytes);
+    }
+}
+
+/// Text measurements that are expensive enough to compute lazily.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TextStats {
+    pub text_length: usize,
+    pub word_count: usize,
+    pub link_text_length: usize,
+    pub link_density: f64,
+    pub has_alphanumeric_text: bool,
+    pub alphabetic_chars: usize,
+    pub digit_chars: usize,
+}
+
+pub(crate) fn visibility_flags(kind: &OwnedNodeKind, text: Option<&str>) -> u8 {
+    match kind {
+        OwnedNodeKind::Text(_) | OwnedNodeKind::InlineCode(_) => {
+            visibility_flag(text.is_some_and(has_visible_inline_text), HAS_VISIBLE_TEXT)
+        }
+        OwnedNodeKind::CodeBlock(code) => {
+            visibility_flag(has_visible_inline_text(&code.text), HAS_VISIBLE_TEXT)
+        }
+        OwnedNodeKind::Image(image) => {
+            visibility_flag(has_visible_inline_text(&image.alt), HAS_VISIBLE_IMAGE)
+        }
+        OwnedNodeKind::TaskMarker(marker) => visibility_flag(
+            marker
+                .fallback_label
+                .as_deref()
+                .is_some_and(has_visible_inline_text),
+            HAS_VISIBLE_TEXT,
+        ),
+        OwnedNodeKind::InlineMath(_) | OwnedNodeKind::DisplayMath(_) | OwnedNodeKind::Media(_) => {
+            HAS_VISIBLE_TEXT
+        }
+        _ => 0,
+    }
+}
+
+fn visibility_flag(visible: bool, flag: u8) -> u8 {
+    if visible { flag } else { 0 }
+}
+
+pub(crate) fn has_visible_inline_text(text: &str) -> bool {
+    text.chars().any(|character| {
+        !character.is_whitespace()
+            && !matches!(character, '\u{00a0}' | '\u{200b}' | '\u{2060}' | '\u{feff}')
+    })
+}
 
 /// Measurements derived from the semantic document.
 ///
@@ -62,7 +180,7 @@ pub(crate) fn walk_text(
     preserve_line_breaks: bool,
     capacity: Option<usize>,
     collect_stats: bool,
-) -> (Option<String>, DocumentStats) {
+) -> (Option<String>, TextStats) {
     let roots: SmallVec<[_; 16]> = document.root_ids().collect();
     walk_text_from_roots(
         document,
@@ -81,7 +199,8 @@ pub(crate) fn render_document_text(document: &Document, capacity: usize) -> Stri
 }
 
 pub(crate) fn compute_document_stats(document: &Document) -> DocumentStats {
-    walk_text(document, false, false, None, true).1
+    let text = walk_text(document, false, false, None, true).1;
+    combine(document.compile_stats(), text)
 }
 
 pub(crate) fn render_node_text(document: &Document, root: DocumentNodeId) -> String {
@@ -97,7 +216,7 @@ fn walk_text_from_roots(
     preserve_line_breaks: bool,
     capacity: Option<usize>,
     collect_stats: bool,
-) -> (Option<String>, DocumentStats) {
+) -> (Option<String>, TextStats) {
     enum Task {
         Node(DocumentNodeId),
         Siblings(DocumentNodeId),
@@ -134,7 +253,6 @@ fn walk_text_from_roots(
         let Some(node) = document.node(id) else {
             continue;
         };
-        output.count(&node.kind());
         match node.kind() {
             NodeKind::Text(text) => output.text(text),
             NodeKind::CodeBlock(code) => {
@@ -294,21 +412,9 @@ struct NormalizedOutput {
     link_output: Option<LinkOutput>,
     link_text_length: usize,
     weighted_link_text_length: f64,
-    paragraph_count: usize,
-    heading_count: usize,
-    list_item_count: usize,
-    code_block_count: usize,
-    table_count: usize,
-    figure_count: usize,
-    image_count: usize,
-    footnote_reference_count: usize,
-    footnote_definition_count: usize,
-    math_count: usize,
-    structured_block_count: usize,
     has_alphanumeric_text: bool,
     alphabetic_chars: usize,
     digit_chars: usize,
-    has_contextual_structure: bool,
 }
 
 impl NormalizedOutput {
@@ -317,47 +423,6 @@ impl NormalizedOutput {
             output: capacity.map(String::with_capacity),
             collect_stats,
             ..Self::default()
-        }
-    }
-
-    fn count(&mut self, kind: &NodeKind) {
-        if !self.collect_stats {
-            return;
-        }
-        match kind {
-            NodeKind::Paragraph => self.paragraph_count += 1,
-            NodeKind::Heading { .. } => self.heading_count += 1,
-            NodeKind::ListItem => self.list_item_count += 1,
-            NodeKind::CodeBlock(_) => {
-                self.code_block_count += 1;
-                self.structured_block_count += 1;
-                self.has_contextual_structure = true;
-            }
-            NodeKind::Table(_) => {
-                self.table_count += 1;
-                self.structured_block_count += 1;
-            }
-            NodeKind::TableCell(cell) => {
-                self.has_contextual_structure |= cell.header;
-            }
-            NodeKind::Figure => {
-                self.figure_count += 1;
-                self.structured_block_count += 1;
-            }
-            NodeKind::Image(_) => self.image_count += 1,
-            NodeKind::FootnoteReference(_) => self.footnote_reference_count += 1,
-            NodeKind::FootnoteDefinition(_) => self.footnote_definition_count += 1,
-            NodeKind::InlineMath(_) | NodeKind::DisplayMath(_) => {
-                self.math_count += 1;
-                self.structured_block_count += 1;
-                self.has_contextual_structure = true;
-            }
-            NodeKind::BlockQuote
-            | NodeKind::Details
-            | NodeKind::DefinitionList
-            | NodeKind::List(_)
-            | NodeKind::Callout(_) => self.structured_block_count += 1,
-            _ => {}
         }
     }
 
@@ -550,10 +615,10 @@ impl NormalizedOutput {
         self.pending = Separator::None;
     }
 
-    fn finish(self) -> (Option<String>, DocumentStats) {
+    fn finish(self) -> (Option<String>, TextStats) {
         (
             self.output,
-            DocumentStats {
+            TextStats {
                 text_length: self.character_count,
                 word_count: self.word_count,
                 link_text_length: self.link_text_length,
@@ -562,23 +627,35 @@ impl NormalizedOutput {
                 } else {
                     (self.weighted_link_text_length / self.character_count as f64).clamp(0.0, 1.0)
                 },
-                paragraph_count: self.paragraph_count,
-                heading_count: self.heading_count,
-                list_item_count: self.list_item_count,
-                code_block_count: self.code_block_count,
-                table_count: self.table_count,
-                figure_count: self.figure_count,
-                image_count: self.image_count,
-                footnote_reference_count: self.footnote_reference_count,
-                footnote_definition_count: self.footnote_definition_count,
-                math_count: self.math_count,
-                structured_block_count: self.structured_block_count,
                 has_alphanumeric_text: self.has_alphanumeric_text,
                 alphabetic_chars: self.alphabetic_chars,
                 digit_chars: self.digit_chars,
-                has_contextual_structure: self.has_contextual_structure,
             },
         )
+    }
+}
+
+pub(crate) fn combine(compile: CompileStats, text: TextStats) -> DocumentStats {
+    DocumentStats {
+        text_length: text.text_length,
+        word_count: text.word_count,
+        link_text_length: text.link_text_length,
+        link_density: text.link_density,
+        paragraph_count: compile.paragraph_count,
+        heading_count: compile.heading_count,
+        list_item_count: compile.list_item_count,
+        code_block_count: compile.code_block_count,
+        table_count: compile.table_count,
+        figure_count: compile.figure_count,
+        image_count: compile.image_count,
+        footnote_reference_count: compile.footnote_reference_count,
+        footnote_definition_count: compile.footnote_definition_count,
+        math_count: compile.math_count,
+        structured_block_count: compile.structured_block_count,
+        has_alphanumeric_text: text.has_alphanumeric_text,
+        alphabetic_chars: text.alphabetic_chars,
+        digit_chars: text.digit_chars,
+        has_contextual_structure: compile.has_contextual_structure,
     }
 }
 

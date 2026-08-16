@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::OnceLock;
 
+use super::stats::{CompileStats, has_visible_inline_text, visibility_flags};
 use super::{
     Callout, CodeBlock, Document, DocumentNodeId, EventOp, FootnoteId, FootnoteRecord, Image, Link,
     List, MathValue, Media, NodeKind, OP_CLOSE, OperationKind, Table, TableCell, TaskMarker,
@@ -27,6 +28,7 @@ pub(crate) enum BuildError {
 /// operations and side tables, not this temporary tree.
 struct BuildNode {
     kind: NodeKind,
+    parent: Option<DocumentNodeId>,
     first_child: Option<DocumentNodeId>,
     next_sibling: Option<DocumentNodeId>,
 }
@@ -48,6 +50,7 @@ pub(crate) struct DocumentBuilder {
     footnotes: Vec<FootnoteRecord>,
     footnote_index: HashMap<FootnoteId, usize>,
     output_capacity_hint: usize,
+    compile_stats: CompileStats,
 }
 
 impl DocumentBuilder {
@@ -64,6 +67,7 @@ impl DocumentBuilder {
             footnotes: Vec::new(),
             footnote_index: HashMap::new(),
             output_capacity_hint: 0,
+            compile_stats: CompileStats::default(),
         }
     }
 
@@ -82,6 +86,7 @@ impl DocumentBuilder {
         if self.take_pending_space(parent) && is_inline_sibling(&kind) {
             self.append_pending_separator(parent)?;
         }
+        self.compile_stats.record_kind(&kind);
         self.append_raw(parent, kind)
     }
 
@@ -113,6 +118,7 @@ impl DocumentBuilder {
             .saturating_add(kind.output_capacity_hint());
         self.nodes.push(BuildNode {
             kind,
+            parent,
             first_child: None,
             next_sibling: None,
         });
@@ -185,6 +191,7 @@ impl DocumentBuilder {
         );
         self.nodes.push(BuildNode {
             kind: NodeKind::Text(text),
+            parent,
             first_child: None,
             next_sibling: Some(before),
         });
@@ -377,6 +384,7 @@ impl DocumentBuilder {
         }
         self.text.push_str(value);
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(length);
+        self.compile_stats.add_semantic_text_bytes(length);
         Ok(reference)
     }
 
@@ -404,6 +412,7 @@ impl DocumentBuilder {
         }
         self.text.push_str(value);
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(added);
+        self.compile_stats.add_semantic_text_bytes(added);
         Ok(reference)
     }
 
@@ -445,6 +454,7 @@ impl DocumentBuilder {
 
     pub(crate) fn finish(mut self) -> Document {
         let source_text = std::mem::take(&mut self.text);
+        let mut compile_stats = self.compile_stats;
         let source_node_count = self.nodes.len();
         let mut node_count = 0usize;
         let mut text = self
@@ -454,6 +464,7 @@ impl DocumentBuilder {
         let mut ends = Vec::with_capacity(source_node_count.saturating_mul(2));
         let mut roots = Vec::with_capacity(self.roots.len());
         let mut remap = vec![DocumentNodeId(0); source_node_count];
+        let mut visibility = Vec::with_capacity(source_node_count.saturating_mul(2));
         let mut payloads = PayloadTables::default();
         let mut last_text = None;
         let mut tasks = Vec::with_capacity(32);
@@ -462,6 +473,9 @@ impl DocumentBuilder {
         while let Some(task) = tasks.pop() {
             match task {
                 BuildTask::Enter(old_id) => {
+                    let parent = self.nodes[old_id.index()]
+                        .parent
+                        .and_then(|parent| remap.get(parent.index()).copied());
                     let kind = std::mem::replace(
                         &mut self.nodes[old_id.index()].kind,
                         NodeKind::BlockGroup,
@@ -478,15 +492,21 @@ impl DocumentBuilder {
                         &mut last_text,
                         kind,
                     );
+                    let flags = ops[new_id.index()].flags;
                     if ops.len() > previous_operations {
                         node_count += 1;
+                        visibility.push(ops[new_id.index()].flags);
+                    } else {
+                        visibility[new_id.index()] |= flags;
                     }
                     remap[old_id.index()] = new_id;
                     if is_container {
-                        tasks.push(BuildTask::Exit(new_id));
+                        tasks.push(BuildTask::Exit { new_id, parent });
                         if let Some(child) = self.nodes[old_id.index()].first_child {
                             tasks.push(BuildTask::Siblings(child));
                         }
+                    } else if let Some(parent) = parent {
+                        visibility[parent.index()] |= flags;
                     }
                 }
                 BuildTask::Siblings(old_id) => {
@@ -495,17 +515,23 @@ impl DocumentBuilder {
                     }
                     tasks.push(BuildTask::Enter(old_id));
                 }
-                BuildTask::Exit(open_id) => {
-                    let kind = ops[open_id.index()].opcode;
+                BuildTask::Exit { new_id, parent } => {
+                    let kind = ops[new_id.index()].opcode;
                     let close = u32::try_from(ops.len()).unwrap_or(u32::MAX);
+                    let flags = visibility[new_id.index()];
+                    ops[new_id.index()].flags = flags;
                     ops.push(EventOp {
-                        payload: open_id.0,
+                        payload: new_id.0,
                         aux: 0,
                         opcode: kind | OP_CLOSE,
-                        flags: 0,
+                        flags,
                     });
                     ends.push(0);
-                    ends[open_id.index()] = close;
+                    visibility.push(flags);
+                    ends[new_id.index()] = close;
+                    if let Some(parent) = parent {
+                        visibility[parent.index()] |= flags;
+                    }
                     last_text = None;
                 }
             }
@@ -540,6 +566,7 @@ impl DocumentBuilder {
             compact_excess_string(text);
         }
         let text = text.unwrap_or(source_text);
+        compile_stats.semantic_text_bytes = text.len();
         compact_excess_capacity(&mut ops);
         compact_excess_capacity(&mut ends);
         compact_excess_capacity(&mut roots);
@@ -575,7 +602,8 @@ impl DocumentBuilder {
             footnotes,
             node_count,
             output_capacity_hint: self.output_capacity_hint,
-            stats: OnceLock::new(),
+            compile_stats,
+            text_stats: OnceLock::new(),
         }
     }
 }
@@ -593,12 +621,15 @@ pub(crate) struct SemanticTapeBuilder {
     text: String,
     payloads: PayloadTables,
     last_children: Vec<Option<DocumentNodeId>>,
+    parents: Vec<Option<DocumentNodeId>>,
+    visibility: Vec<u8>,
     pending_spaces: Vec<bool>,
     pending_root_space: bool,
     footnotes: Vec<FootnoteRecord>,
     footnote_index: HashMap<FootnoteId, usize>,
     node_count: usize,
     output_capacity_hint: usize,
+    compile_stats: CompileStats,
 }
 
 impl SemanticTapeBuilder {
@@ -610,12 +641,15 @@ impl SemanticTapeBuilder {
             text: String::new(),
             payloads: PayloadTables::default(),
             last_children: Vec::with_capacity(capacity.saturating_mul(2)),
+            parents: Vec::with_capacity(capacity.saturating_mul(2)),
+            visibility: Vec::with_capacity(capacity.saturating_mul(2)),
             pending_spaces: Vec::with_capacity(capacity.saturating_mul(2)),
             pending_root_space: false,
             footnotes: Vec::new(),
             footnote_index: HashMap::new(),
             node_count: 0,
             output_capacity_hint: 0,
+            compile_stats: CompileStats::default(),
         }
     }
 
@@ -630,6 +664,7 @@ impl SemanticTapeBuilder {
         if self.take_pending_space(parent) && is_inline_sibling(&kind) {
             self.append_pending_separator(parent)?;
         }
+        self.compile_stats.record_kind(&kind);
         self.append_kind(parent, kind)
     }
 
@@ -700,16 +735,23 @@ impl SemanticTapeBuilder {
             return Err(BuildError::InvalidParent);
         }
         let close = u32::try_from(self.ops.len()).map_err(|_| BuildError::CapacityExceeded)?;
+        let flags = self.visibility[node.index()];
+        self.ops[node.index()].flags = flags;
         self.ops.push(EventOp {
             payload: node.0,
             aux: 0,
             opcode: operation.opcode | OP_CLOSE,
-            flags: 0,
+            flags,
         });
         self.ends.push(0);
         self.last_children.push(None);
+        self.parents.push(None);
+        self.visibility.push(flags);
         self.pending_spaces.push(false);
         self.ends[node.index()] = close;
+        if let Some(parent) = self.parents[node.index()] {
+            self.visibility[parent.index()] |= flags;
+        }
         Ok(())
     }
 
@@ -773,6 +815,7 @@ impl SemanticTapeBuilder {
     }
 
     pub(crate) fn finish(mut self) -> Document {
+        self.compile_stats.semantic_text_bytes = self.text.len();
         compact_excess_capacity(&mut self.ops);
         compact_excess_capacity(&mut self.ends);
         compact_excess_capacity(&mut self.roots);
@@ -824,7 +867,8 @@ impl SemanticTapeBuilder {
             footnotes,
             node_count: self.node_count,
             output_capacity_hint: self.output_capacity_hint,
-            stats: OnceLock::new(),
+            compile_stats: self.compile_stats,
+            text_stats: OnceLock::new(),
         }
     }
 
@@ -940,19 +984,64 @@ impl SemanticTapeBuilder {
             payload,
             aux,
             opcode: operation as u8,
-            flags: 0,
+            flags: self.operation_visibility(operation, payload),
         });
         self.ends
             .push(if operation.is_container() { 0 } else { index });
         self.last_children.push(None);
+        self.parents.push(parent);
+        let flags = self.ops[id.index()].flags;
+        self.visibility.push(flags);
         self.pending_spaces.push(false);
         self.node_count += 1;
         if let Some(parent) = parent {
             self.last_children[parent.index()] = Some(id);
+            if !operation.is_container() {
+                self.visibility[parent.index()] |= flags;
+            }
         } else {
             self.roots.push(id);
         }
         Ok(id)
+    }
+
+    fn operation_visibility(&self, operation: OperationKind, payload: u32) -> u8 {
+        match operation {
+            OperationKind::Text | OperationKind::InlineCode => self
+                .payloads
+                .text_refs
+                .get(payload as usize)
+                .map(|value| self.text_slice(*value))
+                .filter(|value| has_visible_inline_text(value))
+                .map(|_| super::HAS_VISIBLE_TEXT)
+                .unwrap_or_default(),
+            OperationKind::CodeBlock => self
+                .payloads
+                .code_blocks
+                .get(payload as usize)
+                .filter(|value| has_visible_inline_text(&value.text))
+                .map(|_| super::HAS_VISIBLE_TEXT)
+                .unwrap_or_default(),
+            OperationKind::Image => self
+                .payloads
+                .images
+                .get(payload as usize)
+                .filter(|value| has_visible_inline_text(&value.alt))
+                .map(|_| super::HAS_VISIBLE_IMAGE)
+                .unwrap_or_default(),
+            OperationKind::TaskMarker => self
+                .payloads
+                .task_markers
+                .get(payload as usize)
+                .and_then(|value| value.fallback_label.as_deref())
+                .filter(|value| has_visible_inline_text(value))
+                .map(|_| super::HAS_VISIBLE_TEXT)
+                .unwrap_or_default(),
+            OperationKind::InlineMath | OperationKind::DisplayMath | OperationKind::Media => {
+                super::HAS_VISIBLE_TEXT
+            }
+            _ => 0,
+        }
     }
 
     fn append_normalized_prose_value(
@@ -987,6 +1076,8 @@ impl SemanticTapeBuilder {
             if existing.range().end == self.text.len() {
                 let updated = self.extend_text(existing, leading_space, value)?;
                 self.payloads.text_refs[payload] = updated;
+                let flags = self.operation_visibility(OperationKind::Text, payload as u32);
+                self.update_visibility(previous, flags);
                 return Ok(Some(previous));
             }
             if !leading_space && value.is_empty() {
@@ -1086,6 +1177,7 @@ impl SemanticTapeBuilder {
         }
         self.text.push_str(value);
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(length);
+        self.compile_stats.add_semantic_text_bytes(length);
         Ok(reference)
     }
 
@@ -1113,7 +1205,20 @@ impl SemanticTapeBuilder {
         }
         self.text.push_str(value);
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(added);
+        self.compile_stats.add_semantic_text_bytes(added);
         Ok(reference)
+    }
+
+    fn update_visibility(&mut self, node: DocumentNodeId, flags: u8) {
+        let added = flags & !self.visibility[node.index()];
+        if added == 0 {
+            return;
+        }
+        self.visibility[node.index()] |= added;
+        self.ops[node.index()].flags |= added;
+        if let Some(parent) = self.parents[node.index()] {
+            self.visibility[parent.index()] |= added;
+        }
     }
 
     fn text_slice(&self, value: TextRef) -> &str {
@@ -1141,7 +1246,10 @@ struct PayloadTables {
 enum BuildTask {
     Enter(DocumentNodeId),
     Siblings(DocumentNodeId),
-    Exit(DocumentNodeId),
+    Exit {
+        new_id: DocumentNodeId,
+        parent: Option<DocumentNodeId>,
+    },
 }
 
 fn emit_open(
@@ -1153,6 +1261,11 @@ fn emit_open(
     last_text: &mut Option<DocumentNodeId>,
     kind: NodeKind,
 ) -> DocumentNodeId {
+    let text_value = match &kind {
+        NodeKind::Text(value) | NodeKind::InlineCode(value) => source_text.get(value.range()),
+        _ => None,
+    };
+    let flags = visibility_flags(&kind, text_value);
     if !matches!(&kind, NodeKind::Text(_)) {
         *last_text = None;
     }
@@ -1207,6 +1320,7 @@ fn emit_open(
                     let payload = ops[previous.index()].payload as usize;
                     let existing = payloads.text_refs[payload];
                     payloads.text_refs[payload] = merge_document_text(text, existing, source);
+                    ops[previous.index()].flags |= flags;
                     return previous;
                 }
                 let reference = append_document_text(text, source);
@@ -1277,7 +1391,7 @@ fn emit_open(
         payload,
         aux,
         opcode: operation as u8,
-        flags: 0,
+        flags,
     });
     ends.push(0);
     if !operation.is_container() {
@@ -1416,6 +1530,112 @@ mod tests {
             document.debug_tree(),
             "Paragraph\n  Text(\"direct\")\n  Strong\n    Text(\"tape\")\n"
         );
+    }
+
+    #[test]
+    fn compile_stats_and_visibility_are_recorded_during_lowering() {
+        let mut builder = SemanticTapeBuilder::with_capacity(4);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "visible").unwrap();
+        builder.close(paragraph).unwrap();
+        let empty = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.close(empty).unwrap();
+        builder
+            .append(
+                None,
+                NodeKind::CodeBlock(CodeBlock {
+                    language: None,
+                    text: "raw\ncode".into(),
+                }),
+            )
+            .unwrap();
+
+        let document = builder.finish();
+        assert_eq!(document.paragraph_count(), 2);
+        assert_eq!(document.code_block_count(), 1);
+        assert_eq!(document.semantic_text_bytes(), "visible".len());
+        assert_eq!(document.raw_code_bytes(), "raw\ncode".len());
+        assert_ne!(
+            document.visibility_flags(paragraph) & super::super::HAS_VISIBLE_TEXT,
+            0
+        );
+        assert_eq!(document.visibility_flags(empty), 0);
+        assert!(!document.stats_initialized());
+    }
+
+    #[test]
+    fn extending_a_text_node_refreshes_visibility_flags() {
+        let mut builder = SemanticTapeBuilder::with_capacity(2);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let first = builder
+            .append_normalized_prose(Some(paragraph), "\u{200b}")
+            .unwrap();
+        let second = builder
+            .append_normalized_prose(Some(paragraph), "visible")
+            .unwrap();
+        assert_eq!(first, second);
+        builder.close(paragraph).unwrap();
+        let document = builder.finish();
+
+        assert_ne!(
+            document.visibility_flags(paragraph) & super::super::HAS_VISIBLE_TEXT,
+            0
+        );
+    }
+
+    #[test]
+    fn ordinary_builder_propagates_visibility_when_materializing_the_tape() {
+        let mut builder = DocumentBuilder::with_capacity(2);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "ordinary").unwrap();
+        let document = builder.finish();
+
+        assert_ne!(
+            document.visibility_flags(DocumentNodeId(0)) & super::super::HAS_VISIBLE_TEXT,
+            0
+        );
+        assert_eq!(document.paragraph_count(), 1);
+        assert_eq!(document.semantic_text_bytes(), "ordinary".len());
+        assert!(!document.stats_initialized());
+    }
+
+    #[test]
+    fn ordinary_materialization_refreshes_merged_visibility_and_text_bytes() {
+        let mut builder = DocumentBuilder::with_capacity(4);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder
+            .append_prose_unmerged(Some(paragraph), "\u{200b}")
+            .unwrap();
+        let other = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(other), "other").unwrap();
+        builder
+            .append_prose_unmerged(Some(paragraph), "visible")
+            .unwrap();
+        let document = builder.finish();
+
+        assert_ne!(
+            document.visibility_flags(DocumentNodeId(0)) & super::super::HAS_VISIBLE_TEXT,
+            0
+        );
+        assert_eq!(document.semantic_text_bytes(), document.text.len());
+    }
+
+    #[test]
+    fn ordinary_materialization_counts_the_final_canonical_text_arena() {
+        let mut builder = DocumentBuilder::with_capacity(4);
+        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder
+            .append_prose_unmerged(Some(paragraph), "a ")
+            .unwrap();
+        let other = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.append_prose(Some(other), "other").unwrap();
+        builder
+            .append_prose_unmerged(Some(paragraph), " b")
+            .unwrap();
+        let document = builder.finish();
+
+        assert_eq!(document.semantic_text_bytes(), document.text.len());
+        assert_eq!(document.text, "a bother");
     }
 
     #[test]

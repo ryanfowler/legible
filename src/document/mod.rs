@@ -25,6 +25,10 @@ mod text;
 mod uri;
 mod validate;
 
+/// Semantic content flags stored on opening and closing tape operations.
+pub(crate) const HAS_VISIBLE_TEXT: u8 = 1 << 0;
+pub(crate) const HAS_VISIBLE_IMAGE: u8 = 1 << 1;
+
 pub(crate) use builder::{BuildError, DocumentBuilder, SemanticTapeBuilder};
 pub(crate) use code::{
     count_blocks as source_code_block_count,
@@ -243,26 +247,28 @@ pub(crate) struct Document {
     footnotes: Vec<FootnoteRecord>,
     node_count: usize,
     output_capacity_hint: usize,
-    stats: OnceLock<DocumentStats>,
+    compile_stats: stats::CompileStats,
+    text_stats: OnceLock<stats::TextStats>,
 }
 
 impl Document {
     /// Returns measurements derived from the semantic document.
     pub fn stats(&self) -> DocumentStats {
-        *self
-            .stats
-            .get_or_init(|| stats::compute_document_stats(self))
+        let text_stats = *self
+            .text_stats
+            .get_or_init(|| stats::walk_text(self, false, false, None, true).1);
+        stats::combine(self.compile_stats, text_stats)
     }
 
     /// Returns the normalized text for the complete document.
     pub fn text(&self) -> String {
-        if let Some(stats) = self.stats.get() {
+        if let Some(stats) = self.text_stats.get() {
             return stats::render_document_text(self, stats.text_length);
         }
 
-        let (text, stats) =
+        let (text, text_stats) =
             stats::walk_text(self, false, false, Some(self.output_capacity_hint), true);
-        let _ = self.stats.set(stats);
+        let _ = self.text_stats.set(text_stats);
         text.unwrap_or_default()
     }
 
@@ -288,52 +294,60 @@ impl Document {
 
     /// Returns the number of semantic paragraphs.
     pub fn paragraph_count(&self) -> usize {
-        self.stats().paragraph_count
+        self.compile_stats.paragraph_count
     }
 
     /// Returns the number of semantic headings.
     pub fn heading_count(&self) -> usize {
-        self.stats().heading_count
+        self.compile_stats.heading_count
     }
 
     /// Returns the number of semantic list items.
     pub fn list_item_count(&self) -> usize {
-        self.stats().list_item_count
+        self.compile_stats.list_item_count
     }
 
     /// Returns the number of semantic code blocks.
     pub fn code_block_count(&self) -> usize {
-        self.stats().code_block_count
+        self.compile_stats.code_block_count
     }
 
     /// Returns the number of semantic data tables.
     pub fn table_count(&self) -> usize {
-        self.stats().table_count
+        self.compile_stats.table_count
     }
 
     /// Returns the number of semantic figures.
     pub fn figure_count(&self) -> usize {
-        self.stats().figure_count
+        self.compile_stats.figure_count
     }
 
     /// Returns the number of semantic images.
     pub fn image_count(&self) -> usize {
-        self.stats().image_count
+        self.compile_stats.image_count
     }
 
     /// Returns the number of footnote references.
     pub fn footnote_reference_count(&self) -> usize {
-        self.stats().footnote_reference_count
+        self.compile_stats.footnote_reference_count
     }
 
     /// Returns the number of footnote definitions.
     pub fn footnote_definition_count(&self) -> usize {
-        self.stats().footnote_definition_count
+        self.compile_stats.footnote_definition_count
     }
 
     /// Returns the number of math expressions.
     pub fn math_count(&self) -> usize {
-        self.stats().math_count
+        self.compile_stats.math_count
+    }
+
+    pub(crate) fn structured_block_count(&self) -> usize {
+        self.compile_stats.structured_block_count
+    }
+
+    pub(crate) fn has_contextual_structure(&self) -> bool {
+        self.compile_stats.has_contextual_structure
     }
 
     pub(crate) fn footnote_label(&self, id: FootnoteId) -> Option<&str> {
@@ -471,6 +485,24 @@ impl Document {
         self.node_count
     }
 
+    pub(crate) fn compile_stats(&self) -> stats::CompileStats {
+        self.compile_stats
+    }
+
+    pub(crate) fn visibility_flags(&self, id: DocumentNodeId) -> u8 {
+        self.ops
+            .get(id.index())
+            .map_or(0, |operation| operation.flags)
+    }
+
+    pub(crate) fn semantic_text_bytes(&self) -> usize {
+        self.compile_stats.semantic_text_bytes
+    }
+
+    pub(crate) fn raw_code_bytes(&self) -> usize {
+        self.compile_stats.raw_code_bytes
+    }
+
     /// Returns the number of top-level semantic items for benchmark reporting.
     pub(crate) fn root_count(&self) -> usize {
         self.roots.len()
@@ -583,7 +615,7 @@ impl Document {
 
     #[cfg(test)]
     pub(crate) fn stats_initialized(&self) -> bool {
-        self.stats.get().is_some()
+        self.text_stats.get().is_some()
     }
 
     pub(crate) fn node_slot_size() -> usize {

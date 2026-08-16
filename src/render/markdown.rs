@@ -3,7 +3,8 @@
 //! The renderer uses an explicit task stack. It has no dependency on the HTML DOM.
 
 use crate::document::{
-    Document, DocumentNodeId, FootnoteId, ListKind, NodeKindView as NodeKind, TableAlignment,
+    Document, DocumentNodeId, FootnoteId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, ListKind,
+    NodeKindView as NodeKind, TableAlignment,
 };
 use smallvec::SmallVec;
 
@@ -77,20 +78,17 @@ struct MarkdownRenderer<'a> {
     tasks: Vec<Task>,
     list_depth: usize,
     table_depth: usize,
-    visible: Vec<bool>,
     config: MarkdownConfig,
 }
 
 impl<'a> MarkdownRenderer<'a> {
     fn new(document: &'a Document, capacity: usize, config: MarkdownConfig) -> Self {
-        let visible = compute_visibility(document, config.images);
         Self {
             document,
             out: Output::new(capacity),
             tasks: Vec::with_capacity(32),
             list_depth: 0,
             table_depth: 0,
-            visible,
             config,
         }
     }
@@ -144,7 +142,8 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn visible(&self, root: DocumentNodeId) -> bool {
-        self.visible[root.index()]
+        let flags = self.document.visibility_flags(root);
+        flags & HAS_VISIBLE_TEXT != 0 || self.config.images && flags & HAS_VISIBLE_IMAGE != 0
     }
 
     fn next_text_char(&self, id: DocumentNodeId) -> Option<char> {
@@ -830,36 +829,6 @@ impl<'a> MarkdownRenderer<'a> {
     }
 }
 
-fn compute_visibility(document: &Document, images: bool) -> Vec<bool> {
-    let mut visible = vec![false; document.operation_capacity()];
-    let mut tasks = Vec::with_capacity(32);
-    tasks.extend(document.root_ids().map(|root| (root, false)));
-    while let Some((id, visited)) = tasks.pop() {
-        let Some(node) = document.node(id) else {
-            continue;
-        };
-        if !visited {
-            tasks.push((id, true));
-            tasks.extend(document.child_ids(id).map(|child| (child, false)));
-            continue;
-        }
-        let value = match node.kind() {
-            NodeKind::Text(text) => has_visible_inline_text(text),
-            NodeKind::InlineCode(text) => has_visible_inline_text(text),
-            NodeKind::CodeBlock(code) => has_visible_inline_text(&code.text),
-            NodeKind::Image(image) => images && has_visible_inline_text(&image.alt),
-            NodeKind::TaskMarker(marker) => marker
-                .fallback_label
-                .as_deref()
-                .is_some_and(has_visible_inline_text),
-            NodeKind::InlineMath(_) | NodeKind::DisplayMath(_) | NodeKind::Media(_) => true,
-            _ => document.child_ids(id).any(|child| visible[child.index()]),
-        };
-        visible[id.index()] = value;
-    }
-    visible
-}
-
 fn escape_math_source(source: &str) -> String {
     let mut escaped = String::with_capacity(source.len());
     for character in source.chars() {
@@ -903,10 +872,7 @@ fn is_block(kind: &NodeKind) -> bool {
 }
 
 pub(crate) fn has_visible_inline_text(text: &str) -> bool {
-    text.chars().any(|character| {
-        !character.is_whitespace()
-            && !matches!(character, '\u{00a0}' | '\u{200b}' | '\u{2060}' | '\u{feff}')
-    })
+    crate::document::stats::has_visible_inline_text(text)
 }
 
 struct Output {

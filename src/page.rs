@@ -169,7 +169,7 @@ impl ExtractedPage {
 
     /// Returns the number of blocks with useful structural evidence.
     pub fn structured_block_count(&self) -> usize {
-        self.document.stats().structured_block_count
+        self.document.structured_block_count()
     }
 
     /// Returns whether normalized text contains an alphanumeric character.
@@ -189,7 +189,7 @@ impl ExtractedPage {
 
     /// Returns whether the result contains contextual semantic structure.
     pub fn has_contextual_structure(&self) -> bool {
-        self.document.stats().has_contextual_structure
+        self.document.has_contextual_structure()
     }
 
     #[cfg(test)]
