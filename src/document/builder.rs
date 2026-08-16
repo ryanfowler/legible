@@ -35,6 +35,9 @@ pub(crate) struct DocumentBuilder {
     nodes: Vec<BuildNode>,
     roots: Vec<DocumentNodeId>,
     last_children: Vec<Option<DocumentNodeId>>,
+    /// Enabled only by ordinary lowering, which may insert a deferred text
+    /// boundary before an already opened semantic child.
+    previous_siblings: Option<Vec<Option<DocumentNodeId>>>,
     pending_spaces: Vec<bool>,
     pending_root_space: bool,
     /// Prose and inline-code payloads share the retained text arena.
@@ -53,6 +56,7 @@ impl DocumentBuilder {
             nodes: Vec::with_capacity(capacity),
             roots: Vec::new(),
             last_children: Vec::with_capacity(capacity),
+            previous_siblings: None,
             pending_spaces: Vec::with_capacity(capacity),
             pending_root_space: false,
             text: String::new(),
@@ -61,6 +65,10 @@ impl DocumentBuilder {
             footnote_index: HashMap::new(),
             output_capacity_hint: 0,
         }
+    }
+
+    pub(crate) fn enable_preorder_insertions(&mut self) {
+        self.previous_siblings = Some(Vec::with_capacity(self.nodes.capacity()));
     }
 
     pub(crate) fn append(
@@ -109,19 +117,97 @@ impl DocumentBuilder {
             next_sibling: None,
         });
         self.last_children.push(None);
+        if let Some(previous_siblings) = &mut self.previous_siblings {
+            previous_siblings.push(None);
+        }
         self.pending_spaces.push(false);
 
         if let Some(parent) = parent {
             if let Some(previous) = self.last_children[parent.index()] {
                 self.nodes[previous.index()].next_sibling = Some(id);
+                if let Some(previous_siblings) = &mut self.previous_siblings {
+                    previous_siblings[id.index()] = Some(previous);
+                }
             } else {
                 self.nodes[parent.index()].first_child = Some(id);
             }
             self.last_children[parent.index()] = Some(id);
         } else {
+            if let Some(&previous) = self.roots.last() {
+                self.nodes[previous.index()].next_sibling = Some(id);
+                if let Some(previous_siblings) = &mut self.previous_siblings {
+                    previous_siblings[id.index()] = Some(previous);
+                }
+            }
             self.roots.push(id);
         }
         Ok(id)
+    }
+
+    /// Inserts a canonical prose text node immediately before an existing child.
+    ///
+    /// Ordinary lowering discovers some word boundaries only after it has
+    /// opened a semantic child. The temporary builder keeps enough sibling
+    /// links to insert that boundary without a second source traversal.
+    pub(crate) fn insert_normalized_prose_before(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        before: DocumentNodeId,
+        value: &str,
+    ) -> Result<(), BuildError> {
+        if value.is_empty() || !self.valid_parent(parent) || before.index() >= self.nodes.len() {
+            return Err(BuildError::InvalidParent);
+        }
+        let value = super::text::normalize_prose_fragment(value);
+        if value.is_empty() {
+            return Ok(());
+        }
+        let previous = self
+            .previous_siblings
+            .as_ref()
+            .and_then(|siblings| siblings.get(before.index()).copied())
+            .ok_or(BuildError::InvalidParent)?;
+        let valid_before = match parent {
+            Some(parent) => previous.map_or(
+                self.nodes[parent.index()].first_child == Some(before),
+                |previous| self.nodes[previous.index()].next_sibling == Some(before),
+            ),
+            None => previous.map_or(self.roots.first() == Some(&before), |previous| {
+                self.nodes[previous.index()].next_sibling == Some(before)
+            }),
+        };
+        if !valid_before {
+            return Err(BuildError::InvalidParent);
+        }
+        let text = self.append_text(value.as_ref())?;
+        let id = DocumentNodeId(
+            u32::try_from(self.nodes.len()).map_err(|_| BuildError::CapacityExceeded)?,
+        );
+        self.nodes.push(BuildNode {
+            kind: NodeKind::Text(text),
+            first_child: None,
+            next_sibling: Some(before),
+        });
+        self.last_children.push(None);
+        if let Some(previous_siblings) = &mut self.previous_siblings {
+            previous_siblings.push(previous);
+        }
+        self.pending_spaces.push(false);
+        self.requires_text_materialization = true;
+
+        if let Some(previous) = previous {
+            self.nodes[previous.index()].next_sibling = Some(id);
+        } else if let Some(parent) = parent {
+            self.nodes[parent.index()].first_child = Some(id);
+        } else if self.roots.first() == Some(&before) {
+            self.roots[0] = id;
+        } else {
+            return Err(BuildError::InvalidParent);
+        }
+        if let Some(previous_siblings) = &mut self.previous_siblings {
+            previous_siblings[before.index()] = Some(id);
+        }
+        Ok(())
     }
 
     pub(crate) fn append_prose(
@@ -134,6 +220,28 @@ impl DocumentBuilder {
         }
         let normalized = super::text::normalize_prose_fragment(value);
         self.append_normalized_prose_value(parent, normalized)
+    }
+
+    /// Appends prose as a distinct text node.
+    ///
+    /// Most prose should use the coalescing path. A source fallback that may
+    /// receive a deferred boundary needs a stable insertion anchor instead.
+    pub(crate) fn append_prose_unmerged(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        value: &str,
+    ) -> Result<Option<DocumentNodeId>, BuildError> {
+        if !self.valid_parent(parent) {
+            return Err(BuildError::InvalidParent);
+        }
+        let value = super::text::normalize_prose_fragment(value);
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let needs_leading_space = self.take_pending_space(parent) && !value.starts_with(' ');
+        let text = self.append_text_with_prefix(value.as_ref(), needs_leading_space)?;
+        self.requires_text_materialization = true;
+        self.append_raw(parent, NodeKind::Text(text)).map(Some)
     }
 
     /// Appends a fragment that is already canonical prose.
