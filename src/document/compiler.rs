@@ -43,6 +43,9 @@ impl CompileContext {
 
 #[derive(Debug, Error)]
 pub(crate) enum CompileError {
+    /// The ordinary compiler found source structure that needs rich analysis.
+    #[error("ordinary semantic lowering requires the complex compiler")]
+    RequiresComplex,
     #[error(transparent)]
     Build(#[from] BuildError),
     #[error(transparent)]
@@ -121,6 +124,17 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence(
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: Option<&super::facts::SourceEvidence>,
 ) -> Result<Document, CompileError> {
+    // Ordinary pages do not need the rich source-evidence inventory. Run a
+    // cheap gate first, then let the lowering pass validate the few structural
+    // cases that cannot be classified from a flat source scan.
+    if let Some(source_node_count) = super::ordinary::ordinary_source_gate(dom, root) {
+        match super::ordinary::compile(dom, root, context, source_node_count) {
+            Ok(document) => return Ok(document),
+            Err(CompileError::RequiresComplex) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
     let owned_evidence;
     let source_evidence = if let Some(source_evidence) = source_evidence {
         source_evidence
@@ -128,9 +142,6 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence(
         owned_evidence = super::facts::SourceEvidence::analyze(dom, root, &NodeStateStore::new());
         &owned_evidence
     };
-    if let Some(inventory) = super::ordinary::inventory(dom, root, source_evidence) {
-        return super::ordinary::compile(dom, root, context, &inventory, source_evidence);
-    }
     compile_complex_document(dom, root, context, source_facts, source_evidence)
 }
 
@@ -1300,14 +1311,11 @@ mod tests {
         let context = CompileContext::new(base.clone(), base.as_ref());
         let source_evidence =
             super::super::facts::SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
-        let inventory = super::super::ordinary::inventory(&dom, dom.root(), &source_evidence)
-            .expect("source must support ordinary compilation");
         let ordinary = super::super::ordinary::compile(
             &dom,
             dom.root(),
             &context,
-            &inventory,
-            &source_evidence,
+            super::super::ordinary::ordinary_source_gate(&dom, dom.root()).unwrap(),
         )
         .unwrap();
         let complex =
@@ -1397,11 +1405,38 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_boundaries_do_not_move_before_merged_fallback_text() {
+        let html = r#"<p><span>x</span><span><img src="javascript:bad" alt="b">c</span></p>"#;
+        let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let context = CompileContext::default();
+        let source_evidence =
+            super::super::facts::SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
+        let ordinary = super::super::ordinary::compile(
+            &dom,
+            dom.root(),
+            &context,
+            super::super::ordinary::ordinary_source_gate(&dom, dom.root()).unwrap(),
+        )
+        .unwrap();
+        let complex =
+            compile_complex_document(&dom, dom.root(), &context, None, &source_evidence).unwrap();
+        assert_eq!(ordinary.text(), "x bc");
+        assert_eq!(ordinary.text(), complex.text());
+    }
+
+    #[test]
     fn ordinary_compiler_matches_complex_for_article_collections() {
         compare_ordinary_and_complex(
             r#"<article><h1>Archive design</h1><p>The guide explains how the archive stores each record.</p><section class="related-content-tout"><h2>Collection</h2><p>This collection is part of the guide.</p><a href="/archive">Open the archive</a></section><h2>Validation</h2><p>The validation step compares every stored record.</p></article>"#,
             Some("https://example.test/docs/page.html"),
         );
+    }
+
+    #[test]
+    fn ordinary_gate_keeps_nonsemantic_classed_wrappers_on_the_fast_path() {
+        assert!(uses_ordinary_compiler(
+            r#"<article class="post-content"><p>A classed wrapper can still contain ordinary prose.</p></article>"#
+        ));
     }
 
     #[test]
@@ -1414,6 +1449,8 @@ mod tests {
             r#"<table><tr><td>Cell</td></tr></table>"#,
             r#"<table class="highlighttable"><tr><td class="linenos"><pre>1</pre></td><td><pre>code</pre></td></tr></table>"#,
             r#"<div role="list"><div role="listitem">One</div></div>"#,
+            r#"<aside class="side-note">A sidenote.</aside>"#,
+            r#"<aside class="reference-text">A reference.</aside>"#,
             r#"<p><img src="formula.svg" alt="x^2"></p>"#,
         ] {
             assert!(
@@ -1491,6 +1528,7 @@ mod tests {
     fn misplaced_native_structural_elements_use_complex_compilation() {
         for html in [
             "<details><div><summary>Nested</summary></div></details>",
+            "<details>stray text<summary>Nested</summary></details>",
             "<dl>stray text<dt>Term</dt><dd>Definition</dd></dl>",
         ] {
             assert!(
