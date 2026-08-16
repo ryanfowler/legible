@@ -1,6 +1,8 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use std::collections::HashSet;
 
+use super::sparse::{SparseNodeSet, SparseNodeValues};
+
 #[derive(Clone, Debug)]
 pub(crate) struct RecognizedMath {
     pub(crate) source: Box<str>,
@@ -9,8 +11,8 @@ pub(crate) struct RecognizedMath {
 }
 
 pub(crate) struct MathAnalysis {
-    values: Vec<Option<RecognizedMath>>,
-    skipped: Vec<bool>,
+    values: SparseNodeValues<RecognizedMath>,
+    skipped: SparseNodeSet,
 }
 
 impl MathAnalysis {
@@ -44,8 +46,8 @@ impl MathAnalysis {
 
     fn empty() -> Self {
         Self {
-            values: Vec::new(),
-            skipped: Vec::new(),
+            values: SparseNodeValues::new(),
+            skipped: SparseNodeSet::new(),
         }
     }
 
@@ -98,11 +100,11 @@ impl MathAnalysis {
             rendered_for_script[node.index()] = Some(rendered);
         }
 
-        let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
+        let mut values = SparseNodeValues::with_capacity(candidates.iter().len());
+        let mut recognized = vec![false; dom.len()];
         let mut skipped = vec![false; dom.len()];
         for &node in nodes {
-            if !candidates[node.index()] || skipped[node.index()] || values[node.index()].is_some()
-            {
+            if !candidates[node.index()] || skipped[node.index()] || recognized[node.index()] {
                 continue;
             }
             let paired_script = script_for_rendered[node.index()];
@@ -123,11 +125,15 @@ impl MathAnalysis {
                     })
                 })
                 .unwrap_or_else(|| latex.clone());
-            values[semantic_root.index()] = Some(RecognizedMath {
-                source: latex.trim().into(),
-                fallback: fallback.into(),
-                block,
-            });
+            values.push(
+                semantic_root,
+                RecognizedMath {
+                    source: latex.trim().into(),
+                    fallback: fallback.into(),
+                    block,
+                },
+            );
+            recognized[semantic_root.index()] = true;
             if semantic_root != node {
                 skipped[node.index()] = true;
             }
@@ -137,15 +143,34 @@ impl MathAnalysis {
                 skipped[script.index()] = true;
             }
         }
-        Self { values, skipped }
+        values.sort();
+        values.build_dense_index_if_dense(dom.len());
+        let mut sparse_skipped =
+            SparseNodeSet::with_capacity(skipped.iter().filter(|&&value| value).count());
+        for (index, value) in skipped.into_iter().enumerate() {
+            if value {
+                sparse_skipped.push(NodeId(index as u32));
+            }
+        }
+        sparse_skipped.sort();
+        Self {
+            values,
+            skipped: sparse_skipped,
+        }
     }
 
     pub(crate) fn value(&self, node: NodeId) -> Option<&RecognizedMath> {
-        self.values.get(node.index()).and_then(Option::as_ref)
+        self.values.get(node)
     }
 
     pub(crate) fn is_skipped(&self, node: NodeId) -> bool {
-        self.skipped.get(node.index()).copied().unwrap_or(false)
+        self.skipped.contains(node)
+    }
+
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.values
+            .allocated_bytes()
+            .saturating_add(self.skipped.allocated_bytes())
     }
 }
 

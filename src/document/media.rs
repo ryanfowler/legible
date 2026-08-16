@@ -5,20 +5,24 @@ use url::Url;
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 use super::facts::SemanticFacts;
+use super::sparse::SparseNodeValues;
 use super::{DestinationKind, MediaKind, safe_destination};
 
 pub(crate) struct MediaAnalysis {
-    items: Vec<Option<RecognizedMedia>>,
-    fallbacks: Vec<Option<NodeId>>,
+    items: SparseNodeValues<RecognizedMedia>,
 }
 
 impl MediaAnalysis {
     pub(crate) fn item(&self, node: NodeId) -> Option<&RecognizedMedia> {
-        self.items.get(node.index()).and_then(Option::as_ref)
+        self.items.get(node)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.items.allocated_bytes()
     }
 }
 
@@ -58,16 +62,13 @@ fn analyze_inner(
         |facts| facts.inventory().media.is_empty(),
     ) {
         return MediaAnalysis {
-            items: Vec::new(),
-            fallbacks: Vec::new(),
+            items: SparseNodeValues::new(),
         };
     }
     let mut nearest_media = vec![None; dom.len()];
-    let mut kinds = vec![None; dom.len()];
     let mut sources = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
     for &node in nodes {
         let kind = media_kind(dom.tag(node));
-        kinds[node.index()] = kind;
         nearest_media[node.index()] = if kind.is_some() {
             Some(node)
         } else {
@@ -115,9 +116,14 @@ fn analyze_inner(
         }
     }
 
-    let mut result = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
+    let mut result = SparseNodeValues::with_capacity(
+        nodes
+            .iter()
+            .filter(|&&node| media_kind(dom.tag(node)).is_some())
+            .count(),
+    );
     for &node in nodes {
-        let Some(kind) = kinds[node.index()] else {
+        let Some(kind) = media_kind(dom.tag(node)) else {
             continue;
         };
         let Some(mut source) = sources[node.index()].take() else {
@@ -137,27 +143,30 @@ fn analyze_inner(
                 (MediaKind::Video, _) => "Video".into(),
                 (MediaKind::Audio, _) => "Audio".into(),
             });
-        result[node.index()] = Some(RecognizedMedia {
-            kind,
-            source,
-            title,
-            fallback: fallbacks[node.index()],
-        });
+        result.push(
+            node,
+            RecognizedMedia {
+                kind,
+                source,
+                title,
+                fallback: fallbacks[node.index()],
+            },
+        );
     }
-    MediaAnalysis {
-        items: result,
-        fallbacks,
-    }
+    drop(sources);
+    result.sort();
+    result.build_dense_index_if_dense(dom.len());
+    MediaAnalysis { items: result }
 }
 
 pub(super) fn cleanup_evidence(dom: &Dom, nodes: &[NodeId]) -> (Vec<bool>, Vec<Option<NodeId>>) {
     let analysis = analyze(dom, nodes, None);
     let mut sources = vec![false; dom.len()];
-    for (source, item) in sources.iter_mut().zip(&analysis.items) {
-        *source = item.is_some();
+    let mut fallbacks = vec![None; dom.len()];
+    for (node, item) in analysis.items.iter() {
+        sources[node.index()] = true;
+        fallbacks[node.index()] = item.fallback;
     }
-    let mut fallbacks = analysis.fallbacks;
-    fallbacks.resize(dom.len(), None);
     (sources, fallbacks)
 }
 

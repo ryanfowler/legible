@@ -62,6 +62,7 @@ The extraction pipeline flows through these stages:
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
 | `document/` | Private compact semantic event tape plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this representation instead of a DOM |
 | `document/builder.rs` | Temporary source builder for ordinary lowering and direct compact-tape emission for complex lowering |
+| `document/sparse.rs` | Sorted sparse node values and node sets for rare semantic evidence and payloads |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -104,6 +105,7 @@ These invariants are costly to violate:
 - **Accumulate semantic stats during lowering.** Structural counters, semantic text bytes, and raw code bytes belong to compile-time builder state. Propagate visible-text and visible-image flags to containers when they close. Do not add a post-build structural or visibility traversal.
 - **Defer rejected-attempt compilation.** Normal extraction uses cheap DOM quality metrics until a candidate can win. Diagnostics may compile every attempt to report semantic metrics.
 - **Use dense semantic indexes.** Renderers should use node-indexed storage for per-document state instead of hash maps when semantic node IDs are dense.
+- **Keep rare semantic storage sparse.** Use sorted node values or node sets for feature-local payloads and candidates that are absent on most source nodes. Keep dense indexes for hot, shared, arbitrary-node lookups.
 - **Keep the semantic representation compact and private.** Production pages retain an immutable event tape with 8-byte operation headers and type-specific payload tables. Do not add general-purpose tree links to the retained representation. The benchmark prototype remains useful for later renderer comparisons.
 - **Render the tape sequentially.** Markdown, canonical HTML, and normalized text renderers must consume the event tape in source order. Do not add tree-link traversal, child collection, or task generation for ordinary rendering. Keep only small formatting and semantic context stacks.
 - **Use one canonical text arena.** Store semantic prose and inline-code text in one document-owned UTF-8 buffer with `TextRef` ranges. Do not add one owned heap string per semantic text leaf. Keep raw block-code payloads separate until measurements justify moving them.

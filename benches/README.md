@@ -39,6 +39,9 @@ The full suite measures these workloads:
 - steady-state lazy Markdown, text, and HTML rendering (text statistics are prewarmed)
 - deeply nested parser input
 
+See `benches/complex-temporary-storage.md` for the storage inventory and the
+final complex-compiler benchmark measurements.
+
 The `ordinary-inline` workload uses repeated article sections with `strong`, `em`,
 links, inline `code`, native lists, blockquotes, simple image figures,
 `details`/`summary`, and definition lists. It avoids tables, footnotes, math,
