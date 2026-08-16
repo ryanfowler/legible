@@ -219,10 +219,10 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
     let mut fixture_count = 0usize;
 
     eprintln!(
-        "representation/layout: event_op_bytes={}, node_kind_bytes={}, text_value_bytes={}",
+        "representation/layout: event_op_bytes={}, node_kind_bytes={}, text_ref_bytes={}",
         std::mem::size_of::<document::EventOp>(),
         std::mem::size_of::<document::NodeKind>(),
-        std::mem::size_of::<document::TextValue>(),
+        std::mem::size_of::<document::TextRef>(),
     );
 
     for (name, kind, bytes) in [

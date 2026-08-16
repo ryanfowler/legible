@@ -501,10 +501,7 @@ fn compile_complex_document(
             continue;
         }
         if tag == Tag::Code {
-            builder.append(
-                scope.parent,
-                NodeKind::InlineCode(super::TextValue::new(dom.text(node))),
-            )?;
+            builder.append_inline_code(scope.parent, &dom.text(node))?;
             continue;
         }
         if tag == Tag::Input

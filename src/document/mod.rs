@@ -227,7 +227,9 @@ pub(crate) struct Document {
     /// consumers constant-time while renderers migrate to direct tape scans.
     ends: Vec<u32>,
     roots: Vec<DocumentNodeId>,
-    text_values: Vec<TextValue>,
+    /// Canonical semantic prose and inline-code storage.
+    text: String,
+    text_refs: Vec<TextRef>,
     code_blocks: Vec<CodeBlock>,
     links: Vec<Link>,
     images: Vec<Image>,
@@ -376,6 +378,10 @@ impl Document {
     fn kind_ref(&self, id: DocumentNodeId) -> NodeKindView<'_> {
         let operation = &self.ops[id.index()];
         let payload = operation.payload as usize;
+        let text = self
+            .text_refs
+            .get(payload)
+            .and_then(|reference| self.text.get(reference.range()));
         match operation.kind() {
             OperationKind::Paragraph => NodeKindView::Paragraph,
             OperationKind::BlockGroup => NodeKindView::BlockGroup,
@@ -417,17 +423,13 @@ impl Document {
             OperationKind::FootnoteDefinition => {
                 NodeKindView::FootnoteDefinition(FootnoteId(operation.payload))
             }
-            OperationKind::Text => self
-                .text_values
-                .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::Text),
+            OperationKind::Text => text.map_or(NodeKindView::Invalid, NodeKindView::Text),
             OperationKind::Emphasis => NodeKindView::Emphasis,
             OperationKind::Strong => NodeKindView::Strong,
             OperationKind::Strikethrough => NodeKindView::Strikethrough,
-            OperationKind::InlineCode => self
-                .text_values
-                .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::InlineCode),
+            OperationKind::InlineCode => {
+                text.map_or(NodeKindView::Invalid, NodeKindView::InlineCode)
+            }
             OperationKind::Link => self
                 .links
                 .get(payload)
@@ -476,9 +478,7 @@ impl Document {
 
     /// Returns bytes owned by semantic string payloads for benchmark reporting.
     pub(crate) fn semantic_string_bytes(&self) -> usize {
-        self.text_values
-            .iter()
-            .map(|value| value.0.capacity())
+        std::iter::once(self.text.capacity())
             .chain(self.code_blocks.iter().flat_map(|value| {
                 std::iter::once(value.text.len()).chain(value.language.iter().map(|s| s.len()))
             }))
@@ -513,7 +513,7 @@ impl Document {
 
     /// Returns owned semantic string values for benchmark reporting.
     pub(crate) fn semantic_string_value_count(&self) -> usize {
-        self.text_values.len()
+        usize::from(!self.text.is_empty())
             + self
                 .code_blocks
                 .iter()
@@ -552,7 +552,7 @@ impl Document {
         let vector_bytes = self.ops.capacity() * std::mem::size_of::<EventOp>()
             + self.ends.capacity() * std::mem::size_of::<u32>()
             + self.roots.capacity() * std::mem::size_of::<DocumentNodeId>()
-            + self.text_values.capacity() * std::mem::size_of::<TextValue>()
+            + self.text_refs.capacity() * std::mem::size_of::<TextRef>()
             + self.code_blocks.capacity() * std::mem::size_of::<CodeBlock>()
             + self.links.capacity() * std::mem::size_of::<Link>()
             + self.images.capacity() * std::mem::size_of::<Image>()
@@ -774,11 +774,11 @@ pub(crate) enum NodeKind {
     DefinitionDescription,
     Callout(Callout),
     FootnoteDefinition(FootnoteId),
-    Text(TextValue),
+    Text(TextRef),
     Emphasis,
     Strong,
     Strikethrough,
-    InlineCode(TextValue),
+    InlineCode(TextRef),
     Link(Link),
     Image(Image),
     HardBreak,
@@ -799,7 +799,7 @@ impl NodeKind {
 
     fn output_capacity_hint(&self) -> usize {
         match self {
-            Self::Text(text) | Self::InlineCode(text) => text.0.len(),
+            Self::Text(_) | Self::InlineCode(_) => 0,
             Self::CodeBlock(code) => code
                 .text
                 .len()
@@ -829,7 +829,7 @@ impl NodeKind {
 
     fn retained_value_bytes(&self) -> usize {
         match self {
-            Self::Text(text) | Self::InlineCode(text) => text.0.capacity(),
+            Self::Text(_) | Self::InlineCode(_) => 0,
             Self::CodeBlock(code) => {
                 optional_boxed_str_len(&code.language).saturating_add(code.text.len())
             }
@@ -899,11 +899,11 @@ pub(crate) enum NodeKindView<'a> {
     DefinitionDescription,
     Callout(&'a Callout),
     FootnoteDefinition(FootnoteId),
-    Text(&'a TextValue),
+    Text(&'a str),
     Emphasis,
     Strong,
     Strikethrough,
-    InlineCode(&'a TextValue),
+    InlineCode(&'a str),
     Link(&'a Link),
     Image(&'a Image),
     HardBreak,
@@ -928,42 +928,26 @@ fn optional_boxed_str_len(value: &Option<Box<str>>) -> usize {
     value.as_deref().map_or(0, str::len)
 }
 
-/// Canonical text stored by a semantic leaf node.
-///
-/// The wrapper keeps the retained storage format out of the public API.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TextValue(String);
-
-impl TextValue {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub(crate) fn as_mut_string(&mut self) -> &mut String {
-        &mut self.0
-    }
-
-    pub(crate) fn append_normalized_prose(&mut self, value: &str) {
-        text::merge_prose(&mut self.0, value);
-    }
-
-    /// Returns the canonical text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+/// A range into the document-owned canonical text arena.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TextRef {
+    start: u32,
+    len: u32,
 }
 
-impl AsRef<str> for TextValue {
-    fn as_ref(&self) -> &str {
-        self.as_str()
+impl TextRef {
+    fn new(start: usize, len: usize) -> Result<Self, BuildError> {
+        let end = start.checked_add(len).ok_or(BuildError::CapacityExceeded)?;
+        u32::try_from(end).map_err(|_| BuildError::CapacityExceeded)?;
+        Ok(Self {
+            start: u32::try_from(start).map_err(|_| BuildError::CapacityExceeded)?,
+            len: u32::try_from(len).map_err(|_| BuildError::CapacityExceeded)?,
+        })
     }
-}
 
-impl std::ops::Deref for TextValue {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
+    fn range(self) -> std::ops::Range<usize> {
+        let start = self.start as usize;
+        start..start + self.len as usize
     }
 }
 
@@ -1444,7 +1428,7 @@ fn write_kind(output: &mut String, kind: NodeKindView<'_>) {
     use NodeKindView as NodeKind;
     use std::fmt::Write as _;
     match kind {
-        NodeKind::Text(value) => write!(output, "Text({:?})", value.as_str()).unwrap(),
+        NodeKind::Text(value) => write!(output, "Text({:?})", value).unwrap(),
         NodeKind::Heading { level } => write!(output, "Heading(level={level})").unwrap(),
         NodeKind::CodeBlock(code) => write!(
             output,
@@ -1476,7 +1460,7 @@ fn write_kind(output: &mut String, kind: NodeKindView<'_>) {
             image.source, image.alt, image.title, image.width, image.height
         )
         .unwrap(),
-        NodeKind::InlineCode(value) => write!(output, "InlineCode({:?})", value.as_str()).unwrap(),
+        NodeKind::InlineCode(value) => write!(output, "InlineCode({:?})", value).unwrap(),
         NodeKind::FootnoteReference(id) => write!(output, "FootnoteReference({})", id.0).unwrap(),
         NodeKind::FootnoteDefinition(id) => write!(output, "FootnoteDefinition({})", id.0).unwrap(),
         NodeKind::TaskMarker(marker) => write!(

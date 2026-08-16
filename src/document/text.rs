@@ -35,8 +35,6 @@ fn is_ascii_normalized(value: &str) -> bool {
     let bytes = value.as_bytes();
     value.is_ascii()
         && !bytes.is_empty()
-        && bytes[0] != b' '
-        && bytes[bytes.len() - 1] != b' '
         && bytes
             .iter()
             .all(|&byte| !byte.is_ascii_whitespace() || byte == b' ')
@@ -92,6 +90,16 @@ mod tests {
             normalize_prose_fragment(value),
             Cow::Borrowed(fragment) if fragment == value
         ));
+    }
+
+    #[test]
+    fn normalized_ascii_boundary_spaces_are_borrowed() {
+        for value in [" leading", "trailing ", " leading ", " "] {
+            assert!(matches!(
+                normalize_prose_fragment(value),
+                Cow::Borrowed(fragment) if fragment == value
+            ));
+        }
     }
 
     #[test]

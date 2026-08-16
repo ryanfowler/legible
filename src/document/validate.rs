@@ -6,6 +6,7 @@ use super::{
 };
 
 pub(super) fn validate(document: &Document) -> Result<(), ValidationError> {
+    validate_text_arena(document)?;
     validate_tape(document)?;
 
     let mut seen = vec![false; document.ops.len()];
@@ -78,6 +79,17 @@ pub(super) fn validate(document: &Document) -> Result<(), ValidationError> {
     validate_footnotes(document)
 }
 
+fn validate_text_arena(document: &Document) -> Result<(), ValidationError> {
+    for reference in &document.text_refs {
+        if document.text.get(reference.range()).is_none() {
+            return Err(ValidationError::new(
+                "semantic text range is outside the text arena",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_tape(document: &Document) -> Result<(), ValidationError> {
     if document.ops.len() != document.ends.len() {
         return Err(ValidationError::new("semantic tape index length mismatch"));
@@ -141,12 +153,10 @@ fn ensure_id(document: &Document, id: DocumentNodeId) -> Result<(), ValidationEr
 fn validate_kind(kind: NodeKind<'_>) -> Result<(), ValidationError> {
     match kind {
         NodeKind::Invalid => return Err(ValidationError::new("semantic payload is missing")),
-        NodeKind::Text(value) if value.is_empty() => {
+        NodeKind::Text("") => {
             return Err(ValidationError::new("semantic text node is empty"));
         }
-        NodeKind::Text(value)
-            if super::text::normalize_prose_fragment(value).as_ref() != value.as_str() =>
-        {
+        NodeKind::Text(value) if super::text::normalize_prose_fragment(value).as_ref() != value => {
             return Err(ValidationError::new("semantic text is not canonical prose"));
         }
         NodeKind::Heading { level } if !(1..=6).contains(&level) => {
@@ -361,7 +371,7 @@ fn validate_adjacent_text(
                     .peek()
                     .map(|id| is_inline(document.node(*id).unwrap().kind()))
                     .unwrap_or(false);
-            if value.as_str() != " " || !bounded_by_inline {
+            if value != " " || !bounded_by_inline {
                 return Err(ValidationError::new(
                     "semantic whitespace text is not an inline separator",
                 ));

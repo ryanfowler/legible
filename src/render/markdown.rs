@@ -1582,16 +1582,14 @@ mod tests {
     use super::*;
     use crate::document::{
         CodeBlock, DocumentBuilder, Image, List, ListKind, MathFormat, MathValue, NodeKind, Table,
-        TableCell, TaskMarker, TextValue,
+        TableCell, TaskMarker,
     };
 
     #[test]
     fn semantic_code_chooses_safe_delimiters() {
         let mut builder = DocumentBuilder::with_capacity(3);
         let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
-        builder
-            .append(Some(paragraph), NodeKind::InlineCode(TextValue::new("a`b")))
-            .unwrap();
+        builder.append_inline_code(Some(paragraph), "a`b").unwrap();
         builder
             .append(
                 None,
@@ -1762,29 +1760,41 @@ mod tests {
             )
             .unwrap();
         let row = builder.append(Some(table), NodeKind::TableRow).unwrap();
-        for kind in [
-            NodeKind::Image(Image {
-                source: "diagram.png".into(),
-                alt: "A|B".into(),
-                title: None,
-                width: None,
-                height: None,
-            }),
-            NodeKind::InlineCode(TextValue::new("a|b")),
-        ] {
-            let cell = builder
-                .append(
-                    Some(row),
-                    NodeKind::TableCell(TableCell {
-                        header: false,
-                        colspan: 1,
-                        rowspan: 1,
-                        alignment: None,
-                    }),
-                )
-                .unwrap();
-            builder.append(Some(cell), kind).unwrap();
-        }
+        let image_cell = builder
+            .append(
+                Some(row),
+                NodeKind::TableCell(TableCell {
+                    header: false,
+                    colspan: 1,
+                    rowspan: 1,
+                    alignment: None,
+                }),
+            )
+            .unwrap();
+        builder
+            .append(
+                Some(image_cell),
+                NodeKind::Image(Image {
+                    source: "diagram.png".into(),
+                    alt: "A|B".into(),
+                    title: None,
+                    width: None,
+                    height: None,
+                }),
+            )
+            .unwrap();
+        let code_cell = builder
+            .append(
+                Some(row),
+                NodeKind::TableCell(TableCell {
+                    header: false,
+                    colspan: 1,
+                    rowspan: 1,
+                    alignment: None,
+                }),
+            )
+            .unwrap();
+        builder.append_inline_code(Some(code_cell), "a|b").unwrap();
         let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
         assert!(markdown.contains("![A\\|B](diagram.png)"), "{markdown}");
         assert!(markdown.contains("`a\\|b`"), "{markdown}");
