@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecognizedMath {
@@ -229,28 +230,51 @@ fn is_annotation_element(local: &str) -> bool {
 }
 
 /// Marks elements that contain a usable TeX annotation and are math or inside
-/// a known math wrapper. The previous per-element check walked ancestors and
-/// descendants repeatedly. This reverse/preorder pair keeps the pass linear.
-pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> Vec<bool> {
-    let mut has_annotation = vec![false; dom.len()];
-    for &(node, _) in nodes.iter().rev() {
-        let own_annotation = is_tex_annotation(dom, node);
-        let descendant_annotation = dom
-            .element_children(node)
-            .any(|child| has_annotation[child.index()]);
-        has_annotation[node.index()] = own_annotation || descendant_annotation;
+/// a known math wrapper.
+///
+/// The annotation scan is the cheap source gate. Only the ancestor paths of
+/// matching annotations enter the targeted pass, so an ordinary page does not
+/// allocate semantic sets and a page with one equation does not build sets for
+/// every source element.
+pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> HashSet<NodeId> {
+    let annotations: Vec<_> = nodes
+        .iter()
+        .map(|&(node, _)| node)
+        .filter(|&node| is_tex_annotation(dom, node))
+        .collect();
+    if annotations.is_empty() {
+        return HashSet::new();
     }
 
-    let mut inside_wrapper = vec![false; dom.len()];
-    let mut accessible = vec![false; dom.len()];
+    let root = nodes.first().map(|&(node, _)| node);
+    let mut relevant = HashSet::new();
+    for annotation in annotations {
+        let mut node = Some(annotation);
+        while let Some(current) = node {
+            relevant.insert(current);
+            if Some(current) == root {
+                break;
+            }
+            node = dom.parent(current);
+        }
+    }
+
+    let mut inside_wrapper = HashSet::new();
+    let mut accessible = HashSet::new();
     for &(node, _) in nodes {
+        if !relevant.contains(&node) {
+            continue;
+        }
         let inherited = dom
             .parent(node)
-            .is_some_and(|parent| inside_wrapper[parent.index()]);
+            .is_some_and(|parent| inside_wrapper.contains(&parent));
         let wrapper = inherited || has_math_wrapper_class(dom, node);
-        inside_wrapper[node.index()] = wrapper;
-        accessible[node.index()] =
-            has_annotation[node.index()] && (is_math_root(dom, node) || wrapper);
+        if wrapper {
+            inside_wrapper.insert(node);
+        }
+        if is_math_root(dom, node) || wrapper {
+            accessible.insert(node);
+        }
     }
     accessible
 }

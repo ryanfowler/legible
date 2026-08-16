@@ -55,151 +55,233 @@ pub(super) struct FeatureInventory {
     pub(super) footnotes: Vec<NodeId>,
 }
 
-/// Dense source evidence shared by cleanup and semantic compilation.
+/// Small source-gating bits collected before targeted semantic analysis.
+#[derive(Clone, Copy, Default)]
+struct SemanticGate(u8);
+
+impl SemanticGate {
+    const CALLOUT: u8 = 1 << 0;
+    const FOOTNOTE: u8 = 1 << 1;
+    const MATH: u8 = 1 << 2;
+    const DATA_TABLE: u8 = 1 << 3;
+
+    fn add(&mut self, bit: u8) {
+        self.0 |= bit;
+    }
+
+    fn contains(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Sparse source evidence shared by cleanup and semantic compilation.
 ///
-/// The recognizers for rich source semantics are deliberately run once for a
-/// retained fragment. Cleanup only detaches nodes, so these source-relative
-/// facts remain valid while the fragment is reduced and compiled.
+/// The cheap gate runs before a retained-fragment snapshot. Feature-specific
+/// recognizers run only for gated nodes, and their results use sparse node
+/// sets. Cleanup only detaches nodes, so these source-relative facts remain
+/// valid while the fragment is reduced and compiled.
+#[derive(Default)]
 pub(crate) struct SourceEvidence {
-    callout: Vec<bool>,
-    callout_candidate: Vec<bool>,
-    footnote: Vec<bool>,
-    footnote_candidate: Vec<bool>,
-    math: Vec<bool>,
-    accessible_math: Vec<bool>,
-    contains_semantic: Vec<bool>,
-    data_table: Vec<bool>,
+    callout: HashSet<NodeId>,
+    callout_candidate: HashSet<NodeId>,
+    footnote: HashSet<NodeId>,
+    footnote_candidate: HashSet<NodeId>,
+    math: HashSet<NodeId>,
+    accessible_math: HashSet<NodeId>,
+    contains_semantic: HashSet<NodeId>,
+    data_table: HashSet<NodeId>,
 }
 
 impl SourceEvidence {
     pub(crate) fn analyze(dom: &Dom, root: NodeId, store: &NodeStateStore) -> Self {
+        let mut gate = SemanticGate::default();
+        let mut fragment_targets = None;
+        let mut fragment_links = Vec::new();
+        let mut gated = Vec::new();
+        let mut table_nodes = Vec::new();
+        for node in std::iter::once(root).chain(dom.descendants(root)) {
+            let mut node_gate = SemanticGate::default();
+            if dom.tag(node) == Some(Tag::Table) && store.is_data_table(node) == Some(true) {
+                gate.add(SemanticGate::DATA_TABLE);
+                table_nodes.push(node);
+            }
+            if may_have_callout_evidence(dom, node) {
+                gate.add(SemanticGate::CALLOUT);
+                node_gate.add(SemanticGate::CALLOUT);
+            }
+            if has_footnote_attributes(dom, node) {
+                gate.add(SemanticGate::FOOTNOTE);
+                node_gate.add(SemanticGate::FOOTNOTE);
+            }
+            if let Some(target) = fragment_target(dom, node) {
+                fragment_targets
+                    .get_or_insert_with(HashSet::new)
+                    .insert(target);
+                fragment_links.push((node, target));
+            }
+            if may_have_math_evidence(dom, node) {
+                gate.add(SemanticGate::MATH);
+                node_gate.add(SemanticGate::MATH);
+            }
+            if !node_gate.is_empty() {
+                gated.push((node, node_gate));
+            }
+        }
+
+        // Resolve only the small set of fragment targets. Do not build an
+        // index for every source ID, and do not allocate anything when the
+        // source has no fragment references. The first scan already recorded
+        // all other feature candidates, so this pass only handles references.
+        if let Some(targets) = fragment_targets {
+            let mut resolved_targets = HashSet::new();
+            let mut footnote_nodes = HashSet::new();
+            for node in std::iter::once(root).chain(dom.descendants(root)) {
+                if let Some(id) = dom.attr(node, AttrName::Id)
+                    && targets.contains(id)
+                {
+                    resolved_targets.insert(id);
+                    footnote_nodes.insert(node);
+                }
+            }
+            for (node, target) in fragment_links {
+                if resolved_targets.contains(target) {
+                    footnote_nodes.insert(node);
+                }
+            }
+            if !footnote_nodes.is_empty() {
+                gate.add(SemanticGate::FOOTNOTE);
+                for (node, node_gate) in &mut gated {
+                    if footnote_nodes.contains(node) {
+                        node_gate.add(SemanticGate::FOOTNOTE);
+                    }
+                }
+                let mut gated_nodes: HashSet<NodeId> =
+                    gated.iter().map(|&(node, _)| node).collect();
+                for node in footnote_nodes {
+                    if gated_nodes.insert(node) {
+                        let mut node_gate = SemanticGate::default();
+                        node_gate.add(SemanticGate::FOOTNOTE);
+                        gated.push((node, node_gate));
+                    }
+                }
+            }
+        }
+
+        if gate.is_empty() {
+            return Self::default();
+        }
+
         let mut nodes = Vec::with_capacity(dom.len());
         nodes.push((root, 0));
         nodes.extend(dom.element_descendants_snapshot_with_depth(root));
-        const CALLOUT: u8 = 1 << 0;
-        const FOOTNOTE: u8 = 1 << 1;
-        const MATH: u8 = 1 << 2;
-        let fragment_ids: HashSet<&str> = nodes
-            .iter()
-            .filter_map(|&(node, _)| dom.attr(node, AttrName::Id))
-            .collect();
-        let mut gated = Vec::new();
-        let mut table_nodes = Vec::new();
-        for &(node, _) in &nodes {
-            if dom.tag(node) == Some(Tag::Table) {
-                table_nodes.push(node);
-            }
-            let mut gate = 0;
-            if may_have_callout_evidence(dom, node) {
-                gate |= CALLOUT;
-            }
-            if has_footnote_source_gate(dom, node, &fragment_ids) {
-                gate |= FOOTNOTE;
-            }
-            if may_have_math_evidence(dom, node) {
-                gate |= MATH;
-            }
-            if gate != 0 {
-                gated.push((node, gate));
-            }
-        }
-        if gated.is_empty() && table_nodes.is_empty() {
-            return Self {
-                callout: Vec::new(),
-                callout_candidate: Vec::new(),
-                footnote: Vec::new(),
-                footnote_candidate: Vec::new(),
-                math: Vec::new(),
-                accessible_math: Vec::new(),
-                contains_semantic: Vec::new(),
-                data_table: Vec::new(),
-            };
-        }
 
-        let has_math_candidate = gated.iter().any(|&(_, gate)| gate & MATH != 0);
-        let has_callout_candidate = gated.iter().any(|&(_, gate)| gate & CALLOUT != 0);
-        let has_footnote_candidate = gated.iter().any(|&(_, gate)| gate & FOOTNOTE != 0);
+        let has_math_candidate = gated
+            .iter()
+            .any(|&(_, node_gate)| node_gate.contains(SemanticGate::MATH));
+        let has_callout_candidate = gated
+            .iter()
+            .any(|&(_, node_gate)| node_gate.contains(SemanticGate::CALLOUT));
+        let has_footnote_candidate = gated
+            .iter()
+            .any(|&(_, node_gate)| node_gate.contains(SemanticGate::FOOTNOTE));
+        let callout_capacity = gated
+            .iter()
+            .filter(|(_, node_gate)| node_gate.contains(SemanticGate::CALLOUT))
+            .count();
+        let footnote_capacity = gated
+            .iter()
+            .filter(|(_, node_gate)| node_gate.contains(SemanticGate::FOOTNOTE))
+            .count();
+        let math_capacity = gated
+            .iter()
+            .filter(|(_, node_gate)| node_gate.contains(SemanticGate::MATH))
+            .count();
         let mut callout = if has_callout_candidate {
-            vec![false; dom.len()]
+            HashSet::with_capacity(callout_capacity)
         } else {
-            Vec::new()
+            HashSet::new()
         };
         let mut callout_candidate = if has_callout_candidate {
-            vec![false; dom.len()]
+            HashSet::with_capacity(callout_capacity)
         } else {
-            Vec::new()
+            HashSet::new()
         };
         let mut footnote = if has_footnote_candidate {
-            vec![false; dom.len()]
+            HashSet::with_capacity(footnote_capacity)
         } else {
-            Vec::new()
+            HashSet::new()
         };
         let mut footnote_candidate = if has_footnote_candidate {
-            vec![false; dom.len()]
+            HashSet::with_capacity(footnote_capacity)
         } else {
-            Vec::new()
+            HashSet::new()
         };
         let mut math = if has_math_candidate {
-            vec![false; dom.len()]
+            HashSet::with_capacity(math_capacity)
         } else {
-            Vec::new()
+            HashSet::new()
         };
-        let mut data_table = if !table_nodes.is_empty() {
-            vec![false; dom.len()]
-        } else {
-            Vec::new()
-        };
+        let mut data_table = HashSet::with_capacity(table_nodes.len());
 
-        let has_semantic_candidates = !gated.is_empty();
-        let has_protected_candidates = has_semantic_candidates || !table_nodes.is_empty();
-        for (node, gate) in gated {
-            if gate & CALLOUT != 0 {
+        for (node, node_gate) in gated {
+            if node_gate.contains(SemanticGate::CALLOUT) {
                 let (source, candidate) = super::callouts::source_evidence(dom, node);
                 let explicit = dom.attr(node, AttrName::DataCallout).is_some()
                     || dom.attr_by_local_name(node, "data-callout").is_some();
-                callout[node.index()] = source || explicit;
-                callout_candidate[node.index()] = candidate || explicit;
+                if source || explicit {
+                    callout.insert(node);
+                }
+                if candidate || explicit {
+                    callout_candidate.insert(node);
+                }
             }
-            if gate & FOOTNOTE != 0 {
+            if node_gate.contains(SemanticGate::FOOTNOTE) {
                 let explicit = dom.attr(node, AttrName::DataFootnote).is_some()
                     || dom.attr(node, AttrName::DataFootnoteRef).is_some()
                     || dom.attr(node, AttrName::DataFootnotes).is_some()
                     || dom.attr_by_local_name(node, "data-footnote").is_some()
                     || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
                     || dom.attr_by_local_name(node, "data-footnotes").is_some();
-                footnote[node.index()] =
-                    super::footnotes::is_source_evidence(dom, node) || explicit;
-                footnote_candidate[node.index()] =
-                    super::footnotes::has_possible_footnote_evidence(dom, node) || explicit;
+                if super::footnotes::is_source_evidence(dom, node) || explicit {
+                    footnote.insert(node);
+                }
+                if super::footnotes::has_possible_footnote_evidence(dom, node) || explicit {
+                    footnote_candidate.insert(node);
+                }
             }
-            if gate & MATH != 0 {
-                math[node.index()] = super::math::is_source_evidence(dom, node);
+            if node_gate.contains(SemanticGate::MATH) && super::math::is_source_evidence(dom, node)
+            {
+                math.insert(node);
             }
         }
         for node in table_nodes {
-            data_table[node.index()] = store.is_data_table(node) == Some(true);
+            if store.is_data_table(node) == Some(true) {
+                data_table.insert(node);
+            }
         }
 
         let accessible_math = if has_math_candidate {
             super::math::accessible_math_nodes(dom, &nodes)
         } else {
-            Vec::new()
+            HashSet::new()
         };
-        let mut contains_semantic = if !has_protected_candidates {
-            Vec::new()
-        } else {
-            vec![false; dom.len()]
-        };
+        let mut contains_semantic = HashSet::new();
         for &(node, _) in nodes.iter().rev() {
-            let mut value = callout.get(node.index()).copied().unwrap_or(false)
-                || footnote.get(node.index()).copied().unwrap_or(false)
-                || math.get(node.index()).copied().unwrap_or(false)
-                || accessible_math.get(node.index()).copied().unwrap_or(false)
-                || data_table.get(node.index()).copied().unwrap_or(false);
-            for child in dom.element_children(node) {
-                value |= contains_semantic[child.index()];
+            let value = callout.contains(&node)
+                || footnote.contains(&node)
+                || math.contains(&node)
+                || accessible_math.contains(&node)
+                || data_table.contains(&node)
+                || dom
+                    .element_children(node)
+                    .any(|child| contains_semantic.contains(&child));
+            if value {
+                contains_semantic.insert(node);
             }
-            contains_semantic[node.index()] = value;
         }
         Self {
             callout,
@@ -214,47 +296,35 @@ impl SourceEvidence {
     }
 
     pub(crate) fn callout(&self, node: NodeId) -> bool {
-        self.callout.get(node.index()).copied().unwrap_or(false)
+        self.callout.contains(&node)
     }
 
     pub(crate) fn callout_candidate(&self, node: NodeId) -> bool {
-        self.callout_candidate
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        self.callout_candidate.contains(&node)
     }
 
     pub(crate) fn footnote(&self, node: NodeId) -> bool {
-        self.footnote.get(node.index()).copied().unwrap_or(false)
+        self.footnote.contains(&node)
     }
 
     pub(crate) fn footnote_candidate(&self, node: NodeId) -> bool {
-        self.footnote_candidate
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        self.footnote_candidate.contains(&node)
     }
 
     pub(crate) fn math(&self, node: NodeId) -> bool {
-        self.math.get(node.index()).copied().unwrap_or(false)
+        self.math.contains(&node)
     }
 
     pub(crate) fn accessible_math(&self, node: NodeId) -> bool {
-        self.accessible_math
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        self.accessible_math.contains(&node)
     }
 
     pub(crate) fn contains_semantic(&self, node: NodeId) -> bool {
-        self.contains_semantic
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        self.contains_semantic.contains(&node)
     }
 
     pub(crate) fn data_table(&self, node: NodeId) -> bool {
-        self.data_table.get(node.index()).copied().unwrap_or(false)
+        self.data_table.contains(&node)
     }
 
     pub(crate) fn is_semantic_source(&self, node: NodeId) -> bool {
@@ -292,20 +362,25 @@ fn has_footnote_attributes(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn fragment_target(dom: &Dom, node: NodeId) -> Option<&str> {
-    dom.tag(node)
+    let href = dom
+        .tag(node)
         .is_some_and(|tag| tag == Tag::A)
         .then(|| dom.attr(node, AttrName::Href))
-        .flatten()
-        .and_then(|href| href.trim().rsplit_once('#').map(|(_, target)| target))
-        .filter(|target| !target.is_empty())
-}
-
-fn has_footnote_source_gate(dom: &Dom, node: NodeId, fragment_ids: &HashSet<&str>) -> bool {
-    has_footnote_attributes(dom, node)
-        || fragment_target(dom, node).is_some_and(|target| fragment_ids.contains(target))
-        || dom
-            .attr(node, AttrName::Id)
-            .is_some_and(|id| fragment_ids.contains(id))
+        .flatten()?
+        .trim();
+    let (prefix, target) = href.rsplit_once('#')?;
+    let has_scheme = prefix.find(':').is_some_and(|colon| {
+        colon > 0
+            && prefix[..colon]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    });
+    if target.is_empty()
+        || (!prefix.is_empty() && (has_scheme || prefix.starts_with('/') || prefix.contains('?')))
+    {
+        return None;
+    }
+    Some(target)
 }
 
 fn may_have_math_evidence(dom: &Dom, node: NodeId) -> bool {
@@ -984,7 +1059,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_evidence_is_dense_and_reuses_semantic_gates() {
+    fn source_evidence_is_sparse_and_reuses_semantic_gates() {
         let dom = Dom::parse_fragment(
             r##"<div><p class="ordinary">Text</p><aside class="admonition warning"><p>Warning</p></aside><p data-latex="x^2">x squared</p><p><a role="doc-noteref" href="#note">1</a></p><p><a href="article.html#fn1">2</a></p><aside id="note" role="doc-footnote">A note.</aside><p id="fn1">A second note.</p><table role="table"><tr><th>Value</th></tr></table></div>"##,
             Tag::Div,
@@ -1024,6 +1099,70 @@ mod tests {
         assert!(evidence.footnote_candidate(conventional_reference));
         assert!(evidence.footnote_candidate(conventional_definition));
         assert!(evidence.data_table(table));
+    }
+
+    #[test]
+    fn unrelated_ids_do_not_trigger_fragment_semantic_evidence() {
+        let dom = Dom::parse_fragment(
+            r#"<div><p id="section">Section text</p><p class="ordinary">More text</p></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let evidence = SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
+        let section = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("section"))
+            .unwrap();
+        assert!(!evidence.footnote_candidate(section));
+        assert!(!evidence.contains_semantic(dom.root()));
+    }
+
+    #[test]
+    fn layout_tables_do_not_activate_data_table_evidence() {
+        let dom = Dom::parse_fragment(
+            "<div><table><tr><td>Layout</td></tr></table><p>Text</p></div>",
+            Tag::Div,
+        )
+        .unwrap();
+        let evidence = SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
+        let table = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Table))
+            .unwrap();
+        assert!(!evidence.data_table(table));
+        assert!(!evidence.contains_semantic(dom.root()));
+    }
+
+    #[test]
+    fn unresolved_fragment_targets_do_not_trigger_semantic_evidence() {
+        let dom = Dom::parse_fragment(
+            r##"<div><p><a href="#missing">Missing</a></p><p id="section">Section text</p></div>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let evidence = SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
+        let reference = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Href) == Some("#missing"))
+            .unwrap();
+        assert!(!evidence.footnote_candidate(reference));
+    }
+
+    #[test]
+    fn external_and_query_fragments_do_not_trigger_local_evidence() {
+        let dom = Dom::parse_fragment(
+            r##"<div><p><a href="https://example.test/page#note">Remote</a></p><p id="note">Remote target</p><p><a href="?view=all#query">Query</a></p><p id="query">Query target</p></div>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let evidence = SourceEvidence::analyze(&dom, dom.root(), &NodeStateStore::new());
+        for href in ["https://example.test/page#note", "?view=all#query"] {
+            let reference = dom
+                .descendants(dom.root())
+                .find(|&node| dom.attr(node, AttrName::Href) == Some(href))
+                .unwrap();
+            assert!(!evidence.footnote_candidate(reference));
+        }
     }
 
     #[test]
