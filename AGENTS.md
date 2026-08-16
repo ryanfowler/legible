@@ -60,6 +60,7 @@ The extraction pipeline flows through these stages:
 | `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
 | `document/` | Private compact semantic event tape plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this representation instead of a DOM |
+| `document/builder.rs` | Temporary source builder for ordinary lowering and direct compact-tape emission for complex lowering |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
 | `specialized/` | Internal registry and extractors for non-article page structures |
@@ -95,6 +96,7 @@ These invariants are costly to violate:
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Canonicalize discussions once.** Specialized discussion extractors must use the shared builder for primary posts, reply metadata, rich reply bodies, and retained nesting.
 - **Compile output semantics directly.** Footnote, math, and callout source recognition belongs in `document/`. Keep only source protection and external footnote adoption before cleanup.
+- **Lower complex semantics directly.** Complex lowering must emit the compact tape during its task traversal. Do not build the legacy semantic tree and convert it later. Keep source-only parent and close state in the temporary builder.
 - **Route ordinary semantics conservatively.** Use the streaming compiler for supported native HTML only when a cheap source gate finds no inferred semantic dialect. The gate may count source nodes for builder capacity but must not propagate semantic visibility facts. The ordinary compiler validates structural details while it lowers and returns to the complex compiler when required. Do not add a separate ordinary inventory pass.
 - **Share complex semantic facts.** Build feature worklists once. Keep broadly useful node facts compact and dense. Keep feature-specific analysis sparse. Reuse cleanup-safe source facts in final cleanup and semantic compilation. Update derived facts after detach operations.
 - **Cache semantic source evidence.** Collect the tiny source gate during an existing cleanup traversal. Keep feature-specific callout, footnote, math, accessible-math, and data-table evidence as sparse node sets only when the gate finds that feature. Retain sparse feature candidates so complex lowering does not repeat broad gate classification. Resolve fragment references against only their target IDs. Pass the cached evidence through hard cleanup, heuristic cleanup, final cleanup, and semantic compilation. Use cheap tag and attribute gates before rich recognizers. Do not add a standalone whole-fragment pass solely to build the gate.

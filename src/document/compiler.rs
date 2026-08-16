@@ -4,9 +4,10 @@ use thiserror::Error;
 use url::Url;
 
 use super::{
-    BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document, DocumentBuilder,
-    DocumentNodeId, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media,
-    NodeKind, Table, TableAlignment, TableCell, TaskMarker, ValidationError, safe_destination,
+    BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document, DocumentNodeId,
+    FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media, NodeKind,
+    SemanticTapeBuilder, Table, TableAlignment, TableCell, TaskMarker, ValidationError,
+    safe_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 
@@ -59,9 +60,21 @@ struct Scope {
     table: Option<DocumentNodeId>,
     row: Option<DocumentNodeId>,
     figure: Option<DocumentNodeId>,
+    figure_wrapper: Option<DocumentNodeId>,
     definition_list: Option<DocumentNodeId>,
     link: Option<DocumentNodeId>,
     preserve_isolated_whitespace: bool,
+}
+
+enum ListingPlan {
+    Item {
+        primary: Vec<NodeId>,
+        metadata: Option<Vec<NodeId>>,
+    },
+    Group {
+        kind: NodeKind,
+        cells: Vec<NodeId>,
+    },
 }
 
 enum Task {
@@ -80,10 +93,19 @@ enum Task {
         scope: Scope,
         kind: NodeKind,
     },
+    Close {
+        node: DocumentNodeId,
+    },
+    Listing {
+        list: DocumentNodeId,
+        plan: ListingPlan,
+        scope: Scope,
+    },
     DeferredFootnote {
         node: NodeId,
         label: Box<str>,
         scope: Scope,
+        close_group: bool,
     },
     CalloutTitle {
         node: NodeId,
@@ -243,33 +265,41 @@ fn compile_complex_document(
     } else {
         media_separators(dom, root, &media)
     };
-    let mut builder = DocumentBuilder::with_capacity(facts.nodes().len());
+    let mut builder = SemanticTapeBuilder::with_capacity(facts.nodes().len());
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
     let mut table_layouts = HashMap::<DocumentNodeId, TableAnalysis>::new();
     let mut deferred_footnote_group = None;
+    let mut deferred_captions = HashMap::<DocumentNodeId, Vec<(NodeId, Scope)>>::new();
     let scope = Scope {
         parent: None,
         list: None,
         table: None,
         row: None,
         figure: None,
+        figure_wrapper: None,
         definition_list: None,
         link: None,
         preserve_isolated_whitespace: false,
     };
-    let mut tasks = facts
+    let deferred_nodes: Vec<_> = facts
         .nodes()
         .iter()
-        .rev()
         .filter_map(|&node| {
             footnotes
                 .definition(node)
                 .filter(|_| footnotes.is_deferred(node))
-                .map(|label| Task::DeferredFootnote {
-                    node,
-                    label: label.into(),
-                    scope,
-                })
+                .map(|label| (node, label))
+        })
+        .collect();
+    let mut tasks = deferred_nodes
+        .into_iter()
+        .rev()
+        .enumerate()
+        .map(|(reverse_index, (node, label))| Task::DeferredFootnote {
+            node,
+            label: label.into(),
+            scope,
+            close_group: reverse_index == 0,
         })
         .collect::<Vec<_>>();
     tasks.extend(
@@ -288,6 +318,7 @@ fn compile_complex_document(
                 }
                 Task::WrappedChildren { node, scope, kind } => {
                     let parent = builder.append(scope.parent, kind)?;
+                    tasks.push(Task::Close { node: parent });
                     push_children(
                         dom,
                         node,
@@ -298,10 +329,68 @@ fn compile_complex_document(
                         &mut tasks,
                     );
                 }
+                Task::Close { node } => {
+                    builder.close(node)?;
+                    if let Some(captions) = deferred_captions.remove(&node) {
+                        tasks.extend(
+                            captions
+                                .into_iter()
+                                .rev()
+                                .map(|(node, scope)| Task::Node { node, scope }),
+                        );
+                    }
+                }
+                Task::Listing { list, plan, scope } => {
+                    let (parent, children) = match plan {
+                        ListingPlan::Item { primary, metadata } => {
+                            let item = builder.append(Some(list), NodeKind::ListItem)?;
+                            let mut children = Vec::new();
+                            append_cell_tasks(
+                                dom,
+                                &primary,
+                                Scope {
+                                    parent: Some(item),
+                                    ..scope
+                                },
+                                &mut children,
+                            );
+                            if let Some(metadata) = metadata {
+                                children.push(Task::HardBreak { parent: Some(item) });
+                                append_cell_tasks(
+                                    dom,
+                                    &metadata,
+                                    Scope {
+                                        parent: Some(item),
+                                        ..scope
+                                    },
+                                    &mut children,
+                                );
+                            }
+                            (item, children)
+                        }
+                        ListingPlan::Group { kind, cells } => {
+                            let group = builder.append(scope.parent, kind)?;
+                            let mut children = Vec::new();
+                            append_cell_tasks(
+                                dom,
+                                &cells,
+                                Scope {
+                                    parent: Some(group),
+                                    ..scope
+                                },
+                                &mut children,
+                            );
+                            (group, children)
+                        }
+                    };
+                    tasks.push(Task::Close { node: parent });
+                    tasks.extend(children.into_iter().rev());
+                }
                 Task::DeferredFootnote {
                     node,
                     label,
                     mut scope,
+                    close_group,
                 } => {
                     let parent = if let Some(parent) = deferred_footnote_group {
                         parent
@@ -311,6 +400,9 @@ fn compile_complex_document(
                         parent
                     };
                     scope.parent = Some(parent);
+                    if close_group {
+                        tasks.push(Task::Close { node: parent });
+                    }
                     compile_footnote_definition(
                         dom,
                         node,
@@ -327,11 +419,16 @@ fn compile_complex_document(
                     already_strong,
                 } => {
                     let paragraph = builder.append(scope.parent, NodeKind::Paragraph)?;
-                    let parent = if already_strong {
-                        paragraph
+                    let (parent, close_parent) = if already_strong {
+                        (paragraph, None)
                     } else {
-                        builder.append(Some(paragraph), NodeKind::Strong)?
+                        let strong = builder.append(Some(paragraph), NodeKind::Strong)?;
+                        (strong, Some(strong))
                     };
+                    tasks.push(Task::Close { node: paragraph });
+                    if let Some(close_parent) = close_parent {
+                        tasks.push(Task::Close { node: close_parent });
+                    }
                     push_children(
                         dom,
                         node,
@@ -346,6 +443,20 @@ fn compile_complex_document(
             }
             continue;
         };
+        if captions[node.index()]
+            && let Some(figure) = scope.figure
+            && scope.parent != Some(figure)
+            && let Some(wrapper) = scope.figure_wrapper
+        {
+            let mut deferred_scope = scope;
+            deferred_scope.parent = Some(figure);
+            deferred_scope.figure_wrapper = None;
+            deferred_captions
+                .entry(wrapper)
+                .or_default()
+                .push((node, deferred_scope));
+            continue;
+        }
         let heading_permalink = facts.is_heading_permalink(node);
         if tables.is_skipped(node)
             || footnotes.is_skipped(node)
@@ -395,12 +506,15 @@ fn compile_complex_document(
                     || (!scope.preserve_isolated_whitespace
                         && !meaningful_inline_separator(dom, node, &facts))))
             {
-                let parent = if scope.parent.is_some() && scope.parent == scope.list {
+                let list_item = if scope.parent.is_some() && scope.parent == scope.list {
                     Some(builder.append(scope.parent, NodeKind::ListItem)?)
                 } else {
-                    scope.parent
+                    None
                 };
-                builder.append_prose(parent, text)?;
+                builder.append_prose(list_item.or(scope.parent), text)?;
+                if let Some(list_item) = list_item {
+                    builder.close(list_item)?;
+                }
             }
             continue;
         }
@@ -471,13 +585,19 @@ fn compile_complex_document(
             continue;
         }
         if tag == Tag::Table {
-            let table_scope = if scope.parent.is_some() && scope.parent == scope.list {
-                Scope {
-                    parent: Some(builder.append(scope.parent, NodeKind::ListItem)?),
-                    ..scope
-                }
+            let table_list_item = if scope.parent.is_some() && scope.parent == scope.list {
+                Some(builder.append(scope.parent, NodeKind::ListItem)?)
             } else {
-                scope
+                None
+            };
+            if let Some(table_list_item) = table_list_item {
+                tasks.push(Task::Close {
+                    node: table_list_item,
+                });
+            }
+            let table_scope = Scope {
+                parent: table_list_item.or(scope.parent),
+                ..scope
             };
             match tables.kind(node) {
                 super::tables::TableKind::Layout => {
@@ -588,7 +708,7 @@ fn compile_complex_document(
         let callout = callouts.value(node);
         let parent_is_block_group = scope
             .parent
-            .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
+            .is_some_and(|parent| builder.is_block_group(parent));
         let semantic = if let Some(level) = facts.heading_level(node) {
             if !facts.heading_has_meaningful_content(node) {
                 None
@@ -698,27 +818,57 @@ fn compile_complex_document(
             push_children(dom, node, transparent_scope, &mut tasks);
             continue;
         };
-        if is_redundant_formatting(&kind, scope.parent.and_then(|parent| builder.kind(parent))) {
+        if builder.is_redundant_formatting(scope.parent, &kind) {
             push_children(dom, node, scope, &mut tasks);
             continue;
         }
-        let semantic_leaf = matches!(kind, NodeKind::Media(_));
+        let semantic_leaf = matches!(
+            kind,
+            NodeKind::CodeBlock(_)
+                | NodeKind::Text(_)
+                | NodeKind::InlineCode(_)
+                | NodeKind::Image(_)
+                | NodeKind::HardBreak
+                | NodeKind::ThematicBreak
+                | NodeKind::FootnoteReference(_)
+                | NodeKind::TaskMarker(_)
+                | NodeKind::InlineMath(_)
+                | NodeKind::DisplayMath(_)
+                | NodeKind::Media(_)
+        );
         let cell_span = match &kind {
             NodeKind::TableCell(cell) => Some((cell.colspan, cell.rowspan)),
             _ => None,
         };
-        let semantic_parent = if matches!(kind, NodeKind::Figcaption) {
-            scope.figure
-        } else if scope.parent.is_some()
+        let list_item = if scope.parent.is_some()
             && scope.parent == scope.list
-            && !matches!(kind, NodeKind::ListItem | NodeKind::FootnoteDefinition(_))
-        {
+            && !matches!(
+                kind,
+                NodeKind::Figcaption | NodeKind::ListItem | NodeKind::FootnoteDefinition(_)
+            ) {
             Some(builder.append(scope.parent, NodeKind::ListItem)?)
         } else {
-            scope.parent
+            None
         };
+        if let Some(list_item) = list_item {
+            tasks.push(Task::Close { node: list_item });
+        }
+        let semantic_parent = if matches!(kind, NodeKind::Figcaption) {
+            scope.figure
+        } else {
+            list_item.or(scope.parent)
+        };
+        let direct_figure_wrapper = scope.figure.is_some()
+            && scope.figure_wrapper.is_none()
+            && semantic_parent == scope.figure
+            && !matches!(kind, NodeKind::Figcaption);
         let semantic_node = builder.append(semantic_parent, kind)?;
         next_scope.parent = Some(semantic_node);
+        if tag == Tag::Figure {
+            next_scope.figure_wrapper = None;
+        } else if direct_figure_wrapper {
+            next_scope.figure_wrapper = Some(semantic_node);
+        }
         if figures[node.index()]
             && images.is_synthetic(node)
             && let Some(source) = images.source(node).map(Into::into)
@@ -728,14 +878,10 @@ fn compile_complex_document(
                 NodeKind::Image(semantic_image(dom, node, source)),
             )?;
         }
-        match builder.kind_mut(semantic_node) {
-            Some(NodeKind::List(_)) => next_scope.list = Some(semantic_node),
-            Some(NodeKind::ListItem) => {}
-            _ => {
-                if lists.container(node).is_none() {
-                    next_scope.list = scope.list;
-                }
-            }
+        if builder.is_list(semantic_node) {
+            next_scope.list = Some(semantic_node);
+        } else if !builder.is_list_item(semantic_node) && lists.container(node).is_none() {
+            next_scope.list = scope.list;
         }
         match tag {
             Tag::Table => {
@@ -772,6 +918,9 @@ fn compile_complex_document(
             _ => {}
         }
         if !semantic_leaf {
+            tasks.push(Task::Close {
+                node: semantic_node,
+            });
             if let Some(callout) = callout {
                 if let Some(title) = callout.title_node {
                     push_callout_children(
@@ -786,6 +935,8 @@ fn compile_complex_document(
                     let paragraph = builder.append(Some(semantic_node), NodeKind::Paragraph)?;
                     let strong = builder.append(Some(paragraph), NodeKind::Strong)?;
                     builder.append_prose(Some(strong), &callout.title)?;
+                    builder.close(strong)?;
+                    builder.close(paragraph)?;
                     push_children(dom, node, next_scope, &mut tasks);
                 }
             } else if figures[node.index()] {
@@ -797,7 +948,7 @@ fn compile_complex_document(
     }
 
     for (table, analysis) in table_layouts {
-        if let Some(NodeKind::Table(value)) = builder.kind_mut(table) {
+        if let Some(value) = builder.table_mut(table) {
             value.column_count = (!analysis.has_rowspan).then_some(analysis.maximum_width);
         }
     }
@@ -907,7 +1058,7 @@ fn compile_listing_table(
     start: u32,
     scope: Scope,
     analysis: &super::tables::TableAnalysis,
-    builder: &mut DocumentBuilder,
+    builder: &mut SemanticTapeBuilder,
     tasks: &mut Vec<Task>,
 ) -> Result<(), BuildError> {
     let list = builder.append(
@@ -917,81 +1068,86 @@ fn compile_listing_table(
             start: (start != 1).then_some(i64::from(start)),
         }),
     )?;
-    let mut ordered = Vec::new();
+    let mut plans = Vec::new();
     let mut current_item = None;
     let mut expects_metadata = false;
     for &row in analysis.rows(table) {
         let cells = analysis.cells(row);
         if analysis.row_has_rank(row) {
-            let item = builder.append(Some(list), NodeKind::ListItem)?;
-            append_cell_tasks(
-                dom,
-                &cells[1..],
-                analysis,
-                Scope {
-                    parent: Some(item),
-                    ..scope
-                },
-                &mut ordered,
-            );
-            current_item = Some(item);
+            let primary = cells
+                .iter()
+                .copied()
+                .skip(1)
+                .filter(|&cell| analysis.meaningful_cell(cell))
+                .collect();
+            plans.push(ListingPlan::Item {
+                primary,
+                metadata: None,
+            });
+            current_item = Some(plans.len() - 1);
             expects_metadata = true;
         } else if !analysis.row_has_content(row) {
             continue;
         } else if expects_metadata {
-            if let Some(item) = current_item {
-                ordered.push(Task::HardBreak { parent: Some(item) });
-                append_cell_tasks(
-                    dom,
-                    cells,
-                    analysis,
-                    Scope {
-                        parent: Some(item),
-                        ..scope
-                    },
-                    &mut ordered,
-                );
+            if let Some(index) = current_item {
+                let metadata = cells
+                    .iter()
+                    .copied()
+                    .filter(|&cell| analysis.meaningful_cell(cell))
+                    .collect();
+                if let Some(ListingPlan::Item {
+                    metadata: current_metadata,
+                    ..
+                }) = plans.get_mut(index)
+                {
+                    *current_metadata = Some(metadata);
+                }
             }
             expects_metadata = false;
         } else {
-            let kind = if cells
+            let cells = cells
                 .iter()
-                .filter(|&&cell| analysis.meaningful_cell(cell))
-                .all(|&cell| analysis.cell_is_phrasing(cell))
-            {
+                .copied()
+                .filter(|&cell| analysis.meaningful_cell(cell))
+                .collect::<Vec<_>>();
+            let kind = if cells.iter().all(|&cell| analysis.cell_is_phrasing(cell)) {
                 NodeKind::Paragraph
             } else {
                 NodeKind::BlockGroup
             };
-            let group = builder.append(scope.parent, kind)?;
-            append_cell_tasks(
-                dom,
-                cells,
-                analysis,
-                Scope {
-                    parent: Some(group),
-                    ..scope
-                },
-                &mut ordered,
-            );
+            plans.push(ListingPlan::Group { kind, cells });
         }
     }
-    tasks.extend(ordered.into_iter().rev());
+    let mut item_plans = Vec::new();
+    let mut group_plans = Vec::new();
+    for plan in plans {
+        match plan {
+            ListingPlan::Item { .. } => item_plans.push(plan),
+            ListingPlan::Group { .. } => group_plans.push(plan),
+        }
+    }
+    // A fallback row is outside the ordered list. Close the list before those
+    // plans, while keeping all list items in the list's source-order stream.
+    tasks.extend(
+        group_plans
+            .into_iter()
+            .rev()
+            .map(|plan| Task::Listing { list, plan, scope }),
+    );
+    tasks.push(Task::Close { node: list });
+    tasks.extend(
+        item_plans
+            .into_iter()
+            .rev()
+            .map(|plan| Task::Listing { list, plan, scope }),
+    );
+    let _ = dom;
     Ok(())
 }
 
-fn append_cell_tasks(
-    dom: &Dom,
-    cells: &[NodeId],
-    analysis: &super::tables::TableAnalysis,
-    scope: Scope,
-    ordered: &mut Vec<Task>,
-) {
+fn append_cell_tasks(dom: &Dom, cells: &[NodeId], scope: Scope, ordered: &mut Vec<Task>) {
     let mut inserted = false;
     for &cell in cells {
-        if !analysis.meaningful_cell(cell) {
-            continue;
-        }
         if inserted {
             ordered.push(Task::Prose {
                 parent: scope.parent,
@@ -1040,12 +1196,13 @@ fn compile_footnote_definition(
     label: &str,
     scope: Scope,
     footnote_ids: &mut HashMap<String, FootnoteId>,
-    builder: &mut DocumentBuilder,
+    builder: &mut SemanticTapeBuilder,
     tasks: &mut Vec<Task>,
 ) -> Result<(), BuildError> {
     let id = footnote_id(footnote_ids, label)?;
     let definition = builder.append(scope.parent, NodeKind::FootnoteDefinition(id))?;
     builder.define_footnote(id, label, definition)?;
+    tasks.push(Task::Close { node: definition });
     push_children(
         dom,
         node,
@@ -1934,6 +2091,18 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn figure_captions_can_escape_wrappers_without_dropping_later_siblings() {
+        let document = compile(
+            "<figure><div><img src='plot.png' alt='Plot'><figcaption>Caption</figcaption><span>After</span></div></figure>",
+            None,
+        );
+        document.validate().unwrap();
+        let tree = document.debug_tree();
+        assert!(tree.contains("Figcaption\n    Text(\"Caption\")"), "{tree}");
+        assert!(tree.contains("Text(\"After\")"), "{tree}");
     }
 
     #[test]
