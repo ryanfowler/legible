@@ -1,82 +1,61 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{Document, DocumentNodeId, FootnoteId, NodeKind, ValidationError};
+use super::{
+    Document, DocumentNodeId, FootnoteId, NodeKindView as NodeKind, OP_CLOSE, OperationKind,
+    ValidationError,
+};
 
 pub(super) fn validate(document: &Document) -> Result<(), ValidationError> {
-    let node_count = document.nodes.len();
-    let mut seen = vec![false; node_count];
-    let mut claimed_parent = vec![None; node_count];
-    let mut is_root = vec![false; node_count];
-    let mut stack: Vec<(DocumentNodeId, Option<DocumentNodeId>, bool)> =
-        Vec::with_capacity(document.roots.len());
+    validate_tape(document)?;
 
+    let mut seen = vec![false; document.ops.len()];
+    let mut roots_seen = HashSet::new();
+    let mut stack: Vec<(DocumentNodeId, Option<DocumentNodeId>, bool)> = Vec::new();
     for &root in &document.roots {
-        ensure_id(root, node_count)?;
-        if std::mem::replace(&mut is_root[root.index()], true) {
+        ensure_id(document, root)?;
+        if !roots_seen.insert(root) {
             return Err(ValidationError::new("document root is duplicated"));
         }
-        if document.nodes[root.index()].next_sibling.is_some() {
-            return Err(ValidationError::new("semantic root has a sibling link"));
-        }
-        if !valid_root(&document.nodes[root.index()].kind) {
+        let kind = document
+            .node(root)
+            .ok_or_else(|| ValidationError::new("invalid root"))?
+            .kind();
+        if !valid_root(kind) {
             return Err(ValidationError::new(format!(
-                "semantic root {:#?} requires a structural parent",
-                document.nodes[root.index()].kind
+                "semantic root {kind:#?} requires a structural parent"
             )));
         }
+        stack.push((root, None, false));
     }
-    validate_adjacent_text(document, document.roots.iter().copied())?;
-    stack.extend(document.roots.iter().rev().map(|&root| (root, None, false)));
 
     while let Some((id, parent, inside_link)) = stack.pop() {
-        ensure_id(id, node_count)?;
-        if seen[id.index()] {
+        ensure_id(document, id)?;
+        if std::mem::replace(&mut seen[id.index()], true) {
             return Err(ValidationError::new(
                 "semantic node has multiple parents or a cycle",
             ));
         }
-        seen[id.index()] = true;
-
-        let node = &document.nodes[id.index()];
-        validate_kind(node.kind(), node.first_child)?;
-        if inside_link && matches!(node.kind, NodeKind::Link(_)) {
+        let kind = document
+            .node(id)
+            .ok_or_else(|| ValidationError::new("semantic node is not an opening operation"))?
+            .kind();
+        validate_kind(kind)?;
+        if inside_link && matches!(kind, NodeKind::Link(_)) {
             return Err(ValidationError::new("semantic links cannot be nested"));
         }
-        if let Some(parent) = parent
-            && !valid_child(
-                &document.nodes[parent.index()].kind,
-                &document.nodes[id.index()].kind,
-            )
-        {
-            return Err(ValidationError::new(format!(
-                "semantic parent {:#?} cannot contain {:#?}",
-                document.nodes[parent.index()].kind,
-                document.nodes[id.index()].kind
-            )));
+        if let Some(parent) = parent {
+            let parent_kind = document.node(parent).unwrap().kind();
+            if !valid_child(parent_kind, kind) {
+                return Err(ValidationError::new(format!(
+                    "semantic parent {parent_kind:#?} cannot contain {kind:#?}"
+                )));
+            }
         }
 
-        let mut children = Vec::new();
-        let mut child = node.first_child;
-        let mut sibling_steps = 0usize;
-        while let Some(current) = child {
-            ensure_id(current, node_count)?;
-            sibling_steps += 1;
-            if sibling_steps > node_count {
-                return Err(ValidationError::new(
-                    "semantic sibling chain contains a cycle",
-                ));
-            }
-            if is_root[current.index()] || claimed_parent[current.index()].replace(id).is_some() {
-                return Err(ValidationError::new(
-                    "semantic node has multiple parents or a sibling cycle",
-                ));
-            }
-            children.push(current);
-            child = document.nodes[current.index()].next_sibling;
-        }
+        let children: Vec<_> = document.child_ids(id).collect();
         validate_adjacent_text(document, children.iter().copied())?;
-        validate_child_order(document, node.kind(), &children)?;
-        let children_inside_link = inside_link || matches!(node.kind, NodeKind::Link(_));
+        validate_child_order(document, kind, &children)?;
+        let children_inside_link = inside_link || matches!(kind, NodeKind::Link(_));
         stack.extend(
             children
                 .into_iter()
@@ -85,29 +64,83 @@ pub(super) fn validate(document: &Document) -> Result<(), ValidationError> {
         );
     }
 
-    if seen.iter().any(|seen| !seen) {
+    let open_count = document
+        .ops
+        .iter()
+        .filter(|operation| operation.opcode & OP_CLOSE == 0)
+        .count();
+    if seen.iter().filter(|value| **value).count() != open_count {
         return Err(ValidationError::new(
-            "semantic arena contains an unreachable node",
+            "semantic tape contains an unreachable node",
         ));
     }
     validate_tables(document)?;
     validate_footnotes(document)
 }
 
-fn ensure_id(id: DocumentNodeId, node_count: usize) -> Result<(), ValidationError> {
-    if id.index() >= node_count {
+fn validate_tape(document: &Document) -> Result<(), ValidationError> {
+    if document.ops.len() != document.ends.len() {
+        return Err(ValidationError::new("semantic tape index length mismatch"));
+    }
+    let mut open_stack = Vec::new();
+    for (index, operation) in document.ops.iter().copied().enumerate() {
+        let index = u32::try_from(index).map_err(|_| ValidationError::new("tape is too large"))?;
+        let Some(kind) = OperationKind::from_opcode(operation.opcode) else {
+            return Err(ValidationError::new(
+                "semantic tape contains an unknown operation",
+            ));
+        };
+        if operation.is_close() {
+            let Some(open) = open_stack.pop() else {
+                return Err(ValidationError::new(
+                    "semantic tape closes without an opener",
+                ));
+            };
+            if operation.payload != open || document.ends[open as usize] != index {
+                return Err(ValidationError::new(
+                    "semantic tape close operation is misplaced",
+                ));
+            }
+            if operation.opcode & !OP_CLOSE != document.ops[open as usize].opcode {
+                return Err(ValidationError::new(
+                    "semantic tape close kind does not match opener",
+                ));
+            }
+        } else if matches!(kind, OperationKind::Heading) && !(1..=6).contains(&operation.aux) {
+            return Err(ValidationError::new(
+                "semantic heading level is outside 1 through 6",
+            ));
+        } else if kind.is_container() {
+            open_stack.push(index);
+            if document.ends[index as usize] <= index {
+                return Err(ValidationError::new(
+                    "container has no valid close operation",
+                ));
+            }
+        } else if document.ends[index as usize] != index {
+            return Err(ValidationError::new("leaf has a close-operation index"));
+        }
+    }
+    if !open_stack.is_empty() {
         return Err(ValidationError::new(
-            "semantic link points outside the arena",
+            "semantic tape has an unclosed container",
         ));
     }
     Ok(())
 }
 
-fn validate_kind(
-    kind: &NodeKind,
-    first_child: Option<DocumentNodeId>,
-) -> Result<(), ValidationError> {
+fn ensure_id(document: &Document, id: DocumentNodeId) -> Result<(), ValidationError> {
+    if document.node(id).is_none() {
+        return Err(ValidationError::new(
+            "semantic link points outside the tape",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_kind(kind: NodeKind<'_>) -> Result<(), ValidationError> {
     match kind {
+        NodeKind::Invalid => return Err(ValidationError::new("semantic payload is missing")),
         NodeKind::Text(value) if value.is_empty() => {
             return Err(ValidationError::new("semantic text node is empty"));
         }
@@ -116,7 +149,7 @@ fn validate_kind(
         {
             return Err(ValidationError::new("semantic text is not canonical prose"));
         }
-        NodeKind::Heading { level } if !(1..=6).contains(level) => {
+        NodeKind::Heading { level } if !(1..=6).contains(&level) => {
             return Err(ValidationError::new(
                 "semantic heading level is outside 1 through 6",
             ));
@@ -147,19 +180,6 @@ fn validate_kind(
                 "semantic media has an unsafe destination",
             ));
         }
-        NodeKind::CodeBlock(_)
-        | NodeKind::InlineCode(_)
-        | NodeKind::Image(_)
-        | NodeKind::HardBreak
-        | NodeKind::FootnoteReference(_)
-        | NodeKind::TaskMarker(_)
-        | NodeKind::InlineMath(_)
-        | NodeKind::DisplayMath(_)
-        | NodeKind::Media(_)
-            if first_child.is_some() =>
-        {
-            return Err(ValidationError::new("semantic leaf node has children"));
-        }
         _ => {}
     }
     Ok(())
@@ -169,7 +189,7 @@ fn valid_destination(value: &str, kind: super::uri::DestinationKind) -> bool {
     super::uri::safe_destination(value, None, kind).as_deref() == Some(value)
 }
 
-fn valid_root(kind: &NodeKind) -> bool {
+fn valid_root(kind: NodeKind<'_>) -> bool {
     !matches!(
         kind,
         NodeKind::ListItem
@@ -183,7 +203,7 @@ fn valid_root(kind: &NodeKind) -> bool {
     )
 }
 
-fn valid_child(parent: &NodeKind, child: &NodeKind) -> bool {
+fn valid_child(parent: NodeKind<'_>, child: NodeKind<'_>) -> bool {
     match parent {
         NodeKind::List(_) => matches!(child, NodeKind::ListItem | NodeKind::FootnoteDefinition(_)),
         NodeKind::Table(_) => matches!(child, NodeKind::TableCaption | NodeKind::TableRow),
@@ -210,7 +230,8 @@ fn valid_child(parent: &NodeKind, child: &NodeKind) -> bool {
         | NodeKind::InlineMath(_)
         | NodeKind::DisplayMath(_)
         | NodeKind::Media(_)
-        | NodeKind::ThematicBreak => false,
+        | NodeKind::ThematicBreak
+        | NodeKind::Invalid => false,
         NodeKind::Details => !requires_special_parent(child) || matches!(child, NodeKind::Summary),
         NodeKind::Figure => {
             !requires_special_parent(child) || matches!(child, NodeKind::Figcaption)
@@ -227,7 +248,7 @@ fn valid_child(parent: &NodeKind, child: &NodeKind) -> bool {
     }
 }
 
-fn is_inline(kind: &NodeKind) -> bool {
+fn is_inline(kind: NodeKind<'_>) -> bool {
     matches!(
         kind,
         NodeKind::Text(_)
@@ -245,11 +266,11 @@ fn is_inline(kind: &NodeKind) -> bool {
     )
 }
 
-fn nested_link(parent: &NodeKind, child: &NodeKind) -> bool {
+fn nested_link(parent: NodeKind<'_>, child: NodeKind<'_>) -> bool {
     matches!((parent, child), (NodeKind::Link(_), NodeKind::Link(_)))
 }
 
-fn requires_special_parent(kind: &NodeKind) -> bool {
+fn requires_special_parent(kind: NodeKind<'_>) -> bool {
     matches!(
         kind,
         NodeKind::ListItem
@@ -265,14 +286,19 @@ fn requires_special_parent(kind: &NodeKind) -> bool {
 
 fn validate_child_order(
     document: &Document,
-    parent: &NodeKind,
+    parent: NodeKind<'_>,
     children: &[DocumentNodeId],
 ) -> Result<(), ValidationError> {
-    let positions = |matches: fn(&NodeKind) -> bool| {
+    let positions = |matches: fn(NodeKind<'_>) -> bool| {
         children
             .iter()
             .enumerate()
-            .filter_map(|(index, id)| matches(&document.nodes[id.index()].kind).then_some(index))
+            .filter_map(|(index, id)| {
+                document
+                    .node(*id)
+                    .is_some_and(|node| matches(node.kind()))
+                    .then_some(index)
+            })
             .collect::<Vec<_>>()
     };
     match parent {
@@ -316,34 +342,29 @@ fn validate_adjacent_text(
     let mut nodes = nodes.peekable();
     let mut previous = None;
     while let Some(id) = nodes.next() {
-        ensure_id(id, document.nodes.len())?;
-        let kind = &document.nodes[id.index()].kind;
-        if previous.is_some_and(|id: DocumentNodeId| {
-            matches!(document.nodes[id.index()].kind, NodeKind::Text(_))
+        let kind = document.node(id).unwrap().kind();
+        if previous.is_some_and(|previous| {
+            matches!(document.node(previous).unwrap().kind(), NodeKind::Text(_))
         }) && matches!(kind, NodeKind::Text(_))
         {
-            return Err(ValidationError::new(format!(
-                "adjacent semantic text nodes were not merged: {:#?} then {:#?}",
-                previous.map(|id: DocumentNodeId| &document.nodes[id.index()].kind),
-                kind
-            )));
+            return Err(ValidationError::new(
+                "adjacent semantic text nodes were not merged",
+            ));
         }
         if let NodeKind::Text(value) = kind
             && value.chars().all(char::is_whitespace)
         {
             let bounded_by_inline = previous
-                .map(|id: DocumentNodeId| is_inline(&document.nodes[id.index()].kind))
+                .map(|id| is_inline(document.node(id).unwrap().kind()))
                 .unwrap_or(false)
                 && nodes
                     .peek()
-                    .map(|id| is_inline(&document.nodes[id.index()].kind))
+                    .map(|id| is_inline(document.node(*id).unwrap().kind()))
                     .unwrap_or(false);
             if value.as_str() != " " || !bounded_by_inline {
-                return Err(ValidationError::new(format!(
-                    "semantic whitespace text is not an inline separator between {:#?} and {:#?}",
-                    previous.map(|id: DocumentNodeId| &document.nodes[id.index()].kind),
-                    nodes.peek().map(|id| &document.nodes[id.index()].kind)
-                )));
+                return Err(ValidationError::new(
+                    "semantic whitespace text is not an inline separator",
+                ));
             }
         }
         previous = Some(id);
@@ -352,19 +373,23 @@ fn validate_adjacent_text(
 }
 
 fn validate_tables(document: &Document) -> Result<(), ValidationError> {
-    for (index, node) in document.nodes.iter().enumerate() {
-        let NodeKind::Table(table) = &node.kind else {
+    for (index, operation) in document.ops.iter().copied().enumerate() {
+        if operation.is_close() || !matches!(operation.kind(), OperationKind::Table) {
             continue;
+        }
+        let table_id = DocumentNodeId(index as u32);
+        let NodeKind::Table(table) = document.node(table_id).unwrap().kind() else {
+            return Err(ValidationError::new("table payload is missing"));
         };
         let mut maximum_width = 0u32;
         let mut has_rowspan = false;
-        for child in document.child_ids(DocumentNodeId(index as u32)) {
-            if !matches!(document.nodes[child.index()].kind, NodeKind::TableRow) {
+        for row in document.child_ids(table_id) {
+            if !matches!(document.node(row).unwrap().kind(), NodeKind::TableRow) {
                 continue;
             }
             let mut width = 0u32;
-            for cell in document.child_ids(child) {
-                let NodeKind::TableCell(cell) = &document.nodes[cell.index()].kind else {
+            for cell in document.child_ids(row) {
+                let NodeKind::TableCell(cell) = document.node(cell).unwrap().kind() else {
                     continue;
                 };
                 width = width.checked_add(cell.colspan).ok_or_else(|| {
@@ -387,8 +412,11 @@ fn validate_tables(document: &Document) -> Result<(), ValidationError> {
 fn validate_footnotes(document: &Document) -> Result<(), ValidationError> {
     let mut definition_nodes = HashMap::<FootnoteId, DocumentNodeId>::new();
     let mut references = HashSet::<FootnoteId>::new();
-    for (index, node) in document.nodes.iter().enumerate() {
-        match node.kind {
+    for (index, operation) in document.ops.iter().copied().enumerate() {
+        if operation.is_close() {
+            continue;
+        }
+        match document.node(DocumentNodeId(index as u32)).unwrap().kind() {
             NodeKind::FootnoteReference(id) => {
                 references.insert(id);
             }
@@ -401,7 +429,6 @@ fn validate_footnotes(document: &Document) -> Result<(), ValidationError> {
                     "footnote has duplicate definition nodes",
                 ));
             }
-            NodeKind::FootnoteDefinition(_) => {}
             _ => {}
         }
     }
@@ -409,7 +436,7 @@ fn validate_footnotes(document: &Document) -> Result<(), ValidationError> {
     let mut indexed_ids = HashSet::new();
     let mut labels = HashSet::new();
     for definition in &document.footnotes {
-        ensure_id(definition.node, document.nodes.len())?;
+        ensure_id(document, definition.node)?;
         if !indexed_ids.insert(definition.id) || !labels.insert(definition.label.as_ref()) {
             return Err(ValidationError::new(
                 "footnote index has duplicate IDs or labels",
@@ -436,9 +463,7 @@ fn validate_footnotes(document: &Document) -> Result<(), ValidationError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::document::{
-        DocumentBuilder, DocumentNodeId, FootnoteId, Link, List, ListKind, NodeKind,
-    };
+    use crate::document::{DocumentBuilder, FootnoteId, Link, List, ListKind, NodeKind};
 
     #[test]
     fn rejects_invalid_structure() {
@@ -465,7 +490,9 @@ mod tests {
         let mut builder = DocumentBuilder::with_capacity(1);
         builder.append(None, NodeKind::Paragraph).unwrap();
         let mut document = builder.finish();
-        document.roots.push(DocumentNodeId(u32::MAX));
+        document
+            .roots
+            .push(crate::document::DocumentNodeId(u32::MAX));
         assert!(document.validate().is_err());
     }
 

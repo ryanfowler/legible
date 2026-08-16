@@ -219,8 +219,8 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
     let mut fixture_count = 0usize;
 
     eprintln!(
-        "representation/layout: arena_node_bytes={}, node_kind_bytes={}, text_value_bytes={}",
-        std::mem::size_of::<document::ArenaNode>(),
+        "representation/layout: event_op_bytes={}, node_kind_bytes={}, text_value_bytes={}",
+        std::mem::size_of::<document::EventOp>(),
         std::mem::size_of::<document::NodeKind>(),
         std::mem::size_of::<document::TextValue>(),
     );
@@ -257,18 +257,25 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
         .unwrap();
         let semantic_nodes = document.len();
         let retained_bytes = document.retained_bytes_estimate();
-        let source_sized_bytes = retained_bytes.saturating_add(
-            dom.len()
-                .saturating_sub(document.node_capacity())
-                .saturating_mul(document::Document::node_slot_size()),
-        );
+        let source_operation_capacity = dom.len().saturating_mul(2);
+        let source_sized_bytes = retained_bytes
+            .saturating_add(
+                source_operation_capacity
+                    .saturating_sub(document.operation_capacity())
+                    .saturating_mul(document::Document::node_slot_size()),
+            )
+            .saturating_add(
+                source_operation_capacity
+                    .saturating_sub(document.end_capacity())
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            );
         total_semantic_nodes = total_semantic_nodes.saturating_add(semantic_nodes);
         fixture_count += 1;
         eprintln!(
-            "representation/{name}: dom_nodes={}, ir_nodes={semantic_nodes}, roots={}, ir_capacity={}, retained_bytes={retained_bytes}, semantic_string_bytes={}, semantic_string_values={}, source_sized_bytes={source_sized_bytes}",
+            "representation/{name}: dom_nodes={}, ir_nodes={semantic_nodes}, roots={}, operation_capacity={}, retained_bytes={retained_bytes}, semantic_string_bytes={}, semantic_string_values={}, source_sized_bytes={source_sized_bytes}",
             dom.len(),
             document.root_count(),
-            document.node_capacity(),
+            document.operation_capacity(),
             document.semantic_string_bytes(),
             document.semantic_string_value_count(),
         );

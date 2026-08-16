@@ -1,4 +1,4 @@
-use super::{Document, DocumentNodeId, NodeKind};
+use super::{Document, DocumentNodeId, NodeKindView as NodeKind};
 use smallvec::SmallVec;
 
 /// Measurements derived from the semantic document.
@@ -134,7 +134,7 @@ fn walk_text_from_roots(
         let Some(node) = document.node(id) else {
             continue;
         };
-        output.count(node.kind());
+        output.count(&node.kind());
         match node.kind() {
             NodeKind::Text(text) => output.text(text),
             NodeKind::CodeBlock(code) => {
@@ -179,7 +179,7 @@ fn walk_text_from_roots(
                 }
             }
             _ => {
-                if is_block(node.kind()) {
+                if is_block(&node.kind()) {
                     output.separator(block);
                     tasks.push(Task::Boundary(block));
                 }

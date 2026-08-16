@@ -51,9 +51,11 @@ and output rendering. Its generated fragments represent cleaned content regions
 without page chrome. Source evidence and shared cleanup facts are prepared before
 timing, as they are in production extraction.
 
-The `compact_ir_prototype` group compares the current arena traversal with
-benchmark-only preorder-node and open/close event-tape adapters. It measures
-Markdown, HTML, and text projections from the same semantic fixtures. The
+The `compact_ir_prototype` group records the pre-migration arena comparison
+as historical data. It compares the production compatibility view with
+benchmark-only preorder-node and open/close event-tape adapters. The production
+document now uses the event-tape layout. It measures Markdown, HTML, and text
+projections from the same semantic fixtures. The
 fixtures include semantic payload fields and repeated footnote references. See
 `benches/compact-ir-prototype.md` for the layout decision and measurements.
 
@@ -78,7 +80,7 @@ Use the same machine, Rust toolchain, and power mode for comparisons.
 - Doubling generated input size should take less than 2.5 times as long.
 - Deeply nested parser inputs must remain linear and must not overflow the stack.
 - Extraction-only benchmarks must not render Markdown, HTML, or text. The end-to-end Markdown group measures rendering explicitly. Output rendering stays lazy.
-- Lowering benchmark IDs record selected DOM and semantic IR node counts as `dom-N-ir-N`. The benchmark also prints a `representation/...` line with IR capacity, estimated retained bytes, semantic string bytes, root counts, and the equivalent estimate for a source-sized arena reservation. The estimates include vector capacity and owned semantic strings. Use these values to compare retained-representation compression without changing stable Criterion benchmark IDs.
+- Lowering benchmark IDs record selected DOM and semantic IR node counts as `dom-N-ir-N`. The benchmark also prints a `representation/...` line with event-operation capacity, estimated retained bytes, semantic string bytes, root counts, and an estimate for source-sized operation and end-index reservations. The estimates include vector capacity and owned semantic strings. Use these values to compare retained-representation compression without changing stable Criterion benchmark IDs.
 - Extraction benchmarks print an `extraction-representation/...` line from opt-in diagnostics. It reports source DOM nodes, the actual selected and cleaned pre-IR DOM nodes, semantic document nodes, and estimated retained bytes for the same input.
 - A normalization change must not add a repeated full-document scan for each code block, equation, table, or image.
 

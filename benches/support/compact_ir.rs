@@ -1,15 +1,15 @@
 //! Benchmark-only prototypes for the private semantic representation.
 //!
 //! This module deliberately does not participate in production extraction. It
-//! adapts the current semantic arena to two sequential layouts so that the
-//! representation decision can be measured before a compiler rewrite.
+//! adapts the production semantic tape through its compatibility view and
+//! compares that view with benchmark-only sequential layouts.
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::mem::size_of;
 
-use crate::document::{self, Document, NodeKind};
+use crate::document::{self, Document, NodeKindView as NodeKind};
 use crate::dom::{self, Tag};
 
 const NO_PAYLOAD: u32 = u32::MAX;
@@ -574,7 +574,7 @@ fn capture_document(document: &Document) -> Vec<CapturedNode> {
                 let Some(node) = document.node(id) else {
                     continue;
                 };
-                let (kind, aux, payload) = capture_node(node.kind());
+                let (kind, aux, payload) = capture_node(&node.kind());
                 let index = captured.len();
                 captured.push(CapturedNode {
                     source_id: id,
@@ -762,6 +762,7 @@ fn capture_node(kind: &NodeKind) -> (Kind, u16, Option<Payload>) {
                 title: media.title.clone(),
             }),
         ),
+        NodeKind::Invalid => unreachable!("benchmark captured an invalid semantic node"),
     }
 }
 
@@ -923,7 +924,7 @@ fn source_view<'a>(document: &'a Document, id: document::DocumentNodeId) -> Opti
             kind: Kind::FootnoteDefinition,
             aux: 0,
             value: Value::Footnote {
-                label: document.footnote_label(*id).unwrap_or_default(),
+                label: document.footnote_label(id).unwrap_or_default(),
             },
         },
         NodeKind::Text(text) => View {
@@ -980,7 +981,7 @@ fn source_view<'a>(document: &'a Document, id: document::DocumentNodeId) -> Opti
             kind: Kind::FootnoteReference,
             aux: 0,
             value: Value::Footnote {
-                label: document.footnote_label(*id).unwrap_or_default(),
+                label: document.footnote_label(id).unwrap_or_default(),
             },
         },
         NodeKind::TaskMarker(marker) => View {
@@ -1018,6 +1019,7 @@ fn source_view<'a>(document: &'a Document, id: document::DocumentNodeId) -> Opti
                 title: media.title.as_deref(),
             },
         },
+        NodeKind::Invalid => return None,
     };
     Some(view)
 }
@@ -1857,7 +1859,11 @@ fn assert_deep_layouts_are_stack_safe() {
     let mut builder = document::DocumentBuilder::with_capacity(DEPTH + 1);
     let mut parent = None;
     for _ in 0..DEPTH {
-        parent = Some(builder.append(parent, NodeKind::BlockQuote).unwrap());
+        parent = Some(
+            builder
+                .append(parent, document::NodeKind::BlockQuote)
+                .unwrap(),
+        );
     }
     builder.append_prose(parent, "deep").unwrap();
     let document = builder.finish();
@@ -1881,8 +1887,8 @@ pub(crate) fn benchmark(c: &mut Criterion) {
     group.sample_size(20);
 
     eprintln!(
-        "compact-ir/layout: arena_node_bytes={}, node_kind_bytes={}, preorder_header_bytes={}, event_header_bytes={}, payload_slot_bytes={}",
-        size_of::<document::ArenaNode>(),
+        "compact-ir/layout: event_op_bytes={}, node_kind_bytes={}, preorder_header_bytes={}, event_header_bytes={}, payload_slot_bytes={}",
+        size_of::<document::EventOp>(),
         size_of::<document::NodeKind>(),
         size_of::<PreorderNode>(),
         size_of::<Op>(),
@@ -1918,7 +1924,7 @@ pub(crate) fn benchmark(c: &mut Criterion) {
         let arena_stack_capacity = arena_stack_peak.max(32).next_power_of_two();
         let preorder_stack_capacity = preorder_stack_peak.max(32).next_power_of_two();
         eprintln!(
-            "compact-ir/{name}: arena_bytes={arena_bytes}, preorder_bytes={preorder_bytes}, event_bytes={event_bytes}, arena_non_string_bytes={}, preorder_non_string_bytes={}, event_non_string_bytes={}, arena_nodes={semantic_nodes}, preorder_nodes={}, event_ops={}, preorder_payloads={}, event_payloads={}, preorder_payload_slot_bytes={}, event_payload_slot_bytes={}, preorder_strings={}, event_strings={}, preorder_string_values={}, event_string_values={}, footnote_slots={}, arena_task_peak={}, preorder_close_peak={}, event_stack_peak=0, event_builder_stack_peak={}, arena_task_capacity_bytes={}, preorder_stack_capacity_bytes={}, event_builder_stack_capacity_bytes={}",
+            "compact-ir/{name}: production_compat_bytes={arena_bytes}, preorder_bytes={preorder_bytes}, event_bytes={event_bytes}, production_compat_non_string_bytes={}, preorder_non_string_bytes={}, event_non_string_bytes={}, production_compat_nodes={semantic_nodes}, preorder_nodes={}, event_ops={}, preorder_payloads={}, event_payloads={}, preorder_payload_slot_bytes={}, event_payload_slot_bytes={}, preorder_strings={}, event_strings={}, preorder_string_values={}, event_string_values={}, footnote_slots={}, production_compat_task_peak={}, preorder_close_peak={}, event_stack_peak=0, event_builder_stack_peak={}, production_compat_task_capacity_bytes={}, preorder_stack_capacity_bytes={}, event_builder_stack_capacity_bytes={}",
             arena_bytes.saturating_sub(document.semantic_string_bytes()),
             preorder_bytes.saturating_sub(preorder.string_bytes()),
             event_bytes.saturating_sub(events.string_bytes()),
@@ -1968,7 +1974,10 @@ pub(crate) fn benchmark(c: &mut Criterion) {
 
             group.throughput(Throughput::Elements(semantic_nodes as u64));
             group.bench_function(
-                BenchmarkId::new("arena", format!("{name}/{}", format_name(projection))),
+                BenchmarkId::new(
+                    "production-compat",
+                    format!("{name}/{}", format_name(projection)),
+                ),
                 |b| b.iter(|| black_box(render_arena(black_box(&document), projection))),
             );
             group.bench_function(

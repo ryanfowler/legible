@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::document::{Document, DocumentNodeId, ListKind, MediaKind, NodeKind};
+use crate::document::{Document, DocumentNodeId, ListKind, MediaKind, NodeKindView as NodeKind};
 
 pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
     enum Task {
@@ -108,7 +108,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 output.push('<');
                 output.push_str(tag);
                 output.push_str(" id=\"footnote-");
-                if let Some(label) = document.footnote_label(*footnote) {
+                if let Some(label) = document.footnote_label(footnote) {
                     escape_attribute(&mut output, label);
                 }
                 output.push('"');
@@ -177,7 +177,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 None
             }
             NodeKind::FootnoteReference(footnote) => {
-                if let Some(label) = document.footnote_label(*footnote) {
+                if let Some(label) = document.footnote_label(footnote) {
                     output.push_str("<sup><a href=\"#footnote-");
                     escape_attribute(&mut output, label);
                     output.push_str("\" role=\"doc-noteref\">");
@@ -236,6 +236,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 }
                 None
             }
+            NodeKind::Invalid => None,
         };
         if let Some(tag) = close {
             tasks.push(Task::Close(tag));
