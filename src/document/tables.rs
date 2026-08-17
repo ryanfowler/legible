@@ -64,6 +64,7 @@ pub(super) struct TableAnalysis {
     rows: Vec<RowFacts>,
     cell_facts: Vec<CellFacts>,
     controls: Vec<ControlFacts>,
+    gutter_tables: usize,
 }
 
 impl TableAnalysis {
@@ -87,6 +88,7 @@ impl TableAnalysis {
             rows: Vec::new(),
             cell_facts: Vec::new(),
             controls: Vec::new(),
+            gutter_tables: 0,
         };
         let tables = tables.to_vec();
         let mut text = String::new();
@@ -145,6 +147,7 @@ impl TableAnalysis {
         let mut buffer = String::new();
         for table in tables {
             if super::code::is_gutter_table(dom, table) {
+                analysis.gutter_tables += 1;
                 continue;
             }
             let kind =
@@ -168,6 +171,7 @@ impl TableAnalysis {
             rows: Vec::new(),
             cell_facts: Vec::new(),
             controls: Vec::new(),
+            gutter_tables: 0,
         }
     }
 
@@ -278,6 +282,17 @@ impl TableAnalysis {
             .iter()
             .filter(|facts| facts.kind == Some(TableKind::Data))
             .count()
+    }
+
+    pub(super) fn listing_count(&self) -> usize {
+        self.tables
+            .iter()
+            .filter(|facts| matches!(facts.kind, Some(TableKind::Listing { .. })))
+            .count()
+    }
+
+    pub(super) fn gutter_table_count(&self) -> usize {
+        self.gutter_tables
     }
 }
 

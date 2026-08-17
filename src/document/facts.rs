@@ -3,6 +3,7 @@
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use std::collections::HashSet;
 
+use super::BuildCapacityPlan;
 use super::compiler::{heading_level, is_block_tag};
 
 const HAS_VISIBLE_TEXT: u16 = 1 << 0;
@@ -787,6 +788,7 @@ pub(super) struct SemanticFacts {
     nodes: Vec<NodeId>,
     facts: Vec<NodeFacts>,
     inventory: FeatureInventory,
+    capacity_plan: BuildCapacityPlan,
 }
 
 impl SemanticFacts {
@@ -815,11 +817,70 @@ impl SemanticFacts {
         }
         let mut facts = vec![NodeFacts::default(); dom.len()];
         let mut inventory = FeatureInventory::default();
+        let mut capacity_plan = BuildCapacityPlan::default();
+        let mut element_stack = Vec::<(NodeId, bool, usize)>::new();
 
         for &node in &nodes {
+            let parent = dom.parent(node);
+            while element_stack
+                .last()
+                .is_some_and(|&(ancestor, _, _)| parent != Some(ancestor))
+            {
+                element_stack.pop();
+            }
+            let inside_payload = element_stack.last().is_some_and(|&(_, value, _)| value);
+            let semantic_depth = element_stack.last().map_or(0, |&(_, _, depth)| depth);
+            let depth = semantic_depth
+                .saturating_add(dom.tag(node).is_some_and(capacity_container_tag).into());
+            capacity_plan.semantic_nodes = capacity_plan.semantic_nodes.saturating_add(1);
+            capacity_plan.max_depth = capacity_plan.max_depth.max(depth);
+
+            if let Some(text) = dom.text_node(node) {
+                if !inside_payload {
+                    capacity_plan.text_bytes = capacity_plan.text_bytes.saturating_add(text.len());
+                    capacity_plan.text_refs = capacity_plan.text_refs.saturating_add(1);
+                }
+                continue;
+            }
             let Some(tag) = dom.tag(node) else {
                 continue;
             };
+            let node_inside_payload =
+                inside_payload || matches!(tag, Tag::Pre | Tag::Code | Tag::Math | Tag::Script);
+            capacity_plan.containers = capacity_plan
+                .containers
+                .saturating_add(usize::from(capacity_container_tag(tag)));
+            match tag {
+                Tag::Code if !inside_payload => {
+                    capacity_plan.text_refs = capacity_plan.text_refs.saturating_add(1);
+                    if let Some(text) = dom.first_child(node).and_then(|child| dom.text_node(child))
+                    {
+                        capacity_plan.text_bytes =
+                            capacity_plan.text_bytes.saturating_add(text.len());
+                    }
+                }
+                Tag::A => capacity_plan.links = capacity_plan.links.saturating_add(1),
+                Tag::Img | Tag::Picture => {
+                    capacity_plan.images = capacity_plan.images.saturating_add(1)
+                }
+                Tag::Ul | Tag::Ol => capacity_plan.lists = capacity_plan.lists.saturating_add(1),
+                Tag::Table => capacity_plan.tables = capacity_plan.tables.saturating_add(1),
+                Tag::Td | Tag::Th => {
+                    capacity_plan.table_cells = capacity_plan.table_cells.saturating_add(1)
+                }
+                Tag::Input
+                    if dom
+                        .attr(node, AttrName::Type)
+                        .is_some_and(|value| value.eq_ignore_ascii_case("checkbox")) =>
+                {
+                    capacity_plan.task_markers = capacity_plan.task_markers.saturating_add(1)
+                }
+                Tag::Iframe | Tag::Video | Tag::Audio => {
+                    capacity_plan.media = capacity_plan.media.saturating_add(1)
+                }
+                _ => {}
+            }
+            element_stack.push((node, node_inside_payload, depth));
             let is_code_block = source_facts.map_or_else(
                 || {
                     tag == Tag::Pre
@@ -830,6 +891,9 @@ impl SemanticFacts {
             if is_code_block && let Some(source) = super::code::owned_source_candidate(dom, node) {
                 inventory.owned_code_sources.push((node, source));
             }
+            capacity_plan.code_blocks = capacity_plan
+                .code_blocks
+                .saturating_add(usize::from(is_code_block));
             let level = heading_level(dom, node).unwrap_or(0);
             facts[node.index()].heading_level = level;
             if level != 0 {
@@ -886,6 +950,18 @@ impl SemanticFacts {
                 inventory.footnotes.push(node);
             }
         }
+
+        capacity_plan.images = capacity_plan.images.max(inventory.images.len());
+        capacity_plan.lists = capacity_plan.lists.max(inventory.lists.len());
+        capacity_plan.callouts = inventory.callouts.len();
+        capacity_plan.math_values = inventory.math.len();
+        capacity_plan.footnotes = inventory.footnotes.len();
+        capacity_plan.semantic_nodes = capacity_plan
+            .semantic_nodes
+            .saturating_add(inventory.footnotes.len());
+        capacity_plan.containers = capacity_plan
+            .containers
+            .saturating_add(usize::from(!inventory.footnotes.is_empty()));
 
         let needs_permalink_glyphs =
             !inventory.headings.is_empty() && !inventory.fragment_links.is_empty();
@@ -966,6 +1042,7 @@ impl SemanticFacts {
             nodes,
             facts,
             inventory,
+            capacity_plan,
         }
     }
 
@@ -975,6 +1052,10 @@ impl SemanticFacts {
 
     pub(super) fn inventory(&self) -> &FeatureInventory {
         &self.inventory
+    }
+
+    pub(super) fn capacity_plan(&self) -> BuildCapacityPlan {
+        self.capacity_plan
     }
 
     pub(super) fn first_visible(&self, node: NodeId) -> Option<char> {
@@ -1073,6 +1154,31 @@ impl SemanticFacts {
             self.facts[node.index()].set(HAS_MEANINGFUL_CONTENT, meaningful);
         }
     }
+}
+
+fn capacity_container_tag(tag: Tag) -> bool {
+    !matches!(
+        tag,
+        Tag::Br | Tag::Hr | Tag::Img | Tag::Pre | Tag::Iframe | Tag::Video | Tag::Audio
+    ) && is_block_tag(tag)
+        || matches!(
+            tag,
+            Tag::A
+                | Tag::B
+                | Tag::Strong
+                | Tag::Em
+                | Tag::I
+                | Tag::Del
+                | Tag::Figure
+                | Tag::Figcaption
+                | Tag::Details
+                | Tag::Summary
+                | Tag::Dl
+                | Tag::Dt
+                | Tag::Dd
+                | Tag::Td
+                | Tag::Th
+        )
 }
 
 fn propagate_without_source_facts(

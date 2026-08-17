@@ -105,6 +105,12 @@ pub struct ExtractionCounters {
     pub builder_payload_capacity: u64,
     pub builder_footnotes_capacity: u64,
     pub builder_footnote_index_capacity: u64,
+    pub builder_requested_capacity_bytes: u64,
+    pub builder_final_capacity_bytes: u64,
+    pub builder_peak_capacity_bytes: u64,
+    pub builder_reallocations: u64,
+    pub builder_max_open_depth: u64,
+    pub builder_shrink_bytes: u64,
     pub json_ld_bytes: u64,
     pub json_ld_parsed_bytes: u64,
     pub json_ld_retained_bytes: u64,
@@ -205,6 +211,12 @@ std::thread_local! {
             builder_payload_capacity: 0,
             builder_footnotes_capacity: 0,
             builder_footnote_index_capacity: 0,
+            builder_requested_capacity_bytes: 0,
+            builder_final_capacity_bytes: 0,
+            builder_peak_capacity_bytes: 0,
+            builder_reallocations: 0,
+            builder_max_open_depth: 0,
+            builder_shrink_bytes: 0,
             json_ld_bytes: 0,
             json_ld_parsed_bytes: 0,
             json_ld_retained_bytes: 0,
@@ -392,35 +404,67 @@ pub(crate) fn record_semantic_operations(_operations: usize) {
     });
 }
 
+#[cfg(feature = "bench-instrumentation")]
+pub(crate) struct BuilderCapacityReport {
+    pub(crate) requested_bytes: usize,
+    pub(crate) final_bytes: usize,
+    pub(crate) peak_bytes: usize,
+    pub(crate) reallocations: usize,
+    pub(crate) max_open_depth: usize,
+    pub(crate) shrink_bytes: usize,
+    pub(crate) ops: usize,
+    pub(crate) ends: usize,
+    pub(crate) open: usize,
+    pub(crate) text: usize,
+    pub(crate) payload: usize,
+    pub(crate) footnotes: usize,
+    pub(crate) footnote_index: usize,
+}
+
 #[inline(always)]
 #[cfg(feature = "bench-instrumentation")]
-pub(crate) fn record_builder_capacities(
-    _ops: usize,
-    _ends: usize,
-    _open: usize,
-    _text: usize,
-    _payload: usize,
-    _footnotes: usize,
-    _footnote_index: usize,
-) {
+pub(crate) fn record_builder_capacities(report: BuilderCapacityReport) {
     #[cfg(feature = "bench-instrumentation")]
     add_counter(|counters| {
-        counters.builder_ops_capacity = counters.builder_ops_capacity.saturating_add(_ops as u64);
-        counters.builder_ends_capacity =
-            counters.builder_ends_capacity.saturating_add(_ends as u64);
-        counters.builder_open_capacity =
-            counters.builder_open_capacity.saturating_add(_open as u64);
-        counters.builder_text_capacity =
-            counters.builder_text_capacity.saturating_add(_text as u64);
+        counters.builder_requested_capacity_bytes = counters
+            .builder_requested_capacity_bytes
+            .saturating_add(report.requested_bytes as u64);
+        counters.builder_final_capacity_bytes = counters
+            .builder_final_capacity_bytes
+            .saturating_add(report.final_bytes as u64);
+        counters.builder_peak_capacity_bytes = counters
+            .builder_peak_capacity_bytes
+            .max(report.peak_bytes as u64);
+        counters.builder_reallocations = counters
+            .builder_reallocations
+            .saturating_add(report.reallocations as u64);
+        counters.builder_max_open_depth = counters
+            .builder_max_open_depth
+            .max(report.max_open_depth as u64);
+        counters.builder_shrink_bytes = counters
+            .builder_shrink_bytes
+            .saturating_add(report.shrink_bytes as u64);
+        counters.builder_ops_capacity = counters
+            .builder_ops_capacity
+            .saturating_add(report.ops as u64);
+        counters.builder_ends_capacity = counters
+            .builder_ends_capacity
+            .saturating_add(report.ends as u64);
+        counters.builder_open_capacity = counters
+            .builder_open_capacity
+            .saturating_add(report.open as u64);
+        counters.builder_text_capacity = counters
+            .builder_text_capacity
+            .saturating_add(report.text as u64);
         counters.builder_payload_capacity = counters
             .builder_payload_capacity
-            .saturating_add(_payload as u64);
+            .saturating_add(report.payload as u64);
         counters.builder_footnotes_capacity = counters
             .builder_footnotes_capacity
-            .saturating_add(_footnotes as u64);
+            .saturating_add(report.footnotes as u64);
         counters.builder_footnote_index_capacity = counters
             .builder_footnote_index_capacity
-            .saturating_add(_footnote_index as u64);
+            .saturating_add(report.footnote_index as u64);
     });
 }
 
@@ -596,6 +640,37 @@ mod tests {
         record_deallocation(40);
         assert_eq!(snapshot().counters.final_live_bytes, 0);
         record_deallocation(100);
+        reset();
+    }
+
+    #[test]
+    fn builder_capacity_metrics_accumulate_except_for_peak() {
+        reset();
+        let report = |peak_bytes, reallocations, shrink_bytes| BuilderCapacityReport {
+            requested_bytes: 10,
+            final_bytes: 20,
+            peak_bytes,
+            reallocations,
+            max_open_depth: 3,
+            shrink_bytes,
+            ops: 1,
+            ends: 2,
+            open: 3,
+            text: 4,
+            payload: 5,
+            footnotes: 6,
+            footnote_index: 7,
+        };
+        record_builder_capacities(report(100, 2, 8));
+        record_builder_capacities(report(50, 3, 9));
+
+        let counters = snapshot().counters;
+        assert_eq!(counters.builder_requested_capacity_bytes, 20);
+        assert_eq!(counters.builder_final_capacity_bytes, 40);
+        assert_eq!(counters.builder_peak_capacity_bytes, 100);
+        assert_eq!(counters.builder_reallocations, 5);
+        assert_eq!(counters.builder_max_open_depth, 3);
+        assert_eq!(counters.builder_shrink_bytes, 17);
         reset();
     }
 }

@@ -29,7 +29,7 @@ mod validate;
 pub(crate) const HAS_VISIBLE_TEXT: u8 = 1 << 0;
 pub(crate) const HAS_VISIBLE_IMAGE: u8 = 1 << 1;
 
-pub(crate) use builder::{BuildError, SemanticTapeBuilder};
+pub(crate) use builder::{BuildCapacityPlan, BuildError, SemanticTapeBuilder};
 pub(crate) use code::{
     count_blocks as source_code_block_count,
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
