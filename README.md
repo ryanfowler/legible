@@ -68,7 +68,10 @@ let page = extractor.extract("<main><p>Page content.</p></main>", None)?;
 ```
 
 `max_elements(0)` sets no limit. Structured-data metadata extraction is enabled by
-default.
+default. For resource-constrained callers, use `ParseBudget` or the builder's
+budget methods to limit input bytes, DOM nodes, attributes, text, nesting depth,
+and JSON-LD work. A value of `0` means no caller-configured limit. JSON-LD depth
+still has an internal safety cap.
 
 Enable structured decision diagnostics only when you need them:
 

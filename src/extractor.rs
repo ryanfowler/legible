@@ -1,5 +1,6 @@
 //! Content extractor configuration and entry point.
 
+use crate::budget::ParseBudget;
 use crate::dom::Dom;
 use crate::error::Result;
 use crate::extraction::ContentExtractor;
@@ -45,7 +46,7 @@ pub struct ExtractorBuilder {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractorConfig {
-    pub(crate) max_elements: usize,
+    pub(crate) parse_budget: ParseBudget,
     pub(crate) structured_data: bool,
     pub(crate) top_candidates: usize,
     pub(crate) debug: bool,
@@ -59,7 +60,7 @@ pub(crate) struct ExtractorConfig {
 impl Default for ExtractorConfig {
     fn default() -> Self {
         Self {
-            max_elements: 0,
+            parse_budget: ParseBudget::default(),
             structured_data: true,
             top_candidates: 5,
             debug: false,
@@ -84,8 +85,22 @@ impl Extractor {
     ///
     /// `url` must be an absolute URL when present. Legible uses it to resolve
     /// relative links and media URLs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a parser or resource-limit error when the input cannot be
+    /// parsed within the configured budget, or a normal extraction error.
     pub fn extract(&self, html: &str, url: Option<&str>) -> Result<ExtractedPage> {
-        let dom = Dom::parse_document(html).expect("HTML DOM node limit exceeded");
+        if self.config.parse_budget.max_input_bytes > 0
+            && html.len() > self.config.parse_budget.max_input_bytes
+        {
+            return Err(crate::error::Error::ResourceLimit {
+                resource: "input bytes",
+                limit: self.config.parse_budget.max_input_bytes,
+            });
+        }
+        let dom = Dom::parse_document_with_budget(html, &self.config.parse_budget)
+            .map_err(crate::error::Error::from_parse_error)?;
         ContentExtractor::from_document(dom, url, &self.config).extract()
     }
 }
@@ -99,7 +114,67 @@ impl Default for Extractor {
 impl ExtractorBuilder {
     /// Sets the maximum number of HTML elements. Use `0` for no limit.
     pub fn max_elements(mut self, max: usize) -> Self {
-        self.config.max_elements = max;
+        self.config.parse_budget.max_elements = max;
+        self
+    }
+
+    /// Sets all parser and structured-data limits.
+    pub fn parse_budget(mut self, budget: ParseBudget) -> Self {
+        self.config.parse_budget = budget;
+        self
+    }
+
+    /// Sets the maximum input size in bytes. Use `0` for no limit.
+    pub fn max_input_bytes(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_input_bytes = max;
+        self
+    }
+
+    /// Sets the maximum number of allocated DOM nodes. Use `0` for no limit.
+    pub fn max_nodes(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_nodes = max;
+        self
+    }
+
+    /// Sets the maximum number of attributes across the document. Use `0` for no limit.
+    pub fn max_total_attributes(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_total_attributes = max;
+        self
+    }
+
+    /// Sets the maximum number of attributes on one element. Use `0` for no limit.
+    pub fn max_attributes_per_element(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_attributes_per_element = max;
+        self
+    }
+
+    /// Sets the maximum number of text bytes in the DOM. Use `0` for no limit.
+    pub fn max_text_bytes(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_text_bytes = max;
+        self
+    }
+
+    /// Sets the maximum element nesting depth. Use `0` for no limit.
+    pub fn max_depth(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_depth = max;
+        self
+    }
+
+    /// Sets the maximum total JSON-LD script size in bytes. Use `0` for no limit.
+    pub fn max_json_ld_bytes(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_json_ld_bytes = max;
+        self
+    }
+
+    /// Sets the maximum number of typed JSON-LD items. Use `0` for no limit.
+    pub fn max_json_ld_items(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_json_ld_items = max;
+        self
+    }
+
+    /// Sets the maximum JSON-LD nesting depth. Use `0` for the internal safety cap.
+    pub fn max_json_ld_depth(mut self, max: usize) -> Self {
+        self.config.parse_budget.max_json_ld_depth = max;
         self
     }
 
@@ -164,9 +239,9 @@ mod tests {
     fn builder_defaults_match_extractor_defaults() {
         let built = Extractor::builder().build();
         let default = Extractor::default();
-        assert_eq!(built.config.max_elements, default.config.max_elements);
+        assert_eq!(built.config.parse_budget, default.config.parse_budget);
         assert_eq!(built.config.structured_data, default.config.structured_data);
-        assert_eq!(built.config.max_elements, 0);
+        assert_eq!(built.config.parse_budget.max_elements, 0);
         assert!(built.config.structured_data);
         assert!(!built.config.diagnostics);
     }
@@ -178,7 +253,7 @@ mod tests {
             .structured_data(false)
             .diagnostics(true)
             .build();
-        assert_eq!(extractor.config.max_elements, 123);
+        assert_eq!(extractor.config.parse_budget.max_elements, 123);
         assert!(!extractor.config.structured_data);
         assert!(extractor.config.diagnostics);
     }
@@ -598,6 +673,181 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
             extractor.extract("<main><p>Content</p></main>", None),
             Err(Error::TooManyElements(_, 1))
         ));
+    }
+
+    #[test]
+    fn parser_budgets_fail_before_extraction_without_panicking() {
+        let cases = [
+            (
+                Extractor::builder().max_input_bytes(4).build(),
+                "<p>content</p>",
+                "input bytes",
+            ),
+            (
+                Extractor::builder().max_nodes(1).build(),
+                "<p>content</p>",
+                "DOM nodes",
+            ),
+            (
+                Extractor::builder().max_total_attributes(1).build(),
+                "<p id='a' class='b'>content</p>",
+                "total attributes",
+            ),
+            (
+                Extractor::builder().max_attributes_per_element(1).build(),
+                "<p id='a' class='b'>content</p>",
+                "attributes per element",
+            ),
+            (
+                Extractor::builder().max_text_bytes(2).build(),
+                "<p>content</p>",
+                "text bytes",
+            ),
+            (
+                Extractor::builder().max_depth(1).build(),
+                "<div><div>content</div></div>",
+                "element depth",
+            ),
+        ];
+
+        for (extractor, html, resource) in cases {
+            assert!(matches!(
+                extractor.extract(html, None),
+                Err(Error::ResourceLimit {
+                    resource: actual,
+                    ..
+                }) if actual == resource
+            ));
+        }
+    }
+
+    #[test]
+    fn json_ld_budgets_fail_before_structured_data_is_retained() {
+        let html = r#"<html><head><script type="application/ld+json">[
+            {"@context":"https://schema.org","@type":"Article","headline":"One"},
+            {"@context":"https://schema.org","@type":"Article","headline":"Two"}
+        ]</script></head><body><main><p>Useful page content.</p></main></body></html>"#;
+
+        assert!(matches!(
+            Extractor::builder()
+                .max_json_ld_bytes(8)
+                .build()
+                .extract(html, None),
+            Err(Error::ResourceLimit {
+                resource: "JSON-LD bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Extractor::builder()
+                .max_json_ld_items(1)
+                .build()
+                .extract(html, None),
+            Err(Error::ResourceLimit {
+                resource: "JSON-LD items",
+                ..
+            })
+        ));
+
+        let cumulative = r#"<script type="application/ld+json"> {"@type":"Article"} </script>
+            <script type="application/ld+json"> {"@type":"Article"} </script>
+            <main><p>Useful page content.</p></main>"#;
+        assert!(matches!(
+            Extractor::builder()
+                .max_json_ld_bytes(30)
+                .build()
+                .extract(cumulative, None),
+            Err(Error::ResourceLimit {
+                resource: "JSON-LD bytes",
+                ..
+            })
+        ));
+
+        let deep = format!(
+            "<script type='application/ld+json'>{}{{\"@type\":\"Article\"}}{}</script><main><p>Content</p></main>",
+            "[".repeat(4),
+            "]".repeat(4)
+        );
+        assert!(matches!(
+            Extractor::builder()
+                .max_json_ld_depth(2)
+                .build()
+                .extract(&deep, None),
+            Err(Error::ResourceLimit {
+                resource: "JSON-LD depth",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parser_budget_survives_repair_callbacks_after_poisoning() {
+        let error = Extractor::builder()
+            .max_nodes(4)
+            .build()
+            .extract("<table><tr><td><p>content</p></td></tr></table>", None);
+        assert!(matches!(error, Err(Error::ResourceLimit { .. })));
+
+        let error = Extractor::builder()
+            .max_nodes(1)
+            .build()
+            .extract("<div></div>", None);
+        assert!(matches!(error, Err(Error::ResourceLimit { .. })));
+    }
+
+    #[test]
+    fn template_contents_obey_element_depth_budget() {
+        let error = Extractor::builder().max_depth(1).build().extract(
+            "<template><div>content</div></template><main><p>page</p></main>",
+            None,
+        );
+        assert!(matches!(
+            error,
+            Err(Error::ResourceLimit {
+                resource: "element depth",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn internal_json_ld_depth_cap_is_iterative_and_non_panicking() {
+        let depth = 600;
+        let deep = format!(
+            "<script type='application/ld+json'>{}{{\"@type\":\"Article\"}}{}</script><main><p>Content</p></main>",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        assert!(matches!(
+            Extractor::default().extract(&deep, None),
+            Err(Error::ResourceLimit {
+                resource: "JSON-LD depth",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Extractor::builder()
+                .max_json_ld_depth(1_000)
+                .build()
+                .extract(&deep, None),
+            Err(Error::ResourceLimit {
+                resource: "JSON-LD depth",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_parser_budgets_preserve_default_behavior() {
+        let html = "<main><p>Content remains available with unlimited budgets.</p></main>";
+        let default = Extractor::default().extract(html, None).unwrap();
+        let explicit = Extractor::builder()
+            .parse_budget(ParseBudget::default())
+            .build()
+            .extract(html, None)
+            .unwrap();
+        assert_eq!(default.markdown(), explicit.markdown());
+        assert_eq!(default.metadata().title, explicit.metadata().title);
     }
 
     #[test]

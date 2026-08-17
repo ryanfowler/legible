@@ -4,6 +4,8 @@ use std::{env, fs, process::ExitCode};
 fn error_variant(error: &Error) -> &'static str {
     match error {
         Error::TooManyElements(..) => "TooManyElements",
+        Error::ResourceLimit { .. } => "ResourceLimit",
+        Error::Parse(_) => "Parse",
         Error::NoContent => "NoContent",
         Error::NoBody => "NoBody",
         Error::InvalidUrl(..) => "InvalidUrl",

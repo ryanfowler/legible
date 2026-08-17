@@ -46,6 +46,7 @@ The extraction pipeline flows through these stages:
 | Module | Role |
 |---|---|
 | `extractor.rs` | Public builder, extraction config |
+| `budget.rs` | Public parser and structured-data resource budgets |
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
 | `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
@@ -73,6 +74,7 @@ The extraction pipeline flows through these stages:
 | `render/markdown.rs` / `render/text.rs` / `render/html.rs` | Stack-safe format renderers from the semantic document |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
+| `dom/parse.rs` | Parser-only poisoned TreeSink and in-work resource budget enforcement |
 | `dom/traversal.rs` | Iterative DOM-preorder snapshots and cached document anchors for immutable source phases |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
 
