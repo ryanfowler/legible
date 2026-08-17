@@ -59,13 +59,6 @@ impl NodeStateStore {
         self.stats_epoch = 1;
         self.link_lengths = None;
     }
-    pub(crate) fn clear_scores(&mut self) {
-        for entry in &mut self.entries {
-            entry.content_score = 0.0;
-            entry.score_initialized = false;
-            entry.score_seen = false;
-        }
-    }
     pub(crate) fn clear_stats(&mut self) {
         self.stats_epoch = self.stats_epoch.wrapping_add(1);
         if let Some(lengths) = &mut self.link_lengths {

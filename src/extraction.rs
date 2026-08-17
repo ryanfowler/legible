@@ -204,32 +204,12 @@ enum VisibilityVariant {
     Relaxed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AnalysisKey {
-    visibility: VisibilityVariant,
-    weight_classes: bool,
-}
-
-impl AnalysisKey {
-    fn id(self) -> u8 {
-        match (self.visibility, self.weight_classes) {
-            (VisibilityVariant::Normal, true) => 0,
-            (VisibilityVariant::Normal, false) => 1,
-            (VisibilityVariant::Relaxed, true) => 2,
-            (VisibilityVariant::Relaxed, false) => 3,
-        }
-    }
-}
-
 impl ExtractionStrategy {
-    fn analysis_key(self) -> AnalysisKey {
-        AnalysisKey {
-            visibility: if self == Self::RelaxedVisibility {
-                VisibilityVariant::Relaxed
-            } else {
-                VisibilityVariant::Normal
-            },
-            weight_classes: self.weight_classes(),
+    fn visibility_variant(self) -> VisibilityVariant {
+        if self == Self::RelaxedVisibility {
+            VisibilityVariant::Relaxed
+        } else {
+            VisibilityVariant::Normal
         }
     }
 }
@@ -317,31 +297,48 @@ struct CandidateDiscovery {
     has_links: bool,
 }
 
-struct ScoringAnalysis {
-    dom: Option<Dom>,
+struct ScoredVariant {
     node_data: NodeStateStore,
     discovery: CandidateDiscovery,
     candidates: CandidateSet,
     ranked: SmallVec<[RankedCandidate; 64]>,
+}
+
+struct ScoringAnalysis {
+    // This is the only mutable scoring view for a visibility policy. It is
+    // never consumed by an attempt: selected roots are copied out of it into
+    // isolated fragments before cleanup. That keeps retries from cloning the
+    // complete source DOM again.
+    dom: Dom,
+    weighted: ScoredVariant,
+    unweighted: Option<ScoredVariant>,
+    prepared: SmallVec<[NodeId; 256]>,
+    working_snapshot: Vec<(NodeId, u32)>,
+    excluded_mask: Vec<bool>,
+    feature_index: CandidateFeatureIndex,
     body: NodeId,
 }
 
-struct SharedScoringFacts {
-    node_data: NodeStateStore,
-    feature_index: CandidateFeatureIndex,
+impl ScoringAnalysis {
+    fn variant(&self, weight_classes: bool) -> Option<&ScoredVariant> {
+        if weight_classes {
+            Some(&self.weighted)
+        } else {
+            self.unweighted.as_ref()
+        }
+    }
 }
 
 #[derive(Default)]
 struct AnalysisCache {
-    variants: Vec<(AnalysisKey, ScoringAnalysis)>,
-    shared_facts: Vec<(VisibilityVariant, SharedScoringFacts)>,
+    variants: Vec<(VisibilityVariant, ScoringAnalysis)>,
 }
 
 impl AnalysisCache {
-    fn find(&self, key: AnalysisKey) -> Option<usize> {
+    fn find(&self, visibility: VisibilityVariant) -> Option<usize> {
         self.variants
             .iter()
-            .position(|(cached_key, _)| *cached_key == key)
+            .position(|(cached_visibility, _)| *cached_visibility == visibility)
     }
 }
 
@@ -668,14 +665,14 @@ impl<'a> ContentExtractor<'a> {
             crate::instrumentation::record_strategy(strategy as u8);
             self.diagnostic_cleanup_actions.clear();
             self.diagnostic_normalization = NormalizationCountsInfo::default();
-            let key = strategy.analysis_key();
-            let analysis_index = if let Some(index) = analysis_cache.find(key) {
+            let visibility = strategy.visibility_variant();
+            let analysis_index = if let Some(index) = analysis_cache.find(visibility) {
                 index
             } else {
                 #[cfg(test)]
                 record_generic_scoring_call();
                 let analysis = self.build_scoring_analysis(
-                    key,
+                    visibility,
                     &mut match_buffer,
                     &mut text_buffer,
                     &prepared_source,
@@ -686,43 +683,44 @@ impl<'a> ContentExtractor<'a> {
                     structured_root,
                     source_anchors,
                     &mut discovery_cache,
-                    &mut analysis_cache.shared_facts,
                 )?;
-                crate::instrumentation::record_unique_attempt_plan(key.id());
-                analysis_cache.variants.push((key, analysis));
+                crate::instrumentation::record_unique_attempt_plan(visibility as u8);
+                analysis_cache.variants.push((visibility, analysis));
                 analysis_cache.variants.len() - 1
             };
-            let (analysis_dom, discovery, candidates, ranked, body, node_data) = {
+            if !strategy.weight_classes() {
                 let analysis = &mut analysis_cache.variants[analysis_index].1;
-                (
-                    analysis.dom.take(),
-                    analysis.discovery.clone(),
-                    analysis.candidates.clone(),
-                    analysis.ranked.clone(),
-                    analysis.body,
-                    analysis.node_data.clone(),
-                )
-            };
+                if analysis.unweighted.is_none() {
+                    self.prepare_unweighted_scoring(
+                        analysis,
+                        &content_hint_targets,
+                        structured_root,
+                    );
+                }
+            }
+            let analysis = &analysis_cache.variants[analysis_index].1;
+            let variant = analysis
+                .variant(strategy.weight_classes())
+                .ok_or(Error::NoContent)?;
+            let discovery = &variant.discovery;
+            let candidates = &variant.candidates;
+            let ranked = &variant.ranked;
+            let body = analysis.body;
             self.page_byline = discovery.byline.clone();
-            self.node_data = node_data;
-            let mut working_dom = if let Some(dom) = analysis_dom {
-                dom
-            } else {
-                let _scoring_phase = PhaseGuard::new(Phase::Scoring);
-                self.rebuild_scoring_dom(&discovery, &candidates)
-            };
+            self.node_data = variant.node_data.clone();
+            let working_dom = &analysis.dom;
             let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
             let mut selection = select_content_root(
-                &working_dom,
-                &candidates,
-                &ranked,
+                working_dom,
+                candidates,
+                ranked,
                 body,
                 self.structured_data
                     .primary_texts(&self.structured_title, self.source_uri.as_ref()),
             );
             selection = self.selection_for_strategy(
                 strategy,
-                &working_dom,
+                working_dom,
                 body,
                 selection,
                 structured_root,
@@ -753,58 +751,26 @@ impl<'a> ContentExtractor<'a> {
                 .attr(selection.node, AttrName::Role)
                 .is_some_and(Self::has_primary_role);
             let root_info = self.root_info(
-                &working_dom,
-                &candidates,
+                working_dom,
+                candidates,
                 &selection,
                 ranked.first().map(|candidate| candidate.node),
             );
             let root_in_document_chrome =
-                Self::is_document_chrome_root(&working_dom, selection.node, body);
+                Self::is_document_chrome_root(working_dom, selection.node, body);
             if selection.node == body {
-                Self::prune_body_fallback_chrome(&mut working_dom, body);
                 selection.branches.clear();
             }
-            // Move the selected working tree into the extraction path. Keep the
-            // prepared source as the immutable input for a possible retry.
-            let source_dom = std::mem::replace(&mut self.dom, working_dom);
-            let (top_id, synthetic) = if !selection.branches.is_empty() {
-                let container = self
-                    .create_container(selection.branches[0], &selection.branches)
-                    .ok_or(Error::NoContent)?;
-                initialize_node(
-                    &self.dom,
-                    container,
-                    &mut self.node_data,
-                    self.strategy.weight_classes(),
-                );
-                (container, true)
-            } else if selection.node == body {
-                let container = self
-                    .dom
-                    .create_html_element(Tag::Div)
-                    .map_err(|_| Error::NoContent)?;
-                let children: SmallVec<[NodeId; 16]> = self.dom.children(body).collect();
-                for child in children {
-                    self.dom.append_child(container, child)
-                }
-                self.dom.append_child(body, container);
-                initialize_node(
-                    &self.dom,
-                    container,
-                    &mut self.node_data,
-                    self.strategy.weight_classes(),
-                );
-                (container, true)
+
+            // Root selection only reads the immutable scoring view. Record the
+            // boundary edits that the old mutable scoring path applied so they
+            // can be made on the selected fragment after the copy.
+            let mut top_id = selection.node;
+            let rename_top = selection.reason == RootSelectionReason::CompleteAncestor
+                && matches!(working_dom.tag(top_id), Some(Tag::Article | Tag::Main));
+            if !selection.branches.is_empty() || selection.node == body {
+                top_id = selection.branches.first().copied().unwrap_or(body);
             } else {
-                let mut top_id = selection.node;
-                // Ancestor validation changes the boundary, not the output
-                // contract. Keep the established generic content wrapper.
-                if selection.reason == RootSelectionReason::CompleteAncestor
-                    && matches!(self.dom.tag(top_id), Some(Tag::Article | Tag::Main))
-                {
-                    self.dom.rename_html(top_id, Tag::Div);
-                    self.dom.remove_attr(top_id, AttrName::ItemProp);
-                }
                 // Preserve useful boundary expansion from the prose scoring algorithm when the
                 // structural selector accepts the raw ranking winner. Explicit
                 // child, parent, or schema choices are already final.
@@ -820,10 +786,10 @@ impl<'a> ContentExtractor<'a> {
                                     || candidate.has_source(CandidateSource::Semantic)
                             })
                         })
-                        .map(|candidate| self.dom.ancestors(candidate.node).collect())
+                        .map(|candidate| working_dom.ancestors(candidate.node).collect())
                         .collect();
                     if alternatives.len() >= 3 {
-                        let mut parent = self.dom.parent(top_id);
+                        let mut parent = working_dom.parent(top_id);
                         while let Some(node) = parent {
                             if node == body {
                                 break;
@@ -837,12 +803,12 @@ impl<'a> ContentExtractor<'a> {
                                 top_id = node;
                                 break;
                             }
-                            parent = self.dom.parent(node)
+                            parent = working_dom.parent(node)
                         }
                     }
                     if !self.node_data.has(top_id) {
                         initialize_node(
-                            &self.dom,
+                            working_dom,
                             top_id,
                             &mut self.node_data,
                             self.strategy.weight_classes(),
@@ -850,7 +816,7 @@ impl<'a> ContentExtractor<'a> {
                     }
                     let threshold = self.node_data.get_content_score(top_id) / 3.0;
                     let mut last = self.node_data.get_content_score(top_id);
-                    let mut parent = self.dom.parent(top_id);
+                    let mut parent = working_dom.parent(top_id);
                     while let Some(node) = parent {
                         if node == body {
                             break;
@@ -866,13 +832,13 @@ impl<'a> ContentExtractor<'a> {
                             }
                             last = score;
                         }
-                        parent = self.dom.parent(node)
+                        parent = working_dom.parent(node)
                     }
-                    while let Some(parent) = self.dom.parent(top_id) {
+                    while let Some(parent) = working_dom.parent(top_id) {
                         if parent == body {
                             break;
                         }
-                        let mut children = self.dom.element_children(parent);
+                        let mut children = working_dom.element_children(parent);
                         if children.next().is_some() && children.next().is_none() {
                             top_id = parent;
                         } else {
@@ -885,83 +851,153 @@ impl<'a> ContentExtractor<'a> {
                 // to that boundary only when it is small, link-light, and the
                 // omitted prefix is a heading with at most one lead paragraph.
                 if selection.reason == RootSelectionReason::Ranked
-                    && (self.dom.tag(top_id) == Some(Tag::Pre)
-                        || self
-                            .dom
+                    && (working_dom.tag(top_id) == Some(Tag::Pre)
+                        || working_dom
                             .descendants(top_id)
-                            .any(|node| self.dom.tag(node) == Some(Tag::Pre)))
-                    && let Some(article) = self.dom.ancestors(top_id).take(8).find(|&ancestor| {
-                        matches!(self.dom.tag(ancestor), Some(Tag::Article | Tag::Main))
-                            && self.dom.normalized_char_count(ancestor) <= 10_000
+                            .any(|node| working_dom.tag(node) == Some(Tag::Pre)))
+                    && let Some(article) = working_dom.ancestors(top_id).take(8).find(|&ancestor| {
+                        matches!(working_dom.tag(ancestor), Some(Tag::Article | Tag::Main))
+                            && working_dom.normalized_char_count(ancestor) <= 10_000
                     })
-                    && has_compact_code_page_structure(&self.dom, article)
-                    && (has_compact_code_lead(&self.dom, article, top_id)
-                        || has_line_number_table_marker(&self.dom, top_id))
+                    && has_compact_code_page_structure(working_dom, article)
+                    && (has_compact_code_lead(working_dom, article, top_id)
+                        || has_line_number_table_marker(working_dom, top_id))
                 {
                     top_id = article;
                 }
                 if !self.node_data.has(top_id) {
                     initialize_node(
-                        &self.dom,
+                        working_dom,
                         top_id,
                         &mut self.node_data,
                         self.strategy.weight_classes(),
                     )
                 }
-                (top_id, false)
-            };
+            }
+
+            let synthetic = !selection.branches.is_empty() || selection.node == body;
             let lead_media = (!synthetic && exact_root.is_none())
-                .then(|| adjacent_lead_media(&self.dom, top_id))
+                .then(|| adjacent_lead_media(working_dom, top_id))
                 .flatten();
-            let content_id = if synthetic {
-                top_id
-            } else {
-                let siblings = if selection.reason == RootSelectionReason::Ranked {
+            // A synthetic branch container is a sibling of the selected
+            // branches. Its direction therefore comes from the common parent,
+            // not from the first branch's own attributes.
+            let direction_root = selection
+                .branches
+                .first()
+                .and_then(|&branch| working_dom.parent(branch))
+                .unwrap_or(top_id);
+            let source_direction = std::iter::once(direction_root)
+                .chain(working_dom.ancestors(direction_root))
+                .find_map(|node| working_dom.attr(node, AttrName::Dir))
+                .map(str::to_owned);
+            let source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
+                if selection.reason == RootSelectionReason::Ranked {
                     Self::gather_siblings(
-                        &self.dom,
+                        working_dom,
                         top_id,
                         &mut self.node_data,
                         self.options.debug,
                     )
+                    .into_iter()
+                    .collect()
                 } else {
                     SmallVec::from_slice(&[top_id])
-                };
-                self.create_container(top_id, &siblings).unwrap_or(top_id)
+                }
+            } else if !selection.branches.is_empty() {
+                selection.branches.iter().copied().collect()
+            } else {
+                SmallVec::from_slice(&[body])
             };
-            remove_title_brand_headings(&mut self.dom, content_id, &title_plan);
+            // Copy only the selected source roots. The scoring view remains
+            // available for later strategies, so a rejected attempt does not
+            // require another complete DOM clone.
+            let fragment = {
+                let _phase = PhaseGuard::new(Phase::FragmentCopy);
+                working_dom
+                    .copy_subtrees_as_fragment(&source_siblings)
+                    .map_err(|_| Error::NoContent)?
+            };
+            let copied_siblings: SmallVec<[NodeId; 16]> =
+                fragment.children(fragment.root()).collect();
+            let copied_top = if synthetic {
+                copied_siblings[0]
+            } else {
+                let position = source_siblings
+                    .iter()
+                    .position(|&node| node == top_id)
+                    .ok_or(Error::NoContent)?;
+                copied_siblings[position]
+            };
+
+            // Move the selected fragment into the extraction path. The source
+            // DOM is restored after rejection, while the immutable scoring
+            // view stays cached for any later retry.
+            let source_dom = std::mem::replace(&mut self.dom, fragment);
+            let (_top_id, content_id) = if selection.node == body {
+                Self::prune_body_fallback_chrome(&mut self.dom, copied_top);
+                let container = self
+                    .dom
+                    .create_html_element(Tag::Div)
+                    .map_err(|_| Error::NoContent)?;
+                let children: SmallVec<[NodeId; 16]> = self.dom.children(copied_top).collect();
+                for child in children {
+                    self.dom.append_child(container, child)
+                }
+                self.dom.append_child(copied_top, container);
+                self.dom.append_child(self.dom.root(), container);
+                self.dom.detach(copied_top);
+                (container, container)
+            } else if !selection.branches.is_empty() {
+                let container = self
+                    .create_container(copied_siblings[0], &copied_siblings)
+                    .ok_or(Error::NoContent)?;
+                (container, container)
+            } else {
+                if rename_top && matches!(self.dom.tag(copied_top), Some(Tag::Article | Tag::Main))
+                {
+                    self.dom.rename_html(copied_top, Tag::Div);
+                    self.dom.remove_attr(copied_top, AttrName::ItemProp);
+                }
+                let content_id = self
+                    .create_container(copied_top, &copied_siblings)
+                    .unwrap_or(copied_top);
+                (copied_top, content_id)
+            };
+            let synthetic = selection.node == body || !selection.branches.is_empty();
             if let Some(lead_media) = lead_media
-                && lead_media != content_id
-                && self.dom.parent(lead_media).is_some()
+                && !source_siblings.contains(&lead_media)
                 && let Some(first_child) = self.dom.first_child(content_id)
             {
-                self.dom.insert_before(first_child, lead_media);
+                let copied_lead = self
+                    .dom
+                    .import_subtree(&source_dom, lead_media)
+                    .map_err(|_| Error::NoContent)?;
+                self.dom.append_child(self.dom.root(), copied_lead);
+                self.dom.insert_before(first_child, copied_lead);
             }
+            let fragment_title_snapshot =
+                self.dom.element_descendants_snapshot_with_depth(content_id);
+            let fragment_title_plan = title_heading_plan(
+                &self.dom,
+                SourceElements::Snapshot(&fragment_title_snapshot),
+                &self.page_title,
+                &self.structured_title,
+                self.metadata.site_name.as_deref(),
+                self.source_uri.as_ref(),
+            );
+            remove_title_brand_headings(&mut self.dom, content_id, &fragment_title_plan);
 
-            if let Some(direction) = std::iter::once(top_id)
-                .chain(self.dom.ancestors(top_id))
-                .find_map(|node| self.dom.attr(node, AttrName::Dir))
-            {
-                self.page_direction = Some(direction.to_owned());
-            }
+            self.page_direction = source_direction;
 
             // Cleanup owns a compact copy of the selected region. The source
             // DOM remains available for a retry and is never affected by an
             // earlier attempt's mutations.
             #[cfg(feature = "bench-instrumentation")]
             drop(_root_selection_phase);
-            let mut fragment = {
-                let _phase = PhaseGuard::new(Phase::FragmentCopy);
-                self.dom
-                    .copy_subtree_as_fragment(content_id)
-                    .map_err(|_| Error::NoContent)?
-            };
-            let content_id = fragment
-                .first_child(fragment.root())
-                .ok_or(Error::NoContent)?;
             if let Some(footnote_definitions) = footnote_definitions.as_ref() {
-                adopt_external_footnotes(footnote_definitions, &mut fragment, content_id);
+                adopt_external_footnotes(footnote_definitions, &mut self.dom, content_id);
             }
-            self.dom = fragment;
             self.node_data.clear();
             self.node_data.enable_link_lengths();
 
@@ -1238,32 +1274,85 @@ impl<'a> ContentExtractor<'a> {
         })
     }
 
-    fn rebuild_scoring_dom(
+    fn prepare_unweighted_scoring(
         &self,
-        discovery: &CandidateDiscovery,
-        candidates: &CandidateSet,
-    ) -> Dom {
-        // The retained analysis facts already contain all score and ranking
-        // results. A retry that follows a consumed analysis DOM only needs the
-        // structural preparation and excluded-subtree detaches that make the
-        // source tree match that analysis view; it must not score the source a
-        // second time.
-        let mut dom = self.dom.clone();
-        let root = dom.root();
-        normalize_scoring_structure(&mut dom, root);
-        prepare_readability_structure(&mut dom, &discovery.divs_to_prepare, candidates);
-        for &node in &discovery.remove_after_scoring {
-            if dom.parent(node).is_some() {
-                dom.detach(node);
+        analysis: &mut ScoringAnalysis,
+        content_hint_targets: &[NodeId],
+        structured_root: Option<NodeId>,
+    ) {
+        let _scoring_phase = PhaseGuard::new(Phase::Scoring);
+        let discovery = &analysis.weighted.discovery;
+        let working_root = analysis.dom.root();
+        let mut node_data = NodeStateStore::new();
+        node_data.sync_len(analysis.dom.len());
+        if discovery.has_links {
+            node_data.enable_link_lengths();
+        }
+        let mut to_score = SmallVec::<[NodeId; 256]>::new();
+        for &node in &discovery.to_score {
+            if node_data.mark_score_seen(node) {
+                to_score.push(node);
             }
         }
-        dom
+        for &node in &analysis.prepared {
+            if node_data.mark_score_seen(node) {
+                to_score.push(node);
+            }
+        }
+        let readability_scores = compute_readability_scores(
+            &mut analysis.dom,
+            to_score,
+            &discovery.remove_after_scoring,
+            &analysis.excluded_mask,
+            &mut node_data,
+            false,
+        );
+
+        let mut candidates = discovery.candidates.clone();
+        for &node in content_hint_targets {
+            let attached = node == working_root
+                || analysis
+                    .dom
+                    .ancestors(node)
+                    .any(|ancestor| ancestor == working_root);
+            if attached
+                && self
+                    .options
+                    .content_hint
+                    .as_ref()
+                    .is_some_and(|hint| content_target_matches(&analysis.dom, node, hint))
+            {
+                candidates.add_caller_hint(node);
+            }
+        }
+        if let Some(root) = structured_root {
+            candidates.add_structured_data(root);
+        }
+
+        let (ranked, _) = Self::rank_candidates_with_snapshot(
+            &analysis.dom,
+            analysis.body,
+            &analysis.working_snapshot,
+            &mut candidates,
+            readability_scores,
+            &analysis.excluded_mask,
+            &mut node_data,
+            false,
+            self.options.top_candidates,
+            Some(&analysis.feature_index),
+        );
+        analysis.unweighted = Some(ScoredVariant {
+            node_data,
+            discovery: discovery.clone(),
+            candidates,
+            ranked,
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
     fn build_scoring_analysis(
         &mut self,
-        key: AnalysisKey,
+        visibility: VisibilityVariant,
         match_buffer: &mut String,
         text_buffer: &mut String,
         prepared_source: &PreparedSource,
@@ -1274,14 +1363,13 @@ impl<'a> ContentExtractor<'a> {
         structured_root: Option<NodeId>,
         source_anchors: DocumentAnchors,
         discovery_cache: &mut Vec<(VisibilityVariant, CandidateDiscovery)>,
-        shared_facts: &mut Vec<(VisibilityVariant, SharedScoringFacts)>,
     ) -> Result<ScoringAnalysis> {
         // Discovery is source-only and therefore shared by every strategy with
         // the same visibility policy. Keep its side effects out of the retry
         // loop so a rejected attempt cannot alter the next plan.
         let mut discovery = if let Some((_, cached)) = discovery_cache
             .iter()
-            .find(|(visibility, _)| *visibility == key.visibility)
+            .find(|(cached_visibility, _)| *cached_visibility == visibility)
         {
             cached.clone()
         } else {
@@ -1294,10 +1382,10 @@ impl<'a> ContentExtractor<'a> {
                     accessible_math,
                     title_plan,
                     base_candidates,
-                    key.visibility,
+                    visibility,
                 )
             };
-            discovery_cache.push((key.visibility, discovery.clone()));
+            discovery_cache.push((visibility, discovery.clone()));
             discovery
         };
         if let Some(root) = self.specialized_root {
@@ -1313,72 +1401,12 @@ impl<'a> ContentExtractor<'a> {
         let mut working_dom = self.dom.clone();
         let working_root = working_dom.root();
         normalize_scoring_structure(&mut working_dom, working_root);
-
-        let shared = shared_facts
-            .iter()
-            .find(|(visibility, _)| *visibility == key.visibility)
-            .map(|(_, facts)| facts);
-        let mut node_data = shared
-            .map(|facts| {
-                let mut node_data = facts.node_data.clone();
-                node_data.clear_scores();
-                node_data
-            })
-            .unwrap_or_else(NodeStateStore::new);
-        node_data.sync_len(working_dom.len());
-        if discovery.has_links {
-            // Readability score propagation historically had link-length
-            // statistics available during scoring. Preserve that ordering
-            // while the discovery result is shared across retry variants.
-            node_data.enable_link_lengths();
-        }
-        let mut to_score = SmallVec::<[NodeId; 256]>::new();
-        for &node in &discovery.to_score {
-            if node_data.mark_score_seen(node) {
-                to_score.push(node);
-            }
-        }
         let prepared = prepare_readability_structure(
             &mut working_dom,
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
-        for id in prepared {
-            if node_data.mark_score_seen(id) {
-                to_score.push(id);
-            }
-        }
         let excluded_mask = build_exclusion_mask(&working_dom, &discovery.remove_after_scoring);
-        let readability_scores = compute_readability_scores(
-            &mut working_dom,
-            to_score,
-            &discovery.remove_after_scoring,
-            &excluded_mask,
-            &mut node_data,
-            key.weight_classes,
-        );
-
-        let mut candidates = discovery.candidates.clone();
-        for &node in content_hint_targets {
-            let attached = node == working_root
-                || working_dom
-                    .ancestors(node)
-                    .any(|ancestor| ancestor == working_root);
-            if attached
-                && self
-                    .options
-                    .content_hint
-                    .as_ref()
-                    .is_some_and(|hint| content_target_matches(&working_dom, node, hint))
-            {
-                candidates.add_caller_hint(node);
-            }
-        }
-        if let Some(root) = structured_root {
-            candidates.add_structured_data(root);
-        }
-
-        let working_snapshot = working_dom.element_descendants_snapshot_with_depth(working_root);
         let body = source_anchors
             .body
             .filter(|&node| {
@@ -1386,36 +1414,94 @@ impl<'a> ContentExtractor<'a> {
                     && (node == working_root || working_dom.parent(node).is_some())
             })
             .ok_or(Error::NoBody)?;
-        let (ranked, feature_index) = Self::rank_candidates_with_snapshot(
-            &working_dom,
-            body,
-            &working_snapshot,
-            &mut candidates,
-            readability_scores,
-            &excluded_mask,
-            &mut node_data,
-            key.weight_classes,
-            self.options.top_candidates,
-            shared.map(|facts| &facts.feature_index),
-        );
+
+        // Class weighting changes only score inputs. Keep the normal weighted
+        // ranking on the shared scoring view. The unweighted variant is built
+        // lazily only if a later broad or body-fallback strategy needs it.
+        let mut score_variant =
+            |weight_classes: bool, shared_feature_index: Option<&CandidateFeatureIndex>| {
+                let mut node_data = NodeStateStore::new();
+                node_data.sync_len(working_dom.len());
+                if discovery.has_links {
+                    node_data.enable_link_lengths();
+                }
+                let mut to_score = SmallVec::<[NodeId; 256]>::new();
+                for &node in &discovery.to_score {
+                    if node_data.mark_score_seen(node) {
+                        to_score.push(node);
+                    }
+                }
+                for &node in &prepared {
+                    if node_data.mark_score_seen(node) {
+                        to_score.push(node);
+                    }
+                }
+                let readability_scores = compute_readability_scores(
+                    &mut working_dom,
+                    to_score,
+                    &discovery.remove_after_scoring,
+                    &excluded_mask,
+                    &mut node_data,
+                    weight_classes,
+                );
+                let working_snapshot =
+                    working_dom.element_descendants_snapshot_with_depth(working_root);
+
+                let mut candidates = discovery.candidates.clone();
+                for &node in content_hint_targets {
+                    let attached = node == working_root
+                        || working_dom
+                            .ancestors(node)
+                            .any(|ancestor| ancestor == working_root);
+                    if attached
+                        && self
+                            .options
+                            .content_hint
+                            .as_ref()
+                            .is_some_and(|hint| content_target_matches(&working_dom, node, hint))
+                    {
+                        candidates.add_caller_hint(node);
+                    }
+                }
+                if let Some(root) = structured_root {
+                    candidates.add_structured_data(root);
+                }
+
+                let (ranked, feature_index) = Self::rank_candidates_with_snapshot(
+                    &working_dom,
+                    body,
+                    &working_snapshot,
+                    &mut candidates,
+                    readability_scores,
+                    &excluded_mask,
+                    &mut node_data,
+                    weight_classes,
+                    self.options.top_candidates,
+                    shared_feature_index,
+                );
+                (
+                    ScoredVariant {
+                        node_data,
+                        discovery: discovery.clone(),
+                        candidates,
+                        ranked,
+                    },
+                    feature_index,
+                    working_snapshot,
+                )
+            };
+
+        let (weighted, feature_index, working_snapshot) = score_variant(true, None);
         crate::instrumentation::record_scoring_nodes(working_dom.len());
 
-        if shared.is_none() {
-            shared_facts.push((
-                key.visibility,
-                SharedScoringFacts {
-                    node_data: node_data.clone(),
-                    feature_index,
-                },
-            ));
-        }
-
         Ok(ScoringAnalysis {
-            dom: Some(working_dom),
-            node_data,
-            discovery,
-            candidates,
-            ranked,
+            dom: working_dom,
+            weighted,
+            unweighted: None,
+            prepared,
+            working_snapshot,
+            excluded_mask,
+            feature_index,
             body,
         })
     }
@@ -3419,7 +3505,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(generic_scoring_calls(), 3);
+        assert_eq!(generic_scoring_calls(), 2);
     }
 
     #[test]
