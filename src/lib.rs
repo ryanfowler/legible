@@ -75,6 +75,7 @@ mod metadata;
 mod normalize;
 mod page;
 mod page_kind;
+mod prepared;
 mod quality;
 mod render;
 mod scoring;

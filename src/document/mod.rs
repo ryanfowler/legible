@@ -52,7 +52,9 @@ pub(crate) use footnotes::{
     collect_external as collect_external_footnotes,
 };
 pub(crate) use headings::permalink_nodes as heading_permalink_nodes;
-pub(crate) use math::accessible_math_nodes;
+pub(crate) use math::{
+    accessible_math_nodes, has_math_wrapper_class, is_math_root, is_tex_annotation,
+};
 pub(crate) fn media_cleanup_evidence(
     dom: &crate::dom::Dom,
     nodes: &[crate::dom::NodeId],

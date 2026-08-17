@@ -28,9 +28,11 @@ use crate::normalize::{
 };
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
+use crate::prepared::{PreparedSource, SourceElements, SourceEntry, SourceFlags};
 use crate::quality::{
     ContentMetrics, ExtractionQuality, SemanticStructureCounts, interactive_shell_evidence,
-    is_access_barrier, is_incoherent_short_result, is_interactive_shell, semantic_coverage,
+    is_access_barrier, is_access_barrier_prepared, is_incoherent_short_result,
+    is_interactive_shell, semantic_coverage,
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
@@ -301,27 +303,17 @@ fn content_target_matches(dom: &Dom, node: NodeId, target: &ContentHint) -> bool
     }
 }
 
-fn find_content_targets(dom: &Dom, target: &ContentHint) -> Vec<NodeId> {
-    if !content_hint_has_value(target) {
-        return Vec::new();
-    }
-    crate::instrumentation::record_source_full_scan();
-    dom.descendants(dom.root())
-        .filter(|&node| content_target_matches(dom, node, target))
-        .collect()
-}
-
-fn find_content_targets_from_snapshot(
+fn find_content_targets_from_prepared(
     dom: &Dom,
-    snapshot: &[(NodeId, u32)],
+    source: &PreparedSource,
     target: &ContentHint,
 ) -> Vec<NodeId> {
     if !content_hint_has_value(target) {
         return Vec::new();
     }
-    snapshot
-        .iter()
-        .map(|&(node, _)| node)
+    source
+        .elements()
+        .map(|entry| entry.node)
         .filter(|&node| content_target_matches(dom, node, target))
         .collect()
 }
@@ -444,7 +436,7 @@ impl<'a> ContentExtractor<'a> {
             .take()
             .or_else(|| metadata::normalize_title(&title))
             .unwrap_or_default();
-        let content = self.extract_content(preparation_anchors)?;
+        let content = self.extract_content()?;
         self.metadata.title = (!self.page_title.is_empty()).then_some(self.page_title);
         if self.metadata.authors.is_empty()
             && let Some(byline) = self
@@ -490,14 +482,12 @@ impl<'a> ContentExtractor<'a> {
             retained_structured_data,
         ))
     }
-    fn extract_content(
-        &mut self,
-        preparation_anchors: DocumentAnchors,
-    ) -> Result<ExtractedContent> {
+    fn extract_content(&mut self) -> Result<ExtractedContent> {
         let _candidate_preflight_phase = PhaseGuard::new(Phase::CandidateDiscovery);
+        let prepared_source = PreparedSource::build(&self.dom);
         let exact_root = if let Some(target) = &self.options.content_root {
             Some(
-                find_content_targets(&self.dom, target)
+                find_content_targets_from_prepared(&self.dom, &prepared_source, target)
                     .into_iter()
                     .next()
                     .ok_or(Error::ContentRootNotFound)?,
@@ -515,42 +505,30 @@ impl<'a> ContentExtractor<'a> {
                 self.base_uri.clone(),
                 self.source_uri.as_ref(),
             );
-            let anchors =
-                if self.specialized_root.is_none() && preparation_anchors.valid_for(&self.dom) {
-                    preparation_anchors
-                } else {
-                    self.dom.document_anchors()
-                };
             #[cfg(feature = "bench-instrumentation")]
             drop(_candidate_preflight_phase);
-            return self.extract_exact_root(root, origin, &compile_context, anchors);
+            return self.extract_exact_root(
+                root,
+                origin,
+                &compile_context,
+                prepared_source.anchors,
+            );
         }
         let footnote_definitions = exact_root.is_none().then(|| {
             crate::instrumentation::record_external_footnote_scan();
             collect_external_footnotes(&self.dom)
         });
-        let source_anchors = if preparation_anchors.valid_for(&self.dom) {
-            preparation_anchors
-        } else {
-            self.dom.document_anchors()
-        };
-        let initial_nodes = self
-            .dom
-            .element_descendants_snapshot_with_depth(self.dom.root());
+        let source_anchors = prepared_source.anchors;
         let body = source_anchors.body.ok_or(Error::NoBody)?;
-        let source_metrics = ContentMetrics::measure_source(&self.dom, body);
-        let has_relaxable_hidden_content = self.has_relaxable_hidden_content(body);
-        let relaxed_source_metrics = if has_relaxable_hidden_content {
-            ContentMetrics::measure_source_relaxed_visibility(&self.dom, body)
-        } else {
-            source_metrics
-        };
+        let source_metrics = prepared_source.source_metrics;
+        let has_relaxable_hidden_content = prepared_source.has_relaxable_hidden_content(body);
+        let relaxed_source_metrics = prepared_source.relaxed_metrics.unwrap_or(source_metrics);
         if !source_metrics.has_meaningful_text() && !relaxed_source_metrics.has_meaningful_text() {
             return Err(Error::NoContent);
         }
         let short_source_access_barrier = (source_metrics.word_count <= 60
             || source_metrics.text_chars <= 400)
-            && is_access_barrier(&self.dom, body);
+            && is_access_barrier_prepared(&self.dom, &prepared_source, body);
         let substantial_hidden_gain = relaxed_source_metrics.text_chars
             >= source_metrics.text_chars.saturating_mul(2)
             && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(1_000);
@@ -562,16 +540,17 @@ impl<'a> ContentExtractor<'a> {
             && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(100);
         let structured_root = locate_structured_content(
             &self.dom,
+            &prepared_source,
             self.structured_data
                 .primary_texts(&self.structured_title, self.source_uri.as_ref()),
         );
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
-        let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
-        let base_candidates = CandidateSet::discover_semantic_from_snapshot(
+        let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
+        let base_candidates = CandidateSet::discover_semantic_from_prepared(
             &self.dom,
-            &initial_nodes,
+            &prepared_source,
             source_anchors.body,
         );
         let content_hint_targets =
@@ -582,11 +561,11 @@ impl<'a> ContentExtractor<'a> {
                     if content_hint_has_value(hint) {
                         crate::instrumentation::record_content_hint_scan();
                     }
-                    find_content_targets_from_snapshot(&self.dom, &initial_nodes, hint)
+                    find_content_targets_from_prepared(&self.dom, &prepared_source, hint)
                 });
         let title_plan = title_heading_plan(
             &self.dom,
-            &initial_nodes,
+            SourceElements::Prepared(&prepared_source),
             &self.page_title,
             &self.structured_title,
             self.metadata.site_name.as_deref(),
@@ -628,7 +607,7 @@ impl<'a> ContentExtractor<'a> {
                 self.discover_candidates_with_indexes(
                     &mut match_buffer,
                     &mut text_buffer,
-                    &initial_nodes,
+                    &prepared_source,
                     &accessible_math,
                     &title_plan,
                     &base_candidates,
@@ -1351,7 +1330,7 @@ impl<'a> ContentExtractor<'a> {
         let title_snapshot = fragment.element_descendants_snapshot_with_depth(fragment.root());
         let title_plan = title_heading_plan(
             &fragment,
-            &title_snapshot,
+            SourceElements::Snapshot(&title_snapshot),
             &self.page_title,
             &self.structured_title,
             self.metadata.site_name.as_deref(),
@@ -1909,13 +1888,6 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
-    fn is_visibility_recovery_container(&self, node: NodeId) -> bool {
-        matches!(
-            self.dom.tag(node),
-            Some(Tag::Article | Tag::Aside | Tag::Div | Tag::Main | Tag::Nav | Tag::Section)
-        )
-    }
-
     fn is_static_hidden_marker(&self, node: NodeId) -> bool {
         self.dom.attr(node, AttrName::AriaHidden) != Some("true")
             && (!is_probably_visible(&self.dom, node)
@@ -1930,24 +1902,14 @@ impl<'a> ContentExtractor<'a> {
             })
     }
 
-    fn has_relaxable_hidden_content(&self, root: NodeId) -> bool {
-        self.dom.descendants(root).any(|node| {
-            self.is_visibility_recovery_container(node)
-                && !self.is_modal_or_dialog(node)
-                && self.is_static_hidden_marker(node)
-        })
-    }
-
     /// Marks hidden roots that have semantic or repeated structural evidence.
     /// Reverse preorder aggregates each subtree without rescanning descendants.
-    fn relaxed_hidden_roots(&self) -> Vec<bool> {
-        let nodes = self
-            .dom
-            .element_descendants_snapshot_with_depth(self.dom.root());
+    fn relaxed_hidden_roots(&self, prepared_source: &PreparedSource) -> Vec<bool> {
         let mut paragraphs = vec![0_u8; self.dom.len()];
         let mut structured = vec![false; self.dom.len()];
         let mut allowed = vec![false; self.dom.len()];
-        for &(node, _) in nodes.iter().rev() {
+        for entry in prepared_source.elements().rev() {
+            let node = entry.node;
             let tag = self.dom.tag(node);
             paragraphs[node.index()] = u8::from(tag == Some(Tag::P));
             structured[node.index()] = matches!(
@@ -2004,19 +1966,28 @@ impl<'a> ContentExtractor<'a> {
         node_text == sibling_buffer.trim()
     }
 
-    fn is_visible_for_strategy(&self, node: NodeId, accessible_math: &HashSet<NodeId>) -> bool {
+    fn is_visible_for_strategy(
+        &self,
+        entry: &SourceEntry,
+        accessible_math: &HashSet<NodeId>,
+    ) -> bool {
+        let node = entry.node;
         if accessible_math.contains(&node) {
             return true;
         }
-        let utility_hidden = has_hidden_utility_class_for_discovery(&self.dom, node);
+        let fallback_image = self
+            .dom
+            .attr(node, AttrName::Class)
+            .is_some_and(|class| class.contains("fallback-image"));
+        if entry.flags.contains(SourceFlags::ARIA_HIDDEN) && !fallback_image {
+            return false;
+        }
         if self.strategy == ExtractionStrategy::RelaxedVisibility {
-            self.dom.attr(node, AttrName::AriaHidden) != Some("true")
-                || self
-                    .dom
-                    .attr(node, AttrName::Class)
-                    .is_some_and(|class| class.contains("fallback-image"))
+            true
         } else {
-            is_probably_visible(&self.dom, node) && !utility_hidden
+            (!entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                && !entry.flags.contains(SourceFlags::UTILITY_HIDDEN))
+                || fallback_image
         }
     }
 
@@ -2046,27 +2017,25 @@ impl<'a> ContentExtractor<'a> {
         match_buffer: &mut String,
         text_buffer: &mut String,
     ) -> CandidateDiscovery {
-        let initial_nodes = self
-            .dom
-            .element_descendants_snapshot_with_depth(self.dom.root());
-        let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
+        let prepared_source = PreparedSource::build(&self.dom);
+        let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
         let title_plan = title_heading_plan(
             &self.dom,
-            &initial_nodes,
+            SourceElements::Prepared(&prepared_source),
             &self.page_title,
             &self.structured_title,
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
-        let base_candidates = CandidateSet::discover_semantic_from_snapshot(
+        let base_candidates = CandidateSet::discover_semantic_from_prepared(
             &self.dom,
-            &initial_nodes,
-            self.dom.body(),
+            &prepared_source,
+            prepared_source.anchors.body,
         );
         self.discover_candidates_with_indexes(
             match_buffer,
             text_buffer,
-            &initial_nodes,
+            &prepared_source,
             &accessible_math,
             &title_plan,
             &base_candidates,
@@ -2077,14 +2046,14 @@ impl<'a> ContentExtractor<'a> {
         &mut self,
         match_buffer: &mut String,
         text_buffer: &mut String,
-        initial_nodes: &[(NodeId, u32)],
+        prepared_source: &PreparedSource,
         accessible_math: &HashSet<NodeId>,
         title_plan: &TitleHeadingPlan,
         base_candidates: &CandidateSet,
     ) -> CandidateDiscovery {
         let candidates = base_candidates.clone();
         let relaxed_hidden = (self.strategy == ExtractionStrategy::RelaxedVisibility)
-            .then(|| self.relaxed_hidden_roots());
+            .then(|| self.relaxed_hidden_roots(prepared_source));
         let mut to_score = SmallVec::<[NodeId; 256]>::new();
         let mut divs_to_prepare = SmallVec::<[NodeId; 128]>::new();
         let mut remove_after_scoring = SmallVec::<[NodeId; 64]>::new();
@@ -2094,7 +2063,9 @@ impl<'a> ContentExtractor<'a> {
         let retain_preferred_title =
             title_plan.preferred.is_some() && !title_plan.brand_headings.is_empty();
         let mut remove_title = !retain_preferred_title;
-        for &(id, depth) in initial_nodes {
+        for entry in prepared_source.elements() {
+            let id = entry.node;
+            let depth = entry.depth;
             if let Some(root_depth) = excluded_depth {
                 if depth > root_depth {
                     continue;
@@ -2109,11 +2080,11 @@ impl<'a> ContentExtractor<'a> {
                 self.node_data.enable_link_lengths();
             }
             let unsupported_hidden = relaxed_hidden.as_ref().is_some_and(|allowed| {
-                self.is_static_hidden_marker(id)
+                entry.flags.contains(SourceFlags::STATIC_HIDDEN)
                     && (!allowed[id.index()] || self.is_duplicate_hidden_variant(id))
             });
-            if !self.is_visible_for_strategy(id, accessible_math)
-                || self.is_modal_or_dialog(id)
+            if !self.is_visible_for_strategy(entry, accessible_math)
+                || entry.flags.contains(SourceFlags::MODAL_DIALOG)
                 || unsupported_hidden
             {
                 remove_after_scoring.push(id);
@@ -2886,7 +2857,7 @@ fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bo
 
 fn title_heading_plan(
     dom: &Dom,
-    snapshot: &[(NodeId, u32)],
+    elements: SourceElements<'_>,
     page_title: &str,
     structured_title: &str,
     site_name: Option<&str>,
@@ -2898,11 +2869,11 @@ fn title_heading_plan(
     // each node's nearest marked ancestor path once instead of walking that
     // path again for every matching heading. Keep the cheaper direct walk for
     // ordinary documents.
-    let deeply_nested = snapshot.iter().any(|&(_, depth)| depth > 64);
+    let deeply_nested = elements.iter().any(|(_, depth)| depth > 64);
     let context_scores = deeply_nested.then(|| {
         let mut scores = vec![0_i32; dom.len()];
         let root_score = title_heading_context_score(dom, root, 0);
-        for &(node, _) in snapshot {
+        for (node, _) in elements.iter() {
             let parent_score = dom.parent(node).map_or(0, |parent| {
                 if parent == root {
                     root_score
@@ -2915,15 +2886,15 @@ fn title_heading_plan(
         scores
     });
 
-    let headings: Vec<_> = snapshot
+    let headings: Vec<_> = elements
         .iter()
-        .map(|&(node, _)| node)
+        .map(|(node, _)| node)
         .filter(|&node| has_primary_heading_semantics(dom, node))
         .filter(|&node| is_probably_visible(dom, node))
         .collect();
-    let has_link = snapshot
+    let has_link = elements
         .iter()
-        .any(|&(node, _)| dom.tag(node) == Some(Tag::A));
+        .any(|(node, _)| dom.tag(node) == Some(Tag::A));
     let brand_headings: SmallVec<[NodeId; 2]> = if has_link {
         // Resolve linked descendants and ancestors in two linear passes for a
         // deep tree. A descendant scan per heading becomes quadratic after
@@ -2931,7 +2902,7 @@ fn title_heading_plan(
         // ordinary shallow documents to avoid two dense temporary arrays.
         let linked_contexts = deeply_nested.then(|| {
             let mut descendant_links = vec![None; dom.len()];
-            for &(node, _) in snapshot.iter().rev() {
+            for (node, _) in elements.iter().rev() {
                 let subtree_link = if dom.tag(node) == Some(Tag::A) {
                     Some(node)
                 } else {
@@ -2945,7 +2916,7 @@ fn title_heading_plan(
             }
             let mut ancestor_links = vec![None; dom.len()];
             let mut in_document_chrome = vec![false; dom.len()];
-            for &(node, _) in snapshot {
+            for (node, _) in elements.iter() {
                 if let Some(parent) = dom.parent(node) {
                     ancestor_links[node.index()] = if dom.tag(parent) == Some(Tag::A) {
                         Some(parent)
@@ -3780,6 +3751,12 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         assert!(attempts >= 2);
         assert!(deferred.content_excerpt_scans < attempts as u64);
         assert!(deferred.final_dom_node_scans > 0);
+        assert_eq!(
+            crate::instrumentation::snapshot()
+                .counters
+                .prepared_source_builds,
+            1
+        );
     }
 
     #[cfg(feature = "bench-instrumentation")]
@@ -4082,7 +4059,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
         let plan = title_heading_plan(
             &dom,
-            &snapshot,
+            SourceElements::Snapshot(&snapshot),
             "Article title | Example",
             "Article title",
             Some("Example"),

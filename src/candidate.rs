@@ -2,6 +2,7 @@
 
 use crate::constants::split_word_tokens;
 use crate::dom::{AttrName, Dom, NodeId, NodeLink, NodeStateStore, Tag};
+use crate::prepared::PreparedSource;
 use crate::scoring::has_static_hidden_marker;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -143,9 +144,30 @@ impl CandidateSet {
         Self::discover_semantic_from_snapshot(dom, &snapshot, dom.body())
     }
 
+    #[cfg(test)]
     pub(crate) fn discover_semantic_from_snapshot(
         dom: &Dom,
         snapshot: &[(NodeId, u32)],
+        body: Option<NodeId>,
+    ) -> Self {
+        Self::discover_semantic_from_entries(dom, snapshot.iter().copied(), body)
+    }
+
+    pub(crate) fn discover_semantic_from_prepared(
+        dom: &Dom,
+        source: &PreparedSource,
+        body: Option<NodeId>,
+    ) -> Self {
+        Self::discover_semantic_from_entries(
+            dom,
+            source.elements().map(|entry| (entry.node, entry.depth)),
+            body,
+        )
+    }
+
+    fn discover_semantic_from_entries(
+        dom: &Dom,
+        entries: impl IntoIterator<Item = (NodeId, u32)>,
         body: Option<NodeId>,
     ) -> Self {
         let mut candidates = Self {
@@ -158,7 +180,7 @@ impl CandidateSet {
         }
 
         let mut generic_clutter_depth = None;
-        for &(node, depth) in snapshot {
+        for (node, depth) in entries {
             if generic_clutter_depth.is_some_and(|root_depth| depth <= root_depth) {
                 generic_clutter_depth = None;
             }
@@ -1099,6 +1121,7 @@ fn structured_agreement(dom: &Dom, node: NodeId, hints: &[StructuredHint]) -> f6
 /// split across inline elements.
 pub(crate) fn locate_structured_content<'a>(
     dom: &Dom,
+    source: &PreparedSource,
     texts: impl IntoIterator<Item = &'a str>,
 ) -> Option<NodeId> {
     let hints: Vec<_> = texts
@@ -1110,14 +1133,16 @@ pub(crate) fn locate_structured_content<'a>(
         return None;
     }
 
-    let scan_context = PhraseScanContext::new(dom);
+    let scan_context = PhraseScanContext::new(dom, source);
     let mut possible = SmallVec::<[NodeId; 32]>::new();
     for hint in &hints {
         let phrase_len = hint.tokens.len().min(6);
         if phrase_len < 5 {
             continue;
         }
-        for matched_root in visible_phrase_matches(dom, &scan_context, &hint.tokens[..phrase_len]) {
+        for matched_root in
+            visible_phrase_matches(dom, source, &scan_context, &hint.tokens[..phrase_len])
+        {
             if is_navigation_region(dom, matched_root) {
                 continue;
             }
@@ -1161,10 +1186,11 @@ struct PhraseScanContext {
 }
 
 impl PhraseScanContext {
-    fn new(dom: &Dom) -> Self {
+    fn new(dom: &Dom, source: &PreparedSource) -> Self {
         let mut blocked = vec![false; dom.len()];
         let mut flow_root = vec![None; dom.len()];
-        for (node, _) in dom.element_descendants_snapshot_with_depth(dom.root()) {
+        for entry in source.elements() {
+            let node = entry.node;
             let parent = dom.parent(node);
             let parent_blocked = parent.is_some_and(|parent| blocked[parent.index()]);
             blocked[node.index()] = parent_blocked || is_blocked_structured_region(dom, node);
@@ -1180,6 +1206,7 @@ impl PhraseScanContext {
 
 fn visible_phrase_matches(
     dom: &Dom,
+    source: &PreparedSource,
     context: &PhraseScanContext,
     phrase: &[String],
 ) -> SmallVec<[NodeId; 4]> {
@@ -1188,10 +1215,11 @@ fn visible_phrase_matches(
     let mut matched = 0;
     let mut start = None;
     let mut flow_root = None;
-    for node in dom
-        .descendants(dom.root())
-        .filter(|&node| dom.is_text(node))
+    for entry in source
+        .entries_in(source.anchors.root)
+        .filter(|entry| dom.is_text(entry.node))
     {
+        let node = entry.node;
         let parent = dom.parent(node);
         let current_flow_root = parent.and_then(|parent| context.flow_root[parent.index()]);
         if flow_root.is_some() && current_flow_root != flow_root {
@@ -1940,8 +1968,10 @@ mod tests {
         let article = dom
             .first_descendant_by_tag(dom.root(), Tag::Article)
             .unwrap();
+        let source = PreparedSource::build(&dom);
         let root = locate_structured_content(
             &dom,
+            &source,
             ["The split article contains exact useful words across inline elements."],
         )
         .unwrap();
@@ -1961,7 +1991,11 @@ mod tests {
             "<body><header>alpha beta gamma</header><article><p>delta epsilon zeta</p></article></body>",
         )
         .unwrap();
-        assert!(locate_structured_content(&dom, ["alpha beta gamma delta epsilon zeta"]).is_none());
+        let source = PreparedSource::build(&dom);
+        assert!(
+            locate_structured_content(&dom, &source, ["alpha beta gamma delta epsilon zeta"])
+                .is_none()
+        );
     }
 
     #[test]

@@ -67,6 +67,7 @@ The extraction pipeline flows through these stages:
 | `document/sparse.rs` | Sorted sparse node values and node sets for rare semantic evidence and payloads |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
+| `prepared.rs` | Immutable prepared-source preorder index, interval ancestry, anchors, and reusable source metrics |
 | `specialized/` | Internal registry and extractors for non-article page structures |
 | `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
