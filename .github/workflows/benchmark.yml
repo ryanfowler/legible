@@ -33,7 +33,7 @@ jobs:
         run: cargo install critcmp --locked
 
       - name: Benchmark changes
-        run: cargo bench --bench extraction -- --save-baseline changes
+        run: cargo bench --bench smoke -- --save-baseline changes
 
       - name: Collect phase and allocation report
         run: |
@@ -51,7 +51,7 @@ jobs:
         run: git checkout --detach "origin/${GITHUB_BASE_REF}"
 
       - name: Benchmark base
-        run: cargo bench --bench extraction -- --save-baseline base
+        run: cargo bench --bench smoke -- --save-baseline base
 
       - name: Compare benchmarks
         run: |

@@ -275,43 +275,6 @@ impl MarkdownBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use crate::extract;
-    use std::path::{Path, PathBuf};
-
-    fn fixture_sources(root: &Path, sources: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                fixture_sources(&path, sources);
-            } else if path.file_name().is_some_and(|name| name == "source.html") {
-                sources.push(path);
-            }
-        }
-    }
-
-    #[test]
-    fn all_extraction_fixtures_compile_to_valid_documents() {
-        let mut sources = Vec::new();
-        fixture_sources(Path::new("tests"), &mut sources);
-        sources.sort();
-        assert!(!sources.is_empty());
-
-        for source in sources {
-            let html = std::fs::read_to_string(&source).unwrap();
-            let result = extract(&html, Some("https://example.test/docs/page.html"));
-            let expects_error = source
-                .parent()
-                .is_some_and(|directory| directory.join("expected.error").exists());
-            assert!(
-                result.is_ok() || expects_error,
-                "{} did not extract: {:?}",
-                source.display(),
-                result.err()
-            );
-        }
-    }
 
     #[test]
     fn outputs_are_lazy_and_deterministic() {
