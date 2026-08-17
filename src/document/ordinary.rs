@@ -630,11 +630,9 @@ pub(super) fn compile_with_retained_capacity_plan(
             {
                 requires_complex!();
             }
-            let first = text.chars().find(|character| !character.is_whitespace());
-            let last = text
-                .chars()
-                .rev()
-                .find(|character| !character.is_whitespace());
+            let normalized = super::text::normalize_prose_fragment(text);
+            let first = normalized.append.first_non_space;
+            let last = normalized.append.last_non_space;
             let frame_index = frames.len() - 1;
             if first.is_none() {
                 let next_is_inline = dom
@@ -642,13 +640,14 @@ pub(super) fn compile_with_retained_capacity_plan(
                     .is_some_and(|sibling| is_inline_source(dom, sibling));
                 let frame = &mut frames[frame_index];
                 if frame.previous_child_inline && next_is_inline {
-                    builder.append_prose(frame.scope.parent, text)?;
+                    let parent = frame.scope.parent;
+                    builder.append_normalized_prose_fragment(parent, normalized)?;
                 }
                 complete_child(frame, None, first, last, false);
                 continue;
             }
             let frame = &mut frames[frame_index];
-            if !text.chars().next().is_some_and(char::is_whitespace)
+            if !normalized.append.starts_with_space
                 && first.is_some_and(char::is_alphanumeric)
                 && frame.previous_child_inline_element
                 && frame
@@ -659,7 +658,7 @@ pub(super) fn compile_with_retained_capacity_plan(
             }
             consume_boundary(&mut frames, &mut builder, frame_index, first)?;
             let parent = frames[frame_index].scope.parent;
-            builder.append_prose(parent, text)?;
+            builder.append_normalized_prose_fragment(parent, normalized)?;
             complete_child(&mut frames[frame_index], None, first, last, true);
             continue;
         }
@@ -743,9 +742,10 @@ pub(super) fn compile_with_retained_capacity_plan(
                 )?;
             } else {
                 let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
-                let first = alt.chars().find(|character| !character.is_whitespace());
+                let normalized = super::text::normalize_prose_fragment(&alt);
+                let first = normalized.append.first_non_space;
                 consume_boundary(&mut frames, &mut builder, frame_index, first)?;
-                builder.append_prose(scope.parent, &alt)?;
+                builder.append_normalized_prose_fragment(scope.parent, normalized)?;
             }
             complete_child(frames.last_mut().unwrap(), Some(tag), None, None, true);
             continue;
