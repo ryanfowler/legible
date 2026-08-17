@@ -5,8 +5,8 @@ use super::compiler::{
     semantic_image,
 };
 use super::{
-    BuildCapacityPlan, CodeBlock, Document, DocumentNodeId, Link, List, ListKind, SemanticKind,
-    SemanticTapeBuilder,
+    BuildCapacityPlan, CodeBlock, Document, DocumentNodeId, Link, List, ListKind, RetainedStream,
+    SemanticKind, SemanticTapeBuilder,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
@@ -32,10 +32,10 @@ pub(super) fn ordinary_source_gate(dom: &Dom, root: NodeId) -> Option<usize> {
 pub(super) fn ordinary_source_gate_with_retained_nodes(
     dom: &Dom,
     root: NodeId,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&RetainedStream>,
 ) -> Option<OrdinarySourcePlan> {
-    if let Some(nodes) = retained_nodes {
-        return ordinary_source_gate_from_nodes(dom, nodes);
+    if let Some(stream) = retained_stream {
+        return ordinary_source_gate_from_stream(dom, stream);
     }
 
     let mut source_node_count = 0;
@@ -85,15 +85,18 @@ pub(super) fn ordinary_source_gate_with_retained_nodes(
     })
 }
 
-fn ordinary_source_gate_from_nodes(dom: &Dom, nodes: &[NodeId]) -> Option<OrdinarySourcePlan> {
-    let mut ancestors = Vec::<(NodeId, bool, bool, bool, usize)>::new();
+fn ordinary_source_gate_from_stream(
+    dom: &Dom,
+    stream: &RetainedStream,
+) -> Option<OrdinarySourcePlan> {
+    let mut ancestors = Vec::<(u32, bool, bool, bool, usize)>::new();
     let mut capacity = BuildCapacityPlan::default();
     let mut source_node_count = 0;
-    for &node in nodes {
-        let parent = dom.parent(node);
+    for entry in stream.entries() {
+        let node = entry.node;
         while ancestors
             .last()
-            .is_some_and(|&(ancestor, _, _, _, _)| parent != Some(ancestor))
+            .is_some_and(|&(depth, _, _, _, _)| depth >= entry.depth)
         {
             ancestors.pop();
         }
@@ -129,7 +132,7 @@ fn ordinary_source_gate_from_nodes(dom: &Dom, nodes: &[NodeId]) -> Option<Ordina
             return None;
         }
         ancestors.push((
-            node,
+            entry.depth,
             ancestors.last().is_some_and(|&(_, value, _, _, _)| value) || is_heading(tag),
             inside_code || tag == Tag::Code,
             inside_pre || tag == Tag::Pre,
@@ -551,12 +554,14 @@ pub(super) fn compile_with_retained_nodes(
     source_node_count: usize,
     retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
+    let retained_stream =
+        retained_nodes.map(|nodes| RetainedStream::from_preorder(dom, root, nodes));
     compile_with_retained_capacity_plan(
         dom,
         root,
         context,
         BuildCapacityPlan::from_source_node_count(source_node_count),
-        retained_nodes,
+        retained_stream.as_ref(),
     )
 }
 
@@ -565,7 +570,7 @@ pub(super) fn compile_with_retained_capacity_plan(
     root: NodeId,
     context: &CompileContext,
     capacity: BuildCapacityPlan,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&RetainedStream>,
 ) -> Result<Document, CompileError> {
     let mut builder = SemanticTapeBuilder::with_plan(capacity);
     let mut frames = vec![Frame {
@@ -582,14 +587,17 @@ pub(super) fn compile_with_retained_capacity_plan(
         boundary_source: None,
         boundary_pending: false,
     }];
-    let mut tasks = retained_nodes.map_or_else(
+    let mut tasks = retained_stream.map_or_else(
         || {
             dom.children_rev(root)
                 .map(|node| Visit::Node { node })
                 .collect::<Vec<_>>()
         },
-        |nodes| retained_source_tasks(dom, nodes),
+        |_| Vec::new(),
     );
+    let mut retained_position = 0;
+    let mut retained_open_depth = 0usize;
+    let mut retained_skip_depth = None;
 
     macro_rules! requires_complex {
         () => {{
@@ -598,7 +606,36 @@ pub(super) fn compile_with_retained_capacity_plan(
         }};
     }
 
-    while let Some(task) = tasks.pop() {
+    while let Some(task) = if let Some(stream) = retained_stream {
+        loop {
+            if retained_open_depth > 0 {
+                if let Some(entry) = stream.entries().get(retained_position) {
+                    if retained_skip_depth.is_some_and(|depth| entry.depth > depth) {
+                        retained_position += 1;
+                        continue;
+                    }
+                    retained_skip_depth = None;
+                    if entry.depth < retained_open_depth as u32 {
+                        retained_open_depth -= 1;
+                        break Some(Visit::End);
+                    }
+                } else {
+                    retained_open_depth -= 1;
+                    break Some(Visit::End);
+                }
+            }
+            let Some(entry) = stream.entries().get(retained_position) else {
+                break None;
+            };
+            retained_position += 1;
+            if ordinary_leaf_node(dom, entry.node) {
+                retained_skip_depth = Some(entry.depth);
+            }
+            break Some(Visit::Node { node: entry.node });
+        }
+    } else {
+        tasks.pop()
+    } {
         let Visit::Node { node } = task else {
             let frame = frames.pop().expect("compile frame must match an element");
             if frame.requires_content && !frame.has_content {
@@ -923,7 +960,7 @@ pub(super) fn compile_with_retained_capacity_plan(
             boundary_source,
             boundary_pending: boundary_before,
         });
-        if retained_nodes.is_none() {
+        if retained_stream.is_none() {
             tasks.push(Visit::End);
             if !matches!(tag, Tag::Hr | Tag::Br) {
                 tasks.extend(
@@ -931,6 +968,8 @@ pub(super) fn compile_with_retained_capacity_plan(
                         .map(|child| Visit::Node { node: child }),
                 );
             }
+        } else {
+            retained_open_depth += 1;
         }
     }
 
@@ -940,57 +979,6 @@ pub(super) fn compile_with_retained_capacity_plan(
         return Err(CompileError::RequiresComplex);
     }
     Ok(document)
-}
-
-fn retained_source_tasks(dom: &Dom, nodes: &[NodeId]) -> Vec<Visit> {
-    let mut positions = vec![usize::MAX; dom.len()];
-    for (position, &node) in nodes.iter().enumerate() {
-        positions[node.index()] = position;
-    }
-    let mut subtree_ends: Vec<_> = (0..nodes.len()).map(|position| position + 1).collect();
-    for position in (0..nodes.len()).rev() {
-        let node = nodes[position];
-        if let Some(parent) = dom.parent(node) {
-            let parent_position = positions[parent.index()];
-            if parent_position < position {
-                subtree_ends[parent_position] =
-                    subtree_ends[parent_position].max(subtree_ends[position]);
-            }
-        }
-    }
-
-    let mut events = Vec::with_capacity(nodes.len());
-    let mut open = Vec::new();
-    let mut skipped_until = 0;
-    for (position, &node) in nodes.iter().enumerate() {
-        if position < skipped_until {
-            continue;
-        }
-        while let Some(&ancestor) = open.last() {
-            if dom.parent(node) == Some(ancestor) {
-                break;
-            }
-            events.push(Visit::End);
-            open.pop();
-        }
-        events.push(Visit::Node { node });
-        if ordinary_frame_node(dom, node) {
-            open.push(node);
-        }
-        if ordinary_leaf_node(dom, node) {
-            skipped_until = subtree_ends[position];
-        }
-    }
-    while open.pop().is_some() {
-        events.push(Visit::End);
-    }
-    events.reverse();
-    events
-}
-
-fn ordinary_frame_node(dom: &Dom, node: NodeId) -> bool {
-    dom.tag(node)
-        .is_some_and(|tag| !matches!(tag, Tag::Pre | Tag::Code | Tag::Img))
 }
 
 fn ordinary_leaf_node(dom: &Dom, node: NodeId) -> bool {

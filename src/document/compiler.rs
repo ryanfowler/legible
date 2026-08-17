@@ -177,21 +177,21 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: Option<&super::facts::SourceEvidence>,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&super::RetainedStream>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
     // Ordinary pages do not need the rich source-evidence inventory. Run a
     // cheap gate first, then let the lowering pass validate the few structural
     // cases that cannot be classified from a flat source scan.
     if let Some(source_plan) =
-        super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_nodes)
+        super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)
     {
         match super::ordinary::compile_with_retained_capacity_plan(
             dom,
             root,
             context,
             source_plan.capacity,
-            retained_nodes,
+            retained_stream,
         ) {
             Ok(document) => {
                 crate::instrumentation::record_semantic_source_nodes(source_plan.source_node_count);
@@ -216,7 +216,7 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
         context,
         source_facts,
         source_evidence,
-        retained_nodes,
+        retained_stream,
     )
 }
 
@@ -269,7 +269,7 @@ pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence_and
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&super::RetainedStream>,
 ) -> Result<Document, CompileError> {
     compile_document_owned_impl(
         dom,
@@ -277,7 +277,7 @@ pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence_and
         context,
         source_facts,
         Some(source_evidence),
-        retained_nodes,
+        retained_stream,
     )
 }
 
@@ -287,18 +287,18 @@ fn compile_document_owned_impl(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: Option<&super::facts::SourceEvidence>,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&super::RetainedStream>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
     if let Some(source_plan) =
-        super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, retained_nodes)
+        super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, retained_stream)
     {
         match super::ordinary::compile_with_retained_capacity_plan(
             &dom,
             root,
             context,
             source_plan.capacity,
-            retained_nodes,
+            retained_stream,
         ) {
             Ok(document) => {
                 crate::instrumentation::record_semantic_source_nodes(source_plan.source_node_count);
@@ -323,7 +323,7 @@ fn compile_document_owned_impl(
         context,
         source_facts,
         source_evidence,
-        retained_nodes,
+        retained_stream,
     );
     let source_node_count = analysis.facts.nodes().len();
     let mut owned_source_texts = super::code::take_owned_source_texts(
@@ -411,7 +411,7 @@ fn compile_complex_document(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&super::RetainedStream>,
 ) -> Result<Document, CompileError> {
     let analysis = analyze_complex_document(
         dom,
@@ -419,7 +419,7 @@ fn compile_complex_document(
         context,
         source_facts,
         source_evidence,
-        retained_nodes,
+        retained_stream,
     );
     let source_node_count = analysis.facts.nodes().len();
     let result = lower_complex_document(dom, root, context, analysis, None);
@@ -436,14 +436,14 @@ fn analyze_complex_document(
     context: &CompileContext,
     source_facts: Option<&super::facts::SemanticSourceFacts>,
     source_evidence: &super::facts::SourceEvidence,
-    retained_nodes: Option<&[NodeId]>,
+    retained_stream: Option<&super::RetainedStream>,
 ) -> ComplexSourceAnalysis {
     let mut facts = super::facts::SemanticFacts::analyze_with_source_facts(
         dom,
         root,
         source_facts,
         Some(source_evidence),
-        retained_nodes,
+        retained_stream,
     );
     let images = super::images::analyze_with_inventory(
         dom,
@@ -1799,6 +1799,8 @@ mod tests {
         )
         .unwrap();
         let retained_nodes: Vec<_> = dom.descendants(dom.root()).collect();
+        let retained_stream =
+            super::super::RetainedStream::from_preorder(&dom, dom.root(), &retained_nodes);
         let retained = super::super::ordinary::compile_with_retained_nodes(
             &dom,
             dom.root(),
@@ -1806,7 +1808,7 @@ mod tests {
             super::super::ordinary::ordinary_source_gate_with_retained_nodes(
                 &dom,
                 dom.root(),
-                Some(&retained_nodes),
+                Some(&retained_stream),
             )
             .unwrap()
             .source_node_count,

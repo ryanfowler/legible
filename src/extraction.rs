@@ -182,7 +182,7 @@ struct FrozenContent {
     dom: Dom,
     source_facts: Option<crate::document::SemanticSourceFacts>,
     source_evidence: crate::document::SourceEvidence,
-    retained_nodes: Option<Vec<NodeId>>,
+    retained_stream: Option<crate::document::RetainedStream>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -997,7 +997,7 @@ impl<'a> ContentExtractor<'a> {
                 self.dom.append_child(content_id, w)
             }
             let access_barrier = is_access_barrier(&self.dom, content_id);
-            let (mut source_facts, mut retained_nodes) =
+            let (mut source_facts, mut retained_stream) =
                 self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
             crate::instrumentation::record_cleaned_nodes(self.dom.len());
             self.capture_normalization_counts(content_id);
@@ -1005,9 +1005,9 @@ impl<'a> ContentExtractor<'a> {
             drop(_cleanup_phase);
             if synthetic
                 && content_id != self.dom.root()
-                && let Some(retained_nodes) = retained_nodes.as_mut()
+                && let Some(retained_stream) = retained_stream.as_mut()
             {
-                retained_nodes.insert(0, content_id);
+                retained_stream.prepend_root(content_id);
             }
             // The selected region is already a compact fragment. Remove the
             // internal selection boundary when the output contract excludes
@@ -1033,7 +1033,7 @@ impl<'a> ContentExtractor<'a> {
                         &compile_context,
                         source_facts.as_ref(),
                         Some(&source_evidence),
-                        retained_nodes.as_deref(),
+                        retained_stream.as_ref(),
                     )
                     .map_err(|_| Error::NoContent)?,
                 )
@@ -1141,7 +1141,7 @@ impl<'a> ContentExtractor<'a> {
                         &compile_context,
                         source_facts.as_ref(),
                         &source_evidence,
-                        retained_nodes.as_deref(),
+                        retained_stream.as_ref(),
                     )
                     .map_err(|_| Error::NoContent)?
                 };
@@ -1188,7 +1188,7 @@ impl<'a> ContentExtractor<'a> {
                         dom: std::mem::replace(&mut self.dom, source_dom),
                         source_facts,
                         source_evidence,
-                        retained_nodes,
+                        retained_stream,
                     },
                     quality,
                     excerpt,
@@ -1221,7 +1221,7 @@ impl<'a> ContentExtractor<'a> {
             dom,
             source_facts,
             source_evidence,
-            retained_nodes,
+            retained_stream,
         } = best.content;
         let root = dom.root();
         let document =
@@ -1231,7 +1231,7 @@ impl<'a> ContentExtractor<'a> {
                 &compile_context,
                 source_facts.as_ref(),
                 &source_evidence,
-                retained_nodes.as_deref(),
+                retained_stream.as_ref(),
             )
             .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
@@ -1404,7 +1404,7 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let access_barrier = is_access_barrier(&self.dom, content_id);
-        let (mut source_facts, mut retained_nodes) =
+        let (mut source_facts, mut retained_stream) =
             self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
         crate::instrumentation::record_cleaned_nodes(self.dom.len());
         self.capture_normalization_counts(content_id);
@@ -1412,9 +1412,9 @@ impl<'a> ContentExtractor<'a> {
         drop(_cleanup_phase);
         if synthetic
             && content_id != self.dom.root()
-            && let Some(retained_nodes) = retained_nodes.as_mut()
+            && let Some(retained_stream) = retained_stream.as_mut()
         {
-            retained_nodes.insert(0, content_id);
+            retained_stream.prepend_root(content_id);
         }
         if !synthetic {
             let fragment_root = self.dom.root();
@@ -1434,7 +1434,7 @@ impl<'a> ContentExtractor<'a> {
                     compile_context,
                     source_facts.as_ref(),
                     Some(&source_evidence),
-                    retained_nodes.as_deref(),
+                    retained_stream.as_ref(),
                 )
                 .map_err(|_| Error::NoContent)?,
             )
@@ -1515,7 +1515,7 @@ impl<'a> ContentExtractor<'a> {
                 compile_context,
                 source_facts.as_ref(),
                 Some(&source_evidence),
-                retained_nodes.as_deref(),
+                retained_stream.as_ref(),
             )
             .map_err(|_| Error::NoContent)?
         };
@@ -2677,14 +2677,14 @@ impl<'a> ContentExtractor<'a> {
         nodes: &mut Vec<NodeId>,
     ) -> (
         Option<crate::document::SemanticSourceFacts>,
-        Option<Vec<NodeId>>,
+        Option<crate::document::RetainedStream>,
     ) {
         // The compiler resolves URLs, drops source attributes, ignores comments,
         // and collapses transparent wrappers. Only relevance cleanup mutates the
         // selected DOM at this stage.
         let before = self.diagnostic_element_count(root);
         let mut source_facts = None;
-        let retained_nodes = remove_empty_content_with_source_facts(
+        let retained_stream = remove_empty_content_with_source_facts(
             &mut self.dom,
             root,
             nodes,
@@ -2692,7 +2692,7 @@ impl<'a> ContentExtractor<'a> {
             evidence,
         );
         self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
-        (source_facts, retained_nodes)
+        (source_facts, retained_stream)
     }
 
     fn diagnostic_element_count(&self, root: NodeId) -> Option<usize> {
