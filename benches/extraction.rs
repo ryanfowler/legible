@@ -11,6 +11,9 @@ mod document;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/dom/mod.rs"]
 mod dom;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/instrumentation.rs"]
+mod instrumentation;
 
 fn benchmark_page(kind: &str, target_bytes: usize) -> String {
     let mut html = String::with_capacity(target_bytes + 256);

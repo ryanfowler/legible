@@ -137,6 +137,7 @@ impl Dom {
     /// without changing the order or adding newly created nodes to the pass.
     #[cfg(test)]
     pub(crate) fn descendants_snapshot(&self, id: NodeId) -> Vec<NodeId> {
+        crate::instrumentation::record_source_full_scan();
         self.descendants(id).collect()
     }
     /// Records attached element descendants and their depths in DOM preorder.
@@ -145,6 +146,8 @@ impl Dom {
     /// returned snapshot lets mutation passes skip a removed subtree without
     /// walking the current ancestor chain of each descendant.
     pub(crate) fn element_descendants_snapshot_with_depth(&self, id: NodeId) -> Vec<(NodeId, u32)> {
+        crate::instrumentation::record_source_full_scan();
+        crate::instrumentation::record_source_element_snapshot();
         // Documents usually alternate elements and text nodes. Start near the
         // expected element count and grow once for markup-only documents.
         let mut out = Vec::with_capacity((self.len() / 2).max(16));

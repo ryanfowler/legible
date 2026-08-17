@@ -195,6 +195,7 @@ impl Dom {
         Ok(())
     }
     pub(crate) fn copy_subtree_as_fragment(&self, source_root: NodeId) -> Result<Dom, DomError> {
+        crate::instrumentation::record_fragment_copy();
         #[cfg(test)]
         FRAGMENT_COPY_COUNT.with(|count| count.set(count.get() + 1));
         // Reserve the attached subtree in one allocation. Template contents can

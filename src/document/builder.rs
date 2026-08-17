@@ -216,6 +216,29 @@ impl SemanticTapeBuilder {
         if !self.open.is_empty() {
             return Err(BuildError::InvalidParent);
         }
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            let payload_capacity = self.payloads.text_refs.capacity() * size_of::<TextRef>()
+                + self.payloads.code_blocks.capacity() * size_of::<CodeBlock>()
+                + self.payloads.links.capacity() * size_of::<Link>()
+                + self.payloads.images.capacity() * size_of::<Image>()
+                + self.payloads.lists.capacity() * size_of::<List>()
+                + self.payloads.tables.capacity() * size_of::<Table>()
+                + self.payloads.table_cells.capacity() * size_of::<TableCell>()
+                + self.payloads.callouts.capacity() * size_of::<Callout>()
+                + self.payloads.task_markers.capacity() * size_of::<TaskMarker>()
+                + self.payloads.math_values.capacity() * size_of::<MathValue>()
+                + self.payloads.media.capacity() * size_of::<Media>();
+            crate::instrumentation::record_builder_capacities(
+                self.ops.capacity() * size_of::<EventOp>(),
+                self.ends.capacity() * size_of::<u32>(),
+                self.open.capacity() * size_of::<OpenFrame>(),
+                self.text.capacity(),
+                payload_capacity,
+                self.footnotes.capacity() * size_of::<FootnoteRecord>(),
+                self.footnote_index.capacity() * size_of::<(FootnoteId, usize)>(),
+            );
+        }
         self.compile_stats.semantic_text_bytes = self.text.len();
         compact_excess_capacity(&mut self.ops);
         compact_excess_capacity(&mut self.ends);
