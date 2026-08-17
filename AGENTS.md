@@ -73,6 +73,7 @@ The extraction pipeline flows through these stages:
 | `render/markdown.rs` / `render/text.rs` / `render/html.rs` | Stack-safe format renderers from the semantic document |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
+| `dom/traversal.rs` | Iterative DOM-preorder snapshots and cached document anchors for immutable source phases |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
 
 ### Design Rules
@@ -112,6 +113,7 @@ These invariants are costly to violate:
 - **Render the tape sequentially.** Markdown, canonical HTML, and normalized text renderers must consume the event tape in source order. Do not add tree-link traversal, child collection, or task generation for ordinary rendering. Keep only small formatting and semantic context stacks.
 - **Use one canonical text arena.** Store semantic prose and inline-code text in one document-owned UTF-8 buffer with `TextRef` ranges. Do not add one owned heap string per semantic text leaf. Keep raw block-code payloads separate until measurements justify moving them.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
+- **Reuse immutable source snapshots.** Share one prepared source preorder/depth snapshot with title planning, candidate context, structural features, table marking, and content hints. Cache body, HTML, and base handles only while their tree remains unchanged. Build a new snapshot after fragment mutation.
 
 ### Common Pitfalls
 

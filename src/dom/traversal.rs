@@ -1,5 +1,50 @@
-use super::{Dom, NodeId};
+use super::{AttrName, Dom, NodeId, Tag};
+use html5ever::ns;
 use smallvec::SmallVec;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DocumentAnchors {
+    pub(crate) root: NodeId,
+    pub(crate) html: Option<NodeId>,
+    pub(crate) body: Option<NodeId>,
+    pub(crate) first_base_with_href: Option<NodeId>,
+}
+
+impl DocumentAnchors {
+    fn new(root: NodeId) -> Self {
+        Self {
+            root,
+            html: None,
+            body: None,
+            first_base_with_href: None,
+        }
+    }
+
+    pub(crate) fn valid_for(&self, dom: &Dom) -> bool {
+        let attached = |node: NodeId| {
+            node == dom.root() || dom.ancestors(node).any(|ancestor| ancestor == dom.root())
+        };
+        self.root == dom.root()
+            && self
+                .html
+                .is_none_or(|node| attached(node) && dom.tag(node) == Some(Tag::Html))
+            && self
+                .body
+                .is_none_or(|node| attached(node) && dom.tag(node) == Some(Tag::Body))
+            && self.first_base_with_href.is_none_or(|node| {
+                attached(node)
+                    && is_html_base(dom, node)
+                    && dom.attr(node, AttrName::Href).is_some()
+            })
+    }
+}
+
+fn is_html_base(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::Other)
+        && dom
+            .qual_name(node)
+            .is_some_and(|name| name.ns == ns!(html) && name.local.as_ref() == "base")
+}
 
 #[cfg(test)]
 pub(crate) struct NodeIds {
@@ -131,15 +176,36 @@ impl Dom {
             next: self.first_child(id),
         }
     }
-    /// Records the attached descendants in DOM preorder.
-    ///
-    /// The returned IDs do not borrow the DOM, so callers can mutate the tree
-    /// without changing the order or adding newly created nodes to the pass.
-    #[cfg(test)]
-    pub(crate) fn descendants_snapshot(&self, id: NodeId) -> Vec<NodeId> {
-        crate::instrumentation::record_source_full_scan();
-        self.descendants(id).collect()
+
+    fn record_document_anchor(&self, node: NodeId, anchors: &mut DocumentAnchors) {
+        if anchors.html.is_none() && self.tag(node) == Some(Tag::Html) {
+            anchors.html = Some(node);
+        }
+        if anchors.body.is_none() && self.tag(node) == Some(Tag::Body) {
+            anchors.body = Some(node);
+        }
+        if anchors.first_base_with_href.is_none()
+            && is_html_base(self, node)
+            && self.attr(node, AttrName::Href).is_some()
+        {
+            anchors.first_base_with_href = Some(node);
+        }
     }
+
+    /// Finds the document-level handles used by immutable source phases.
+    ///
+    /// The handles are valid only while the corresponding tree remains
+    /// attached and its relevant nodes are not renamed or detached.
+    pub(crate) fn document_anchors(&self) -> DocumentAnchors {
+        crate::instrumentation::record_source_full_scan();
+        let root = self.root();
+        let mut anchors = DocumentAnchors::new(root);
+        for node in std::iter::once(root).chain(self.descendants(root)) {
+            self.record_document_anchor(node, &mut anchors);
+        }
+        anchors
+    }
+
     /// Records attached element descendants and their depths in DOM preorder.
     ///
     /// Depth is relative to `id`, so its direct children have depth 1. The
@@ -171,6 +237,16 @@ impl Dom {
         }
         out
     }
+
+    /// Records the attached descendants in DOM preorder.
+    ///
+    /// The returned IDs do not borrow the DOM, so callers can mutate the tree
+    /// without changing the order or adding newly created nodes to the pass.
+    #[cfg(test)]
+    pub(crate) fn descendants_snapshot(&self, id: NodeId) -> Vec<NodeId> {
+        crate::instrumentation::record_source_full_scan();
+        self.descendants(id).collect()
+    }
     pub(crate) fn ancestors(&self, id: NodeId) -> Ancestors<'_> {
         Ancestors {
             dom: self,
@@ -180,10 +256,6 @@ impl Dom {
     pub(crate) fn body(&self) -> Option<NodeId> {
         self.descendants(self.root)
             .find(|&id| self.tag(id) == Some(super::Tag::Body))
-    }
-    pub(crate) fn html_element(&self) -> Option<NodeId> {
-        self.descendants(self.root)
-            .find(|&id| self.tag(id) == Some(super::Tag::Html))
     }
     pub(crate) fn append_text(&self, root: NodeId, out: &mut String) {
         if let Some(t) = self.text_node(root) {

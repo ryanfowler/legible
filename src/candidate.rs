@@ -140,16 +140,20 @@ impl CandidateSet {
     #[cfg(test)]
     pub(crate) fn discover_semantic(dom: &Dom) -> Self {
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
-        Self::discover_semantic_from_snapshot(dom, &snapshot)
+        Self::discover_semantic_from_snapshot(dom, &snapshot, dom.body())
     }
 
-    pub(crate) fn discover_semantic_from_snapshot(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Self {
+    pub(crate) fn discover_semantic_from_snapshot(
+        dom: &Dom,
+        snapshot: &[(NodeId, u32)],
+        body: Option<NodeId>,
+    ) -> Self {
         let mut candidates = Self {
             candidates: Vec::new(),
             positions: vec![usize::MAX; dom.len()],
         };
 
-        if let Some(body) = dom.body() {
+        if let Some(body) = body {
             candidates.add(body, CandidateSource::Generic, 0.0);
         }
 
@@ -243,7 +247,12 @@ impl CandidateSet {
                 .is_some_and(|roles| matches_role(roles, "article") || matches_role(roles, "main"))
     }
 
-    pub(crate) fn ranking_context(&self, dom: &Dom, store: &NodeStateStore) -> CandidateContext {
+    pub(crate) fn ranking_context(
+        &self,
+        dom: &Dom,
+        store: &NodeStateStore,
+        nodes: &[(NodeId, u32)],
+    ) -> CandidateContext {
         let mut readability_in_subtree = vec![false; dom.len()];
         let mut authoritative_count = vec![0_u32; dom.len()];
         for candidate in &self.candidates {
@@ -254,7 +263,6 @@ impl CandidateSet {
             }
         }
 
-        let nodes = dom.element_descendants_snapshot_with_depth(dom.root());
         for &(node, _) in nodes.iter().rev() {
             if let Some(parent) = dom.parent(node) {
                 readability_in_subtree[parent.index()] |= readability_in_subtree[node.index()];
@@ -268,7 +276,7 @@ impl CandidateSet {
         let mut nearest_authoritative_ancestor = vec![NodeLink::NONE; dom.len()];
         // `nodes` already records DOM order. Reuse it for nearest-ancestor
         // propagation instead of taking a second element snapshot.
-        for &(node, _) in &nodes {
+        for &(node, _) in nodes {
             if let Some(parent) = dom.parent(node) {
                 nearest_authoritative_ancestor[node.index()] =
                     if self.is_authoritative_semantic(dom, parent) {
@@ -480,7 +488,8 @@ pub(crate) fn select_content_root<'a>(
     // it with unrelated peer candidates.
     let mut branches = SmallVec::new();
     if reason != RootSelectionReason::StructuredData {
-        if let Some(parent) = shared_semantic_parent(dom, candidates, ranked, selected, first.score)
+        if let Some(parent) =
+            shared_semantic_parent(dom, candidates, ranked, selected, body, first.score)
         {
             selected = parent;
             reason = RootSelectionReason::SharedParent;
@@ -619,10 +628,11 @@ fn shared_semantic_parent(
     candidates: &CandidateSet,
     ranked: &[RankedCandidate],
     selected: NodeId,
+    body: NodeId,
     top_score: f64,
 ) -> Option<NodeId> {
     dom.ancestors(selected).find(|&parent| {
-        parent != dom.body().unwrap_or(parent)
+        parent != body
             && candidates.is_authoritative_semantic(dom, parent)
             && ranked.iter().any(|candidate| {
                 candidate.node == parent && competitive_score(candidate.score, top_score)

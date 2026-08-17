@@ -16,7 +16,7 @@ pub(crate) use id::{DomError, NodeId, NodeLink};
 pub(crate) use node::{ElementData, Node, NodeData};
 pub(crate) use state::{DataTableState, NodeStateStore, NodeStats};
 pub(crate) use tag::Tag;
-pub(crate) use traversal::build_match_string;
+pub(crate) use traversal::{DocumentAnchors, build_match_string};
 
 #[cfg(test)]
 mod tests {
@@ -205,6 +205,111 @@ mod tests {
             .find(|&node| dom.tag(node) == Some(Tag::P))
             .unwrap();
         assert_eq!(dom.text(empty_paragraph), "");
+    }
+
+    #[test]
+    fn source_snapshot_caches_repaired_document_anchors() {
+        let dom = Dom::parse_document(
+            "<base href='https://example.com/base/'><title>T</title><p>content</p>",
+        )
+        .unwrap();
+        let anchors = dom.document_anchors();
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        let html = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Html));
+
+        assert_eq!(anchors.root, dom.root());
+        assert_eq!(anchors.html, html);
+        assert_eq!(anchors.body, dom.body());
+        assert_eq!(
+            anchors
+                .first_base_with_href
+                .and_then(|node| dom.attr(node, AttrName::Href)),
+            Some("https://example.com/base/")
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|&(node, _)| node == anchors.body.unwrap())
+        );
+        assert!(anchors.valid_for(&dom));
+    }
+
+    #[test]
+    fn source_snapshot_handles_fragments_without_a_body() {
+        let dom = Dom::parse_fragment("<h1>deep content</h1>", Tag::Div).unwrap();
+        let anchors = dom.document_anchors();
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+
+        assert_eq!(anchors.root, dom.root());
+        assert_eq!(anchors.html, None);
+        assert_eq!(anchors.body, None);
+        assert_eq!(snapshot.len(), 1);
+        assert!(anchors.valid_for(&dom));
+    }
+
+    #[test]
+    fn source_snapshot_keeps_the_first_repaired_html_and_body() {
+        let dom =
+            Dom::parse_document("<html><body><p>first</p></body><body><p>second</p></body></html>")
+                .unwrap();
+        let anchors = dom.document_anchors();
+        let html_count = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Html))
+            .count();
+        let body_count = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Body))
+            .count();
+
+        assert_eq!(html_count, 1);
+        assert_eq!(body_count, 1);
+        assert_eq!(
+            anchors.html,
+            dom.descendants(dom.root())
+                .find(|&node| { dom.tag(node) == Some(Tag::Html) })
+        );
+        assert_eq!(
+            anchors.body,
+            dom.descendants(dom.root())
+                .find(|&node| { dom.tag(node) == Some(Tag::Body) })
+        );
+    }
+
+    #[test]
+    fn detached_document_anchors_are_rejected() {
+        let mut dom = Dom::parse_document("<body><main>content</main></body>").unwrap();
+        let anchors = dom.document_anchors();
+        dom.detach(anchors.body.unwrap());
+
+        assert!(!anchors.valid_for(&dom));
+
+        let mut moved_dom = Dom::parse_document("<body><main>content</main></body>").unwrap();
+        let moved_anchors = moved_dom.document_anchors();
+        let detached_parent = moved_dom.create_html_element(Tag::Div).unwrap();
+        moved_dom.append_child(detached_parent, moved_anchors.body.unwrap());
+
+        assert!(!moved_anchors.valid_for(&moved_dom));
+    }
+
+    #[test]
+    fn source_snapshot_preserves_depth_for_repaired_headings() {
+        let wrappers = "<div>".repeat(70);
+        let closing = "</div>".repeat(70);
+        let dom = Dom::parse_document(&format!(
+            "<body>{wrappers}<h1>Deep title</h1>{closing}</body>"
+        ))
+        .unwrap();
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        let heading = snapshot
+            .iter()
+            .find(|&&(node, _)| dom.tag(node) == Some(Tag::H1))
+            .copied()
+            .unwrap();
+
+        assert!(heading.1 > 64);
     }
 
     #[test]
