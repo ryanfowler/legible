@@ -476,6 +476,10 @@ impl CandidateSet {
             .filter(|&position| position != NO_CANDIDATE)
             .map(|position| position as usize)
     }
+
+    pub(crate) fn index_of(&self, node: NodeId) -> Option<usize> {
+        self.candidate_index(node)
+    }
 }
 
 fn is_generic_candidate(dom: &Dom, node: NodeId, tag: Option<Tag>) -> bool {

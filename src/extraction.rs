@@ -2493,16 +2493,19 @@ impl<'a> ContentExtractor<'a> {
         // detaches deferred clutter. Reuse those refreshed statistics and the
         // unaffected leaf cache. Feature calculation uses the same tree and
         // would otherwise repeat a full postorder text scan.
-        let feature_index = if let Some(feature_index) = shared_feature_index {
+        let feature_index = if let Some(feature_index) = shared_feature_index
+            .filter(|feature_index| feature_index.matches_candidates(candidates))
+        {
             feature_index.clone()
         } else {
             let mut table_nodes = Vec::new();
             mark_data_tables_from_snapshot(dom, snapshot, store, &mut table_nodes);
-            CandidateFeatureIndex::new(dom, store, snapshot)
+            CandidateFeatureIndex::new(dom, store, snapshot, candidates)
         };
         feature_index.prepare_text_cache(store);
-        for candidate in candidates.iter_mut() {
-            candidate.features = feature_index.features(dom, *candidate, store, weight_classes);
+        for (candidate_index, candidate) in candidates.iter_mut().enumerate() {
+            candidate.features =
+                feature_index.features(dom, candidate_index, *candidate, store, weight_classes);
         }
 
         let context = candidates.ranking_context(dom, store, snapshot);
