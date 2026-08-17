@@ -173,6 +173,7 @@ impl ContentMetrics {
     /// metrics on the selected result.
     pub(crate) fn measure_fast(dom: &Dom, root: NodeId) -> Self {
         let mut metrics = Self::measure_dom(dom, root);
+        crate::instrumentation::record_source_full_scan();
         if std::iter::once(root)
             .chain(dom.descendants(root))
             .any(|node| crate::document::semantic_source_evidence(dom, node, None))
@@ -186,6 +187,7 @@ impl ContentMetrics {
     }
 
     fn measure_dom(dom: &Dom, root: NodeId) -> Self {
+        crate::instrumentation::record_source_full_scan();
         let mut store = NodeStateStore::new();
         store.enable_link_lengths();
         let text = get_or_compute_stats(dom, root, &mut store);
@@ -619,6 +621,7 @@ impl ExtractionQuality {
 /// Detects a dominant access gate. A match needs structural and textual
 /// evidence, except for explicit machine-generated denial text.
 pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
+    crate::instrumentation::record_source_full_scan();
     let mut buffer = String::new();
     let text = normalize_barrier_text(get_normalized_inner_text(dom, root, &mut buffer));
     if text.is_empty() {
@@ -753,6 +756,7 @@ pub(crate) struct InteractiveShellEvidence {
 /// Collects source structure used to recognize an application shell.
 /// Extraction does not execute the client code that would populate such a page.
 pub(crate) fn interactive_shell_evidence(dom: &Dom, root: NodeId) -> InteractiveShellEvidence {
+    crate::instrumentation::record_source_full_scan();
     let controls = std::iter::once(root)
         .chain(dom.descendants(root))
         .filter(|&node| {

@@ -10,6 +10,7 @@ use super::{
     safe_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
+use crate::instrumentation::{Phase, PhaseGuard};
 
 use super::sparse::SparseNodeSet;
 
@@ -178,6 +179,7 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
     source_evidence: Option<&super::facts::SourceEvidence>,
     retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
+    let _phase = PhaseGuard::new(Phase::SemanticCompilation);
     // Ordinary pages do not need the rich source-evidence inventory. Run a
     // cheap gate first, then let the lowering pass validate the few structural
     // cases that cannot be classified from a flat source scan.
@@ -191,7 +193,11 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
             source_node_count,
             retained_nodes,
         ) {
-            Ok(document) => return Ok(document),
+            Ok(document) => {
+                crate::instrumentation::record_semantic_source_nodes(source_node_count);
+                record_document_metrics(&document);
+                return Ok(document);
+            }
             Err(CompileError::RequiresComplex) => {}
             Err(error) => return Err(error),
         }
@@ -283,6 +289,7 @@ fn compile_document_owned_impl(
     source_evidence: Option<&super::facts::SourceEvidence>,
     retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
+    let _phase = PhaseGuard::new(Phase::SemanticCompilation);
     if let Some(source_node_count) =
         super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, retained_nodes)
     {
@@ -293,7 +300,11 @@ fn compile_document_owned_impl(
             source_node_count,
             retained_nodes,
         ) {
-            Ok(document) => return Ok(document),
+            Ok(document) => {
+                crate::instrumentation::record_semantic_source_nodes(source_node_count);
+                record_document_metrics(&document);
+                return Ok(document);
+            }
             Err(CompileError::RequiresComplex) => {}
             Err(error) => return Err(error),
         }
@@ -314,11 +325,22 @@ fn compile_document_owned_impl(
         source_evidence,
         retained_nodes,
     );
+    let source_node_count = analysis.facts.nodes().len();
     let mut owned_source_texts = super::code::take_owned_source_texts(
         &mut dom,
         &analysis.facts.inventory().owned_code_sources,
     );
-    lower_complex_document(&dom, root, context, analysis, owned_source_texts.as_mut())
+    let result = lower_complex_document(&dom, root, context, analysis, owned_source_texts.as_mut());
+    if let Ok(document) = &result {
+        crate::instrumentation::record_semantic_source_nodes(source_node_count);
+        record_document_metrics(document);
+    }
+    result
+}
+
+fn record_document_metrics(document: &Document) {
+    crate::instrumentation::record_semantic_operations(document.operations().len());
+    crate::instrumentation::record_retained_bytes(document.retained_bytes_estimate());
 }
 
 struct ComplexSourceAnalysis {
@@ -399,7 +421,13 @@ fn compile_complex_document(
         source_evidence,
         retained_nodes,
     );
-    lower_complex_document(dom, root, context, analysis, None)
+    let source_node_count = analysis.facts.nodes().len();
+    let result = lower_complex_document(dom, root, context, analysis, None);
+    if let Ok(document) = &result {
+        crate::instrumentation::record_semantic_source_nodes(source_node_count);
+        record_document_metrics(document);
+    }
+    result
 }
 
 fn analyze_complex_document(

@@ -71,6 +71,8 @@ impl ExtractedPage {
 
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         self.document.text()
     }
 
@@ -225,6 +227,8 @@ impl HtmlBuilder<'_> {
 
     /// Renders the configured HTML output.
     pub fn render(self) -> String {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         let _ = self.sanitize;
         crate::render::html::render_html(
             &self.page.document,
@@ -255,6 +259,8 @@ impl MarkdownBuilder<'_> {
 
     /// Renders the configured Markdown output.
     pub fn render(self) -> String {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::markdown::render_markdown(
             &self.page.document,
             self.page.document.output_capacity_hint(),

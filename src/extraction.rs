@@ -15,6 +15,7 @@ use crate::diagnostics::{
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
 use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
+use crate::instrumentation::{Phase, PhaseGuard};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
@@ -104,6 +105,7 @@ struct FrozenContent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 enum ExtractionStrategy {
     Normal,
     RelaxedCleanup,
@@ -178,6 +180,7 @@ fn find_content_targets(dom: &Dom, target: &ContentHint) -> Vec<NodeId> {
     {
         return Vec::new();
     }
+    crate::instrumentation::record_source_full_scan();
     dom.descendants(dom.root())
         .filter(|&node| {
             if !dom.is_element(node) {
@@ -242,6 +245,7 @@ impl<'a> ContentExtractor<'a> {
         if let Some(e) = self.url_error {
             return Err(Error::InvalidUrl(e));
         }
+        let _metadata_phase = PhaseGuard::new(Phase::Metadata);
         if self.options.max_elements > 0 {
             let n = self
                 .dom
@@ -291,6 +295,9 @@ impl<'a> ContentExtractor<'a> {
         {
             debug_log!(self, "Structured data contains a content-location hint");
         }
+        #[cfg(feature = "bench-instrumentation")]
+        drop(_metadata_phase);
+        let _preparation_phase = PhaseGuard::new(Phase::Preparation);
         unwrap_noscript_images(&mut self.dom);
         prep_document(&mut self.dom);
         let document_root = self.dom.root();
@@ -310,6 +317,8 @@ impl<'a> ContentExtractor<'a> {
         if self.page_kind == PageKind::Unknown {
             self.page_kind = PageKind::detect(&self.dom);
         }
+        #[cfg(feature = "bench-instrumentation")]
+        drop(_preparation_phase);
         self.page_title = self
             .metadata
             .title
@@ -363,6 +372,7 @@ impl<'a> ContentExtractor<'a> {
         ))
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
+        let _candidate_preflight_phase = PhaseGuard::new(Phase::CandidateDiscovery);
         let body = self.dom.body().ok_or(Error::NoBody)?;
         let exact_root = if let Some(target) = &self.options.content_root {
             Some(
@@ -424,6 +434,8 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
+        #[cfg(feature = "bench-instrumentation")]
+        drop(_candidate_preflight_phase);
         if let Some(html) = self.dom.html_element() {
             if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
                 self.page_language = Some(lang.into())
@@ -445,19 +457,23 @@ impl<'a> ContentExtractor<'a> {
                 continue;
             }
             self.strategy = strategy;
+            crate::instrumentation::record_strategy(strategy as u8);
             self.diagnostic_cleanup_actions.clear();
             self.diagnostic_normalization = NormalizationCountsInfo::default();
             // Discovery only records nodes. It does not mutate the source DOM.
             // Deferred removals stay attached until all candidate scores and
             // link-density values have been calculated.
-            let mut discovery = self.discover_candidates_with_indexes(
-                &mut match_buffer,
-                &mut text_buffer,
-                &initial_nodes,
-                &accessible_math,
-                &title_plan,
-                &base_candidates,
-            );
+            let mut discovery = {
+                let _phase = PhaseGuard::new(Phase::CandidateDiscovery);
+                self.discover_candidates_with_indexes(
+                    &mut match_buffer,
+                    &mut text_buffer,
+                    &initial_nodes,
+                    &accessible_math,
+                    &title_plan,
+                    &base_candidates,
+                )
+            };
             if let Some(root) = self.specialized_root {
                 // A specialized extractor has already separated content from
                 // page chrome. Generic discovery can still provide ranking
@@ -471,6 +487,7 @@ impl<'a> ContentExtractor<'a> {
             // Prepare and score one working copy. Score propagation runs before
             // deferred clutter is detached. The prepared source stays intact
             // for retries.
+            let _scoring_phase = PhaseGuard::new(Phase::Scoring);
             let mut working_dom = self.dom.clone();
             let working_root = working_dom.root();
             normalize_scoring_structure(&mut working_dom, working_root);
@@ -510,7 +527,11 @@ impl<'a> ContentExtractor<'a> {
                 readability_scores,
                 &excluded_mask,
             );
+            crate::instrumentation::record_scoring_nodes(working_dom.len());
+            #[cfg(feature = "bench-instrumentation")]
+            drop(_scoring_phase);
             let body = working_dom.body().ok_or(Error::NoBody)?;
+            let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
             let mut selection = select_content_root(
                 &working_dom,
                 &candidates,
@@ -563,7 +584,6 @@ impl<'a> ContentExtractor<'a> {
                 Self::prune_body_fallback_chrome(&mut working_dom, body);
                 selection.branches.clear();
             }
-
             // Move the selected working tree into the extraction path. Keep the
             // prepared source as the immutable input for a possible retry.
             let source_dom = std::mem::replace(&mut self.dom, working_dom);
@@ -748,10 +768,14 @@ impl<'a> ContentExtractor<'a> {
             // Cleanup owns a compact copy of the selected region. The source
             // DOM remains available for a retry and is never affected by an
             // earlier attempt's mutations.
-            let mut fragment = self
-                .dom
-                .copy_subtree_as_fragment(content_id)
-                .map_err(|_| Error::NoContent)?;
+            #[cfg(feature = "bench-instrumentation")]
+            drop(_root_selection_phase);
+            let mut fragment = {
+                let _phase = PhaseGuard::new(Phase::FragmentCopy);
+                self.dom
+                    .copy_subtree_as_fragment(content_id)
+                    .map_err(|_| Error::NoContent)?
+            };
             let content_id = fragment
                 .first_child(fragment.root())
                 .ok_or(Error::NoContent)?;
@@ -762,6 +786,7 @@ impl<'a> ContentExtractor<'a> {
             self.node_data.clear();
             self.node_data.enable_link_lengths();
 
+            let _cleanup_phase = PhaseGuard::new(Phase::Cleanup);
             let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
             let video = regexps::VIDEOS.clone();
             let (candidate_semantic_metrics, source_evidence) = self.prep_article(
@@ -793,7 +818,10 @@ impl<'a> ContentExtractor<'a> {
             let access_barrier = is_access_barrier(&self.dom, content_id);
             let (mut source_facts, mut retained_nodes) =
                 self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
+            crate::instrumentation::record_cleaned_nodes(self.dom.len());
             self.capture_normalization_counts(content_id);
+            #[cfg(feature = "bench-instrumentation")]
+            drop(_cleanup_phase);
             if synthetic
                 && content_id != self.dom.root()
                 && let Some(retained_nodes) = retained_nodes.as_mut()

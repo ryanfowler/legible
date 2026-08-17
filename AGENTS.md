@@ -59,6 +59,7 @@ The extraction pipeline flows through these stages:
 | `document/stats.rs` | Compile-time structural counters, lazy text metrics, and shared semantic visibility classification |
 | `document/ordinary.rs` | Conservative feature routing and stack-safe streaming compilation for ordinary HTML semantics |
 | `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
+| `instrumentation.rs` | Benchmark-only phase, allocation, clone, scan, semantic, builder-capacity, and JSON-LD measurements |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
 | `document/` | Private compact semantic event tape plus internal retained-source compiler, direct semantic recognition, validation, and sequential test tape output; production pages retain this representation instead of a DOM |
 | `document/builder.rs` | Direct semantic tape builder for ordinary and complex lowering; keeps only source-order close state |
@@ -173,6 +174,11 @@ Use `cargo bench --bench smoke` for the normal development performance check. It
 covers medium and large article extraction, end-to-end Markdown extraction, and
 lazy Markdown rendering. It uses short Criterion measurement windows. Use it to
 catch large regressions, not to make final performance claims.
+
+Use `cargo run --release --bin extraction-report --features bench-instrumentation`
+to collect phase, retry, allocation, and retained-document measurements. The
+feature is disabled by default, and default builds keep the measurement calls
+empty.
 
 Do not run the full benchmark suite for every change. Run
 `cargo bench --bench extraction` for performance-sensitive work, baseline

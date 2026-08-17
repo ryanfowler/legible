@@ -78,9 +78,12 @@ impl StructuredData {
                 .trim_start_matches("<![CDATA[")
                 .trim_end_matches("]]>")
                 .trim();
+            crate::instrumentation::record_json_ld_bytes(content.len());
             let Ok(value) = serde_json::from_str::<Value>(content) else {
                 continue;
             };
+            #[cfg(feature = "bench-instrumentation")]
+            crate::instrumentation::record_json_ld_parsed_bytes(estimated_json_value_bytes(&value));
             collect_structured_items(&value, false, &mut items);
         }
         Self { items }
@@ -124,8 +127,29 @@ impl StructuredData {
     }
 
     pub(crate) fn retained_items(&self) -> Vec<Value> {
-        self.items.clone()
+        let items = self.items.clone();
+        #[cfg(feature = "bench-instrumentation")]
+        crate::instrumentation::record_json_ld_retained_bytes(
+            items.iter().map(estimated_json_value_bytes).sum(),
+        );
+        items
     }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn estimated_json_value_bytes(value: &Value) -> usize {
+    std::mem::size_of::<Value>()
+        + match value {
+            Value::Null => 0,
+            Value::Bool(_) => 0,
+            Value::Number(number) => number.to_string().len(),
+            Value::String(text) => text.len(),
+            Value::Array(values) => values.iter().map(estimated_json_value_bytes).sum::<usize>(),
+            Value::Object(values) => values
+                .iter()
+                .map(|(key, value)| key.len() + estimated_json_value_bytes(value))
+                .sum::<usize>(),
+        }
 }
 
 fn script_text<'a>(dom: &'a Dom, id: NodeId, buffer: &'a mut String) -> &'a str {
