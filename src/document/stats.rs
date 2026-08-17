@@ -81,11 +81,13 @@ pub(crate) struct TextStats {
     pub digit_chars: usize,
 }
 
+pub(super) fn is_visible_inline_character(character: char) -> bool {
+    !character.is_whitespace()
+        && !matches!(character, '\u{00a0}' | '\u{200b}' | '\u{2060}' | '\u{feff}')
+}
+
 pub(crate) fn has_visible_inline_text(text: &str) -> bool {
-    text.chars().any(|character| {
-        !character.is_whitespace()
-            && !matches!(character, '\u{00a0}' | '\u{200b}' | '\u{2060}' | '\u{feff}')
-    })
+    text.chars().any(is_visible_inline_character)
 }
 
 /// Measurements derived from the semantic document.

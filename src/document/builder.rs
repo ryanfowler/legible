@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::OnceLock;
@@ -211,7 +210,7 @@ impl SemanticTapeBuilder {
             return Err(BuildError::InvalidParent);
         }
         let normalized = super::text::normalize_prose_fragment(value);
-        self.append_normalized_prose_value(parent, normalized)
+        self.append_normalized_prose_fragment(parent, normalized)
     }
 
     pub(crate) fn append_normalized_prose(
@@ -222,7 +221,19 @@ impl SemanticTapeBuilder {
         if !self.valid_parent(parent) {
             return Err(BuildError::InvalidParent);
         }
-        self.append_normalized_prose_value(parent, Cow::Borrowed(value))
+        let normalized = super::text::normalize_prose_fragment(value);
+        self.append_normalized_prose_fragment(parent, normalized)
+    }
+
+    pub(super) fn append_normalized_prose_fragment(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        value: super::text::NormalizedFragment<'_>,
+    ) -> Result<Option<DocumentNodeId>, BuildError> {
+        if !self.valid_parent(parent) {
+            return Err(BuildError::InvalidParent);
+        }
+        self.append_normalized_prose_value(parent, value)
     }
 
     pub(crate) fn close(&mut self, node: DocumentNodeId) -> Result<(), BuildError> {
@@ -493,9 +504,20 @@ impl SemanticTapeBuilder {
         payload: u32,
         aux: u16,
     ) -> Result<DocumentNodeId, BuildError> {
+        self.append_operation_with_flags(parent, operation, payload, aux, None)
+    }
+
+    fn append_operation_with_flags(
+        &mut self,
+        parent: Option<DocumentNodeId>,
+        operation: OperationKind,
+        payload: u32,
+        aux: u16,
+        known_flags: Option<u8>,
+    ) -> Result<DocumentNodeId, BuildError> {
         let index = u32::try_from(self.ops.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let id = DocumentNodeId(index);
-        let flags = self.operation_visibility(operation, payload);
+        let flags = known_flags.unwrap_or_else(|| self.operation_visibility(operation, payload));
         push_tracked(
             &mut self.ops,
             EventOp {
@@ -581,20 +603,21 @@ impl SemanticTapeBuilder {
     fn append_normalized_prose_value(
         &mut self,
         parent: Option<DocumentNodeId>,
-        value: Cow<'_, str>,
+        value: super::text::NormalizedFragment<'_>,
     ) -> Result<Option<DocumentNodeId>, BuildError> {
         if value.is_empty() {
             return Ok(None);
         }
         let value_ref = value.as_ref();
+        let append = value.append;
         let previous = self.previous_child(parent);
-        if value_ref == " " {
+        if append.first_non_space.is_none() {
             if previous.is_some() {
                 self.set_pending_space(parent, true);
             }
             return Ok(None);
         }
-        let needs_leading_space = self.take_pending_space(parent) && !value_ref.starts_with(' ');
+        let needs_leading_space = self.take_pending_space(parent) && !append.starts_with_space;
         if let Some(previous) = previous
             && self.ops[previous.index()].kind() == OperationKind::Text
         {
@@ -602,7 +625,7 @@ impl SemanticTapeBuilder {
             let existing = self.payloads.text_refs[payload];
             let existing_value = self.text_slice(existing);
             let leading_space = needs_leading_space && !existing_value.ends_with(' ');
-            let value = if existing_value.ends_with(' ') && value_ref.starts_with(' ') {
+            let value = if existing_value.ends_with(' ') && append.starts_with_space {
                 &value_ref[1..]
             } else {
                 value_ref
@@ -610,7 +633,11 @@ impl SemanticTapeBuilder {
             if existing.range().end == self.text.len() {
                 let updated = self.extend_text(existing, leading_space, value)?;
                 self.payloads.text_refs[payload] = updated;
-                let flags = self.operation_visibility(OperationKind::Text, payload as u32);
+                let flags = if append.has_visible_text {
+                    super::HAS_VISIBLE_TEXT
+                } else {
+                    0
+                };
                 self.ops[previous.index()].flags |= flags;
                 if let Some(parent) = self.open.last_mut() {
                     parent.flags |= flags;
@@ -623,13 +650,33 @@ impl SemanticTapeBuilder {
             let value = self.append_text_with_prefix(value, leading_space)?;
             let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics);
             return self
-                .append_operation(parent, OperationKind::Text, payload, 0)
+                .append_operation_with_flags(
+                    parent,
+                    OperationKind::Text,
+                    payload,
+                    0,
+                    Some(if append.has_visible_text {
+                        super::HAS_VISIBLE_TEXT
+                    } else {
+                        0
+                    }),
+                )
                 .map(Some);
         }
         let value = self.append_text_with_prefix(value_ref, needs_leading_space)?;
         let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics);
-        self.append_operation(parent, OperationKind::Text, payload, 0)
-            .map(Some)
+        self.append_operation_with_flags(
+            parent,
+            OperationKind::Text,
+            payload,
+            0,
+            Some(if append.has_visible_text {
+                super::HAS_VISIBLE_TEXT
+            } else {
+                0
+            }),
+        )
+        .map(Some)
     }
 
     fn valid_parent(&self, parent: Option<DocumentNodeId>) -> bool {

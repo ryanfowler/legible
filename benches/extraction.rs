@@ -100,6 +100,9 @@ fn retained_fragment(kind: &str, target_bytes: usize) -> String {
     if kind == "ordinary-inline" {
         return ordinary_inline_fragment(target_bytes);
     }
+    if kind == "fragmented-prose" {
+        return fragmented_prose_fragment(target_bytes / 5);
+    }
     if kind == "raw-code" {
         let mut source = String::with_capacity(target_bytes);
         let mut index = 0;
@@ -142,6 +145,20 @@ fn retained_fragment(kind: &str, target_bytes: usize) -> String {
         }
         index += 1;
     }
+    html
+}
+
+fn fragmented_prose_fragment(fragment_count: usize) -> String {
+    let mut html = String::with_capacity(fragment_count.saturating_mul(5) + 32);
+    html.push_str("<article><p>");
+    for index in 0..fragment_count {
+        if index % 2 == 0 {
+            html.push_str("<span><span>a</span></span>");
+        } else {
+            html.push_str("<span> </span>");
+        }
+    }
+    html.push_str("</p></article>");
     html
 }
 
@@ -245,6 +262,7 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
     for (name, kind, bytes) in [
         ("simple-prose", "prose", 4_000),
         ("long-prose", "prose", 250_000),
+        ("fragmented-prose", "fragmented-prose", 100_000),
         ("ordinary-inline", "ordinary-inline", 50_000),
         ("ordinary-inline-large", "ordinary-inline", 500_000),
         ("highlighted-code", "code", 100_000),
