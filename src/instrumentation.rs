@@ -110,6 +110,16 @@ pub struct ExtractionCounters {
     pub json_ld_retained_bytes: u64,
 }
 
+/// Counts for E01 source-pipeline work that is deferred or skipped.
+#[cfg(feature = "bench-instrumentation")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeferredWorkCounters {
+    pub content_hint_scans: u64,
+    pub content_excerpt_scans: u64,
+    pub final_dom_node_scans: u64,
+    pub external_footnote_scans: u64,
+}
+
 /// Accumulated phase time in nanoseconds.
 #[cfg(feature = "bench-instrumentation")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -158,6 +168,7 @@ pub struct InstrumentationSnapshot {
 #[derive(Clone, Copy, Default)]
 struct State {
     counters: ExtractionCounters,
+    deferred_work: DeferredWorkCounters,
     phases: [u64; PHASE_COUNT],
     live_bytes: u64,
     allocation_baseline: u64,
@@ -197,6 +208,12 @@ std::thread_local! {
             json_ld_bytes: 0,
             json_ld_parsed_bytes: 0,
             json_ld_retained_bytes: 0,
+        },
+        deferred_work: DeferredWorkCounters {
+            content_hint_scans: 0,
+            content_excerpt_scans: 0,
+            final_dom_node_scans: 0,
+            external_footnote_scans: 0,
         },
         phases: [0; PHASE_COUNT],
         live_bytes: 0,
@@ -266,6 +283,38 @@ pub(crate) fn record_source_element_snapshot() {
     #[cfg(feature = "bench-instrumentation")]
     add_counter(|counters| {
         counters.source_element_snapshots = counters.source_element_snapshots.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_content_hint_scan() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_deferred_work(|counters| {
+        counters.content_hint_scans = counters.content_hint_scans.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_content_excerpt_scan() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_deferred_work(|counters| {
+        counters.content_excerpt_scans = counters.content_excerpt_scans.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_final_dom_node_scan() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_deferred_work(|counters| {
+        counters.final_dom_node_scans = counters.final_dom_node_scans.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_external_footnote_scan() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_deferred_work(|counters| {
+        counters.external_footnote_scans = counters.external_footnote_scans.saturating_add(1)
     });
 }
 
@@ -455,6 +504,15 @@ fn add_counter(update: impl FnOnce(&mut ExtractionCounters)) {
     });
 }
 
+#[cfg(feature = "bench-instrumentation")]
+fn add_deferred_work(update: impl FnOnce(&mut DeferredWorkCounters)) {
+    STATE.with(|state| {
+        let mut value = state.get();
+        update(&mut value.deferred_work);
+        state.set(value);
+    });
+}
+
 /// Clears the current thread's measurement state.
 #[cfg(feature = "bench-instrumentation")]
 pub fn reset() {
@@ -490,6 +548,12 @@ pub fn snapshot() -> InstrumentationSnapshot {
             },
         }
     })
+}
+
+/// Returns deferred-work counters for the current thread.
+#[cfg(feature = "bench-instrumentation")]
+pub fn deferred_work_snapshot() -> DeferredWorkCounters {
+    STATE.with(|state| state.get().deferred_work)
 }
 
 #[cfg(all(test, feature = "bench-instrumentation"))]

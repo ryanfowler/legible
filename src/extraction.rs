@@ -175,33 +175,38 @@ struct CandidateDiscovery {
     remove_after_scoring: SmallVec<[NodeId; 64]>,
 }
 
+fn content_hint_has_value(target: &ContentHint) -> bool {
+    !matches!(target, ContentHint::Id(value) | ContentHint::Class(value) if value.trim().is_empty())
+}
+
+fn content_target_matches(dom: &Dom, node: NodeId, target: &ContentHint) -> bool {
+    if !dom.is_element(node) {
+        return false;
+    }
+    match target {
+        ContentHint::Id(value) => dom.attr(node, AttrName::Id) == Some(value.as_str()),
+        ContentHint::Class(value) => dom
+            .attr(node, AttrName::Class)
+            .is_some_and(|classes| classes.split_whitespace().any(|class| class == value)),
+        ContentHint::Tag(tag) => {
+            let expected = match tag {
+                ContentTag::Article => Tag::Article,
+                ContentTag::Main => Tag::Main,
+                ContentTag::Section => Tag::Section,
+                ContentTag::Div => Tag::Div,
+            };
+            dom.tag(node) == Some(expected)
+        }
+    }
+}
+
 fn find_content_targets(dom: &Dom, target: &ContentHint) -> Vec<NodeId> {
-    if matches!(target, ContentHint::Id(value) | ContentHint::Class(value) if value.trim().is_empty())
-    {
+    if !content_hint_has_value(target) {
         return Vec::new();
     }
     crate::instrumentation::record_source_full_scan();
     dom.descendants(dom.root())
-        .filter(|&node| {
-            if !dom.is_element(node) {
-                return false;
-            }
-            match target {
-                ContentHint::Id(value) => dom.attr(node, AttrName::Id) == Some(value.as_str()),
-                ContentHint::Class(value) => dom
-                    .attr(node, AttrName::Class)
-                    .is_some_and(|classes| classes.split_whitespace().any(|class| class == value)),
-                ContentHint::Tag(tag) => {
-                    let expected = match tag {
-                        ContentTag::Article => Tag::Article,
-                        ContentTag::Main => Tag::Main,
-                        ContentTag::Section => Tag::Section,
-                        ContentTag::Div => Tag::Div,
-                    };
-                    dom.tag(node) == Some(expected)
-                }
-            }
-        })
+        .filter(|&node| content_target_matches(dom, node, target))
         .collect()
 }
 
@@ -384,7 +389,10 @@ impl<'a> ContentExtractor<'a> {
         } else {
             self.specialized_root
         };
-        let footnote_definitions = collect_external_footnotes(&self.dom);
+        let footnote_definitions = exact_root.is_none().then(|| {
+            crate::instrumentation::record_external_footnote_scan();
+            collect_external_footnotes(&self.dom)
+        });
         let source_metrics = exact_root.map_or_else(
             || ContentMetrics::measure_source(&self.dom, body),
             |root| ContentMetrics::measure(&self.dom, root),
@@ -427,6 +435,16 @@ impl<'a> ContentExtractor<'a> {
         let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
         let base_candidates =
             CandidateSet::discover_semantic_from_snapshot(&self.dom, &initial_nodes);
+        let content_hint_targets =
+            self.options
+                .content_hint
+                .as_ref()
+                .map_or_else(Vec::new, |hint| {
+                    if content_hint_has_value(hint) {
+                        crate::instrumentation::record_content_hint_scan();
+                    }
+                    find_content_targets(&self.dom, hint)
+                });
         let title_plan = title_heading_plan(
             &self.dom,
             &self.page_title,
@@ -444,6 +462,8 @@ impl<'a> ContentExtractor<'a> {
                 self.page_direction = Some(dir.into())
             }
         }
+        let compile_context =
+            crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref());
         for strategy in ExtractionStrategy::ORDER {
             if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
                 continue;
@@ -513,8 +533,18 @@ impl<'a> ContentExtractor<'a> {
                 self.strategy.weight_classes(),
             );
             let mut candidates = discovery.candidates;
-            if let Some(hint) = &self.options.content_hint {
-                for node in find_content_targets(&working_dom, hint) {
+            for &node in &content_hint_targets {
+                let attached = node == working_root
+                    || working_dom
+                        .ancestors(node)
+                        .any(|ancestor| ancestor == working_root);
+                if attached
+                    && self
+                        .options
+                        .content_hint
+                        .as_ref()
+                        .is_some_and(|hint| content_target_matches(&working_dom, node, hint))
+                {
                     candidates.add_caller_hint(node);
                 }
             }
@@ -779,8 +809,8 @@ impl<'a> ContentExtractor<'a> {
             let content_id = fragment
                 .first_child(fragment.root())
                 .ok_or(Error::NoContent)?;
-            if exact_root.is_none() {
-                adopt_external_footnotes(&footnote_definitions, &mut fragment, content_id);
+            if let Some(footnote_definitions) = footnote_definitions.as_ref() {
+                adopt_external_footnotes(footnote_definitions, &mut fragment, content_id);
             }
             self.dom = fragment;
             self.node_data.clear();
@@ -792,6 +822,7 @@ impl<'a> ContentExtractor<'a> {
             let (candidate_semantic_metrics, source_evidence) = self.prep_article(
                 content_id,
                 selection.node != body && strategy != ExtractionStrategy::BodyFallback,
+                &compile_context,
                 &video,
                 &mut match_buffer,
                 &mut text_buffer,
@@ -814,7 +845,6 @@ impl<'a> ContentExtractor<'a> {
                 }
                 self.dom.append_child(content_id, w)
             }
-            let excerpt = self.content_excerpt(content_id);
             let access_barrier = is_access_barrier(&self.dom, content_id);
             let (mut source_facts, mut retained_nodes) =
                 self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
@@ -841,7 +871,6 @@ impl<'a> ContentExtractor<'a> {
             if let Some(source_facts) = source_facts.as_mut() {
                 source_facts.rebase_root(&self.dom, result_root);
             }
-            let final_dom_nodes = 1 + self.dom.descendants(result_root).count();
             // Normal extraction only needs the semantic document for a candidate
             // that can win. Diagnostics still compile every attempt so that they
             // retain complete semantic metrics.
@@ -850,10 +879,7 @@ impl<'a> ContentExtractor<'a> {
                     crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
                         &self.dom,
                         result_root,
-                        &crate::document::CompileContext::new(
-                            self.base_uri.clone(),
-                            self.source_uri.as_ref(),
-                        ),
+                        &compile_context,
                         source_facts.as_ref(),
                         Some(&source_evidence),
                         retained_nodes.as_deref(),
@@ -868,7 +894,10 @@ impl<'a> ContentExtractor<'a> {
                     .as_ref()
                     .map(|document| RepresentationMetricsInfo {
                         source_dom_nodes: self.source_dom_nodes,
-                        final_dom_nodes,
+                        final_dom_nodes: {
+                            crate::instrumentation::record_final_dom_node_scan();
+                            1 + self.dom.descendants(result_root).count()
+                        },
                         document_nodes: document.len(),
                         estimated_document_bytes: document.retained_bytes_estimate(),
                     });
@@ -939,6 +968,7 @@ impl<'a> ContentExtractor<'a> {
                         && !deferred_for_visibility
                         && (quality.is_good() || schema_match));
             if accepted {
+                let excerpt = self.content_excerpt_if_needed(result_root);
                 self.record_attempt(
                     strategy,
                     root_info,
@@ -957,10 +987,7 @@ impl<'a> ContentExtractor<'a> {
                     crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
                         content,
                         result_root,
-                        &crate::document::CompileContext::new(
-                            self.base_uri.clone(),
-                            self.source_uri.as_ref(),
-                        ),
+                        &compile_context,
                         source_facts.as_ref(),
                         &source_evidence,
                         retained_nodes.as_deref(),
@@ -1004,6 +1031,7 @@ impl<'a> ContentExtractor<'a> {
                 {
                     attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
                 }
+                let excerpt = self.content_excerpt_if_needed(result_root);
                 self.best_attempt = Some(BestAttempt {
                     content: FrozenContent {
                         dom: std::mem::replace(&mut self.dom, source_dom),
@@ -1049,10 +1077,7 @@ impl<'a> ContentExtractor<'a> {
             crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
                 dom,
                 root,
-                &crate::document::CompileContext::new(
-                    self.base_uri.clone(),
-                    self.source_uri.as_ref(),
-                ),
+                &compile_context,
                 source_facts.as_ref(),
                 &source_evidence,
                 retained_nodes.as_deref(),
@@ -1901,10 +1926,12 @@ impl<'a> ContentExtractor<'a> {
         }
         Some(container)
     }
+    #[allow(clippy::too_many_arguments)]
     fn prep_article(
         &mut self,
         root: NodeId,
         credible_semantic_candidate: bool,
+        compile_context: &crate::document::CompileContext,
         video: &Regex,
         _match_buffer: &mut String,
         text_buffer: &mut String,
@@ -1955,10 +1982,7 @@ impl<'a> ContentExtractor<'a> {
                 crate::document::compile_document_with_optional_source_facts_and_evidence(
                     &self.dom,
                     root,
-                    &crate::document::CompileContext::new(
-                        self.base_uri.clone(),
-                        self.source_uri.as_ref(),
-                    ),
+                    compile_context,
                     None,
                     Some(&source_evidence),
                 )
@@ -2023,6 +2047,7 @@ impl<'a> ContentExtractor<'a> {
         (candidate_semantic_metrics, source_evidence)
     }
     fn content_excerpt(&self, root: NodeId) -> Option<String> {
+        crate::instrumentation::record_content_excerpt_scan();
         let mut buffer = String::new();
         self.dom
             .descendants(root)
@@ -2055,6 +2080,16 @@ impl<'a> ContentExtractor<'a> {
                     Some(trimmed.to_owned())
                 }
             })
+    }
+
+    fn content_excerpt_if_needed(&self, root: NodeId) -> Option<String> {
+        if self.metadata.description.is_some() {
+            return None;
+        }
+        // Final cleanup only detaches empty blocks, which this scan already
+        // ignores. The retained root therefore preserves the excerpt source
+        // point while letting rejected attempts skip the subtree scan.
+        self.content_excerpt(root)
     }
     fn final_cleanup(
         &mut self,
@@ -3121,6 +3156,135 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 && attempt.normalization.tables == 0
                 && attempt.normalization.flattened_layout_tables == 0
         }));
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn deferred_attempt_work_is_visible_in_counters() {
+        let hidden_detail = "The recovered section explains configuration, validation, compatibility, and deployment with practical detail. ".repeat(4);
+        let html = format!(
+            r#"<body><main><p>Visible summary.</p><article hidden><h2>Complete guide</h2><p>{hidden_detail}</p></article></main></body>"#
+        );
+        crate::instrumentation::reset();
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+        let deferred = crate::instrumentation::deferred_work_snapshot();
+
+        let attempts = page.diagnostics().unwrap().attempts.len();
+        assert!(attempts >= 2);
+        assert!(deferred.content_excerpt_scans < attempts as u64);
+        assert!(deferred.final_dom_node_scans > 0);
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn metadata_description_skips_excerpt_and_normal_extraction_skips_final_count() {
+        crate::instrumentation::reset();
+        let page = crate::extract(
+            r#"<html><head><meta name="description" content="The source description."></head><body><main><p>The article has enough useful text to be selected and rendered.</p><p>A second paragraph keeps the result substantive.</p></main></body></html>"#,
+            None,
+        )
+        .unwrap();
+        let deferred = crate::instrumentation::deferred_work_snapshot();
+
+        assert_eq!(
+            page.metadata().description.as_deref(),
+            Some("The source description.")
+        );
+        assert_eq!(deferred.content_excerpt_scans, 0);
+        assert_eq!(deferred.final_dom_node_scans, 0);
+
+        crate::instrumentation::reset();
+        crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(
+                r#"<body><main><p>The diagnostic result has enough useful text to be selected and measured.</p><p>A second paragraph keeps the result substantive.</p></main></body>"#,
+                None,
+            )
+            .unwrap();
+        assert!(crate::instrumentation::deferred_work_snapshot().final_dom_node_scans > 0);
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn exact_root_skips_external_footnote_collection_and_content_hints_scan_once() {
+        crate::instrumentation::reset();
+        crate::Extractor::builder()
+            .content_root(crate::ContentHint::Id("chosen".into()))
+            .build()
+            .extract(
+                r##"<body><main id="chosen"><p>The requested root contains enough useful text for extraction.</p><p>A second paragraph keeps the root substantive.<sup><a href="#external-note">1</a></sup></p></main><aside id="external-note" role="doc-footnote">This definition is outside the requested root.</aside></body>"##,
+                None,
+            )
+            .unwrap();
+        let deferred = crate::instrumentation::deferred_work_snapshot();
+        assert_eq!(deferred.external_footnote_scans, 0);
+
+        crate::instrumentation::reset();
+        let specialized_page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(
+                include_str!("../tests/specialized/hacker-news-listing/source.html"),
+                Some("https://news.ycombinator.com/"),
+            )
+            .unwrap();
+        assert!(
+            specialized_page
+                .diagnostics()
+                .and_then(|diagnostics| diagnostics.specialized_extractor.as_deref())
+                .is_some()
+        );
+        assert_eq!(
+            crate::instrumentation::deferred_work_snapshot().external_footnote_scans,
+            0
+        );
+
+        crate::instrumentation::reset();
+        crate::Extractor::builder()
+            .content_hint(crate::ContentHint::Id("preferred".into()))
+            .build()
+            .extract(
+                r#"<body><main><div id="preferred"><p>The caller selected this useful content with enough detail for extraction.</p><p>A second paragraph provides more useful context.</p></div></main></body>"#,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            crate::instrumentation::deferred_work_snapshot().content_hint_scans,
+            1
+        );
+    }
+
+    #[test]
+    fn cached_content_hints_skip_detached_scoring_nodes() {
+        let page = crate::Extractor::builder()
+            .content_hint(crate::ContentHint::Tag(crate::ContentTag::Div))
+            .diagnostics(true)
+            .build()
+            .extract(
+                r#"<body><main><div id="preferred"><p>Short hinted text.</p></div><p>The surrounding document contains enough substantive content to remain a valid extraction result with practical detail and useful context.</p><p>A second paragraph keeps the selected region coherent.</p></main></body>"#,
+                None,
+            )
+            .unwrap();
+
+        assert!(page.text().contains("surrounding document"));
+        let accepted = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        assert!(
+            !accepted
+                .selected_root
+                .candidate_sources
+                .contains(&crate::diagnostics::CandidateSourceInfo::CallerHint)
+        );
     }
 
     #[test]
