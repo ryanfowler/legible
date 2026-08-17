@@ -1,7 +1,7 @@
 //! Internal content-root candidates.
 
 use crate::constants::split_word_tokens;
-use crate::dom::{AttrName, Dom, NodeId, NodeLink, NodeStateStore, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::prepared::PreparedSource;
 use crate::scoring::has_static_hidden_marker;
 use smallvec::SmallVec;
@@ -24,6 +24,7 @@ const STRONG_CLASSES: &[&str] = &[
     "markdown-body",
     "post",
 ];
+const NO_CANDIDATE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandidateSource {
@@ -105,35 +106,53 @@ impl Candidate {
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateSet {
     candidates: Vec<Candidate>,
-    positions: Vec<usize>,
+    /// Candidate indexes are looked up by source NodeId. Keep this map dense
+    /// because callers already have stable node IDs, but use a u32 sentinel
+    /// so the map does not double the size of the node index on 64-bit hosts.
+    positions: Vec<u32>,
 }
 
 pub(crate) struct CandidateContext {
+    // All relationship values are indexed by CandidateSet order. Most source
+    // nodes are not candidates, so these must not be DOM-sized arrays.
     readability_in_subtree: Vec<bool>,
     has_authoritative_ancestor: Vec<bool>,
     authoritative_count: Vec<u32>,
     article_peer_count: Vec<u32>,
     article_peer_score: Vec<f64>,
+    source_positions: Vec<u32>,
 }
 
 impl CandidateContext {
-    pub(crate) fn has_readability(&self, node: NodeId) -> bool {
-        self.readability_in_subtree[node.index()]
+    pub(crate) fn has_readability(&self, candidate: usize) -> bool {
+        self.readability_in_subtree[candidate]
     }
 
-    pub(crate) fn has_authoritative_ancestor(&self, node: NodeId) -> bool {
-        self.has_authoritative_ancestor[node.index()]
+    pub(crate) fn has_authoritative_ancestor(&self, candidate: usize) -> bool {
+        self.has_authoritative_ancestor[candidate]
     }
 
-    pub(crate) fn has_authoritative_descendant(&self, node: NodeId, own: bool) -> bool {
-        self.authoritative_count[node.index()] > u32::from(own)
+    pub(crate) fn has_authoritative_descendant(&self, candidate: usize, own: bool) -> bool {
+        self.authoritative_count[candidate] > u32::from(own)
     }
 
-    pub(crate) fn article_peer_summary(&self, node: NodeId) -> (u32, f64) {
+    pub(crate) fn article_peer_summary(&self, candidate: usize) -> (u32, f64) {
         (
-            self.article_peer_count[node.index()],
-            self.article_peer_score[node.index()],
+            self.article_peer_count[candidate],
+            self.article_peer_score[candidate],
         )
+    }
+
+    pub(crate) fn source_order(&self, candidate: usize) -> usize {
+        let position = self.source_positions[candidate];
+        if position != NO_CANDIDATE {
+            return position as usize;
+        }
+        // Detached or synthetic candidates are not present in the snapshot.
+        // Keep their order deterministic after attached source nodes.
+        usize::MAX
+            .saturating_sub(self.source_positions.len())
+            .saturating_add(candidate)
     }
 }
 
@@ -172,7 +191,7 @@ impl CandidateSet {
     ) -> Self {
         let mut candidates = Self {
             candidates: Vec::new(),
-            positions: vec![usize::MAX; dom.len()],
+            positions: vec![NO_CANDIDATE; dom.len()],
         };
 
         if let Some(body) = body {
@@ -275,58 +294,92 @@ impl CandidateSet {
         store: &NodeStateStore,
         nodes: &[(NodeId, u32)],
     ) -> CandidateContext {
-        let mut readability_in_subtree = vec![false; dom.len()];
-        let mut authoritative_count = vec![0_u32; dom.len()];
-        for candidate in &self.candidates {
-            readability_in_subtree[candidate.node.index()] =
-                candidate.has_source(CandidateSource::Readability);
-            if self.is_authoritative_semantic(dom, candidate.node) {
-                authoritative_count[candidate.node.index()] = 1;
+        let candidate_count = self.candidates.len();
+        let mut source_positions = vec![NO_CANDIDATE; candidate_count];
+        let mut candidate_parent = vec![NO_CANDIDATE; candidate_count];
+        let mut nearest_authoritative_ancestor = vec![NO_CANDIDATE; candidate_count];
+        let mut active_candidates: Vec<(u32, u32)> = Vec::new();
+        let mut active_authoritative: Vec<(u32, u32)> = Vec::new();
+
+        // Build the candidate containment tree from the existing preorder
+        // snapshot. This preserves DOM ancestry while keeping all retained
+        // relationship state candidate-sized.
+        for (source_position, &(node, depth)) in nodes.iter().enumerate() {
+            let Ok(source_position) = u32::try_from(source_position) else {
+                break;
+            };
+            while active_candidates
+                .last()
+                .is_some_and(|&(active_depth, _)| active_depth >= depth)
+            {
+                active_candidates.pop();
+            }
+            while active_authoritative
+                .last()
+                .is_some_and(|&(active_depth, _)| active_depth >= depth)
+            {
+                active_authoritative.pop();
+            }
+
+            let candidate_index = self.candidate_index(node);
+            if let Some(candidate_index) = candidate_index {
+                source_positions[candidate_index] = source_position;
+                candidate_parent[candidate_index] = active_candidates
+                    .last()
+                    .map_or(NO_CANDIDATE, |&(_, parent)| parent);
+                nearest_authoritative_ancestor[candidate_index] = active_authoritative
+                    .last()
+                    .map_or(NO_CANDIDATE, |&(_, ancestor)| ancestor);
+                active_candidates.push((depth, candidate_index as u32));
+            }
+
+            if self.is_authoritative_semantic(dom, node)
+                && let Some(candidate_index) = candidate_index
+            {
+                active_authoritative.push((depth, candidate_index as u32));
             }
         }
 
-        for &(node, _) in nodes.iter().rev() {
-            if let Some(parent) = dom.parent(node) {
-                readability_in_subtree[parent.index()] |= readability_in_subtree[node.index()];
-                authoritative_count[parent.index()] = authoritative_count[parent.index()]
-                    .saturating_add(authoritative_count[node.index()]);
+        let mut candidate_order: Vec<_> = (0..candidate_count).collect();
+        candidate_order.sort_unstable_by_key(|&candidate| source_positions[candidate]);
+
+        let mut readability_in_subtree = vec![false; candidate_count];
+        let mut authoritative_count = vec![0_u32; candidate_count];
+        for (index, candidate) in self.candidates.iter().enumerate() {
+            readability_in_subtree[index] = candidate.has_source(CandidateSource::Readability);
+            authoritative_count[index] =
+                u32::from(self.is_authoritative_semantic(dom, candidate.node));
+        }
+        for &child in candidate_order.iter().rev() {
+            let parent = candidate_parent[child];
+            if parent != NO_CANDIDATE {
+                let parent = parent as usize;
+                readability_in_subtree[parent] |= readability_in_subtree[child];
+                authoritative_count[parent] =
+                    authoritative_count[parent].saturating_add(authoritative_count[child]);
             }
         }
 
-        // NodeLink uses a u32 sentinel, so this index is half the size of
-        // Vec<Option<NodeId>> on targets where NodeId has no niche.
-        let mut nearest_authoritative_ancestor = vec![NodeLink::NONE; dom.len()];
-        // `nodes` already records DOM order. Reuse it for nearest-ancestor
-        // propagation instead of taking a second element snapshot.
-        for &(node, _) in nodes {
-            if let Some(parent) = dom.parent(node) {
-                nearest_authoritative_ancestor[node.index()] =
-                    if self.is_authoritative_semantic(dom, parent) {
-                        NodeLink::from_option(Some(parent))
-                    } else {
-                        nearest_authoritative_ancestor[parent.index()]
-                    };
-            }
-        }
-
-        let mut article_peer_count = vec![0_u32; dom.len()];
-        let mut article_peer_score = vec![0.0; dom.len()];
-        for candidate in &self.candidates {
+        let mut article_peer_count = vec![0_u32; candidate_count];
+        let mut article_peer_score = vec![0.0; candidate_count];
+        for (candidate_index, candidate) in self.candidates.iter().enumerate() {
             let is_article = dom.tag(candidate.node) == Some(Tag::Article)
                 || dom
                     .attr(candidate.node, AttrName::Role)
                     .is_some_and(|role| matches_role(role, "article"));
-            let Some(parent) = nearest_authoritative_ancestor[candidate.node.index()].get() else {
+            let parent = nearest_authoritative_ancestor[candidate_index];
+            if parent == NO_CANDIDATE {
                 continue;
-            };
+            }
+            let parent = parent as usize;
             if is_article
                 && dom.parent(candidate.node).is_some()
                 && store
                     .get_stats(candidate.node)
                     .is_some_and(|stats| stats.has_non_whitespace)
             {
-                article_peer_count[parent.index()] += 1;
-                article_peer_score[parent.index()] += candidate.readability_score;
+                article_peer_count[parent] += 1;
+                article_peer_score[parent] += candidate.readability_score;
             }
         }
 
@@ -334,26 +387,37 @@ impl CandidateSet {
             readability_in_subtree,
             has_authoritative_ancestor: nearest_authoritative_ancestor
                 .iter()
-                .map(|ancestor| ancestor.get().is_some())
+                .map(|&ancestor| ancestor != NO_CANDIDATE)
                 .collect(),
             authoritative_count,
             article_peer_count,
             article_peer_score,
+            source_positions,
         }
     }
 
     pub(crate) fn get(&self, node: NodeId) -> Option<&Candidate> {
-        let position = self.positions.get(node.index()).copied()?;
-        (position != usize::MAX).then(|| &self.candidates[position])
+        self.candidate_index(node)
+            .and_then(|position| self.candidates.get(position))
     }
 
     fn add(&mut self, node: NodeId, source: CandidateSource, value: f64) {
         if node.index() >= self.positions.len() {
-            self.positions.resize(node.index() + 1, usize::MAX);
+            self.positions.resize(node.index() + 1, NO_CANDIDATE);
         }
         let position = self.positions[node.index()];
-        if position == usize::MAX {
-            self.positions[node.index()] = self.candidates.len();
+        if position == NO_CANDIDATE {
+            let Ok(position) = u32::try_from(self.candidates.len()) else {
+                // NodeId and the lookup sentinel bound the representable
+                // candidate count. If that bound is reached, leave the
+                // candidate unindexed instead of creating an invalid map
+                // entry or panicking on caller-controlled input.
+                return;
+            };
+            if position == NO_CANDIDATE {
+                return;
+            }
+            self.positions[node.index()] = position;
             let mut sources = CandidateSources::default();
             sources.insert(source);
             self.candidates.push(Candidate {
@@ -379,7 +443,7 @@ impl CandidateSet {
             return;
         }
 
-        let candidate = &mut self.candidates[position];
+        let candidate = &mut self.candidates[position as usize];
         let already_had_source = candidate.sources.contains(source);
         candidate.sources.insert(source);
         match source {
@@ -403,6 +467,14 @@ impl CandidateSet {
             }
             CandidateSource::Generic => {}
         }
+    }
+
+    fn candidate_index(&self, node: NodeId) -> Option<usize> {
+        self.positions
+            .get(node.index())
+            .copied()
+            .filter(|&position| position != NO_CANDIDATE)
+            .map(|position| position as usize)
     }
 }
 
@@ -1384,6 +1456,183 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.has_source(CandidateSource::Generic))
         );
+    }
+
+    #[test]
+    fn ranking_context_relationships_are_candidate_sized() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="main"><div class="wrapper"><article><p>First article content.</p></article><article><p>Second article content.</p></article></div><p>Not a candidate.</p></main></body>"#,
+        )
+        .unwrap();
+        let main = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("main"))
+            .unwrap();
+        let articles: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Article))
+            .collect();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        for (index, &article) in articles.iter().enumerate() {
+            candidates.add_readability(article, 10.0 + index as f64);
+        }
+
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        let mut store = NodeStateStore::new();
+        for candidate in candidates.iter() {
+            crate::scoring::get_or_compute_stats(&dom, candidate.node, &mut store);
+        }
+        let context = candidates.ranking_context(&dom, &store, &snapshot);
+
+        assert_eq!(
+            context.readability_in_subtree.len(),
+            candidates.candidates.len()
+        );
+        assert_eq!(
+            context.has_authoritative_ancestor.len(),
+            candidates.candidates.len()
+        );
+        assert_eq!(
+            context.authoritative_count.len(),
+            candidates.candidates.len()
+        );
+        assert_eq!(
+            context.article_peer_count.len(),
+            candidates.candidates.len()
+        );
+        assert_eq!(
+            context.article_peer_score.len(),
+            candidates.candidates.len()
+        );
+        assert_eq!(
+            std::mem::size_of_val(&candidates.positions[0]),
+            std::mem::size_of::<u32>()
+        );
+
+        let main_index = candidates.candidate_index(main).unwrap();
+        assert!(context.has_readability(main_index));
+        assert_eq!(context.article_peer_summary(main_index).0, 2);
+        for &article in &articles {
+            let article_index = candidates.candidate_index(article).unwrap();
+            assert!(context.has_authoritative_ancestor(article_index));
+            assert!(!context.has_authoritative_descendant(article_index, true));
+        }
+
+        let legacy = legacy_ranking_relationships(&dom, &store, &snapshot, &candidates);
+        for (index, candidate) in candidates.candidates.iter().enumerate() {
+            let node = candidate.node.index();
+            assert_eq!(context.has_readability(index), legacy.0[node]);
+            assert_eq!(context.has_authoritative_ancestor(index), legacy.1[node]);
+            assert_eq!(
+                context.has_authoritative_descendant(index, false),
+                legacy.2[node] > 0
+            );
+            assert_eq!(
+                context.article_peer_summary(index),
+                (legacy.3[node], legacy.4[node])
+            );
+        }
+    }
+
+    #[test]
+    fn equal_candidate_scores_keep_source_order() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div><section id="first"><p>Equal source text.</p></section></div><div><section id="second"><p>Equal source text.</p></section></div></main></body>"#,
+        )
+        .unwrap();
+        let first = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("first"))
+            .unwrap();
+        let second = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("second"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(first, 10.0);
+        candidates.add_readability(second, 10.0);
+
+        let first_index = candidates.candidate_index(first).unwrap();
+        let second_index = candidates.candidate_index(second).unwrap();
+        assert!(first_index < second_index);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.readability_score == 10.0)
+                .map(|candidate| candidate.node)
+                .collect::<Vec<_>>(),
+            [first, second]
+        );
+    }
+
+    type LegacyRelationships = (Vec<bool>, Vec<bool>, Vec<u32>, Vec<u32>, Vec<f64>);
+
+    fn legacy_ranking_relationships(
+        dom: &Dom,
+        store: &NodeStateStore,
+        nodes: &[(NodeId, u32)],
+        candidates: &CandidateSet,
+    ) -> LegacyRelationships {
+        let mut readability_in_subtree = vec![false; dom.len()];
+        let mut authoritative_count = vec![0_u32; dom.len()];
+        for candidate in &candidates.candidates {
+            readability_in_subtree[candidate.node.index()] =
+                candidate.has_source(CandidateSource::Readability);
+            if candidates.is_authoritative_semantic(dom, candidate.node) {
+                authoritative_count[candidate.node.index()] = 1;
+            }
+        }
+        for &(node, _) in nodes.iter().rev() {
+            if let Some(parent) = dom.parent(node) {
+                readability_in_subtree[parent.index()] |= readability_in_subtree[node.index()];
+                authoritative_count[parent.index()] = authoritative_count[parent.index()]
+                    .saturating_add(authoritative_count[node.index()]);
+            }
+        }
+
+        let mut nearest_authoritative_ancestor = vec![None; dom.len()];
+        for &(node, _) in nodes {
+            if let Some(parent) = dom.parent(node) {
+                nearest_authoritative_ancestor[node.index()] =
+                    if candidates.is_authoritative_semantic(dom, parent) {
+                        Some(parent)
+                    } else {
+                        nearest_authoritative_ancestor[parent.index()]
+                    };
+            }
+        }
+
+        let mut article_peer_count = vec![0_u32; dom.len()];
+        let mut article_peer_score = vec![0.0; dom.len()];
+        for candidate in &candidates.candidates {
+            let is_article = dom.tag(candidate.node) == Some(Tag::Article)
+                || dom
+                    .attr(candidate.node, AttrName::Role)
+                    .is_some_and(|role| matches_role(role, "article"));
+            let Some(parent) = nearest_authoritative_ancestor[candidate.node.index()] else {
+                continue;
+            };
+            if is_article
+                && dom.parent(candidate.node).is_some()
+                && store
+                    .get_stats(candidate.node)
+                    .is_some_and(|stats| stats.has_non_whitespace)
+            {
+                article_peer_count[parent.index()] += 1;
+                article_peer_score[parent.index()] += candidate.readability_score;
+            }
+        }
+
+        (
+            readability_in_subtree,
+            nearest_authoritative_ancestor
+                .iter()
+                .map(Option::is_some)
+                .collect(),
+            authoritative_count,
+            article_peer_count,
+            article_peer_score,
+        )
     }
 
     #[test]

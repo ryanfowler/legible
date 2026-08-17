@@ -2509,7 +2509,7 @@ impl<'a> ContentExtractor<'a> {
         let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
             .iter()
             .enumerate()
-            .filter_map(|(order, candidate)| {
+            .filter_map(|(candidate_index, candidate)| {
                 if excluded
                     .get(candidate.node.index())
                     .copied()
@@ -2523,7 +2523,7 @@ impl<'a> ContentExtractor<'a> {
                 }
                 let is_semantic = candidate.has_source(CandidateSource::Semantic);
                 let is_authoritative = candidates.is_authoritative_semantic(dom, candidate.node);
-                let has_readability = context.has_readability(candidate.node);
+                let has_readability = context.has_readability(candidate_index);
                 let has_meaningful_content = has_readability
                     || candidate.features.code_block_count > 0
                     || candidate.features.table_count > 0
@@ -2548,8 +2548,8 @@ impl<'a> ContentExtractor<'a> {
                 }
                 let short_semantic_bonus = if is_authoritative
                     && has_meaningful_content
-                    && !context.has_authoritative_ancestor(candidate.node)
-                    && !context.has_authoritative_descendant(candidate.node, is_authoritative)
+                    && !context.has_authoritative_ancestor(candidate_index)
+                    && !context.has_authoritative_descendant(candidate_index, is_authoritative)
                 {
                     25.0 * (1.0 - (f64::from(length.min(100)) / 100.0))
                 } else {
@@ -2563,7 +2563,7 @@ impl<'a> ContentExtractor<'a> {
                                 .any(|value| value.eq_ignore_ascii_case("main"))
                         });
                 let (article_peer_count, article_peer_score) = if is_main {
-                    context.article_peer_summary(candidate.node)
+                    context.article_peer_summary(candidate_index)
                 } else {
                     (0, 0.0)
                 };
@@ -2590,7 +2590,7 @@ impl<'a> ContentExtractor<'a> {
                 Some(RankedCandidate {
                     node: candidate.node,
                     score: final_score,
-                    order,
+                    order: context.source_order(candidate_index),
                 })
             })
             .collect();
@@ -3603,6 +3603,48 @@ mod tests {
             .attr(ranked[0].node, AttrName::Id)
             .expect("winner must have a test ID")
             .to_owned()
+    }
+
+    #[test]
+    fn ranking_ties_keep_source_order_at_the_candidate_cutoff() {
+        let dom = Dom::parse_document(
+            r#"<body><p id="first">Same source sentence.</p><p id="second">Same source sentence.</p><p id="third">Same source sentence.</p></body>"#,
+        )
+        .unwrap();
+        let body = dom.body().unwrap();
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        // Add candidates in a different order than their source positions.
+        // Equal scores must still use the snapshot's source order at the
+        // top-candidate cutoff.
+        for id in ["third", "second", "first"] {
+            let node = dom
+                .descendants(dom.root())
+                .find(|&node| dom.attr(node, AttrName::Id) == Some(id))
+                .unwrap();
+            candidates.add_readability(node, 10.0);
+        }
+        let mut store = NodeStateStore::new();
+        let mut excluded = vec![false; dom.len()];
+        excluded[body.index()] = true;
+
+        let (ranked, _) = ContentExtractor::rank_candidates_with_snapshot(
+            &dom,
+            body,
+            &snapshot,
+            &mut candidates,
+            SmallVec::new(),
+            &excluded,
+            &mut store,
+            true,
+            2,
+            None,
+        );
+        let ranked_ids: Vec<_> = ranked
+            .iter()
+            .map(|candidate| dom.attr(candidate.node, AttrName::Id).unwrap())
+            .collect();
+        assert_eq!(ranked_ids, ["first", "second"]);
     }
 
     #[test]
