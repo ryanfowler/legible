@@ -241,13 +241,15 @@ pub(crate) fn get_or_compute_stats_excluding(
     }
     store.get_stats(id).copied().unwrap_or_default()
 }
-/// Structural counts for all attached subtrees.
+/// Structural counts for candidate subtrees.
 ///
-/// This index makes feature calculation linear in DOM size, even when many
-/// nested nodes become candidates.
+/// Counts are accumulated on the candidate containment tree rather than on
+/// every source node. This keeps the feature index proportional to the number
+/// of candidates while preserving additive subtree totals.
 #[derive(Clone)]
 pub(crate) struct CandidateFeatureIndex {
     counts: Vec<StructuralCounts>,
+    candidate_nodes: Vec<NodeId>,
     has_links: bool,
 }
 
@@ -281,13 +283,40 @@ impl StructuralCounts {
 }
 
 impl CandidateFeatureIndex {
-    pub(crate) fn new(dom: &Dom, store: &NodeStateStore, nodes: &[(NodeId, u32)]) -> Self {
-        let mut counts = vec![StructuralCounts::default(); dom.len()];
+    pub(crate) fn new(
+        dom: &Dom,
+        store: &NodeStateStore,
+        nodes: &[(NodeId, u32)],
+        candidates: &CandidateSet,
+    ) -> Self {
+        let candidate_nodes: Vec<_> = candidates.iter().map(|candidate| candidate.node).collect();
+        let mut counts = vec![StructuralCounts::default(); candidate_nodes.len()];
+        let mut candidate_parent = vec![None; candidate_nodes.len()];
+        let mut active_candidates = Vec::<(u32, usize)>::new();
+        let mut candidate_order = Vec::with_capacity(candidate_nodes.len());
         let mut has_links = false;
 
-        for &(node, _) in nodes {
+        for &(node, depth) in nodes {
             let Some(tag) = dom.tag(node) else { continue };
-            let own = &mut counts[node.index()];
+            if tag == Tag::A {
+                has_links = true;
+            }
+
+            while active_candidates
+                .last()
+                .is_some_and(|&(active_depth, _)| active_depth >= depth)
+            {
+                active_candidates.pop();
+            }
+
+            if let Some(candidate_index) = candidates.index_of(node) {
+                candidate_parent[candidate_index] =
+                    active_candidates.last().map(|&(_, parent)| parent);
+                active_candidates.push((depth, candidate_index));
+                candidate_order.push(candidate_index);
+            }
+
+            let mut own = StructuralCounts::default();
             match tag {
                 Tag::P => own.paragraphs = 1,
                 Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => own.headings = 1,
@@ -299,17 +328,36 @@ impl CandidateFeatureIndex {
                 Tag::Blockquote | Tag::Details | Tag::Dl | Tag::Math | Tag::Picture => {
                     own.protected_blocks = 1
                 }
-                Tag::A => has_links = true,
                 _ => {}
             }
-        }
-        for &(node, _) in nodes.iter().rev() {
-            if let Some(parent) = dom.parent(node) {
-                let child = counts[node.index()];
-                counts[parent.index()].add(child);
+            if let Some(&(_, candidate_index)) = active_candidates.last() {
+                counts[candidate_index].add(own);
             }
         }
-        Self { counts, has_links }
+
+        // The snapshot is in source preorder, so reversing the candidates
+        // propagates every nested candidate's total to its candidate parent
+        // without revisiting the non-candidate source nodes.
+        for &candidate_index in candidate_order.iter().rev() {
+            if let Some(parent) = candidate_parent[candidate_index] {
+                let child = counts[candidate_index];
+                counts[parent].add(child);
+            }
+        }
+        Self {
+            counts,
+            candidate_nodes,
+            has_links,
+        }
+    }
+
+    pub(crate) fn matches_candidates(&self, candidates: &CandidateSet) -> bool {
+        self.candidate_nodes.len() == candidates.iter().count()
+            && self
+                .candidate_nodes
+                .iter()
+                .zip(candidates.iter())
+                .all(|(&node, candidate)| node == candidate.node)
     }
 
     pub(crate) fn prepare_text_cache(&self, store: &mut NodeStateStore) {
@@ -322,12 +370,17 @@ impl CandidateFeatureIndex {
     pub(crate) fn features(
         &self,
         dom: &Dom,
+        candidate_index: usize,
         candidate: Candidate,
         store: &mut NodeStateStore,
         weight_classes: bool,
     ) -> CandidateFeatures {
         let text = get_or_compute_stats(dom, candidate.node, store);
-        let counts = self.counts[candidate.node.index()];
+        let counts = self
+            .counts
+            .get(candidate_index)
+            .copied()
+            .unwrap_or_default();
         let link_text_chars = if store.link_lengths_enabled() {
             store.link_length(candidate.node)
         } else {
@@ -1099,7 +1152,7 @@ mod tests {
         has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text,
     };
     use crate::candidate::CandidateSet;
-    use crate::dom::{Dom, NodeStateStore, Tag};
+    use crate::dom::{AttrName, Dom, NodeStateStore, Tag};
 
     #[test]
     fn static_visibility_handles_inline_css_declarations() {
@@ -1201,6 +1254,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.node == main)
             .unwrap();
+        let candidate_index = candidates.index_of(main).unwrap();
         let mut store = NodeStateStore::new();
         let mut table_nodes = Vec::new();
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
@@ -1210,9 +1264,9 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot);
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
         index.prepare_text_cache(&mut store);
-        let features = index.features(&dom, candidate, &mut store, true);
+        let features = index.features(&dom, candidate_index, candidate, &mut store, true);
 
         assert!(features.word_count >= 12);
         assert_eq!(features.paragraph_count, 2);
@@ -1228,7 +1282,7 @@ mod tests {
         assert!(features.positive_name_score > 0.0);
         assert!(features.negative_name_score > 0.0);
 
-        let unweighted = index.features(&dom, candidate, &mut store, false);
+        let unweighted = index.features(&dom, candidate_index, candidate, &mut store, false);
         assert_eq!(unweighted.positive_name_score, 0.0);
         assert_eq!(unweighted.negative_name_score, 0.0);
     }
@@ -1253,6 +1307,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.node == main)
             .unwrap();
+        let candidate_index = candidates.index_of(main).unwrap();
         let mut store = NodeStateStore::new();
         let mut table_nodes = Vec::new();
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
@@ -1262,14 +1317,66 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot);
-        let features = index.features(&dom, candidate, &mut store, false);
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
+        let features = index.features(&dom, candidate_index, candidate, &mut store, false);
 
         assert_eq!(features.paragraph_count, 300);
         assert_eq!(features.heading_count, 300);
         assert_eq!(features.code_block_count, 300);
         assert_eq!(features.table_count, 300);
         assert_eq!(features.figure_count, 300);
+    }
+
+    #[test]
+    fn structural_counts_aggregate_through_nested_candidates() {
+        let dom = Dom::parse_document(
+            r#"<body><main><section id="outer"><p>Before.</p><section id="inner"><h2>Inside</h2><p>Inner.</p><figure><img src="plot.png"></figure></section><p>After.</p></section></main></body>"#,
+        )
+        .unwrap();
+        let outer = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("outer"))
+            .unwrap();
+        let inner = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("inner"))
+            .unwrap();
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        let mut store = NodeStateStore::new();
+        let mut table_nodes = Vec::new();
+        crate::cleaning::mark_data_tables_from_snapshot(
+            &dom,
+            &snapshot,
+            &mut store,
+            &mut table_nodes,
+        );
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
+
+        assert_eq!(index.counts.len(), candidates.iter().count());
+        let outer_features = index.features(
+            &dom,
+            candidates.index_of(outer).unwrap(),
+            *candidates.get(outer).unwrap(),
+            &mut store,
+            false,
+        );
+        let inner_features = index.features(
+            &dom,
+            candidates.index_of(inner).unwrap(),
+            *candidates.get(inner).unwrap(),
+            &mut store,
+            false,
+        );
+
+        assert_eq!(inner_features.paragraph_count, 1);
+        assert_eq!(inner_features.heading_count, 1);
+        assert_eq!(inner_features.figure_count, 1);
+        assert_eq!(inner_features.image_count, 1);
+        assert_eq!(outer_features.paragraph_count, 3);
+        assert_eq!(outer_features.heading_count, 1);
+        assert_eq!(outer_features.figure_count, 1);
+        assert_eq!(outer_features.image_count, 1);
     }
 
     #[test]
