@@ -245,6 +245,7 @@ pub(crate) fn get_or_compute_stats_excluding(
 ///
 /// This index makes feature calculation linear in DOM size, even when many
 /// nested nodes become candidates.
+#[derive(Clone)]
 pub(crate) struct CandidateFeatureIndex {
     counts: Vec<StructuralCounts>,
     has_links: bool,
