@@ -34,7 +34,7 @@ pub(crate) struct NodeState {
     pub(crate) stats: NodeStats,
     pub(crate) stats_epoch: u32,
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct NodeStateStore {
     entries: Vec<NodeState>,
     stats_epoch: u32,
@@ -58,6 +58,13 @@ impl NodeStateStore {
             .for_each(|e| *e = NodeState::default());
         self.stats_epoch = 1;
         self.link_lengths = None;
+    }
+    pub(crate) fn clear_scores(&mut self) {
+        for entry in &mut self.entries {
+            entry.content_score = 0.0;
+            entry.score_initialized = false;
+            entry.score_seen = false;
+        }
     }
     pub(crate) fn clear_stats(&mut self) {
         self.stats_epoch = self.stats_epoch.wrapping_add(1);

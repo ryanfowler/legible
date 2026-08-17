@@ -376,6 +376,18 @@ pub(crate) fn record_strategy(plan_id: u8) {
     STATE.with(|state| {
         let mut value = state.get();
         value.counters.strategies_started = value.counters.strategies_started.saturating_add(1);
+        let _ = plan_id;
+        state.set(value);
+    });
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let _ = plan_id;
+}
+
+#[inline(always)]
+pub(crate) fn record_unique_attempt_plan(plan_id: u8) {
+    #[cfg(feature = "bench-instrumentation")]
+    STATE.with(|state| {
+        let mut value = state.get();
         if plan_id < u8::BITS as u8 {
             let bit = 1_u8 << plan_id;
             if value.attempt_plan_mask & bit == 0 {
