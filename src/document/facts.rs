@@ -804,12 +804,12 @@ impl SemanticFacts {
         root: NodeId,
         source_facts: Option<&SemanticSourceFacts>,
         source_evidence: Option<&SourceEvidence>,
-        retained_nodes: Option<&[NodeId]>,
+        retained_stream: Option<&super::RetainedStream>,
     ) -> Self {
         let mut nodes = Vec::with_capacity(dom.len());
         nodes.push(root);
-        if let Some(retained_nodes) = retained_nodes {
-            nodes.extend(retained_nodes.iter().copied());
+        if let Some(retained_stream) = retained_stream {
+            nodes.extend(retained_stream.iter_nodes());
         } else if let Some(source_facts) = source_facts {
             nodes.extend(source_facts.live_nodes(root));
         } else {

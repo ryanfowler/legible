@@ -131,7 +131,7 @@ pub(crate) fn remove_empty_content_with_source_facts(
     nodes: &mut Vec<NodeId>,
     source_facts: &mut Option<crate::document::SemanticSourceFacts>,
     source_evidence: &crate::document::SourceEvidence,
-) -> Option<Vec<NodeId>> {
+) -> Option<crate::document::RetainedStream> {
     remove_empty_nodes(dom, root, nodes, source_facts, source_evidence)
 }
 
@@ -157,7 +157,7 @@ fn remove_empty_nodes(
     nodes: &mut Vec<NodeId>,
     source_facts: &mut Option<crate::document::SemanticSourceFacts>,
     source_evidence: &crate::document::SourceEvidence,
-) -> Option<Vec<NodeId>> {
+) -> Option<crate::document::RetainedStream> {
     // A source-fact snapshot already owns the source order used by complex
     // lowering. Build a second, complete stream only for the ordinary path,
     // where it can replace the compiler's DOM traversal. Source facts may be
@@ -171,10 +171,11 @@ fn remove_empty_nodes(
         nodes.extend(dom.descendants(root));
     }
 
-    let (positions, subtree_ends) = build_retained_stream
-        .then(|| retained_source_ranges(dom, nodes))
-        .unzip();
-    let mut removed_ranges = Vec::new();
+    // Build the retained stream before detach operations. It carries the
+    // source depth required by ordinary lowering, so final cleanup does not
+    // need a DOM-sized position index or a second topology reconstruction.
+    let mut retained_stream = build_retained_stream
+        .then(|| crate::document::RetainedStream::from_preorder(dom, root, nodes));
 
     // Whitespace-only syntax token elements contain significant code text.
     // Record code ancestry in one preorder pass so empty-node cleanup does not
@@ -238,7 +239,7 @@ fn remove_empty_nodes(
         }
     }
 
-    for &node in nodes.iter().rev() {
+    for (position, &node) in nodes.iter().enumerate().rev() {
         let significant_code_whitespace =
             in_preformatted_code[node.index()] && has_text[node.index()];
         if dom.parent(node).is_some()
@@ -270,13 +271,8 @@ fn remove_empty_nodes(
                 ) && !has_visible_heading_content(dom, node))
         {
             let parent = dom.parent(node);
-            if let (Some(positions), Some(subtree_ends)) =
-                (positions.as_ref(), subtree_ends.as_ref())
-            {
-                let position = positions[node.index()];
-                if position != usize::MAX {
-                    removed_ranges.push((position, subtree_ends[position]));
-                }
+            if let Some(retained_stream) = retained_stream.as_mut() {
+                retained_stream.mark_removed(position);
             }
             dom.detach(node);
             if let Some(source_facts) = source_facts.as_mut() {
@@ -288,61 +284,10 @@ fn remove_empty_nodes(
         source_facts.refresh_after_cleanup(dom);
     }
 
-    build_retained_stream.then(|| retained_live_nodes(nodes, removed_ranges))
-}
-
-/// Returns source-order positions and subtree ends for the final cleanup
-/// snapshot. Arena allocation order is not a source-order guarantee, so this
-/// derives ranges from parent links before cleanup detaches any nodes.
-fn retained_source_ranges(dom: &Dom, nodes: &[NodeId]) -> (Vec<usize>, Vec<usize>) {
-    let mut positions = vec![usize::MAX; dom.len()];
-    for (position, &node) in nodes.iter().enumerate() {
-        positions[node.index()] = position;
-    }
-
-    let mut subtree_ends: Vec<_> = (0..nodes.len()).map(|position| position + 1).collect();
-    for position in (0..nodes.len()).rev() {
-        let node = nodes[position];
-        if let Some(parent) = dom.parent(node) {
-            let parent_position = positions[parent.index()];
-            if parent_position < position {
-                subtree_ends[parent_position] =
-                    subtree_ends[parent_position].max(subtree_ends[position]);
-            }
-        }
-    }
-    (positions, subtree_ends)
-}
-
-/// Removes final-cleanup subtrees from the source snapshot without walking the
-/// retained DOM again. The remaining nodes stay in source order and include
-/// text and comment nodes needed by ordinary lowering.
-fn retained_live_nodes(nodes: &[NodeId], removed_ranges: Vec<(usize, usize)>) -> Vec<NodeId> {
-    // Cleanup visits the source snapshot in reverse order, so removed ranges
-    // already have descending starts. Walk the snapshot in the same direction
-    // and advance through ranges without sorting or merging them.
-    let mut retained = Vec::with_capacity(
-        nodes.len().saturating_sub(
-            removed_ranges
-                .iter()
-                .map(|(start, end)| end.saturating_sub(*start))
-                .sum(),
-        ),
-    );
-    let mut range_index = 0;
-    for position in (0..nodes.len()).rev() {
-        while range_index < removed_ranges.len() && position < removed_ranges[range_index].0 {
-            range_index += 1;
-        }
-        if range_index == removed_ranges.len()
-            || position < removed_ranges[range_index].0
-            || position >= removed_ranges[range_index].1
-        {
-            retained.push(nodes[position]);
-        }
-    }
-    retained.reverse();
-    retained
+    retained_stream.take().map(|mut stream| {
+        stream.compact_removed();
+        stream
+    })
 }
 
 #[cfg(test)]

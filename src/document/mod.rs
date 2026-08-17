@@ -17,6 +17,7 @@ mod lists;
 mod math;
 mod media;
 mod ordinary;
+mod retained;
 mod sparse;
 pub(crate) mod stats;
 mod tables;
@@ -66,6 +67,7 @@ pub(crate) fn selected_image_sources_for_cleanup(
     let analysis = images::analyze(dom, nodes, None);
     analysis.into_sources(dom.len())
 }
+pub(crate) use retained::RetainedStream;
 pub(crate) use stats::DocumentStats;
 pub(crate) fn semantic_source_is_protected(
     dom: &crate::dom::Dom,
