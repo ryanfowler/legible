@@ -4,10 +4,10 @@ use thiserror::Error;
 use url::Url;
 
 use super::{
-    BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document, DocumentNodeId,
-    FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media, SemanticKind,
-    SemanticTapeBuilder, Table, TableAlignment, TableCell, TaskMarker, ValidationError,
-    safe_destination,
+    BuildCapacityPlan, BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document,
+    DocumentNodeId, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media,
+    SemanticKind, SemanticTapeBuilder, Table, TableAlignment, TableCell, TaskMarker,
+    ValidationError, safe_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::instrumentation::{Phase, PhaseGuard};
@@ -183,18 +183,18 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
     // Ordinary pages do not need the rich source-evidence inventory. Run a
     // cheap gate first, then let the lowering pass validate the few structural
     // cases that cannot be classified from a flat source scan.
-    if let Some(source_node_count) =
+    if let Some(source_plan) =
         super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_nodes)
     {
-        match super::ordinary::compile_with_retained_nodes(
+        match super::ordinary::compile_with_retained_capacity_plan(
             dom,
             root,
             context,
-            source_node_count,
+            source_plan.capacity,
             retained_nodes,
         ) {
             Ok(document) => {
-                crate::instrumentation::record_semantic_source_nodes(source_node_count);
+                crate::instrumentation::record_semantic_source_nodes(source_plan.source_node_count);
                 record_document_metrics(&document);
                 return Ok(document);
             }
@@ -290,18 +290,18 @@ fn compile_document_owned_impl(
     retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
-    if let Some(source_node_count) =
+    if let Some(source_plan) =
         super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, retained_nodes)
     {
-        match super::ordinary::compile_with_retained_nodes(
+        match super::ordinary::compile_with_retained_capacity_plan(
             &dom,
             root,
             context,
-            source_node_count,
+            source_plan.capacity,
             retained_nodes,
         ) {
             Ok(document) => {
-                crate::instrumentation::record_semantic_source_nodes(source_node_count);
+                crate::instrumentation::record_semantic_source_nodes(source_plan.source_node_count);
                 record_document_metrics(&document);
                 return Ok(document);
             }
@@ -522,7 +522,8 @@ fn lower_complex_document(
         media_separators,
         text_after_media_separators,
     } = analysis;
-    let mut builder = SemanticTapeBuilder::with_capacity(facts.nodes().len());
+    let capacity = capacity_plan_for_lowering(&facts, &tables);
+    let mut builder = SemanticTapeBuilder::with_plan(capacity);
     let mut footnote_ids = HashMap::<String, FootnoteId>::new();
     let mut open_tables: Vec<OpenTable> = Vec::new();
     let mut deferred_footnote_group = None;
@@ -1229,6 +1230,16 @@ fn lower_complex_document(
     Ok(document)
 }
 
+fn capacity_plan_for_lowering(
+    facts: &super::facts::SemanticFacts,
+    tables: &super::tables::TableAnalysis,
+) -> BuildCapacityPlan {
+    let mut capacity = facts.capacity_plan();
+    capacity.lists = capacity.lists.saturating_add(tables.listing_count());
+    capacity.code_blocks = capacity.code_blocks.max(tables.gutter_table_count());
+    capacity
+}
+
 fn media_separators(
     dom: &Dom,
     root: NodeId,
@@ -1748,6 +1759,32 @@ mod tests {
         super::super::ordinary::supports(&dom, dom.root())
     }
 
+    #[test]
+    fn capacity_depth_counts_semantic_containers_not_transparent_wrappers() {
+        let wrappers = "<span>".repeat(1_024);
+        let closing = "</span>".repeat(1_024);
+        let html = format!("<p>{wrappers}text{closing}</p>");
+        let dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
+        let root = dom.root();
+
+        let ordinary =
+            super::super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, None)
+                .unwrap();
+        assert_eq!(ordinary.capacity.max_depth, 1);
+
+        let evidence =
+            super::super::facts::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
+        let complex = analyze_complex_document(
+            &dom,
+            root,
+            &CompileContext::default(),
+            None,
+            &evidence,
+            None,
+        );
+        assert_eq!(complex.facts.capacity_plan().max_depth, 1);
+    }
+
     fn compare_ordinary_and_complex(html: &str, base: Option<&str>) {
         let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
         let base = base.map(|value| Url::parse(value).unwrap());
@@ -1771,7 +1808,8 @@ mod tests {
                 dom.root(),
                 Some(&retained_nodes),
             )
-            .unwrap(),
+            .unwrap()
+            .source_node_count,
             Some(&retained_nodes),
         )
         .unwrap();
@@ -2433,6 +2471,29 @@ mod tests {
         let tree = document.debug_tape();
         assert!(tree.starts_with("List(kind=Ordered, start=None)"), "{tree}");
         assert!(tree.contains("BlockGroup\n  Paragraph"), "{tree}");
+    }
+
+    #[test]
+    fn capacity_plan_includes_synthetic_table_payloads() {
+        let html = r#"<table><tr><td>1.</td><td><a href="/one">First</a></td></tr><tr><td></td><td>Metadata</td></tr><tr><td>2.</td><td><a href="/two">Second</a></td></tr><tr><td></td><td>More metadata</td></tr><tr><td>3.</td><td><a href="/three">Third</a></td></tr><tr><td></td><td>Last metadata</td></tr></table><table class="lntable"><tbody><tr><td class="lntd"><pre><code><span class="lnt">1</span></code></pre></td><td class="lntd"><pre><code class="language-rust">let value = 1;</code></pre></td></tr></tbody></table>"#;
+        let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let root = dom.root();
+        let evidence =
+            super::super::facts::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
+        let analysis = analyze_complex_document(
+            &dom,
+            root,
+            &CompileContext::default(),
+            None,
+            &evidence,
+            None,
+        );
+        let capacity = capacity_plan_for_lowering(&analysis.facts, &analysis.tables);
+
+        assert_eq!(analysis.tables.listing_count(), 1);
+        assert_eq!(analysis.tables.gutter_table_count(), 1);
+        assert!(capacity.lists >= analysis.tables.listing_count());
+        assert!(capacity.code_blocks >= analysis.tables.gutter_table_count());
     }
 
     #[test]

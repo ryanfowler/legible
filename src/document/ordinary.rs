@@ -5,9 +5,15 @@ use super::compiler::{
     semantic_image,
 };
 use super::{
-    CodeBlock, Document, DocumentNodeId, Link, List, ListKind, SemanticKind, SemanticTapeBuilder,
+    BuildCapacityPlan, CodeBlock, Document, DocumentNodeId, Link, List, ListKind, SemanticKind,
+    SemanticTapeBuilder,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+
+pub(super) struct OrdinarySourcePlan {
+    pub(super) source_node_count: usize,
+    pub(super) capacity: BuildCapacityPlan,
+}
 
 /// Returns the source-node count when a fragment is safe to try on the ordinary path.
 ///
@@ -17,7 +23,7 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 /// full inventory traversal from ordinary pages.
 #[cfg(test)]
 pub(super) fn ordinary_source_gate(dom: &Dom, root: NodeId) -> Option<usize> {
-    ordinary_source_gate_with_retained_nodes(dom, root, None)
+    ordinary_source_gate_with_retained_nodes(dom, root, None).map(|plan| plan.source_node_count)
 }
 
 /// Runs the ordinary gate over the source-order stream produced by final
@@ -27,16 +33,21 @@ pub(super) fn ordinary_source_gate_with_retained_nodes(
     dom: &Dom,
     root: NodeId,
     retained_nodes: Option<&[NodeId]>,
-) -> Option<usize> {
+) -> Option<OrdinarySourcePlan> {
     if let Some(nodes) = retained_nodes {
         return ordinary_source_gate_from_nodes(dom, nodes);
     }
 
-    let mut node_count = 0;
-    let mut tasks: Vec<(NodeId, bool)> = dom.children_rev(root).map(|node| (node, false)).collect();
+    let mut source_node_count = 0;
+    let mut capacity = BuildCapacityPlan::default();
+    let mut tasks: Vec<(NodeId, bool, bool, bool, usize)> = dom
+        .children_rev(root)
+        .map(|node| (node, false, false, false, 0))
+        .collect();
 
-    while let Some((node, inside_heading)) = tasks.pop() {
-        node_count += 1;
+    while let Some((node, inside_heading, inside_code, inside_pre, depth)) = tasks.pop() {
+        source_node_count += 1;
+        observe_capacity(dom, node, inside_code, inside_pre, depth, &mut capacity);
         if dom.text_node(node).is_some() || dom.is_comment(node) {
             continue;
         }
@@ -55,32 +66,55 @@ pub(super) fn ordinary_source_gate_with_retained_nodes(
             return None;
         }
         let child_inside_heading = inside_heading || is_heading(tag);
-        tasks.extend(
-            dom.children_rev(node)
-                .map(|child| (child, child_inside_heading)),
-        );
+        let child_inside_code = inside_code || tag == Tag::Code;
+        let child_inside_pre = inside_pre || tag == Tag::Pre;
+        let child_semantic_depth = depth.saturating_add(usize::from(is_capacity_container(tag)));
+        tasks.extend(dom.children_rev(node).map(|child| {
+            (
+                child,
+                child_inside_heading,
+                child_inside_code,
+                child_inside_pre,
+                child_semantic_depth,
+            )
+        }));
     }
-    Some(node_count)
+    Some(OrdinarySourcePlan {
+        source_node_count,
+        capacity,
+    })
 }
 
-fn ordinary_source_gate_from_nodes(dom: &Dom, nodes: &[NodeId]) -> Option<usize> {
-    let mut ancestors = Vec::<(NodeId, bool)>::new();
-    let mut node_count = 0;
+fn ordinary_source_gate_from_nodes(dom: &Dom, nodes: &[NodeId]) -> Option<OrdinarySourcePlan> {
+    let mut ancestors = Vec::<(NodeId, bool, bool, bool, usize)>::new();
+    let mut capacity = BuildCapacityPlan::default();
+    let mut source_node_count = 0;
     for &node in nodes {
         let parent = dom.parent(node);
         while ancestors
             .last()
-            .is_some_and(|&(ancestor, _)| parent != Some(ancestor))
+            .is_some_and(|&(ancestor, _, _, _, _)| parent != Some(ancestor))
         {
             ancestors.pop();
         }
 
-        node_count += 1;
+        source_node_count += 1;
+        let inside_code = ancestors.last().is_some_and(|&(_, _, value, _, _)| value);
+        let inside_pre = ancestors.last().is_some_and(|&(_, _, _, value, _)| value);
+        let semantic_depth = ancestors.last().map_or(0, |&(_, _, _, _, depth)| depth);
+        observe_capacity(
+            dom,
+            node,
+            inside_code,
+            inside_pre,
+            semantic_depth,
+            &mut capacity,
+        );
         if dom.text_node(node).is_some() || dom.is_comment(node) {
             continue;
         }
         let tag = dom.tag(node)?;
-        let inside_heading = ancestors.last().is_some_and(|&(_, value)| value);
+        let inside_heading = ancestors.last().is_some_and(|&(_, value, _, _, _)| value);
         if has_complex_tag(tag)
             || has_complex_attributes(dom, node)
             || tag == Tag::A
@@ -96,10 +130,83 @@ fn ordinary_source_gate_from_nodes(dom: &Dom, nodes: &[NodeId]) -> Option<usize>
         }
         ancestors.push((
             node,
-            ancestors.last().is_some_and(|&(_, value)| value) || is_heading(tag),
+            ancestors.last().is_some_and(|&(_, value, _, _, _)| value) || is_heading(tag),
+            inside_code || tag == Tag::Code,
+            inside_pre || tag == Tag::Pre,
+            semantic_depth.saturating_add(usize::from(is_capacity_container(tag))),
         ));
     }
-    Some(node_count)
+    Some(OrdinarySourcePlan {
+        source_node_count,
+        capacity,
+    })
+}
+
+fn observe_capacity(
+    dom: &Dom,
+    node: NodeId,
+    inside_code: bool,
+    inside_pre: bool,
+    depth: usize,
+    plan: &mut BuildCapacityPlan,
+) {
+    plan.semantic_nodes = plan.semantic_nodes.saturating_add(1);
+    let semantic_depth =
+        depth.saturating_add(dom.tag(node).is_some_and(is_capacity_container).into());
+    plan.max_depth = plan.max_depth.max(semantic_depth);
+
+    if let Some(text) = dom.text_node(node) {
+        if !inside_code && !inside_pre {
+            plan.text_bytes = plan.text_bytes.saturating_add(text.len());
+            plan.text_refs = plan.text_refs.saturating_add(1);
+        }
+        return;
+    }
+
+    let Some(tag) = dom.tag(node) else {
+        return;
+    };
+    plan.containers = plan
+        .containers
+        .saturating_add(usize::from(is_capacity_container(tag)));
+    match tag {
+        Tag::Pre => plan.code_blocks = plan.code_blocks.saturating_add(1),
+        Tag::Code => {
+            if !inside_pre {
+                plan.text_refs = plan.text_refs.saturating_add(1);
+                if let Some(text) = dom.first_child(node).and_then(|child| dom.text_node(child)) {
+                    plan.text_bytes = plan.text_bytes.saturating_add(text.len());
+                }
+            }
+        }
+        Tag::A => plan.links = plan.links.saturating_add(1),
+        Tag::Img => plan.images = plan.images.saturating_add(1),
+        Tag::Ol | Tag::Ul => plan.lists = plan.lists.saturating_add(1),
+        _ => {}
+    }
+}
+
+fn is_capacity_container(tag: Tag) -> bool {
+    !matches!(
+        tag,
+        Tag::Br | Tag::Hr | Tag::Img | Tag::Pre | Tag::Iframe | Tag::Video | Tag::Audio
+    ) && is_block_tag(tag)
+        || matches!(
+            tag,
+            Tag::A
+                | Tag::B
+                | Tag::Strong
+                | Tag::Em
+                | Tag::I
+                | Tag::Del
+                | Tag::Figure
+                | Tag::Figcaption
+                | Tag::Details
+                | Tag::Summary
+                | Tag::Dl
+                | Tag::Dt
+                | Tag::Dd
+        )
 }
 
 #[cfg(test)]
@@ -436,6 +543,7 @@ pub(super) fn compile(
 /// Compiles an ordinary fragment from the final-cleanup source stream when it
 /// is available. The stream contains source nodes in preorder. Leaf semantic
 /// elements still skip their source descendants, matching DOM traversal.
+#[cfg(test)]
 pub(super) fn compile_with_retained_nodes(
     dom: &Dom,
     root: NodeId,
@@ -443,7 +551,23 @@ pub(super) fn compile_with_retained_nodes(
     source_node_count: usize,
     retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
-    let mut builder = SemanticTapeBuilder::with_capacity(source_node_count);
+    compile_with_retained_capacity_plan(
+        dom,
+        root,
+        context,
+        BuildCapacityPlan::from_source_node_count(source_node_count),
+        retained_nodes,
+    )
+}
+
+pub(super) fn compile_with_retained_capacity_plan(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    capacity: BuildCapacityPlan,
+    retained_nodes: Option<&[NodeId]>,
+) -> Result<Document, CompileError> {
+    let mut builder = SemanticTapeBuilder::with_plan(capacity);
     let mut frames = vec![Frame {
         tag: None,
         scope: Scope::default(),
@@ -467,11 +591,18 @@ pub(super) fn compile_with_retained_nodes(
         |nodes| retained_source_tasks(dom, nodes),
     );
 
+    macro_rules! requires_complex {
+        () => {{
+            builder.record_abandoned_attempt();
+            return Err(CompileError::RequiresComplex);
+        }};
+    }
+
     while let Some(task) = tasks.pop() {
         let Visit::Node { node } = task else {
             let frame = frames.pop().expect("compile frame must match an element");
             if frame.requires_content && !frame.has_content {
-                return Err(CompileError::RequiresComplex);
+                requires_complex!();
             }
             if let Some(semantic) = frame.semantic {
                 builder.close(semantic)?;
@@ -497,7 +628,7 @@ pub(super) fn compile_with_retained_nodes(
                 .is_some_and(|frame| frame.scope.inside_code && !frame.scope.inside_pre)
                 && text.contains('\n')
             {
-                return Err(CompileError::RequiresComplex);
+                requires_complex!();
             }
             let first = text.chars().find(|character| !character.is_whitespace());
             let last = text
@@ -540,20 +671,21 @@ pub(super) fn compile_with_retained_nodes(
             continue;
         }
         let Some(tag) = dom.tag(node) else {
-            return Err(CompileError::RequiresComplex);
+            requires_complex!();
         };
         if has_complex_tag(tag) {
-            return Err(CompileError::RequiresComplex);
+            requires_complex!();
         }
         if is_block_tag(tag) && scope.forbids_blocks {
-            return Err(CompileError::RequiresComplex);
+            requires_complex!();
         }
         if tag == Tag::Pre {
             if !simple_pre(dom, node) {
-                return Err(CompileError::RequiresComplex);
+                requires_complex!();
             }
-            let code = super::code::recognize_known_block(dom, node, true)
-                .ok_or(CompileError::RequiresComplex)?;
+            let Some(code) = super::code::recognize_known_block(dom, node, true) else {
+                requires_complex!();
+            };
             let first = code
                 .text
                 .chars()
@@ -576,11 +708,11 @@ pub(super) fn compile_with_retained_nodes(
         }
         if tag == Tag::Code {
             if dom.children(node).any(|child| dom.is_element(child)) {
-                return Err(CompileError::RequiresComplex);
+                requires_complex!();
             }
             let text = dom.text(node);
             if !scope.inside_pre && text.contains('\n') {
-                return Err(CompileError::RequiresComplex);
+                requires_complex!();
             }
             let first = text.chars().find(|character| !character.is_whitespace());
             let last = text
@@ -595,7 +727,7 @@ pub(super) fn compile_with_retained_nodes(
         }
         if tag == Tag::Img {
             if scope.inside_heading || !simple_image_source(dom, node) {
-                return Err(CompileError::RequiresComplex);
+                requires_complex!();
             }
             let source = dom
                 .attr(node, AttrName::Src)
@@ -620,7 +752,7 @@ pub(super) fn compile_with_retained_nodes(
         }
 
         if tag == Tag::A && scope.link.is_some() {
-            return Err(CompileError::RequiresComplex);
+            requires_complex!();
         }
         if tag == Tag::Figure && !simple_figure(dom, node)
             || tag == Tag::Figcaption
@@ -638,7 +770,7 @@ pub(super) fn compile_with_retained_nodes(
             || matches!(tag, Tag::Ul | Tag::Ol) && !simple_native_list(dom, node)
             || tag == Tag::Dl && !simple_definition_list(dom, node)
         {
-            return Err(CompileError::RequiresComplex);
+            requires_complex!();
         }
         let block = is_block_tag(tag);
         let requires_content = !block && !matches!(tag, Tag::Br | Tag::Code | Tag::Img)

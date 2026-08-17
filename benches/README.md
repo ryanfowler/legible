@@ -34,6 +34,8 @@ preparation, candidate discovery, scoring, root selection, fragment copy,
 cleanup, semantic compilation, and rendering durations. It also records
 allocation count, allocated bytes, peak live bytes, retained document bytes,
 DOM clone bytes, builder capacities, JSON-LD bytes, and strategy attempts.
+Builder capacity data also includes requested, final, and peak bytes, vector
+reallocations, maximum open depth, and severe shrink-copy bytes.
 Phase durations are inclusive when diagnostics compile rejected attempts.
 
 The `strategy/*` fixtures cover normal, retry, exact-root, and specialized
