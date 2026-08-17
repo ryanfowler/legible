@@ -123,11 +123,35 @@ struct BuilderMetrics {
     reallocations: usize,
     max_open_depth: usize,
     shrink_bytes: usize,
+    #[cfg(test)]
+    limits: BuilderLimits,
 }
 
 #[cfg(not(feature = "bench-instrumentation"))]
 #[derive(Default)]
-struct BuilderMetrics;
+struct BuilderMetrics {
+    #[cfg(test)]
+    limits: BuilderLimits,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BuilderLimits {
+    pub(crate) max_operations: u32,
+    pub(crate) max_payloads: u32,
+    pub(crate) max_text_bytes: u32,
+}
+
+#[cfg(test)]
+impl Default for BuilderLimits {
+    fn default() -> Self {
+        Self {
+            max_operations: u32::MAX,
+            max_payloads: u32::MAX,
+            max_text_bytes: u32::MAX,
+        }
+    }
+}
 
 impl SemanticTapeBuilder {
     #[cfg(test)]
@@ -155,6 +179,13 @@ impl SemanticTapeBuilder {
             metrics_recorded: false,
             metrics: BuilderMetrics::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_limits(plan: BuildCapacityPlan, limits: BuilderLimits) -> Self {
+        let mut builder = Self::with_plan(plan);
+        builder.metrics.limits = limits;
+        builder
     }
 
     /// Records an attempt that stops before a document can be finished.
@@ -197,7 +228,7 @@ impl SemanticTapeBuilder {
             self.append_pending_separator(parent)?;
         }
         let value = self.append_text(value)?;
-        let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics);
+        let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics)?;
         self.append_operation(parent, OperationKind::InlineCode, payload, 0)
     }
 
@@ -246,6 +277,10 @@ impl SemanticTapeBuilder {
             || self.open.last().is_none_or(|frame| frame.node != node)
         {
             return Err(BuildError::InvalidParent);
+        }
+        #[cfg(test)]
+        if self.ops.len() >= self.metrics.limits.max_operations as usize {
+            return Err(BuildError::CapacityExceeded);
         }
         let close = u32::try_from(self.ops.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let frame = self.open.pop().ok_or(BuildError::InvalidParent)?;
@@ -375,14 +410,7 @@ impl SemanticTapeBuilder {
             .iter()
             .all(|definition| definition.id.index() < footnotes.len())
         {
-            let mut indexed: Vec<Option<FootnoteRecord>> = std::iter::repeat_with(|| None)
-                .take(footnotes.len())
-                .collect();
-            for definition in footnotes.drain(..) {
-                let index = definition.id.index();
-                indexed[index] = Some(definition);
-            }
-            footnotes = indexed.into_iter().flatten().collect();
+            footnotes.sort_unstable_by_key(|definition| definition.id.index());
         }
 
         Ok(Document {
@@ -423,25 +451,25 @@ impl SemanticTapeBuilder {
             SemanticKind::BlockQuote => (OperationKind::BlockQuote, 0, 0),
             SemanticKind::CodeBlock(value) => (
                 OperationKind::CodeBlock,
-                push_payload(&mut self.payloads.code_blocks, value, &mut self.metrics),
+                push_payload(&mut self.payloads.code_blocks, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::List(value) => (
                 OperationKind::List,
-                push_payload(&mut self.payloads.lists, value, &mut self.metrics),
+                push_payload(&mut self.payloads.lists, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::ListItem => (OperationKind::ListItem, 0, 0),
             SemanticKind::Table(value) => (
                 OperationKind::Table,
-                push_payload(&mut self.payloads.tables, value, &mut self.metrics),
+                push_payload(&mut self.payloads.tables, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::TableCaption => (OperationKind::TableCaption, 0, 0),
             SemanticKind::TableRow => (OperationKind::TableRow, 0, 0),
             SemanticKind::TableCell(value) => (
                 OperationKind::TableCell,
-                push_payload(&mut self.payloads.table_cells, value, &mut self.metrics),
+                push_payload(&mut self.payloads.table_cells, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::Figure => (OperationKind::Figure, 0, 0),
@@ -454,7 +482,7 @@ impl SemanticTapeBuilder {
             SemanticKind::DefinitionDescription => (OperationKind::DefinitionDescription, 0, 0),
             SemanticKind::Callout(value) => (
                 OperationKind::Callout,
-                push_payload(&mut self.payloads.callouts, value, &mut self.metrics),
+                push_payload(&mut self.payloads.callouts, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::FootnoteDefinition(id) => (OperationKind::FootnoteDefinition, id.0, 0),
@@ -463,34 +491,34 @@ impl SemanticTapeBuilder {
             SemanticKind::Strikethrough => (OperationKind::Strikethrough, 0, 0),
             SemanticKind::Link(value) => (
                 OperationKind::Link,
-                push_payload(&mut self.payloads.links, value, &mut self.metrics),
+                push_payload(&mut self.payloads.links, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::Image(value) => (
                 OperationKind::Image,
-                push_payload(&mut self.payloads.images, value, &mut self.metrics),
+                push_payload(&mut self.payloads.images, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::HardBreak => (OperationKind::HardBreak, 0, 0),
             SemanticKind::FootnoteReference(id) => (OperationKind::FootnoteReference, id.0, 0),
             SemanticKind::TaskMarker(value) => (
                 OperationKind::TaskMarker,
-                push_payload(&mut self.payloads.task_markers, value, &mut self.metrics),
+                push_payload(&mut self.payloads.task_markers, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::InlineMath(value) => (
                 OperationKind::InlineMath,
-                push_payload(&mut self.payloads.math_values, value, &mut self.metrics),
+                push_payload(&mut self.payloads.math_values, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::DisplayMath(value) => (
                 OperationKind::DisplayMath,
-                push_payload(&mut self.payloads.math_values, value, &mut self.metrics),
+                push_payload(&mut self.payloads.math_values, value, &mut self.metrics)?,
                 0,
             ),
             SemanticKind::Media(value) => (
                 OperationKind::Media,
-                push_payload(&mut self.payloads.media, value, &mut self.metrics),
+                push_payload(&mut self.payloads.media, value, &mut self.metrics)?,
                 0,
             ),
         };
@@ -515,6 +543,10 @@ impl SemanticTapeBuilder {
         aux: u16,
         known_flags: Option<u8>,
     ) -> Result<DocumentNodeId, BuildError> {
+        #[cfg(test)]
+        if self.ops.len() >= self.metrics.limits.max_operations as usize {
+            return Err(BuildError::CapacityExceeded);
+        }
         let index = u32::try_from(self.ops.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let id = DocumentNodeId(index);
         let flags = known_flags.unwrap_or_else(|| self.operation_visibility(operation, payload));
@@ -648,7 +680,7 @@ impl SemanticTapeBuilder {
                 return Ok(Some(previous));
             }
             let value = self.append_text_with_prefix(value, leading_space)?;
-            let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics);
+            let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics)?;
             return self
                 .append_operation_with_flags(
                     parent,
@@ -664,7 +696,7 @@ impl SemanticTapeBuilder {
                 .map(Some);
         }
         let value = self.append_text_with_prefix(value_ref, needs_leading_space)?;
-        let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics);
+        let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics)?;
         self.append_operation_with_flags(
             parent,
             OperationKind::Text,
@@ -746,7 +778,7 @@ impl SemanticTapeBuilder {
             }
         }
         let separator = self.append_text(" ")?;
-        let payload = push_payload(&mut self.payloads.text_refs, separator, &mut self.metrics);
+        let payload = push_payload(&mut self.payloads.text_refs, separator, &mut self.metrics)?;
         self.append_operation(parent, OperationKind::Text, payload, 0)?;
         Ok(())
     }
@@ -765,6 +797,13 @@ impl SemanticTapeBuilder {
             .len()
             .checked_add(usize::from(leading_space))
             .ok_or(BuildError::CapacityExceeded)?;
+        #[cfg(test)]
+        if start
+            .checked_add(length)
+            .is_none_or(|end| end > self.metrics.limits.max_text_bytes as usize)
+        {
+            return Err(BuildError::CapacityExceeded);
+        }
         let reference = TextRef::new(start, length)?;
         if leading_space {
             push_str_tracked(&mut self.text, " ", &mut self.metrics);
@@ -792,8 +831,18 @@ impl SemanticTapeBuilder {
             return Ok(existing);
         }
         debug_assert_eq!(existing.range().end, self.text.len());
-        let added = value.len() + usize::from(leading_space);
-        let reference = TextRef::new(existing.start as usize, existing.len as usize + added)?;
+        let added = value
+            .len()
+            .checked_add(usize::from(leading_space))
+            .ok_or(BuildError::CapacityExceeded)?;
+        let length = (existing.len as usize)
+            .checked_add(added)
+            .ok_or(BuildError::CapacityExceeded)?;
+        let reference = TextRef::new(existing.start as usize, length)?;
+        #[cfg(test)]
+        if reference.range().end > self.metrics.limits.max_text_bytes as usize {
+            return Err(BuildError::CapacityExceeded);
+        }
         if leading_space {
             push_str_tracked(&mut self.text, " ", &mut self.metrics);
         }
@@ -894,10 +943,18 @@ impl PayloadTables {
     }
 }
 
-fn push_payload<T>(values: &mut Vec<T>, value: T, metrics: &mut BuilderMetrics) -> u32 {
-    let index = u32::try_from(values.len()).unwrap_or(u32::MAX);
+fn push_payload<T>(
+    values: &mut Vec<T>,
+    value: T,
+    metrics: &mut BuilderMetrics,
+) -> Result<u32, BuildError> {
+    #[cfg(test)]
+    if values.len() >= metrics.limits.max_payloads as usize {
+        return Err(BuildError::CapacityExceeded);
+    }
+    let index = u32::try_from(values.len()).map_err(|_| BuildError::CapacityExceeded)?;
     push_tracked(values, value, metrics);
-    index
+    Ok(index)
 }
 
 #[inline(always)]
@@ -1033,6 +1090,170 @@ mod tests {
         assert_eq!(builder.payloads.media.capacity(), 1);
         assert_eq!(builder.footnotes.capacity(), 2);
         assert!(builder.footnote_index.capacity() >= 2);
+    }
+
+    #[test]
+    fn payload_capacity_failures_are_checked_for_every_payload_kind() {
+        let limits = BuilderLimits {
+            max_operations: u32::MAX,
+            max_payloads: 0,
+            max_text_bytes: u32::MAX,
+        };
+        let kinds = [
+            SemanticKind::CodeBlock(CodeBlock {
+                language: None,
+                text: "code".into(),
+            }),
+            SemanticKind::List(List {
+                kind: ListKind::Unordered,
+                start: None,
+            }),
+            SemanticKind::Table(Table {
+                column_count: Some(1),
+            }),
+            SemanticKind::TableCell(TableCell {
+                header: false,
+                colspan: 1,
+                rowspan: 1,
+                alignment: None,
+            }),
+            SemanticKind::Callout(Callout {
+                kind: super::super::CalloutKind::Note,
+                title: None,
+            }),
+            SemanticKind::Link(Link {
+                destination: "https://example.test".into(),
+                title: None,
+                fragment_only: false,
+            }),
+            SemanticKind::Image(Image {
+                source: "https://example.test/image.png".into(),
+                alt: "image".into(),
+                title: None,
+                width: None,
+                height: None,
+            }),
+            SemanticKind::TaskMarker(TaskMarker {
+                checked: false,
+                fallback_label: None,
+            }),
+            SemanticKind::InlineMath(MathValue {
+                source: "x".into(),
+                format: super::super::MathFormat::Tex,
+                fallback_text: None,
+            }),
+            SemanticKind::DisplayMath(MathValue {
+                source: "x".into(),
+                format: super::super::MathFormat::Tex,
+                fallback_text: None,
+            }),
+            SemanticKind::Media(Media {
+                kind: super::super::MediaKind::Audio,
+                source: "https://example.test/audio.mp3".into(),
+                title: None,
+            }),
+        ];
+
+        for kind in kinds {
+            let mut builder =
+                SemanticTapeBuilder::with_test_limits(BuildCapacityPlan::default(), limits);
+            assert_eq!(builder.emit(None, kind), Err(BuildError::CapacityExceeded));
+            assert!(builder.ops.is_empty());
+        }
+    }
+
+    #[test]
+    fn text_payload_capacity_failure_does_not_emit_an_invalid_operation() {
+        let limits = BuilderLimits {
+            max_operations: u32::MAX,
+            max_payloads: 0,
+            max_text_bytes: u32::MAX,
+        };
+        let mut builder =
+            SemanticTapeBuilder::with_test_limits(BuildCapacityPlan::default(), limits);
+        let paragraph = builder.emit(None, SemanticKind::Paragraph).unwrap();
+
+        assert_eq!(
+            builder.append_prose(Some(paragraph), "text"),
+            Err(BuildError::CapacityExceeded)
+        );
+        assert_eq!(
+            builder.append_inline_code(Some(paragraph), "code"),
+            Err(BuildError::CapacityExceeded)
+        );
+        assert_eq!(builder.ops.len(), 1);
+    }
+
+    #[test]
+    fn operation_and_text_capacity_failures_are_checked() {
+        let mut builder = SemanticTapeBuilder::with_test_limits(
+            BuildCapacityPlan::default(),
+            BuilderLimits {
+                max_operations: 0,
+                max_payloads: u32::MAX,
+                max_text_bytes: u32::MAX,
+            },
+        );
+        assert_eq!(
+            builder.emit(None, SemanticKind::Paragraph),
+            Err(BuildError::CapacityExceeded)
+        );
+
+        let mut builder = SemanticTapeBuilder::with_test_limits(
+            BuildCapacityPlan::default(),
+            BuilderLimits {
+                max_operations: u32::MAX,
+                max_payloads: u32::MAX,
+                max_text_bytes: 0,
+            },
+        );
+        let paragraph = builder.emit(None, SemanticKind::Paragraph).unwrap();
+        assert_eq!(
+            builder.append_prose(Some(paragraph), "text"),
+            Err(BuildError::CapacityExceeded)
+        );
+        assert!(builder.text.is_empty());
+    }
+
+    #[test]
+    fn close_capacity_failure_does_not_pop_the_open_frame() {
+        let mut builder = SemanticTapeBuilder::with_test_limits(
+            BuildCapacityPlan::default(),
+            BuilderLimits {
+                max_operations: 1,
+                max_payloads: u32::MAX,
+                max_text_bytes: u32::MAX,
+            },
+        );
+        let paragraph = builder.emit(None, SemanticKind::Paragraph).unwrap();
+        assert_eq!(builder.close(paragraph), Err(BuildError::CapacityExceeded));
+        assert_eq!(builder.open.last().map(|frame| frame.node), Some(paragraph));
+    }
+
+    #[test]
+    fn extending_text_checks_capacity_before_mutating_the_arena() {
+        let mut builder = SemanticTapeBuilder::with_test_limits(
+            BuildCapacityPlan::default(),
+            BuilderLimits {
+                max_operations: u32::MAX,
+                max_payloads: u32::MAX,
+                max_text_bytes: 1,
+            },
+        );
+        let paragraph = builder.emit(None, SemanticKind::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "a").unwrap();
+
+        assert_eq!(
+            builder.append_prose(Some(paragraph), "b"),
+            Err(BuildError::CapacityExceeded)
+        );
+        assert_eq!(builder.text, "a");
+        assert_eq!(builder.payloads.text_refs.len(), 1);
+
+        builder.close(paragraph).unwrap();
+        let document = builder.finish().unwrap();
+        assert_eq!(document.text(), "a");
+        assert!(document.validate().is_ok());
     }
 
     #[test]
