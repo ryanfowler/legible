@@ -323,11 +323,16 @@ fn report(
             .join("|")
     );
     let counters = snapshot.counters;
+    let deferred = legible::instrumentation::deferred_work_snapshot();
     println!(
-        "counters/{group}/{name}: parse_calls={}, source_full_scans={}, source_element_snapshots={}, dom_clones={}, dom_clone_bytes={}, fragment_copies={}, strategies_started={}, unique_attempt_plans={}, scoring_nodes={}, cleaned_nodes={}, semantic_source_nodes={}, semantic_operations={}, allocations={}, allocated_bytes={}, deallocations={}, deallocated_bytes={}, peak_live_bytes={}, final_live_bytes={}, final_retained_bytes={}, builder_ops_capacity={}, builder_ends_capacity={}, builder_open_capacity={}, builder_text_capacity={}, builder_payload_capacity={}, builder_footnotes_capacity={}, builder_footnote_index_capacity={}, json_ld_bytes={}, json_ld_parsed_bytes={}, json_ld_retained_bytes={}",
+        "counters/{group}/{name}: parse_calls={}, source_full_scans={}, source_element_snapshots={}, content_hint_scans={}, content_excerpt_scans={}, final_dom_node_scans={}, external_footnote_scans={}, dom_clones={}, dom_clone_bytes={}, fragment_copies={}, strategies_started={}, unique_attempt_plans={}, scoring_nodes={}, cleaned_nodes={}, semantic_source_nodes={}, semantic_operations={}, allocations={}, allocated_bytes={}, deallocations={}, deallocated_bytes={}, peak_live_bytes={}, final_live_bytes={}, final_retained_bytes={}, builder_ops_capacity={}, builder_ends_capacity={}, builder_open_capacity={}, builder_text_capacity={}, builder_payload_capacity={}, builder_footnotes_capacity={}, builder_footnote_index_capacity={}, json_ld_bytes={}, json_ld_parsed_bytes={}, json_ld_retained_bytes={}",
         counters.parse_calls,
         counters.source_full_scans,
         counters.source_element_snapshots,
+        deferred.content_hint_scans,
+        deferred.content_excerpt_scans,
+        deferred.final_dom_node_scans,
+        deferred.external_footnote_scans,
         counters.dom_clones,
         counters.dom_clone_bytes,
         counters.fragment_copies,
