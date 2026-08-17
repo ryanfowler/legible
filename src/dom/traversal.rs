@@ -11,7 +11,7 @@ pub(crate) struct DocumentAnchors {
 }
 
 impl DocumentAnchors {
-    fn new(root: NodeId) -> Self {
+    pub(crate) fn new(root: NodeId) -> Self {
         Self {
             root,
             html: None,
@@ -20,6 +20,7 @@ impl DocumentAnchors {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn valid_for(&self, dom: &Dom) -> bool {
         let attached = |node: NodeId| {
             node == dom.root() || dom.ancestors(node).any(|ancestor| ancestor == dom.root())
@@ -177,7 +178,7 @@ impl Dom {
         }
     }
 
-    fn record_document_anchor(&self, node: NodeId, anchors: &mut DocumentAnchors) {
+    pub(crate) fn record_document_anchor(&self, node: NodeId, anchors: &mut DocumentAnchors) {
         if anchors.html.is_none() && self.tag(node) == Some(Tag::Html) {
             anchors.html = Some(node);
         }

@@ -247,7 +247,7 @@ fn math_fallback(dom: &Dom, node: NodeId) -> Option<String> {
     (!fallback.is_empty()).then_some(fallback)
 }
 
-fn is_math_root(dom: &Dom, node: NodeId) -> bool {
+pub(crate) fn is_math_root(dom: &Dom, node: NodeId) -> bool {
     dom.qual_name(node)
         .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("math"))
 }
@@ -306,7 +306,7 @@ pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> HashS
     accessible
 }
 
-fn is_tex_annotation(dom: &Dom, node: NodeId) -> bool {
+pub(crate) fn is_tex_annotation(dom: &Dom, node: NodeId) -> bool {
     dom.qual_name(node)
         .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("annotation"))
         && dom
@@ -655,7 +655,7 @@ fn is_math_script_type(value: &str) -> bool {
     value == "math/tex" || value.starts_with("math/tex;") || value == "text/tex"
 }
 
-fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {
+pub(crate) fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {
     dom.qual_name(node)
         .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"))
         || dom.attr(node, AttrName::Class).is_some_and(|classes| {

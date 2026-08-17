@@ -5,11 +5,13 @@ use crate::diagnostics::{
 };
 use crate::document::{Document, OperationKind, SemanticItemView as Item};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
+use crate::prepared::{PreparedSource, SourceFlags};
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
-    get_or_compute_stats_excluding, has_hidden_utility_class_for_discovery,
-    has_static_hidden_marker,
+    get_or_compute_stats_excluding,
 };
+#[cfg(test)]
+use crate::scoring::{has_hidden_utility_class_for_discovery, has_static_hidden_marker};
 use std::collections::{HashMap, HashSet};
 
 /// Text and structure measured for one DOM region.
@@ -40,16 +42,84 @@ impl ContentMetrics {
     /// Measures source content after excluding document-level navigation and
     /// chrome. Semantic headers inside a main/article region remain source
     /// content.
+    #[cfg(test)]
     pub(crate) fn measure_source(dom: &Dom, root: NodeId) -> Self {
         Self::measure_source_with_visibility(dom, root, false)
     }
 
     /// Measures source content while retaining static visibility markers.
     /// ARIA-hidden content and document chrome remain excluded.
-    pub(crate) fn measure_source_relaxed_visibility(dom: &Dom, root: NodeId) -> Self {
-        Self::measure_source_with_visibility(dom, root, true)
+    pub(crate) fn measure_source_prepared(
+        dom: &Dom,
+        source: &PreparedSource,
+        root: NodeId,
+        relax_static_visibility: bool,
+    ) -> Self {
+        let Some(range) = source.subtree_range(root) else {
+            return Self::default();
+        };
+        let entries = &source.entries[range];
+        let has_primary_region = entries
+            .iter()
+            .filter(|entry| entry.node != root)
+            .any(|entry| entry.is_element() && entry.flags.contains(SourceFlags::PRIMARY_REGION));
+        let mut in_primary_region = vec![false; dom.len()];
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.node != root && entry.is_element())
+        {
+            let parent_is_primary = dom
+                .parent(entry.node)
+                .is_some_and(|parent| in_primary_region[parent.index()]);
+            in_primary_region[entry.node.index()] =
+                parent_is_primary || entry.flags.contains(SourceFlags::PRIMARY_REGION);
+        }
+        let mut excluded = vec![false; dom.len()];
+        for entry in entries.iter().filter(|entry| entry.is_element()) {
+            let tag = entry.tag;
+            let hidden = dom.attr(entry.node, AttrName::AriaHidden) == Some("true")
+                || !relax_static_visibility
+                    && (entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                        || entry.flags.contains(SourceFlags::UTILITY_HIDDEN))
+                || entry.flags.contains(SourceFlags::MODAL_DIALOG)
+                || dom.attr(entry.node, AttrName::AriaModal) == Some("true");
+            let hard_non_content = hidden
+                || matches!(
+                    tag,
+                    Some(
+                        Tag::Script
+                            | Tag::Style
+                            | Tag::Template
+                            | Tag::Meta
+                            | Tag::Link
+                            | Tag::Input
+                            | Tag::Textarea
+                            | Tag::Select
+                            | Tag::Button
+                            | Tag::Datalist
+                            | Tag::Option
+                            | Tag::Iframe
+                            | Tag::Embed
+                            | Tag::Object
+                    )
+                );
+            let document_chrome = entry.flags.contains(SourceFlags::DOCUMENT_CHROME);
+            let contextual_sidebar = tag == Some(Tag::Aside)
+                || dom.attr(entry.node, AttrName::Role).is_some_and(|roles| {
+                    roles
+                        .split_whitespace()
+                        .any(|role| role.eq_ignore_ascii_case("complementary"))
+                });
+            excluded[entry.node.index()] = hard_non_content
+                || document_chrome && !in_primary_region[entry.node.index()]
+                || contextual_sidebar
+                    && has_primary_region
+                    && !in_primary_region[entry.node.index()];
+        }
+        Self::measure_filtered_prepared(dom, root, source, &excluded)
     }
 
+    #[cfg(test)]
     fn measure_source_with_visibility(
         dom: &Dom,
         root: NodeId,
@@ -204,6 +274,7 @@ impl ContentMetrics {
         metrics
     }
 
+    #[cfg(test)]
     fn measure_filtered(
         dom: &Dom,
         root: NodeId,
@@ -237,6 +308,57 @@ impl ContentMetrics {
                 metrics.link_text_chars = metrics.link_text_chars.saturating_add(
                     get_or_compute_stats_excluding(dom, node, &mut store, excluded).text_length
                         as usize,
+                );
+            }
+        }
+        let (references, definitions, expressions) =
+            crate::document::semantic_normalization_counts_for_nodes(dom, root, &included_nodes);
+        metrics.footnote_reference_count = references;
+        metrics.footnote_definition_count = definitions;
+        metrics.math_count = expressions;
+        metrics
+    }
+
+    fn measure_filtered_prepared(
+        dom: &Dom,
+        root: NodeId,
+        source: &PreparedSource,
+        excluded: &[bool],
+    ) -> Self {
+        let mut store = NodeStateStore::new();
+        store.enable_link_lengths();
+        let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
+        let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
+        let Some(range) = source.subtree_range(root) else {
+            return metrics;
+        };
+        let entries = &source.entries[range];
+        let mut included_nodes = Vec::with_capacity(source.element_count.min(entries.len()) + 1);
+        if !excluded.get(root.index()).copied().unwrap_or(false) {
+            included_nodes.push(root);
+        }
+        let mut excluded_depth = None;
+        for entry in entries.iter().filter(|entry| entry.is_element()) {
+            if entry.node == root {
+                continue;
+            }
+            if let Some(boundary) = excluded_depth {
+                if entry.depth > boundary {
+                    continue;
+                }
+                excluded_depth = None;
+            }
+            if excluded.get(entry.node.index()).copied().unwrap_or(false) {
+                excluded_depth = Some(entry.depth);
+                continue;
+            }
+            included_nodes.push(entry.node);
+            metrics.count_structure(entry.tag);
+            if entry.tag == Some(Tag::A) {
+                metrics.link_text_chars = metrics.link_text_chars.saturating_add(
+                    get_or_compute_stats_excluding(dom, entry.node, &mut store, excluded)
+                        .text_length as usize,
                 );
             }
         }
@@ -621,17 +743,37 @@ impl ExtractionQuality {
 /// Detects a dominant access gate. A match needs structural and textual
 /// evidence, except for explicit machine-generated denial text.
 pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
+    is_access_barrier_impl(dom, root, None)
+}
+
+pub(crate) fn is_access_barrier_prepared(dom: &Dom, source: &PreparedSource, root: NodeId) -> bool {
+    is_access_barrier_impl(dom, root, Some(source))
+}
+
+fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&PreparedSource>) -> bool {
     crate::instrumentation::record_source_full_scan();
     let mut buffer = String::new();
     let text = normalize_barrier_text(get_normalized_inner_text(dom, root, &mut buffer));
     if text.is_empty() {
         return false;
     }
-    let heading = std::iter::once(root)
-        .chain(dom.descendants(root))
-        .find(|&node| {
-            matches!(dom.tag(node), Some(Tag::H1 | Tag::H2 | Tag::H3))
-                && dom.has_non_whitespace_text(node)
+    let heading = source
+        .map(|source| {
+            source
+                .entries_in(root)
+                .map(|entry| entry.node)
+                .find(|&node| {
+                    matches!(dom.tag(node), Some(Tag::H1 | Tag::H2 | Tag::H3))
+                        && dom.has_non_whitespace_text(node)
+                })
+        })
+        .unwrap_or_else(|| {
+            std::iter::once(root)
+                .chain(dom.descendants(root))
+                .find(|&node| {
+                    matches!(dom.tag(node), Some(Tag::H1 | Tag::H2 | Tag::H3))
+                        && dom.has_non_whitespace_text(node)
+                })
         })
         .map(|node| normalize_barrier_text(get_normalized_inner_text(dom, node, &mut buffer)))
         .unwrap_or_default();
@@ -673,18 +815,39 @@ pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
     ]
     .iter()
     .any(|phrase| heading.starts_with(phrase));
-    let structural_gate = std::iter::once(root)
-        .chain(dom.descendants(root))
-        .any(|node| {
-            [AttrName::Class, AttrName::Id]
-                .into_iter()
-                .filter_map(|name| dom.attr(node, name))
-                .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
-                .any(|token| {
-                    matches!(
-                        token.to_ascii_lowercase().as_str(),
-                        "paywall" | "barrier" | "gate" | "subscribe"
-                    )
+    let structural_gate = source
+        .map(|source| {
+            source.entries_in(root).any(|entry| {
+                [AttrName::Class, AttrName::Id]
+                    .into_iter()
+                    .filter_map(|name| dom.attr(entry.node, name))
+                    .flat_map(|value| {
+                        value.split(|character: char| !character.is_ascii_alphanumeric())
+                    })
+                    .any(|token| {
+                        matches!(
+                            token.to_ascii_lowercase().as_str(),
+                            "paywall" | "barrier" | "gate" | "subscribe"
+                        )
+                    })
+            })
+        })
+        .unwrap_or_else(|| {
+            std::iter::once(root)
+                .chain(dom.descendants(root))
+                .any(|node| {
+                    [AttrName::Class, AttrName::Id]
+                        .into_iter()
+                        .filter_map(|name| dom.attr(node, name))
+                        .flat_map(|value| {
+                            value.split(|character: char| !character.is_ascii_alphanumeric())
+                        })
+                        .any(|token| {
+                            matches!(
+                                token.to_ascii_lowercase().as_str(),
+                                "paywall" | "barrier" | "gate" | "subscribe"
+                            )
+                        })
                 })
         });
     let action = [
@@ -846,6 +1009,7 @@ fn normalize_barrier_text(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn is_primary_role(roles: &str) -> bool {
     roles
         .split_whitespace()
@@ -890,6 +1054,8 @@ mod tests {
             .first_descendant_by_tag(expected.root(), Tag::Main)
             .unwrap();
         let actual = ContentMetrics::measure_source(&source, source_body);
+        let prepared = crate::prepared::PreparedSource::build(&source);
+        let prepared_actual = prepared.source_metrics;
         let expected = ContentMetrics::measure(&expected, expected_main);
 
         assert_eq!(actual.word_count, expected.word_count);
@@ -905,6 +1071,20 @@ mod tests {
         assert_eq!(actual.has_alphanumeric_text, expected.has_alphanumeric_text);
         assert_eq!(actual.alphabetic_chars, expected.alphabetic_chars);
         assert_eq!(actual.digit_chars, expected.digit_chars);
+        assert_eq!(prepared_actual.word_count, actual.word_count);
+        assert_eq!(prepared_actual.text_chars, actual.text_chars);
+        assert_eq!(prepared_actual.paragraph_count, actual.paragraph_count);
+        assert_eq!(prepared_actual.heading_count, actual.heading_count);
+        assert_eq!(
+            prepared_actual.structured_block_count,
+            actual.structured_block_count
+        );
+        assert_eq!(prepared_actual.link_text_chars, actual.link_text_chars);
+        assert_eq!(prepared_actual.link_density, actual.link_density);
+        assert_eq!(
+            prepared_actual.has_alphanumeric_text,
+            actual.has_alphanumeric_text
+        );
     }
 
     #[test]

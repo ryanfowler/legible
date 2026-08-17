@@ -82,6 +82,8 @@ pub struct ExtractionCounters {
     pub parse_calls: u64,
     pub source_full_scans: u64,
     pub source_element_snapshots: u64,
+    pub prepared_source_builds: u64,
+    pub prepared_source_entries: u64,
     pub dom_clones: u64,
     pub fragment_copies: u64,
     pub strategies_started: u64,
@@ -188,6 +190,8 @@ std::thread_local! {
             parse_calls: 0,
             source_full_scans: 0,
             source_element_snapshots: 0,
+            prepared_source_builds: 0,
+            prepared_source_entries: 0,
             dom_clones: 0,
             fragment_copies: 0,
             strategies_started: 0,
@@ -295,6 +299,26 @@ pub(crate) fn record_source_element_snapshot() {
     #[cfg(feature = "bench-instrumentation")]
     add_counter(|counters| {
         counters.source_element_snapshots = counters.source_element_snapshots.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_prepared_source_build() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.prepared_source_builds = counters.prepared_source_builds.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_prepared_source_entries(entries: usize) {
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let _ = entries;
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.prepared_source_entries = counters
+            .prepared_source_entries
+            .saturating_add(entries as u64)
     });
 }
 
