@@ -4,6 +4,9 @@ use std::hint::black_box;
 
 // Criterion benchmarks compile as a separate crate. Include the private DOM and
 // semantic tape modules so these measurements use the same implementation.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/budget.rs"]
+mod budget;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 #[path = "../src/document/mod.rs"]

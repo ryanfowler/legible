@@ -367,16 +367,6 @@ impl<'a> ContentExtractor<'a> {
             return Err(Error::InvalidUrl(e));
         }
         let _metadata_phase = PhaseGuard::new(Phase::Metadata);
-        if self.options.max_elements > 0 {
-            let n = self
-                .dom
-                .descendants(self.dom.root())
-                .filter(|&x| self.dom.is_element(x))
-                .count();
-            if n > self.options.max_elements {
-                return Err(Error::TooManyElements(n, self.options.max_elements));
-            }
-        }
         let preparation_anchors = self.dom.document_anchors();
         if let Some(base) = preparation_anchors.first_base_with_href
             && let Some(href) = self.dom.attr(base, AttrName::Href)
@@ -395,7 +385,18 @@ impl<'a> ContentExtractor<'a> {
         let title = metadata::get_page_title(&self.dom);
         self.structured_title = metadata::content_identity_title(&self.dom, &title);
         if self.options.structured_data {
-            self.structured_data = StructuredData::parse(&self.dom);
+            self.structured_data = StructuredData::parse(&self.dom, &self.options.parse_budget)
+                .map_err(|error| match error {
+                    metadata::StructuredDataError::Bytes { limit } => {
+                        Error::resource_limit("JSON-LD bytes", limit)
+                    }
+                    metadata::StructuredDataError::Items { limit } => {
+                        Error::resource_limit("JSON-LD items", limit)
+                    }
+                    metadata::StructuredDataError::Depth { limit } => {
+                        Error::resource_limit("JSON-LD depth", limit)
+                    }
+                })?;
         }
         (self.metadata, self.metadata_diagnostics) = metadata::discover_with_diagnostics(
             &self.dom,

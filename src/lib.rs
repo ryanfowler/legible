@@ -45,6 +45,10 @@
 //! # Ok::<(), legible::Error>(())
 //! ```
 //!
+//! Use [`ParseBudget`] to bound parser and JSON-LD work when the input is not
+//! trusted. Zero-valued limits are unlimited, except that JSON-LD depth uses an
+//! internal safety cap.
+//!
 //! # Security
 //!
 //! [`ExtractedPage::html`] returns canonical semantic HTML. It cannot contain source
@@ -52,6 +56,7 @@
 //! [`ExtractedPage::safe_html`] is an alias for the same output. Markdown output
 //! contains no raw HTML.
 
+mod budget;
 mod candidate;
 mod cleaning;
 mod constants;
@@ -75,6 +80,7 @@ mod render;
 mod scoring;
 mod specialized;
 
+pub use budget::ParseBudget;
 pub use diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
     ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
@@ -101,7 +107,8 @@ pub use instrumentation::{ExtractionCounters, InstrumentationSnapshot, Phase, Ph
 /// # Errors
 ///
 /// This function returns [`Error::InvalidUrl`], [`Error::NoBody`],
-/// [`Error::NoContent`], or [`Error::TooManyElements`] when applicable.
+/// [`Error::NoContent`], [`Error::TooManyElements`], [`Error::ResourceLimit`],
+/// or [`Error::Parse`] when applicable.
 pub fn extract(html: &str, url: Option<&str>) -> Result<ExtractedPage> {
     Extractor::default().extract(html, url)
 }

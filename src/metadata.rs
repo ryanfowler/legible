@@ -1,5 +1,6 @@
 //! Metadata discovery and structured-data parsing.
 
+use crate::budget::ParseBudget;
 use crate::constants::{
     find_last_title_separator_start, has_hierarchical_title_separator, has_title_separator,
     is_json_ld_article_type, is_schema_org_url, normalize_whitespace, remove_title_first_part,
@@ -57,8 +58,17 @@ pub(crate) struct StructuredData {
     items: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructuredDataError {
+    Bytes { limit: usize },
+    Items { limit: usize },
+    Depth { limit: usize },
+}
+
+const INTERNAL_MAX_JSON_LD_DEPTH: usize = 512;
+
 impl StructuredData {
-    pub(crate) fn parse(dom: &Dom) -> Self {
+    pub(crate) fn parse(dom: &Dom, budget: &ParseBudget) -> Result<Self, StructuredDataError> {
         let scripts: Vec<_> = dom
             .descendants(dom.root())
             .filter(|&id| {
@@ -72,21 +82,51 @@ impl StructuredData {
             .collect();
         let mut items = Vec::new();
         let mut buffer = String::new();
+        let mut json_ld_bytes = 0usize;
         for id in scripts {
-            let content = script_text(dom, id, &mut buffer)
+            let (raw_content, raw_bytes) = script_text_bounded(
+                dom,
+                id,
+                &mut buffer,
+                budget.max_json_ld_bytes.saturating_sub(json_ld_bytes),
+            )
+            .map_err(|_| StructuredDataError::Bytes {
+                limit: budget.max_json_ld_bytes,
+            })?;
+            json_ld_bytes = json_ld_bytes.saturating_add(raw_bytes);
+            if budget.max_json_ld_bytes > 0 && json_ld_bytes > budget.max_json_ld_bytes {
+                return Err(StructuredDataError::Bytes {
+                    limit: budget.max_json_ld_bytes,
+                });
+            }
+            let content = raw_content
                 .trim()
                 .trim_start_matches("<![CDATA[")
                 .trim_end_matches("]]>")
                 .trim();
+            let json_depth_limit = if budget.max_json_ld_depth == 0 {
+                INTERNAL_MAX_JSON_LD_DEPTH
+            } else {
+                budget.max_json_ld_depth.min(INTERNAL_MAX_JSON_LD_DEPTH)
+            };
+            if exceeds_json_depth(content, json_depth_limit) {
+                return Err(StructuredDataError::Depth {
+                    limit: json_depth_limit,
+                });
+            }
             crate::instrumentation::record_json_ld_bytes(content.len());
             let Ok(value) = serde_json::from_str::<Value>(content) else {
                 continue;
             };
             #[cfg(feature = "bench-instrumentation")]
             crate::instrumentation::record_json_ld_parsed_bytes(estimated_json_value_bytes(&value));
-            collect_structured_items(&value, false, &mut items);
+            collect_structured_items(&value, false, &mut items, budget.max_json_ld_items).map_err(
+                |_| StructuredDataError::Items {
+                    limit: budget.max_json_ld_items,
+                },
+            )?;
         }
-        Self { items }
+        Ok(Self { items })
     }
 
     #[cfg(test)]
@@ -138,79 +178,151 @@ impl StructuredData {
 
 #[cfg(feature = "bench-instrumentation")]
 fn estimated_json_value_bytes(value: &Value) -> usize {
-    std::mem::size_of::<Value>()
-        + match value {
-            Value::Null => 0,
-            Value::Bool(_) => 0,
-            Value::Number(number) => number.to_string().len(),
-            Value::String(text) => text.len(),
-            Value::Array(values) => values.iter().map(estimated_json_value_bytes).sum::<usize>(),
-            Value::Object(values) => values
-                .iter()
-                .map(|(key, value)| key.len() + estimated_json_value_bytes(value))
-                .sum::<usize>(),
+    let mut total = 0usize;
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        total = total.saturating_add(std::mem::size_of::<Value>());
+        match value {
+            Value::Null | Value::Bool(_) => {}
+            Value::Number(number) => {
+                total = total.saturating_add(number.to_string().len());
+            }
+            Value::String(text) => {
+                total = total.saturating_add(text.len());
+            }
+            Value::Array(values) => pending.extend(values.iter().rev()),
+            Value::Object(values) => {
+                for (key, value) in values.iter().rev() {
+                    total = total.saturating_add(key.len());
+                    pending.push(value);
+                }
+            }
         }
+    }
+    total
 }
 
-fn script_text<'a>(dom: &'a Dom, id: NodeId, buffer: &'a mut String) -> &'a str {
+fn script_text_bounded<'a>(
+    dom: &'a Dom,
+    id: NodeId,
+    buffer: &'a mut String,
+    limit: usize,
+) -> Result<(&'a str, usize), ()> {
     let mut children = dom.children(id);
     let first = children.next();
     if let Some(node) = first
         && children.next().is_none()
         && let Some(text) = dom.text_node(node)
     {
-        return text;
+        if limit > 0 && text.len() > limit {
+            return Err(());
+        }
+        return Ok((text, text.len()));
+    }
+    let bytes = std::iter::once(id)
+        .chain(dom.descendants(id))
+        .filter_map(|node| dom.text_node(node).map(str::len))
+        .fold(0usize, usize::saturating_add);
+    if limit > 0 && bytes > limit {
+        return Err(());
     }
     buffer.clear();
     dom.append_text(id, buffer);
-    buffer
+    Ok((buffer, bytes))
 }
 
-fn collect_structured_items(value: &Value, inherited_schema: bool, out: &mut Vec<Value>) {
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                collect_structured_items(value, inherited_schema, out);
+fn collect_structured_items(
+    value: &Value,
+    inherited_schema: bool,
+    out: &mut Vec<Value>,
+    max_items: usize,
+) -> Result<(), ()> {
+    let mut pending = vec![(value, inherited_schema)];
+    while let Some((value, inherited_schema)) = pending.pop() {
+        match value {
+            Value::Array(values) => {
+                pending.extend(values.iter().rev().map(|value| (value, inherited_schema)));
             }
-        }
-        Value::Object(object) => {
-            let schema = inherited_schema
-                || object.get("@context").is_some_and(is_schema_context)
-                || object
-                    .get("@type")
-                    .is_some_and(|kind| json_types(kind).any(is_absolute_schema_type));
-            if !schema {
-                return;
-            }
-            if object.get("@type").is_some() {
-                out.push(value.clone());
-            }
-            if let Some(graph) = object.get("@graph") {
-                collect_structured_items(graph, true, out);
-            }
-            for (key, nested) in object {
-                if !matches!(key.as_str(), "@context" | "@graph" | "@type") {
-                    collect_structured_items(nested, true, out);
+            Value::Object(object) => {
+                let schema = inherited_schema
+                    || object.get("@context").is_some_and(is_schema_context)
+                    || object
+                        .get("@type")
+                        .is_some_and(|kind| json_types(kind).any(is_absolute_schema_type));
+                if !schema {
+                    continue;
+                }
+                if object.get("@type").is_some() {
+                    if max_items > 0 && out.len() >= max_items {
+                        return Err(());
+                    }
+                    out.push(value.clone());
+                }
+                for (key, nested) in object.iter().rev() {
+                    if !matches!(key.as_str(), "@context" | "@graph" | "@type") {
+                        pending.push((nested, true));
+                    }
+                }
+                if let Some(graph) = object.get("@graph") {
+                    pending.push((graph, true));
                 }
             }
+            _ => {}
         }
-        _ => {}
     }
+    Ok(())
 }
 
 fn is_schema_context(value: &Value) -> bool {
-    match value {
-        Value::String(value) => is_schema_url(value),
-        Value::Array(values) => values.iter().any(is_schema_context),
-        Value::Object(values) => {
-            values
-                .get("@vocab")
-                .and_then(Value::as_str)
-                .is_some_and(is_schema_url)
-                || values.values().filter_map(Value::as_str).any(is_schema_url)
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::String(value) if is_schema_url(value) => return true,
+            Value::Array(values) => pending.extend(values.iter()),
+            Value::Object(values) => {
+                if values
+                    .get("@vocab")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_schema_url)
+                {
+                    return true;
+                }
+                pending.extend(values.values());
+            }
+            _ => {}
         }
-        _ => false,
     }
+    false
+}
+
+fn exceeds_json_depth(value: &str, limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in value.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                if depth > limit {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn is_schema_url(value: &str) -> bool {
@@ -784,45 +896,59 @@ fn structured_item_fingerprint(item: &Value) -> u64 {
     hasher.finish()
 }
 
+enum HashTask<'a> {
+    Value(&'a Value),
+    ObjectEntry(&'a str, &'a Value),
+}
+
 fn hash_json_value(value: &Value, hasher: &mut impl Hasher, budget: &mut FingerprintBudget) {
     if budget.values == 0 {
         0xff_u8.hash(hasher);
         return;
     }
-    budget.values -= 1;
-    match value {
-        Value::Null => 0_u8.hash(hasher),
-        Value::Bool(value) => {
-            1_u8.hash(hasher);
-            value.hash(hasher);
+
+    let mut pending = vec![HashTask::Value(value)];
+    while let Some(task) = pending.pop() {
+        if budget.values == 0 {
+            break;
         }
-        Value::Number(value) => {
-            2_u8.hash(hasher);
-            hash_bounded_bytes(value.to_string().as_bytes(), hasher, budget);
-        }
-        Value::String(value) => {
-            3_u8.hash(hasher);
-            hash_bounded_bytes(value.as_bytes(), hasher, budget);
-        }
-        Value::Array(values) => {
-            4_u8.hash(hasher);
-            values.len().hash(hasher);
-            for value in values {
-                if budget.values == 0 {
-                    break;
+        match task {
+            HashTask::Value(value) => {
+                budget.values -= 1;
+                match value {
+                    Value::Null => 0_u8.hash(hasher),
+                    Value::Bool(value) => {
+                        1_u8.hash(hasher);
+                        value.hash(hasher);
+                    }
+                    Value::Number(value) => {
+                        2_u8.hash(hasher);
+                        hash_bounded_bytes(value.to_string().as_bytes(), hasher, budget);
+                    }
+                    Value::String(value) => {
+                        3_u8.hash(hasher);
+                        hash_bounded_bytes(value.as_bytes(), hasher, budget);
+                    }
+                    Value::Array(values) => {
+                        4_u8.hash(hasher);
+                        values.len().hash(hasher);
+                        pending.extend(values.iter().rev().map(HashTask::Value));
+                    }
+                    Value::Object(values) => {
+                        5_u8.hash(hasher);
+                        values.len().hash(hasher);
+                        pending.extend(
+                            values
+                                .iter()
+                                .rev()
+                                .map(|(key, value)| HashTask::ObjectEntry(key, value)),
+                        );
+                    }
                 }
-                hash_json_value(value, hasher, budget);
             }
-        }
-        Value::Object(values) => {
-            5_u8.hash(hasher);
-            values.len().hash(hasher);
-            for (key, value) in values {
-                if budget.values == 0 {
-                    break;
-                }
+            HashTask::ObjectEntry(key, value) => {
                 hash_bounded_bytes(key.as_bytes(), hasher, budget);
-                hash_json_value(value, hasher, budget);
+                pending.push(HashTask::Value(value));
             }
         }
     }
@@ -916,24 +1042,26 @@ fn json_name(value: &Value) -> Option<&str> {
 }
 
 fn collect_json_names(value: &Value, add: &mut impl FnMut(&str)) {
-    if let Some(values) = value.as_array() {
-        for value in values {
-            collect_json_names(value, add);
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        if let Some(values) = value.as_array() {
+            pending.extend(values.iter().rev());
+        } else if let Some(name) = json_name(value) {
+            add(name);
         }
-    } else if let Some(name) = json_name(value) {
-        add(name);
     }
 }
 
 fn collect_json_keywords(value: Option<&Value>, out: &mut CandidateSet) {
     let Some(value) = value else { return };
-    if let Some(values) = value.as_array() {
-        for value in values {
-            collect_json_keywords(Some(value), out);
-        }
-    } else if let Some(value) = value.as_str() {
-        for tag in value.split(',') {
-            out.add(|set| &mut set.tags, tag, MetadataSource::JsonLd, 88);
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        if let Some(values) = value.as_array() {
+            pending.extend(values.iter().rev());
+        } else if let Some(value) = value.as_str() {
+            for tag in value.split(',') {
+                out.add(|set| &mut set.tags, tag, MetadataSource::JsonLd, 88);
+            }
         }
     }
 }
@@ -2610,7 +2738,7 @@ mod tests {
     fn metadata(html: &str, url: Option<&str>, structured: bool) -> Metadata {
         let dom = Dom::parse_document(html).unwrap();
         let data = if structured {
-            StructuredData::parse(&dom)
+            StructuredData::parse(&dom, &ParseBudget::default()).unwrap()
         } else {
             StructuredData::default()
         };
@@ -2658,7 +2786,7 @@ mod tests {
             ]</script>"#,
         )
         .unwrap();
-        let data = StructuredData::parse(&dom);
+        let data = StructuredData::parse(&dom, &ParseBudget::default()).unwrap();
 
         assert_eq!(data.items.len(), 2);
         assert_eq!(
@@ -2975,7 +3103,7 @@ mod tests {
             ]</script>"#,
         )
         .unwrap();
-        let data = StructuredData::parse(&dom);
+        let data = StructuredData::parse(&dom, &ParseBudget::default()).unwrap();
 
         assert!(data.primary_texts("", None).next().is_none());
         let resolved = discover(&dom, &data, "", None, None);
@@ -2991,7 +3119,7 @@ mod tests {
             <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Repeated article","author":{"name":"Ada"},"datePublished":"2025-04-05","articleBody":"The repeated article body has enough useful words to identify its content."}</script>"#,
         )
         .unwrap();
-        let data = StructuredData::parse(&dom);
+        let data = StructuredData::parse(&dom, &ParseBudget::default()).unwrap();
         let title = get_page_title(&dom);
         let resolved = discover(&dom, &data, &title, None, None);
 
