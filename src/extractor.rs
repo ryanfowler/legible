@@ -158,7 +158,7 @@ impl ExtractorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Error;
+    use crate::{CandidateSourceInfo, Error, ExtractionStrategyInfo, RootSelectionReasonInfo};
 
     #[test]
     fn builder_defaults_match_extractor_defaults() {
@@ -210,6 +210,124 @@ mod tests {
             .unwrap();
         assert!(chrome.text().contains("Requested navigation details"));
         assert!(!chrome.text().contains("Automatic main content"));
+    }
+
+    #[test]
+    fn exact_content_root_preserves_metadata_and_semantic_tables() {
+        let html = r#"<html><head><title>Article title</title></head><body>
+            <main><article id="chosen">
+                <h1>Article title</h1>
+                <p class="byline">By Ada Lovelace</p>
+                <p>This selected article contains enough useful detail for exact-root extraction and metadata checks.</p>
+                <table><tr><th>Field</th><th>Value</th></tr><tr><td>Status</td><td>Ready</td></tr></table>
+            </article><p>Excluded surrounding content.</p></main>
+        </body></html>"#;
+        let page = Extractor::builder()
+            .content_root(ContentHint::Id("chosen".into()))
+            .build()
+            .extract(html, None)
+            .unwrap();
+
+        assert_eq!(page.metadata().title.as_deref(), Some("Article title"));
+        assert!(
+            page.metadata()
+                .authors
+                .iter()
+                .any(|author| author.contains("Ada"))
+        );
+        assert!(!page.text().contains("Article title"));
+        assert!(page.markdown().contains("| Field | Value |"));
+        assert!(!page.text().contains("Excluded surrounding"));
+    }
+
+    #[test]
+    fn exact_content_root_reports_one_deterministic_diagnostic_attempt() {
+        let page = Extractor::builder()
+            .content_root(ContentHint::Tag(ContentTag::Article))
+            .diagnostics(true)
+            .build()
+            .extract(
+                "<body><article><p>The requested article has enough useful content for deterministic extraction.</p><p>A second paragraph keeps it meaningful.</p></article><article><p>Excluded content.</p></article></body>",
+                None,
+            )
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        assert_eq!(
+            diagnostics.selected_strategy,
+            ExtractionStrategyInfo::Normal
+        );
+        assert_eq!(diagnostics.attempts.len(), 1);
+        let attempt = &diagnostics.attempts[0];
+        assert!(attempt.accepted);
+        assert_eq!(
+            attempt.selected_root.selection_reason,
+            RootSelectionReasonInfo::SpecificChild
+        );
+        assert_eq!(
+            attempt.selected_root.candidate_sources,
+            vec![CandidateSourceInfo::CallerHint]
+        );
+        assert_eq!(attempt.selected_root.tag.as_deref(), Some("article"));
+    }
+
+    #[test]
+    fn exact_content_root_rejects_a_root_without_meaningful_text() {
+        let error = Extractor::builder()
+            .content_root(ContentHint::Id("empty".into()))
+            .build()
+            .extract(
+                "<body><div id='empty'><img src='empty.png'></div><main><p>Other useful content remains outside the requested root.</p></main></body>",
+                None,
+            );
+        assert!(matches!(error, Err(Error::NoContent)));
+    }
+
+    #[test]
+    fn exact_content_root_normalizes_direct_phrasing_content() {
+        let page = Extractor::builder()
+            .content_root(ContentHint::Id("root".into()))
+            .build()
+            .extract(
+                "<body><div id='root'>Direct <em>phrasing</em> content.</div><p>Excluded content.</p></body>",
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            page.html()
+                .contains("<p>Direct <em>phrasing</em> content.</p>")
+        );
+        assert!(!page.text().contains("Excluded content"));
+    }
+
+    #[test]
+    fn exact_content_root_preserves_hidden_math_with_tex_annotation() {
+        let page = Extractor::builder()
+            .content_root(ContentHint::Id("root".into()))
+            .build()
+            .extract(
+                r#"<body><div id="root"><p>The selected explanation includes an equation.</p><math style="opacity:0"><semantics><mrow><mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math><p>The explanation continues after the equation.</p></div></body>"#,
+                None,
+            )
+            .unwrap();
+
+        assert!(page.markdown().contains("$E=mc^2$"));
+    }
+
+    #[test]
+    fn exact_content_root_drops_hidden_and_modal_wrappers() {
+        let page = Extractor::builder()
+            .content_root(ContentHint::Id("root".into()))
+            .build()
+            .extract(
+                r#"<body><div id="root"><p>Visible selected content remains in the result.</p><div hidden><p>Hidden content must not leak from the requested root.</p></div><div role="dialog"><p>Modal content must not leak from the requested root.</p></div></div></body>"#,
+                None,
+            )
+            .unwrap();
+
+        assert!(page.text().contains("Visible selected content"));
+        assert!(!page.text().contains("Hidden content"));
+        assert!(!page.text().contains("Modal content"));
     }
 
     #[test]

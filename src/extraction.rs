@@ -5,7 +5,9 @@ use crate::candidate::{
     locate_structured_content, select_content_root,
 };
 use crate::cleaning::*;
-use crate::constants::{is_alter_to_div_exception, is_default_tag_to_score, regexps};
+use crate::constants::{
+    is_alter_to_div_exception, is_default_tag_to_score, is_phrasing_elem, regexps,
+};
 use crate::diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
     ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
@@ -88,6 +90,80 @@ fn remove_title_brand_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingP
     }
 }
 
+fn exact_is_phrasing_content(dom: &Dom, node: NodeId, depth: u32) -> bool {
+    if dom.is_text(node) || dom.is_comment(node) {
+        return true;
+    }
+    let Some(tag) = dom.tag(node) else {
+        return false;
+    };
+    is_phrasing_elem(tag)
+        || matches!(tag, Tag::A | Tag::Del | Tag::Ins)
+            && depth < 10
+            && dom
+                .children(node)
+                .all(|child| exact_is_phrasing_content(dom, child, depth + 1))
+}
+
+fn exact_is_whitespace(dom: &Dom, node: NodeId) -> bool {
+    dom.text_node(node)
+        .is_some_and(|text| text.trim().is_empty())
+        || dom.tag(node) == Some(Tag::Br)
+}
+
+/// Wrap direct phrasing content in the caller-selected root.
+///
+/// This keeps the exact-root path's source semantics without invoking the
+/// generic readability preparation pass.
+fn wrap_exact_phrasing_content_in_p(dom: &mut Dom, root: NodeId) {
+    let children: SmallVec<[NodeId; 8]> = dom.children(root).collect();
+    if children.is_empty()
+        || !children
+            .iter()
+            .all(|&child| exact_is_phrasing_content(dom, child, 0))
+    {
+        return;
+    }
+    let mut start = 0;
+    let mut end = children.len();
+    while start < end && exact_is_whitespace(dom, children[start]) {
+        start += 1;
+    }
+    while end > start && exact_is_whitespace(dom, children[end - 1]) {
+        end -= 1;
+    }
+    if start == end {
+        return;
+    }
+    let paragraph = dom.create_html_element(Tag::P).expect("DOM node limit");
+    dom.insert_before(children[start], paragraph);
+    for &child in &children[start..end] {
+        dom.append_child(paragraph, child);
+    }
+    for &child in children[..start].iter().chain(children[end..].iter()) {
+        dom.detach(child);
+    }
+}
+
+fn has_exact_single_paragraph_child(dom: &Dom, node: NodeId) -> bool {
+    let mut found = false;
+    for child in dom.children(node) {
+        if dom.is_element(child) {
+            if found || dom.tag(child) != Some(Tag::P) {
+                return false;
+            }
+            found = true;
+        } else if dom.is_text(child)
+            && dom
+                .text_node(child)
+                .is_some_and(|text| text.ends_with(|character: char| !character.is_whitespace()))
+        {
+            return false;
+        }
+    }
+    found
+}
+
 struct BestAttempt {
     content: FrozenContent,
     quality: ExtractionQuality,
@@ -95,6 +171,12 @@ struct BestAttempt {
     direction: Option<String>,
     strategy: ExtractionStrategy,
     diagnostic_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactRootOrigin {
+    Caller,
+    Specialized,
 }
 
 struct FrozenContent {
@@ -113,6 +195,26 @@ enum ExtractionStrategy {
     StructuredDataHint,
     RelaxedVisibility,
     BodyFallback,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static GENERIC_SCORING_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_generic_scoring_call() {
+    GENERIC_SCORING_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_generic_scoring_calls() {
+    GENERIC_SCORING_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn generic_scoring_calls() -> u32 {
+    GENERIC_SCORING_CALLS.with(std::cell::Cell::get)
 }
 
 impl From<ExtractionStrategy> for ExtractionStrategyInfo {
@@ -389,6 +491,20 @@ impl<'a> ContentExtractor<'a> {
         } else {
             self.specialized_root
         };
+        if let Some(root) = exact_root {
+            let origin = if self.options.content_root.is_some() {
+                ExactRootOrigin::Caller
+            } else {
+                ExactRootOrigin::Specialized
+            };
+            let compile_context = crate::document::CompileContext::new(
+                self.base_uri.clone(),
+                self.source_uri.as_ref(),
+            );
+            #[cfg(feature = "bench-instrumentation")]
+            drop(_candidate_preflight_phase);
+            return self.extract_exact_root(root, origin, &compile_context);
+        }
         let footnote_definitions = exact_root.is_none().then(|| {
             crate::instrumentation::record_external_footnote_scan();
             collect_external_footnotes(&self.dom)
@@ -508,6 +624,8 @@ impl<'a> ContentExtractor<'a> {
             // deferred clutter is detached. The prepared source stays intact
             // for retries.
             let _scoring_phase = PhaseGuard::new(Phase::Scoring);
+            #[cfg(test)]
+            record_generic_scoring_call();
             let mut working_dom = self.dom.clone();
             let working_root = working_dom.root();
             normalize_scoring_structure(&mut working_dom, working_root);
@@ -1088,6 +1206,396 @@ impl<'a> ContentExtractor<'a> {
             document,
         })
     }
+
+    fn extract_exact_root(
+        &mut self,
+        root: NodeId,
+        origin: ExactRootOrigin,
+        compile_context: &crate::document::CompileContext,
+    ) -> Result<ExtractedContent> {
+        let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
+        self.strategy = ExtractionStrategy::Normal;
+        crate::instrumentation::record_strategy(ExtractionStrategy::Normal as u8);
+        self.diagnostic_cleanup_actions.clear();
+        self.diagnostic_normalization = NormalizationCountsInfo::default();
+
+        let body = self.dom.body().ok_or(Error::NoBody)?;
+        let mut ancestor = Some(root);
+        let mut root_attached = false;
+        while let Some(node) = ancestor {
+            if node == self.dom.root() {
+                root_attached = true;
+                break;
+            }
+            ancestor = self.dom.parent(node);
+        }
+        if !self.dom.is_element(root) || !root_attached {
+            return Err(match origin {
+                ExactRootOrigin::Caller => Error::ContentRootNotFound,
+                ExactRootOrigin::Specialized => Error::NoContent,
+            });
+        }
+
+        let source_metrics = ContentMetrics::measure(&self.dom, root);
+        if !source_metrics.has_meaningful_text() {
+            return Err(Error::NoContent);
+        }
+        Self::normalize_exact_root_structure(&mut self.dom, root, origin);
+
+        if let Some(html) = self.dom.html_element() {
+            if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
+                self.page_language = Some(lang.into());
+            }
+            if let Some(dir) = self.dom.attr(html, AttrName::Dir) {
+                self.page_direction = Some(dir.into());
+            }
+        }
+
+        let root_info = self.exact_root_info(&self.dom, root, origin);
+        let synthetic = root == body;
+        let top_id;
+        let content_id;
+
+        if synthetic {
+            Self::prune_body_fallback_chrome(&mut self.dom, body);
+            let container = self
+                .dom
+                .create_html_element(Tag::Div)
+                .map_err(|_| Error::NoContent)?;
+            let children: SmallVec<[NodeId; 16]> = self.dom.children(body).collect();
+            for child in children {
+                self.dom.append_child(container, child);
+            }
+            self.dom.append_child(body, container);
+            initialize_node(
+                &self.dom,
+                container,
+                &mut self.node_data,
+                self.strategy.weight_classes(),
+            );
+            top_id = container;
+            content_id = container;
+        } else {
+            if !self.node_data.has(root) {
+                initialize_node(
+                    &self.dom,
+                    root,
+                    &mut self.node_data,
+                    self.strategy.weight_classes(),
+                );
+            }
+            top_id = root;
+            content_id = self.create_container(root, &[root]).unwrap_or(root);
+        }
+
+        if let Some(direction) = std::iter::once(top_id)
+            .chain(self.dom.ancestors(top_id))
+            .find_map(|node| self.dom.attr(node, AttrName::Dir))
+        {
+            self.page_direction = Some(direction.to_owned());
+        }
+
+        #[cfg(feature = "bench-instrumentation")]
+        drop(_root_selection_phase);
+
+        let mut fragment = {
+            let _phase = PhaseGuard::new(Phase::FragmentCopy);
+            self.dom
+                .copy_subtree_as_fragment(content_id)
+                .map_err(|_| Error::NoContent)?
+        };
+        let content_id = fragment
+            .first_child(fragment.root())
+            .ok_or(Error::NoContent)?;
+        let title_plan = title_heading_plan(
+            &fragment,
+            &self.page_title,
+            &self.structured_title,
+            self.metadata.site_name.as_deref(),
+            self.source_uri.as_ref(),
+        );
+        let mut match_buffer = String::new();
+        let mut text_buffer = String::new();
+        self.prepare_exact_fragment(
+            &mut fragment,
+            content_id,
+            origin,
+            &title_plan,
+            &mut match_buffer,
+            &mut text_buffer,
+        );
+        remove_title_brand_headings(&mut fragment, content_id, &title_plan);
+        self.dom = fragment;
+        self.node_data.clear();
+        self.node_data.enable_link_lengths();
+
+        let _cleanup_phase = PhaseGuard::new(Phase::Cleanup);
+        let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
+        let video = regexps::VIDEOS.clone();
+        let mut cleaning_nodes = Vec::new();
+        let (candidate_semantic_metrics, source_evidence) = self.prep_article(
+            content_id,
+            root != body,
+            compile_context,
+            &video,
+            &mut match_buffer,
+            &mut text_buffer,
+            &mut cleaning_nodes,
+        );
+        if synthetic {
+            self.dom
+                .set_attr(content_id, AttrName::Id, "legible-content");
+            self.dom.set_attr(content_id, AttrName::Class, "page");
+        } else {
+            let wrapper = self
+                .dom
+                .create_html_element(Tag::Div)
+                .map_err(|_| Error::NoContent)?;
+            self.dom.set_attr(wrapper, AttrName::Id, "legible-content");
+            self.dom.set_attr(wrapper, AttrName::Class, "page");
+            let children: SmallVec<[NodeId; 16]> = self.dom.children(content_id).collect();
+            for child in children {
+                self.dom.append_child(wrapper, child);
+            }
+            self.dom.append_child(content_id, wrapper);
+        }
+
+        let access_barrier = is_access_barrier(&self.dom, content_id);
+        let (mut source_facts, mut retained_nodes) =
+            self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
+        crate::instrumentation::record_cleaned_nodes(self.dom.len());
+        self.capture_normalization_counts(content_id);
+        #[cfg(feature = "bench-instrumentation")]
+        drop(_cleanup_phase);
+        if synthetic
+            && content_id != self.dom.root()
+            && let Some(retained_nodes) = retained_nodes.as_mut()
+        {
+            retained_nodes.insert(0, content_id);
+        }
+        if !synthetic {
+            let fragment_root = self.dom.root();
+            self.dom.move_children(content_id, fragment_root);
+            self.dom.detach(content_id);
+        }
+        let result_root = self.dom.root();
+        if let Some(source_facts) = source_facts.as_mut() {
+            source_facts.rebase_root(&self.dom, result_root);
+        }
+
+        let result_document = if self.diagnostic_attempts.is_some() {
+            Some(
+                crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+                    &self.dom,
+                    result_root,
+                    compile_context,
+                    source_facts.as_ref(),
+                    Some(&source_evidence),
+                    retained_nodes.as_deref(),
+                )
+                .map_err(|_| Error::NoContent)?,
+            )
+        } else {
+            None
+        };
+        let representation = result_document
+            .as_ref()
+            .map(|document| RepresentationMetricsInfo {
+                source_dom_nodes: self.source_dom_nodes,
+                final_dom_nodes: {
+                    crate::instrumentation::record_final_dom_node_scan();
+                    1 + self.dom.descendants(result_root).count()
+                },
+                document_nodes: document.len(),
+                estimated_document_bytes: document.retained_bytes_estimate(),
+            });
+        let result_metrics = result_document.as_ref().map_or_else(
+            || ContentMetrics::measure_fast(&self.dom, result_root),
+            ContentMetrics::measure_document,
+        );
+        let result_semantic_counts = result_document.as_ref().and_then(|document| {
+            candidate_semantic_metrics
+                .as_ref()
+                .map(|_| SemanticStructureCounts::measure(document))
+        });
+        let semantic_coverage = candidate_semantic_metrics.as_ref().and_then(|source| {
+            result_semantic_counts
+                .as_ref()
+                .and_then(|result| semantic_coverage(source, result))
+        });
+        let quality = ExtractionQuality::new(source_metrics, result_metrics, root != body);
+        let root_in_document_chrome = false;
+        let interactive_shell = is_interactive_shell(result_metrics, shell_evidence);
+        let incoherent_short = is_incoherent_short_result(result_metrics);
+        let valid_result = result_metrics.has_meaningful_text();
+        if !valid_result {
+            self.record_attempt(
+                ExtractionStrategy::Normal,
+                root_info,
+                source_metrics,
+                result_metrics,
+                quality,
+                semantic_coverage,
+                representation,
+                false,
+                Some(Self::attempt_rejection_reason(
+                    root_in_document_chrome,
+                    access_barrier,
+                    false,
+                    interactive_shell,
+                    incoherent_short,
+                    false,
+                    false,
+                )),
+            );
+            return Err(Error::NoContent);
+        }
+
+        let excerpt = self.content_excerpt_if_needed(result_root);
+        self.record_attempt(
+            ExtractionStrategy::Normal,
+            root_info,
+            source_metrics,
+            result_metrics,
+            quality,
+            semantic_coverage,
+            representation,
+            true,
+            None,
+        );
+        let document = if let Some(document) = result_document {
+            document
+        } else {
+            crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+                &self.dom,
+                result_root,
+                compile_context,
+                source_facts.as_ref(),
+                Some(&source_evidence),
+                retained_nodes.as_deref(),
+            )
+            .map_err(|_| Error::NoContent)?
+        };
+        Ok(ExtractedContent { excerpt, document })
+    }
+
+    fn prepare_exact_fragment(
+        &mut self,
+        dom: &mut Dom,
+        root: NodeId,
+        origin: ExactRootOrigin,
+        title_plan: &TitleHeadingPlan,
+        match_buffer: &mut String,
+        text_buffer: &mut String,
+    ) {
+        if origin != ExactRootOrigin::Caller {
+            return;
+        }
+        let snapshot = dom.element_descendants_snapshot_with_depth(root);
+        let accessible_math = accessible_math_nodes(dom, &snapshot);
+        let heading_limit = heading_text_limit(&self.page_title, &self.structured_title);
+        let retain_preferred_title =
+            title_plan.preferred.is_some() && !title_plan.brand_headings.is_empty();
+        let mut remove_title = !retain_preferred_title;
+        let mut excluded_depth = None;
+        for &(node, depth) in &snapshot {
+            if let Some(root_depth) = excluded_depth {
+                if depth > root_depth {
+                    continue;
+                }
+                excluded_depth = None;
+            }
+            if (!accessible_math.contains(&node) && !is_probably_visible(dom, node))
+                || Self::is_modal_or_dialog_in(dom, node)
+            {
+                dom.detach(node);
+                excluded_depth = Some(depth);
+                continue;
+            }
+            if self.page_byline.is_none() && !self.metadata.has_source_author {
+                build_match_string(dom, node, match_buffer);
+                if is_valid_byline(dom, node, match_buffer, text_buffer) {
+                    self.page_byline = Some(
+                        metadata::byline_name(dom, node)
+                            .unwrap_or_else(|| get_inner_text(dom, node, text_buffer).to_owned()),
+                    );
+                    dom.detach(node);
+                    excluded_depth = Some(depth);
+                    continue;
+                }
+            }
+            let duplicates_title = if has_primary_heading_semantics(dom, node) {
+                let heading = get_inner_text_limited(dom, node, text_buffer, heading_limit);
+                let matches_title = heading_matches_page_title(&self.page_title, heading)
+                    && (!self.metadata.title_from_content_heading
+                        || heading_matches_page_title(&self.structured_title, heading));
+                matches_title
+                    && if retain_preferred_title {
+                        title_plan.preferred != Some(node)
+                    } else {
+                        remove_title
+                    }
+            } else {
+                false
+            };
+            if duplicates_title {
+                remove_title = false;
+                dom.detach(node);
+                excluded_depth = Some(depth);
+            }
+        }
+    }
+
+    fn normalize_exact_root_structure(dom: &mut Dom, root: NodeId, origin: ExactRootOrigin) {
+        match origin {
+            ExactRootOrigin::Caller => {
+                if dom.tag(root) == Some(Tag::Div) {
+                    wrap_exact_phrasing_content_in_p(dom, root);
+                }
+            }
+            ExactRootOrigin::Specialized => {
+                let nodes = dom.element_descendants_snapshot_with_depth(root);
+                for &(node, _) in &nodes {
+                    if node == root
+                        || dom.parent(node).is_none()
+                        || dom.tag(node) != Some(Tag::Div)
+                        || !is_probably_visible(dom, node)
+                        || Self::is_modal_or_dialog_in(dom, node)
+                        || !has_exact_single_paragraph_child(dom, node)
+                    {
+                        continue;
+                    }
+                    let Some(paragraph) = dom.element_children(node).next() else {
+                        continue;
+                    };
+                    dom.replace_with(node, paragraph);
+                }
+            }
+        }
+    }
+
+    fn exact_root_info(
+        &self,
+        dom: &Dom,
+        root: NodeId,
+        origin: ExactRootOrigin,
+    ) -> Option<RootInfo> {
+        self.diagnostic_attempts.as_ref()?;
+        Some(RootInfo {
+            tag: dom.qual_name(root).map(|name| name.local.to_string()),
+            id: dom.attr(root, AttrName::Id).map(str::to_owned),
+            classes: dom
+                .attr(root, AttrName::Class)
+                .map(|classes| classes.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
+            selection_reason: RootSelectionReason::SpecificChild.into(),
+            candidate_sources: match origin {
+                ExactRootOrigin::Caller => vec![CandidateSourceInfo::CallerHint],
+                ExactRootOrigin::Specialized => Vec::new(),
+            },
+        })
+    }
+
     fn root_info(
         &self,
         dom: &Dom,
@@ -1470,15 +1978,19 @@ impl<'a> ContentExtractor<'a> {
     }
 
     fn is_modal_or_dialog(&self, node: NodeId) -> bool {
-        self.dom.attr(node, AttrName::AriaModal) == Some("true")
-            || self.dom.attr(node, AttrName::Role).is_some_and(|roles| {
+        Self::is_modal_or_dialog_in(&self.dom, node)
+    }
+
+    fn is_modal_or_dialog_in(dom: &Dom, node: NodeId) -> bool {
+        dom.attr(node, AttrName::AriaModal) == Some("true")
+            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
                 roles.split_whitespace().any(|role| {
                     role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
                 })
             })
-            || (!is_probably_visible(&self.dom, node)
-                || has_hidden_utility_class_for_discovery(&self.dom, node))
-                && self.dom.attr(node, AttrName::Class).is_some_and(|classes| {
+            || (!is_probably_visible(dom, node)
+                || has_hidden_utility_class_for_discovery(dom, node))
+                && dom.attr(node, AttrName::Class).is_some_and(|classes| {
                     classes.split_whitespace().any(|class| {
                         class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
                     })
@@ -2608,6 +3120,30 @@ mod tests {
 
         assert!(page.markdown().contains("semantic compiler consumes"));
         assert_eq!(Dom::fragment_copy_count(), 1);
+    }
+
+    #[test]
+    fn exact_and_specialized_roots_skip_generic_scoring() {
+        reset_generic_scoring_calls();
+        crate::Extractor::builder()
+            .content_root(crate::ContentHint::Id("chosen".into()))
+            .build()
+            .extract(
+                "<body><main id='chosen'><p>The requested root contains enough useful text for extraction.</p><p>A second paragraph keeps the requested content substantive.</p></main><aside>Unrelated page content.</aside></body>",
+                None,
+            )
+            .unwrap();
+        assert_eq!(generic_scoring_calls(), 0);
+
+        reset_generic_scoring_calls();
+        crate::Extractor::builder()
+            .build()
+            .extract(
+                include_str!("../tests/specialized/hacker-news-listing/source.html"),
+                Some("https://news.ycombinator.com/"),
+            )
+            .unwrap();
+        assert_eq!(generic_scoring_calls(), 0);
     }
 
     #[test]
