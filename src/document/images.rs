@@ -42,6 +42,7 @@ impl ImageAnalysis {
         sources
     }
 
+    #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.sources
             .allocated_bytes()

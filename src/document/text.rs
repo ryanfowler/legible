@@ -41,6 +41,7 @@ fn is_ascii_normalized(value: &str) -> bool {
         && !bytes.windows(2).any(|window| window == b"  ")
 }
 
+#[cfg(test)]
 pub(super) fn merge_prose(existing: &mut String, next: &str) {
     if existing.ends_with(' ') && next.starts_with(' ') {
         existing.push_str(&next[1..]);
@@ -51,10 +52,12 @@ pub(super) fn merge_prose(existing: &mut String, next: &str) {
 
 /// Accumulates prose fragments when a caller needs one canonical text value.
 #[derive(Default)]
+#[cfg(test)]
 pub(crate) struct ProseTextAccumulator {
     value: String,
 }
 
+#[cfg(test)]
 impl ProseTextAccumulator {
     pub(crate) fn push(&mut self, fragment: &str) {
         let fragment = normalize_prose_fragment(fragment);
@@ -67,6 +70,7 @@ impl ProseTextAccumulator {
 }
 
 /// Returns preformatted content unchanged.
+#[cfg(test)]
 pub(crate) fn preformatted_text(value: &str) -> Box<str> {
     value.into()
 }

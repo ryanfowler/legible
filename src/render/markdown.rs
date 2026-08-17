@@ -4,8 +4,8 @@
 // only formatting and structural state that is needed while writing output.
 
 use crate::document::{
-    Document, EventOp, FootnoteId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, ListKind,
-    NodeKindView as NodeKind, OperationKind, TableAlignment,
+    Document, EventOp, FootnoteId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, ListKind, OperationKind,
+    SemanticItemView as Item, TableAlignment,
 };
 use smallvec::SmallVec;
 
@@ -123,7 +123,7 @@ impl<'a> MarkdownRenderer<'a> {
         self.out.finish()
     }
 
-    fn open(&mut self, index: usize, operation: EventOp, node: NodeKind<'_>) -> Option<usize> {
+    fn open(&mut self, index: usize, operation: EventOp, node: Item<'_>) -> Option<usize> {
         let kind = self.document.operation_kind(index)?;
         if let Some(parent) = self.frames.last_mut() {
             parent.direct_children += 1;
@@ -136,10 +136,10 @@ impl<'a> MarkdownRenderer<'a> {
         let parent_kind = self.frames.last().map(|frame| frame.kind);
 
         match node {
-            NodeKind::Text(text) => {
+            Item::Text(text) => {
                 self.out.text(text, self.next_text_char(index));
             }
-            NodeKind::Heading { level } => {
+            Item::Heading { level } => {
                 if !self.visible(operation) {
                     if !self.config.images {
                         return Some(end.saturating_add(1));
@@ -152,7 +152,7 @@ impl<'a> MarkdownRenderer<'a> {
                 self.out.markup(" ");
                 self.push_frame(index, kind, CloseAction::Block);
             }
-            NodeKind::Paragraph => {
+            Item::Paragraph => {
                 let in_list_item = parent_kind == Some(OperationKind::ListItem);
                 let in_table_cell = parent_kind == Some(OperationKind::TableCell);
                 let in_first_footnote_paragraph = parent_kind
@@ -176,7 +176,7 @@ impl<'a> MarkdownRenderer<'a> {
                     },
                 );
             }
-            NodeKind::TableCaption => {
+            Item::TableCaption => {
                 self.out.ensure_blank_line();
                 self.push_frame(
                     index,
@@ -186,14 +186,14 @@ impl<'a> MarkdownRenderer<'a> {
                     },
                 );
             }
-            NodeKind::Figcaption
-            | NodeKind::DefinitionTerm
-            | NodeKind::DefinitionDescription
-            | NodeKind::Summary => {
+            Item::Figcaption
+            | Item::DefinitionTerm
+            | Item::DefinitionDescription
+            | Item::Summary => {
                 self.out.ensure_blank_line();
                 self.push_frame(index, kind, CloseAction::Block);
             }
-            NodeKind::BlockGroup => {
+            Item::BlockGroup => {
                 if self.block_contains_only_footnotes(index) {
                     self.out.limit_trailing_newlines(3);
                     self.push_frame(index, kind, CloseAction::None);
@@ -204,30 +204,30 @@ impl<'a> MarkdownRenderer<'a> {
                     self.push_frame(index, kind, CloseAction::Block);
                 }
             }
-            NodeKind::Figure | NodeKind::Details | NodeKind::DefinitionList => {
+            Item::Figure | Item::Details | Item::DefinitionList => {
                 if !self.out.in_empty_list_item() {
                     self.out.ensure_blank_line();
                 }
                 self.push_frame(index, kind, CloseAction::Block);
             }
-            NodeKind::BlockQuote | NodeKind::Callout(_) => {
+            Item::BlockQuote | Item::Callout(_) => {
                 self.out.ensure_blank_line();
                 self.out.prefixes.push(Prefix::Quote);
                 self.push_frame(index, kind, CloseAction::Quote);
             }
-            NodeKind::HardBreak => self.out.hard_break(),
-            NodeKind::ThematicBreak => {
+            Item::HardBreak => self.out.hard_break(),
+            Item::ThematicBreak => {
                 self.out.ensure_blank_line();
                 self.out.mark_list_item_content();
                 self.out.markup("---");
                 self.out.newline();
             }
-            NodeKind::Strong => self.format(index, kind, operation, "**"),
-            NodeKind::Emphasis => self.format(index, kind, operation, "*"),
-            NodeKind::Strikethrough => self.format(index, kind, operation, "~~"),
-            NodeKind::InlineCode(text) => self.code_span(text),
-            NodeKind::CodeBlock(code) => self.code_block(code.language(), code.text()),
-            NodeKind::Link(link) => {
+            Item::Strong => self.format(index, kind, operation, "**"),
+            Item::Emphasis => self.format(index, kind, operation, "*"),
+            Item::Strikethrough => self.format(index, kind, operation, "~~"),
+            Item::InlineCode(text) => self.code_span(text),
+            Item::CodeBlock(code) => self.code_block(code.language(), code.text()),
+            Item::Link(link) => {
                 if self.config.links {
                     self.out.mark_inline_boundary();
                     self.out.open_link();
@@ -235,20 +235,20 @@ impl<'a> MarkdownRenderer<'a> {
                 self.push_frame(index, kind, CloseAction::Link(self.config.links));
                 let _ = link;
             }
-            NodeKind::Image(image) if self.config.images => self.image(image),
-            NodeKind::Image(_) => {}
-            NodeKind::List(list) => self.list(index, kind, list.kind, list.start),
-            NodeKind::ListItem => self.list_item(index, kind),
-            NodeKind::Table(_) => self.table(index, kind),
-            NodeKind::TableRow => self.table_row(index, kind),
-            NodeKind::TableCell(_) => {
+            Item::Image(image) if self.config.images => self.image(image),
+            Item::Image(_) => {}
+            Item::List(list) => self.list(index, kind, list.kind, list.start),
+            Item::ListItem => self.list_item(index, kind),
+            Item::Table(_) => self.table(index, kind),
+            Item::TableRow => self.table_row(index, kind),
+            Item::TableCell(_) => {
                 if self.start_table_cell(index) {
                     return Some(end.saturating_add(1));
                 }
                 self.push_frame(index, kind, CloseAction::None);
             }
-            NodeKind::FootnoteReference(id) => self.footnote_reference(id),
-            NodeKind::FootnoteDefinition(id) => {
+            Item::FootnoteReference(id) => self.footnote_reference(id),
+            Item::FootnoteDefinition(id) => {
                 let Some(label) = self.document.footnote_label(id) else {
                     return Some(end.saturating_add(1));
                 };
@@ -259,10 +259,10 @@ impl<'a> MarkdownRenderer<'a> {
                 self.out.prefixes.push(Prefix::Indent(4));
                 self.push_frame(index, kind, CloseAction::Footnote);
             }
-            NodeKind::TaskMarker(_) => {}
-            NodeKind::InlineMath(math) => self.math(math.source(), false),
-            NodeKind::DisplayMath(math) => self.math(math.source(), true),
-            NodeKind::Media(media) => {
+            Item::TaskMarker(_) => {}
+            Item::InlineMath(math) => self.math(math.source(), false),
+            Item::DisplayMath(math) => self.math(math.source(), true),
+            Item::Media(media) => {
                 let title = media.title().unwrap_or(media.source());
                 if self.config.links {
                     self.out.markup("[");
@@ -274,7 +274,7 @@ impl<'a> MarkdownRenderer<'a> {
                     self.out.text(title, None);
                 }
             }
-            NodeKind::Invalid => {}
+            Item::Invalid => {}
         }
         None
     }
@@ -297,7 +297,7 @@ impl<'a> MarkdownRenderer<'a> {
                 if !enabled {
                     return;
                 }
-                let Some(NodeKind::Link(link)) = self.document.operation_view(opening) else {
+                let Some(Item::Link(link)) = self.document.operation_view(opening) else {
                     return;
                 };
                 if self.out.close_marker("[", "](") {
@@ -391,8 +391,8 @@ impl<'a> MarkdownRenderer<'a> {
             }
             let node = self.document.operation_view(next)?;
             match node {
-                NodeKind::Text(text) => return text.chars().next(),
-                NodeKind::Image(_) if self.config.images => return Some('!'),
+                Item::Text(text) => return text.chars().next(),
+                Item::Image(_) if self.config.images => return Some('!'),
                 _ => {
                     if kind.is_container() {
                         nested += 1;
@@ -691,15 +691,15 @@ impl<'a> MarkdownRenderer<'a> {
                 continue;
             };
             match node {
-                NodeKind::Text(text) if has_visible_inline_text(text) => return None,
-                NodeKind::TaskMarker(marker) => {
+                Item::Text(text) if has_visible_inline_text(text) => return None,
+                Item::TaskMarker(marker) => {
                     return Some((marker.is_checked(), marker.fallback_label()));
                 }
-                NodeKind::List(_) => {
+                Item::List(_) => {
                     index = self.document.operation_end(index).saturating_add(1);
                     continue;
                 }
-                NodeKind::Image(_) | NodeKind::Media(_) => return None,
+                Item::Image(_) | Item::Media(_) => return None,
                 _ => {}
             }
             index += 1;
@@ -723,8 +723,8 @@ impl<'a> MarkdownRenderer<'a> {
                 continue;
             };
             match node {
-                NodeKind::Text(text) if has_visible_inline_text(text) => return true,
-                NodeKind::List(_) | NodeKind::TaskMarker(_) => {
+                Item::Text(text) if has_visible_inline_text(text) => return true,
+                Item::List(_) | Item::TaskMarker(_) => {
                     index = self.document.operation_end(index).saturating_add(1);
                     continue;
                 }
@@ -750,7 +750,7 @@ impl<'a> MarkdownRenderer<'a> {
             }
             if depth == 1
                 && self.document.operation_kind(index) == Some(OperationKind::TableCell)
-                && let Some(NodeKind::TableCell(cell)) = self.document.operation_view(index)
+                && let Some(Item::TableCell(cell)) = self.document.operation_view(index)
                 && (cell.colspan() > 1 || cell.rowspan() > 1)
             {
                 return true;
@@ -782,7 +782,7 @@ impl<'a> MarkdownRenderer<'a> {
                 continue;
             }
             if depth == 0
-                && let Some(NodeKind::TableCell(cell)) = self.document.operation_view(index)
+                && let Some(Item::TableCell(cell)) = self.document.operation_view(index)
             {
                 values.push(cell.alignment());
             }
@@ -815,11 +815,11 @@ impl<'a> MarkdownRenderer<'a> {
                 continue;
             };
             match node {
-                NodeKind::HardBreak
-                | NodeKind::CodeBlock(_)
-                | NodeKind::List(_)
-                | NodeKind::Table(_)
-                | NodeKind::DisplayMath(_) => return true,
+                Item::HardBreak
+                | Item::CodeBlock(_)
+                | Item::List(_)
+                | Item::Table(_)
+                | Item::DisplayMath(_) => return true,
                 kind if is_block(&kind) => {
                     blocks += 1;
                     if blocks > 1 {
@@ -850,28 +850,28 @@ impl<'a> MarkdownRenderer<'a> {
                 continue;
             };
             match node {
-                NodeKind::Text(value) | NodeKind::InlineCode(value) => text.push_str(value),
-                NodeKind::CodeBlock(code) => {
+                Item::Text(value) | Item::InlineCode(value) => text.push_str(value),
+                Item::CodeBlock(code) => {
                     text.push(' ');
                     text.push_str(code.text());
                     text.push(' ');
                 }
-                NodeKind::Image(image) if self.config.images => text.push_str(image.alt()),
-                NodeKind::HardBreak => text.push(' '),
-                NodeKind::FootnoteReference(id) => {
+                Item::Image(image) if self.config.images => text.push_str(image.alt()),
+                Item::HardBreak => text.push(' '),
+                Item::FootnoteReference(id) => {
                     if let Some(label) = self.document.footnote_label(id) {
                         text.push_str(label);
                     }
                 }
-                NodeKind::TaskMarker(marker) => {
+                Item::TaskMarker(marker) => {
                     if let Some(label) = marker.fallback_label() {
                         text.push_str(label);
                     }
                 }
-                NodeKind::InlineMath(math) | NodeKind::DisplayMath(math) => {
+                Item::InlineMath(math) | Item::DisplayMath(math) => {
                     text.push_str(math.fallback_text().unwrap_or(math.source()));
                 }
-                NodeKind::Media(media) => {
+                Item::Media(media) => {
                     text.push_str(media.title().unwrap_or(media.source()));
                 }
                 kind => {
@@ -910,7 +910,7 @@ impl<'a> MarkdownRenderer<'a> {
             .find(|frame| frame.kind == OperationKind::List);
         let (kind, start) = match list {
             Some(frame) => {
-                if let Some(NodeKind::List(value)) = self.document.operation_view(frame.index) {
+                if let Some(Item::List(value)) = self.document.operation_view(frame.index) {
                     (value.kind(), value.start())
                 } else {
                     (ListKind::Unordered, None)
@@ -950,31 +950,31 @@ fn escape_math_source(source: &str) -> String {
     escaped
 }
 
-fn is_block(kind: &NodeKind) -> bool {
+fn is_block(kind: &Item) -> bool {
     matches!(
         kind,
-        NodeKind::Paragraph
-            | NodeKind::BlockGroup
-            | NodeKind::Heading { .. }
-            | NodeKind::BlockQuote
-            | NodeKind::CodeBlock(_)
-            | NodeKind::List(_)
-            | NodeKind::ListItem
-            | NodeKind::Table(_)
-            | NodeKind::TableCaption
-            | NodeKind::TableRow
-            | NodeKind::TableCell(_)
-            | NodeKind::Figure
-            | NodeKind::Figcaption
-            | NodeKind::Details
-            | NodeKind::Summary
-            | NodeKind::ThematicBreak
-            | NodeKind::DefinitionList
-            | NodeKind::DefinitionTerm
-            | NodeKind::DefinitionDescription
-            | NodeKind::Callout(_)
-            | NodeKind::FootnoteDefinition(_)
-            | NodeKind::DisplayMath(_)
+        Item::Paragraph
+            | Item::BlockGroup
+            | Item::Heading { .. }
+            | Item::BlockQuote
+            | Item::CodeBlock(_)
+            | Item::List(_)
+            | Item::ListItem
+            | Item::Table(_)
+            | Item::TableCaption
+            | Item::TableRow
+            | Item::TableCell(_)
+            | Item::Figure
+            | Item::Figcaption
+            | Item::Details
+            | Item::Summary
+            | Item::ThematicBreak
+            | Item::DefinitionList
+            | Item::DefinitionTerm
+            | Item::DefinitionDescription
+            | Item::Callout(_)
+            | Item::FootnoteDefinition(_)
+            | Item::DisplayMath(_)
     )
 }
 
@@ -1682,25 +1682,26 @@ fn is_word_like(value: char) -> bool {
 mod tests {
     use super::*;
     use crate::document::{
-        CodeBlock, DocumentBuilder, Image, List, ListKind, MathFormat, MathValue, NodeKind, Table,
-        TableCell, TaskMarker,
+        CodeBlock, Image, List, ListKind, MathFormat, MathValue, SemanticKind as Item,
+        SemanticTapeBuilder, Table, TableCell, TaskMarker,
     };
 
     #[test]
     fn semantic_code_chooses_safe_delimiters() {
-        let mut builder = DocumentBuilder::with_capacity(3);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(3);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
         builder.append_inline_code(Some(paragraph), "a`b").unwrap();
+        builder.close(paragraph).unwrap();
         builder
-            .append(
+            .emit(
                 None,
-                NodeKind::CodeBlock(CodeBlock {
+                Item::CodeBlock(CodeBlock {
                     language: Some("rust".into()),
                     text: "let fence = ```;\n".into(),
                 }),
             )
             .unwrap();
-        let document = builder.finish();
+        let document = builder.finish().unwrap();
         assert_eq!(
             render_markdown(&document, 0, MarkdownConfig::default()),
             "``a`b``\n\n````rust\nlet fence = ```;\n````\n"
@@ -1709,31 +1710,32 @@ mod tests {
 
     #[test]
     fn sibling_tasks_preserve_nested_inline_order() {
-        let mut builder = DocumentBuilder::with_capacity(6);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(6);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
         builder.append_prose(Some(paragraph), "first").unwrap();
-        let emphasis = builder.append(Some(paragraph), NodeKind::Emphasis).unwrap();
+        let emphasis = builder.emit(Some(paragraph), Item::Emphasis).unwrap();
         builder.append_prose(Some(emphasis), "second").unwrap();
+        builder.close(emphasis).unwrap();
         builder.append_prose(Some(paragraph), " third").unwrap();
-        let trailing = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.close(paragraph).unwrap();
+        let trailing = builder.emit(None, Item::Paragraph).unwrap();
         builder.append_prose(Some(trailing), "next").unwrap();
+        builder.close(trailing).unwrap();
 
         assert_eq!(
-            render_markdown(&builder.finish(), 0, MarkdownConfig::default()),
+            render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default()),
             "first *second* third\n\nnext\n"
         );
     }
 
     #[test]
     fn image_only_heading_without_alt_degrades_to_an_image() {
-        let mut builder = DocumentBuilder::with_capacity(2);
-        let heading = builder
-            .append(None, NodeKind::Heading { level: 2 })
-            .unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(2);
+        let heading = builder.emit(None, Item::Heading { level: 2 }).unwrap();
         builder
-            .append(
+            .emit(
                 Some(heading),
-                NodeKind::Image(Image {
+                Item::Image(Image {
                     source: "diagram.png".into(),
                     alt: "".into(),
                     title: None,
@@ -1742,98 +1744,104 @@ mod tests {
                 }),
             )
             .unwrap();
+        builder.close(heading).unwrap();
         assert_eq!(
-            render_markdown(&builder.finish(), 0, MarkdownConfig::default()),
+            render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default()),
             "![](diagram.png)\n"
         );
     }
 
     #[test]
     fn task_markers_must_be_the_first_visible_item_content() {
-        let mut builder = DocumentBuilder::with_capacity(8);
+        let mut builder = SemanticTapeBuilder::with_capacity(8);
         let list = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::List(List {
+                Item::List(List {
                     kind: ListKind::Unordered,
                     start: None,
                 }),
             )
             .unwrap();
-        let trailing = builder.append(Some(list), NodeKind::ListItem).unwrap();
+        let trailing = builder.emit(Some(list), Item::ListItem).unwrap();
         builder.append_prose(Some(trailing), "Optional ").unwrap();
         builder
-            .append(
+            .emit(
                 Some(trailing),
-                NodeKind::TaskMarker(TaskMarker {
+                Item::TaskMarker(TaskMarker {
                     checked: true,
                     fallback_label: None,
                 }),
             )
             .unwrap();
-        let multiple = builder.append(Some(list), NodeKind::ListItem).unwrap();
+        builder.close(trailing).unwrap();
+        let multiple = builder.emit(Some(list), Item::ListItem).unwrap();
         builder
-            .append(
+            .emit(
                 Some(multiple),
-                NodeKind::TaskMarker(TaskMarker {
+                Item::TaskMarker(TaskMarker {
                     checked: false,
                     fallback_label: None,
                 }),
             )
             .unwrap();
         builder
-            .append(
+            .emit(
                 Some(multiple),
-                NodeKind::TaskMarker(TaskMarker {
+                Item::TaskMarker(TaskMarker {
                     checked: true,
                     fallback_label: None,
                 }),
             )
             .unwrap();
         builder.append_prose(Some(multiple), "First").unwrap();
+        builder.close(multiple).unwrap();
+        builder.close(list).unwrap();
         assert_eq!(
-            render_markdown(&builder.finish(), 0, MarkdownConfig::default()),
+            render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default()),
             "- Optional\n- [ ] First\n"
         );
     }
 
     #[test]
     fn math_cannot_emit_raw_html_or_close_its_delimiter() {
-        let mut builder = DocumentBuilder::with_capacity(2);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(2);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
         builder
-            .append(
+            .emit(
                 Some(paragraph),
-                NodeKind::InlineMath(MathValue {
+                Item::InlineMath(MathValue {
                     source: "x $ <img src=x onerror=x>".into(),
                     format: MathFormat::Tex,
                     fallback_text: None,
                 }),
             )
             .unwrap();
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        builder.close(paragraph).unwrap();
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert_eq!(markdown, "$x \\$ &lt;img src=x onerror=x&gt;$\n");
         assert!(!markdown.contains("<img"));
     }
 
     #[test]
     fn complex_table_cells_flatten_to_valid_gfm_lines_and_keep_the_caption() {
-        let mut builder = DocumentBuilder::with_capacity(10);
+        let mut builder = SemanticTapeBuilder::with_capacity(10);
         let table = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Table(Table {
+                Item::Table(Table {
                     column_count: Some(1),
                 }),
             )
             .unwrap();
-        let caption = builder.append(Some(table), NodeKind::TableCaption).unwrap();
+        let caption = builder.emit(Some(table), Item::TableCaption).unwrap();
         builder.append_prose(Some(caption), "Measurements").unwrap();
-        let row = builder.append(Some(table), NodeKind::TableRow).unwrap();
+        builder.close(caption).unwrap();
+        let row = builder.emit(Some(table), Item::TableRow).unwrap();
         let cell = builder
-            .append(
+            .emit(
                 Some(row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: false,
                     colspan: 1,
                     rowspan: 1,
@@ -1841,30 +1849,35 @@ mod tests {
                 }),
             )
             .unwrap();
-        let first = builder.append(Some(cell), NodeKind::Paragraph).unwrap();
+        let first = builder.emit(Some(cell), Item::Paragraph).unwrap();
         builder.append_prose(Some(first), "first").unwrap();
-        let second = builder.append(Some(cell), NodeKind::Paragraph).unwrap();
+        builder.close(first).unwrap();
+        let second = builder.emit(Some(cell), Item::Paragraph).unwrap();
         builder.append_prose(Some(second), "second").unwrap();
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        builder.close(second).unwrap();
+        builder.close(cell).unwrap();
+        builder.close(row).unwrap();
+        builder.close(table).unwrap();
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert_eq!(markdown, "Measurements\n\n| first second |\n| --- |\n");
     }
 
     #[test]
     fn table_images_and_code_escape_column_delimiters() {
-        let mut builder = DocumentBuilder::with_capacity(6);
+        let mut builder = SemanticTapeBuilder::with_capacity(6);
         let table = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Table(Table {
+                Item::Table(Table {
                     column_count: Some(2),
                 }),
             )
             .unwrap();
-        let row = builder.append(Some(table), NodeKind::TableRow).unwrap();
+        let row = builder.emit(Some(table), Item::TableRow).unwrap();
         let image_cell = builder
-            .append(
+            .emit(
                 Some(row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: false,
                     colspan: 1,
                     rowspan: 1,
@@ -1873,9 +1886,9 @@ mod tests {
             )
             .unwrap();
         builder
-            .append(
+            .emit(
                 Some(image_cell),
-                NodeKind::Image(Image {
+                Item::Image(Image {
                     source: "diagram.png".into(),
                     alt: "A|B".into(),
                     title: None,
@@ -1884,10 +1897,11 @@ mod tests {
                 }),
             )
             .unwrap();
+        builder.close(image_cell).unwrap();
         let code_cell = builder
-            .append(
+            .emit(
                 Some(row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: false,
                     colspan: 1,
                     rowspan: 1,
@@ -1896,27 +1910,30 @@ mod tests {
             )
             .unwrap();
         builder.append_inline_code(Some(code_cell), "a|b").unwrap();
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        builder.close(code_cell).unwrap();
+        builder.close(row).unwrap();
+        builder.close(table).unwrap();
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert!(markdown.contains("![A\\|B](diagram.png)"), "{markdown}");
         assert!(markdown.contains("`a\\|b`"), "{markdown}");
     }
 
     #[test]
     fn spanning_tables_degrade_without_invalid_gfm_columns() {
-        let mut builder = DocumentBuilder::with_capacity(5);
+        let mut builder = SemanticTapeBuilder::with_capacity(5);
         let table = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Table(Table {
+                Item::Table(Table {
                     column_count: Some(2),
                 }),
             )
             .unwrap();
-        let row = builder.append(Some(table), NodeKind::TableRow).unwrap();
+        let row = builder.emit(Some(table), Item::TableRow).unwrap();
         let cell = builder
-            .append(
+            .emit(
                 Some(row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: true,
                     colspan: 2,
                     rowspan: 1,
@@ -1925,27 +1942,30 @@ mod tests {
             )
             .unwrap();
         builder.append_prose(Some(cell), "Wide heading").unwrap();
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        builder.close(cell).unwrap();
+        builder.close(row).unwrap();
+        builder.close(table).unwrap();
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert_eq!(markdown, "Wide heading\n");
         assert!(!markdown.contains("| ---"));
     }
 
     #[test]
     fn nested_spanning_tables_do_not_degrade_the_outer_table() {
-        let mut builder = DocumentBuilder::with_capacity(10);
+        let mut builder = SemanticTapeBuilder::with_capacity(10);
         let outer = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Table(Table {
+                Item::Table(Table {
                     column_count: Some(1),
                 }),
             )
             .unwrap();
-        let outer_row = builder.append(Some(outer), NodeKind::TableRow).unwrap();
+        let outer_row = builder.emit(Some(outer), Item::TableRow).unwrap();
         let outer_cell = builder
-            .append(
+            .emit(
                 Some(outer_row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: false,
                     colspan: 1,
                     rowspan: 1,
@@ -1954,18 +1974,18 @@ mod tests {
             )
             .unwrap();
         let nested = builder
-            .append(
+            .emit(
                 Some(outer_cell),
-                NodeKind::Table(Table {
+                Item::Table(Table {
                     column_count: Some(2),
                 }),
             )
             .unwrap();
-        let nested_row = builder.append(Some(nested), NodeKind::TableRow).unwrap();
+        let nested_row = builder.emit(Some(nested), Item::TableRow).unwrap();
         let nested_cell = builder
-            .append(
+            .emit(
                 Some(nested_row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: true,
                     colspan: 2,
                     rowspan: 1,
@@ -1974,19 +1994,25 @@ mod tests {
             )
             .unwrap();
         builder.append_prose(Some(nested_cell), "Nested").unwrap();
+        builder.close(nested_cell).unwrap();
+        builder.close(nested_row).unwrap();
+        builder.close(nested).unwrap();
+        builder.close(outer_cell).unwrap();
+        builder.close(outer_row).unwrap();
+        builder.close(outer).unwrap();
 
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert!(markdown.contains("| Nested |"), "{markdown}");
         assert!(markdown.contains("| --- |"), "{markdown}");
     }
 
     #[test]
     fn list_item_numbering_ignores_direct_footnote_children() {
-        let mut builder = DocumentBuilder::with_capacity(6);
+        let mut builder = SemanticTapeBuilder::with_capacity(6);
         let list = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::List(List {
+                Item::List(List {
                     kind: ListKind::Ordered,
                     start: Some(5),
                 }),
@@ -1994,49 +2020,66 @@ mod tests {
             .unwrap();
         let footnote_id = crate::document::FootnoteId::from_index(0).unwrap();
         let definition = builder
-            .append(Some(list), NodeKind::FootnoteDefinition(footnote_id))
+            .emit(Some(list), Item::FootnoteDefinition(footnote_id))
             .unwrap();
-        let definition_paragraph = builder
-            .append(Some(definition), NodeKind::Paragraph)
-            .unwrap();
+        let definition_paragraph = builder.emit(Some(definition), Item::Paragraph).unwrap();
         builder
             .append_prose(Some(definition_paragraph), "Note")
             .unwrap();
         builder
             .define_footnote(footnote_id, "note", definition)
             .unwrap();
-        let item = builder.append(Some(list), NodeKind::ListItem).unwrap();
+        builder.close(definition_paragraph).unwrap();
+        builder.close(definition).unwrap();
+        let item = builder.emit(Some(list), Item::ListItem).unwrap();
         builder.append_prose(Some(item), "Item").unwrap();
+        builder.close(item).unwrap();
+        builder.close(list).unwrap();
 
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert!(markdown.contains("5. Item"), "{markdown}");
     }
 
     #[test]
     fn deeply_nested_formatting_with_many_text_runs_is_linear() {
         const DEPTH: usize = 5_000;
-        let mut builder = DocumentBuilder::with_capacity(DEPTH * 2 + 1);
-        let mut parent = Some(builder.append(None, NodeKind::Paragraph).unwrap());
+        let mut builder = SemanticTapeBuilder::with_capacity(DEPTH * 2 + 1);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        let mut parent = Some(paragraph);
+        let mut formatting_nodes = Vec::with_capacity(DEPTH);
         for _ in 0..DEPTH {
-            let formatting = builder.append(parent, NodeKind::Emphasis).unwrap();
+            let formatting = builder.emit(parent, Item::Emphasis).unwrap();
             builder.append_prose(Some(formatting), "x ").unwrap();
+            formatting_nodes.push(formatting);
             parent = Some(formatting);
         }
         builder.append_prose(parent, "end").unwrap();
-        let markdown = render_markdown(&builder.finish(), 0, MarkdownConfig::default());
+        for formatting in formatting_nodes.into_iter().rev() {
+            builder.close(formatting).unwrap();
+        }
+        builder.close(paragraph).unwrap();
+        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
         assert!(markdown.contains("end"));
     }
 
     #[test]
     fn deeply_nested_formatting_is_linear_and_stack_safe() {
         const DEPTH: usize = 10_000;
-        let mut builder = DocumentBuilder::with_capacity(DEPTH + 2);
-        let mut parent = Some(builder.append(None, NodeKind::Paragraph).unwrap());
+        let mut builder = SemanticTapeBuilder::with_capacity(DEPTH + 2);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        let mut parent = Some(paragraph);
+        let mut formatting_nodes = Vec::with_capacity(DEPTH);
         for _ in 0..DEPTH {
-            parent = Some(builder.append(parent, NodeKind::Emphasis).unwrap());
+            let emphasis = builder.emit(parent, Item::Emphasis).unwrap();
+            formatting_nodes.push(emphasis);
+            parent = Some(emphasis);
         }
         builder.append_prose(parent, "deep").unwrap();
-        let document = builder.finish();
+        for formatting in formatting_nodes.into_iter().rev() {
+            builder.close(formatting).unwrap();
+        }
+        builder.close(paragraph).unwrap();
+        let document = builder.finish().unwrap();
         let markdown = render_markdown(&document, 0, MarkdownConfig::default());
         assert!(markdown.contains("deep"));
     }

@@ -228,6 +228,7 @@ impl FootnoteAnalysis {
         self.available.contains(label)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.references
             .allocated_bytes()
@@ -1072,12 +1073,6 @@ fn token(value: &str, expected: &str) -> bool {
     value
         .split_whitespace()
         .any(|value| value.eq_ignore_ascii_case(expected))
-}
-
-pub(crate) fn is_local_reference(dom: &Dom, node: NodeId, href: &str) -> bool {
-    dom.tag(node) == Some(Tag::A)
-        && is_explicit_reference(dom, node)
-        && fragment_target(Some(href)).is_some()
 }
 
 pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {

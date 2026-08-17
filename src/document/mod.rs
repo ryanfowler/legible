@@ -4,8 +4,6 @@
 //! private so the representation can change without changing Legible's public
 //! output contract.
 
-#![allow(dead_code)]
-
 mod builder;
 mod callouts;
 mod code;
@@ -24,13 +22,14 @@ pub(crate) mod stats;
 mod tables;
 mod text;
 mod uri;
+#[cfg(any(test, feature = "fuzzing", debug_assertions))]
 mod validate;
 
 /// Semantic content flags stored on opening and closing tape operations.
 pub(crate) const HAS_VISIBLE_TEXT: u8 = 1 << 0;
 pub(crate) const HAS_VISIBLE_IMAGE: u8 = 1 << 1;
 
-pub(crate) use builder::{BuildError, DocumentBuilder, SemanticTapeBuilder};
+pub(crate) use builder::{BuildError, SemanticTapeBuilder};
 pub(crate) use code::{
     count_blocks as source_code_block_count,
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
@@ -232,11 +231,9 @@ pub(crate) struct Document {
     /// Sequential semantic operations. Container operations are paired with a
     /// close operation; leaf operations stand alone.
     ops: Vec<EventOp>,
-    /// The operation index of each node's closing operation, or the node's own
-    /// index for a leaf. This compatibility index keeps legacy internal
-    /// consumers constant-time while renderers migrate to direct tape scans.
+    /// The operation index of each opening operation's close operation, or the
+    /// opening operation's own index for a leaf.
     ends: Vec<u32>,
-    roots: Vec<DocumentNodeId>,
     /// Canonical semantic prose and inline-code storage.
     text: String,
     text_refs: Vec<TextRef>,
@@ -361,12 +358,6 @@ impl Document {
             .map(|definition| definition.label.as_ref())
     }
 
-    pub(crate) fn root_ids(
-        &self,
-    ) -> impl ExactSizeIterator<Item = DocumentNodeId> + DoubleEndedIterator + '_ {
-        self.roots.iter().copied()
-    }
-
     /// Returns the retained semantic operations in source order.
     ///
     /// Renderers use this view for their sequential tape interpreters. Keep
@@ -380,12 +371,12 @@ impl Document {
         self.ops.get(index).map(|operation| operation.kind())
     }
 
-    pub(crate) fn operation_view(&self, index: usize) -> Option<NodeKindView<'_>> {
+    pub(crate) fn operation_view(&self, index: usize) -> Option<SemanticItemView<'_>> {
         let operation = self.ops.get(index)?;
         if operation.is_close() {
             return None;
         }
-        Some(self.kind_ref(DocumentNodeId(index as u32)))
+        Some(self.kind_ref(index))
     }
 
     pub(crate) fn operation_end(&self, index: usize) -> usize {
@@ -396,117 +387,89 @@ impl Document {
         operation.payload() as usize
     }
 
-    pub(crate) fn node(&self, id: DocumentNodeId) -> Option<DocumentNode<'_>> {
-        let operation = self.ops.get(id.index())?;
-        (!operation.is_close()).then_some(DocumentNode { document: self, id })
-    }
-
-    pub(crate) fn child_ids(&self, parent: DocumentNodeId) -> Children<'_> {
-        Children {
-            document: self,
-            next: self.first_child(parent),
-        }
-    }
-
-    pub(crate) fn first_child(&self, parent: DocumentNodeId) -> Option<DocumentNodeId> {
-        let child = DocumentNodeId(parent.0.checked_add(1)?);
-        self.node(child)
-            .filter(|_| child.0 < self.node_end(parent))
-            .map(|_| child)
-    }
-
-    pub(crate) fn next_sibling(&self, node: DocumentNodeId) -> Option<DocumentNodeId> {
-        let next = DocumentNodeId(self.node_end(node).checked_add(1)?);
-        self.node(next).map(|_| next)
-    }
-
-    fn node_end(&self, id: DocumentNodeId) -> u32 {
-        self.ends.get(id.index()).copied().unwrap_or(id.0)
-    }
-
-    fn kind_ref(&self, id: DocumentNodeId) -> NodeKindView<'_> {
-        let operation = &self.ops[id.index()];
+    fn kind_ref(&self, index: usize) -> SemanticItemView<'_> {
+        let operation = &self.ops[index];
         let payload = operation.payload as usize;
         let text = self
             .text_refs
             .get(payload)
             .and_then(|reference| self.text.get(reference.range()));
         match operation.kind() {
-            OperationKind::Paragraph => NodeKindView::Paragraph,
-            OperationKind::BlockGroup => NodeKindView::BlockGroup,
-            OperationKind::Heading => NodeKindView::Heading {
+            OperationKind::Paragraph => SemanticItemView::Paragraph,
+            OperationKind::BlockGroup => SemanticItemView::BlockGroup,
+            OperationKind::Heading => SemanticItemView::Heading {
                 level: operation.aux as u8,
             },
-            OperationKind::BlockQuote => NodeKindView::BlockQuote,
+            OperationKind::BlockQuote => SemanticItemView::BlockQuote,
             OperationKind::CodeBlock => self
                 .code_blocks
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::CodeBlock),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::CodeBlock),
             OperationKind::List => self
                 .lists
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::List),
-            OperationKind::ListItem => NodeKindView::ListItem,
+                .map_or(SemanticItemView::Invalid, SemanticItemView::List),
+            OperationKind::ListItem => SemanticItemView::ListItem,
             OperationKind::Table => self
                 .tables
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::Table),
-            OperationKind::TableCaption => NodeKindView::TableCaption,
-            OperationKind::TableRow => NodeKindView::TableRow,
+                .map_or(SemanticItemView::Invalid, SemanticItemView::Table),
+            OperationKind::TableCaption => SemanticItemView::TableCaption,
+            OperationKind::TableRow => SemanticItemView::TableRow,
             OperationKind::TableCell => self
                 .table_cells
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::TableCell),
-            OperationKind::Figure => NodeKindView::Figure,
-            OperationKind::Figcaption => NodeKindView::Figcaption,
-            OperationKind::Details => NodeKindView::Details,
-            OperationKind::Summary => NodeKindView::Summary,
-            OperationKind::ThematicBreak => NodeKindView::ThematicBreak,
-            OperationKind::DefinitionList => NodeKindView::DefinitionList,
-            OperationKind::DefinitionTerm => NodeKindView::DefinitionTerm,
-            OperationKind::DefinitionDescription => NodeKindView::DefinitionDescription,
+                .map_or(SemanticItemView::Invalid, SemanticItemView::TableCell),
+            OperationKind::Figure => SemanticItemView::Figure,
+            OperationKind::Figcaption => SemanticItemView::Figcaption,
+            OperationKind::Details => SemanticItemView::Details,
+            OperationKind::Summary => SemanticItemView::Summary,
+            OperationKind::ThematicBreak => SemanticItemView::ThematicBreak,
+            OperationKind::DefinitionList => SemanticItemView::DefinitionList,
+            OperationKind::DefinitionTerm => SemanticItemView::DefinitionTerm,
+            OperationKind::DefinitionDescription => SemanticItemView::DefinitionDescription,
             OperationKind::Callout => self
                 .callouts
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::Callout),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::Callout),
             OperationKind::FootnoteDefinition => {
-                NodeKindView::FootnoteDefinition(FootnoteId(operation.payload))
+                SemanticItemView::FootnoteDefinition(FootnoteId(operation.payload))
             }
-            OperationKind::Text => text.map_or(NodeKindView::Invalid, NodeKindView::Text),
-            OperationKind::Emphasis => NodeKindView::Emphasis,
-            OperationKind::Strong => NodeKindView::Strong,
-            OperationKind::Strikethrough => NodeKindView::Strikethrough,
+            OperationKind::Text => text.map_or(SemanticItemView::Invalid, SemanticItemView::Text),
+            OperationKind::Emphasis => SemanticItemView::Emphasis,
+            OperationKind::Strong => SemanticItemView::Strong,
+            OperationKind::Strikethrough => SemanticItemView::Strikethrough,
             OperationKind::InlineCode => {
-                text.map_or(NodeKindView::Invalid, NodeKindView::InlineCode)
+                text.map_or(SemanticItemView::Invalid, SemanticItemView::InlineCode)
             }
             OperationKind::Link => self
                 .links
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::Link),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::Link),
             OperationKind::Image => self
                 .images
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::Image),
-            OperationKind::HardBreak => NodeKindView::HardBreak,
+                .map_or(SemanticItemView::Invalid, SemanticItemView::Image),
+            OperationKind::HardBreak => SemanticItemView::HardBreak,
             OperationKind::FootnoteReference => {
-                NodeKindView::FootnoteReference(FootnoteId(operation.payload))
+                SemanticItemView::FootnoteReference(FootnoteId(operation.payload))
             }
             OperationKind::TaskMarker => self
                 .task_markers
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::TaskMarker),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::TaskMarker),
             OperationKind::InlineMath => self
                 .math_values
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::InlineMath),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::InlineMath),
             OperationKind::DisplayMath => self
                 .math_values
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::DisplayMath),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::DisplayMath),
             OperationKind::Media => self
                 .media
                 .get(payload)
-                .map_or(NodeKindView::Invalid, NodeKindView::Media),
+                .map_or(SemanticItemView::Invalid, SemanticItemView::Media),
         }
     }
 
@@ -520,27 +483,24 @@ impl Document {
         self.node_count
     }
 
-    pub(crate) fn compile_stats(&self) -> stats::CompileStats {
-        self.compile_stats
-    }
-
-    pub(crate) fn visibility_flags(&self, id: DocumentNodeId) -> u8 {
-        self.ops
-            .get(id.index())
-            .map_or(0, |operation| operation.flags)
-    }
-
-    pub(crate) fn semantic_text_bytes(&self) -> usize {
-        self.compile_stats.semantic_text_bytes
-    }
-
-    pub(crate) fn raw_code_bytes(&self) -> usize {
-        self.compile_stats.raw_code_bytes
-    }
-
     /// Returns the number of top-level semantic items for benchmark reporting.
+    #[allow(dead_code)]
     pub(crate) fn root_count(&self) -> usize {
-        self.roots.len()
+        let mut depth = 0usize;
+        let mut roots = 0usize;
+        for operation in &self.ops {
+            if operation.is_close() {
+                depth = depth.saturating_sub(1);
+            } else {
+                if depth == 0 {
+                    roots += 1;
+                }
+                if operation.kind().is_container() {
+                    depth += 1;
+                }
+            }
+        }
+        roots
     }
 
     /// Returns bytes owned by semantic string payloads for benchmark reporting.
@@ -579,6 +539,7 @@ impl Document {
     }
 
     /// Returns owned semantic string values for benchmark reporting.
+    #[allow(dead_code)]
     pub(crate) fn semantic_string_value_count(&self) -> usize {
         usize::from(!self.text.is_empty())
             + self
@@ -618,7 +579,6 @@ impl Document {
     pub(crate) fn retained_bytes_estimate(&self) -> usize {
         let vector_bytes = self.ops.capacity() * std::mem::size_of::<EventOp>()
             + self.ends.capacity() * std::mem::size_of::<u32>()
-            + self.roots.capacity() * std::mem::size_of::<DocumentNodeId>()
             + self.text_refs.capacity() * std::mem::size_of::<TextRef>()
             + self.code_blocks.capacity() * std::mem::size_of::<CodeBlock>()
             + self.links.capacity() * std::mem::size_of::<Link>()
@@ -636,10 +596,12 @@ impl Document {
             .saturating_add(self.semantic_string_bytes())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn operation_capacity(&self) -> usize {
         self.ops.capacity()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn end_capacity(&self) -> usize {
         self.ends.capacity()
     }
@@ -653,17 +615,19 @@ impl Document {
         self.text_stats.get().is_some()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn node_slot_size() -> usize {
         std::mem::size_of::<EventOp>()
     }
 
+    #[cfg(any(test, feature = "fuzzing", debug_assertions))]
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         validate::validate(self)
     }
 
     #[cfg(test)]
-    pub(crate) fn debug_tree(&self) -> String {
-        debug_tree(self)
+    pub(crate) fn debug_tape(&self) -> String {
+        debug_tape(self)
     }
 }
 
@@ -790,45 +754,15 @@ impl EventOp {
         self.payload
     }
 
-    pub(crate) fn aux(self) -> u16 {
-        self.aux
-    }
-
     pub(crate) fn flags(self) -> u8 {
         self.flags
-    }
-}
-
-pub(crate) struct DocumentNode<'a> {
-    document: &'a Document,
-    id: DocumentNodeId,
-}
-
-impl<'a> DocumentNode<'a> {
-    pub(crate) fn kind(&self) -> NodeKindView<'a> {
-        self.document.kind_ref(self.id)
-    }
-}
-
-pub(crate) struct Children<'a> {
-    document: &'a Document,
-    next: Option<DocumentNodeId>,
-}
-
-impl Iterator for Children<'_> {
-    type Item = DocumentNodeId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let id = self.next?;
-        self.next = self.document.next_sibling(id);
-        Some(id)
     }
 }
 
 /// The semantic meaning of a document node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub(crate) enum NodeKind {
+pub(crate) enum SemanticKind {
     Paragraph,
     /// A semantic block boundary with no more specific meaning.
     BlockGroup,
@@ -853,11 +787,9 @@ pub(crate) enum NodeKind {
     DefinitionDescription,
     Callout(Callout),
     FootnoteDefinition(FootnoteId),
-    Text(TextRef),
     Emphasis,
     Strong,
     Strikethrough,
-    InlineCode(TextRef),
     Link(Link),
     Image(Image),
     HardBreak,
@@ -868,17 +800,9 @@ pub(crate) enum NodeKind {
     Media(Media),
 }
 
-impl NodeKind {
-    pub(crate) fn heading_level(&self) -> Option<u8> {
-        match self {
-            Self::Heading { level } => Some(*level),
-            _ => None,
-        }
-    }
-
+impl SemanticKind {
     fn output_capacity_hint(&self) -> usize {
         match self {
-            Self::Text(_) | Self::InlineCode(_) => 0,
             Self::CodeBlock(code) => code
                 .text_len()
                 .saturating_add(optional_boxed_str_len(&code.language)),
@@ -904,65 +828,23 @@ impl NodeKind {
             _ => 0,
         }
     }
-
-    fn retained_value_bytes(&self) -> usize {
-        match self {
-            Self::Text(_) | Self::InlineCode(_) => 0,
-            Self::CodeBlock(code) => {
-                optional_boxed_str_len(&code.language).saturating_add(code.text_len())
-            }
-            Self::Link(link) => link
-                .destination
-                .len()
-                .saturating_add(optional_boxed_str_len(&link.title)),
-            Self::Image(image) => image
-                .source
-                .len()
-                .saturating_add(image.alt.len())
-                .saturating_add(optional_boxed_str_len(&image.title)),
-            Self::Callout(callout) => optional_boxed_str_len(&callout.title),
-            Self::TaskMarker(marker) => optional_boxed_str_len(&marker.fallback_label),
-            Self::InlineMath(math) | Self::DisplayMath(math) => math
-                .source
-                .len()
-                .saturating_add(optional_boxed_str_len(&math.fallback_text)),
-            Self::Media(media) => media
-                .source
-                .len()
-                .saturating_add(optional_boxed_str_len(&media.title)),
-            _ => 0,
-        }
-    }
-
-    fn semantic_string_value_count(&self) -> usize {
-        match self {
-            Self::Text(_) | Self::InlineCode(_) => 1,
-            Self::CodeBlock(code) => 1 + usize::from(code.language.is_some()),
-            Self::Link(link) => 1 + usize::from(link.title.is_some()),
-            Self::Image(image) => 2 + usize::from(image.title.is_some()),
-            Self::Callout(callout) => usize::from(callout.title.is_some()),
-            Self::TaskMarker(marker) => usize::from(marker.fallback_label.is_some()),
-            Self::InlineMath(math) | Self::DisplayMath(math) => {
-                1 + usize::from(math.fallback_text.is_some())
-            }
-            Self::Media(media) => 1 + usize::from(media.title.is_some()),
-            _ => 0,
-        }
-    }
 }
 
 /// A borrowed view of one compact tape operation. Payload values live in
 /// type-specific side tables and are borrowed only for the duration of a
 /// view.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum NodeKindView<'a> {
+pub(crate) enum SemanticItemView<'a> {
     Paragraph,
     BlockGroup,
-    Heading { level: u8 },
+    Heading {
+        level: u8,
+    },
     BlockQuote,
     CodeBlock(&'a CodeBlock),
     List(&'a List),
     ListItem,
+    #[allow(dead_code)]
     Table(&'a Table),
     TableCaption,
     TableRow,
@@ -975,6 +857,7 @@ pub(crate) enum NodeKindView<'a> {
     DefinitionList,
     DefinitionTerm,
     DefinitionDescription,
+    #[allow(dead_code)]
     Callout(&'a Callout),
     FootnoteDefinition(FootnoteId),
     Text(&'a str),
@@ -991,15 +874,6 @@ pub(crate) enum NodeKindView<'a> {
     DisplayMath(&'a MathValue),
     Media(&'a Media),
     Invalid,
-}
-
-impl NodeKindView<'_> {
-    pub(crate) fn heading_level(self) -> Option<u8> {
-        match self {
-            Self::Heading { level } => Some(level),
-            _ => None,
-        }
-    }
 }
 
 fn optional_boxed_str_len(value: &Option<Box<str>>) -> usize {
@@ -1121,14 +995,6 @@ impl Image {
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
-    /// Returns the declared width in pixels, when available.
-    pub fn width(&self) -> Option<u32> {
-        self.width
-    }
-    /// Returns the declared height in pixels, when available.
-    pub fn height(&self) -> Option<u32> {
-        self.height
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1160,13 +1026,6 @@ pub(crate) struct Table {
     pub(crate) column_count: Option<u32>,
 }
 
-impl Table {
-    /// Returns the exact column count when the semantic grid has one.
-    pub fn column_count(&self) -> Option<u32> {
-        self.column_count
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TableCell {
     pub(crate) header: bool,
@@ -1176,10 +1035,6 @@ pub(crate) struct TableCell {
 }
 
 impl TableCell {
-    /// Returns true for a semantic header cell.
-    pub fn is_header(&self) -> bool {
-        self.header
-    }
     /// Returns the column span. This value is at least one.
     pub fn colspan(&self) -> u32 {
         self.colspan
@@ -1205,17 +1060,6 @@ pub(crate) enum TableAlignment {
 pub(crate) struct Callout {
     pub(crate) kind: CalloutKind,
     pub(crate) title: Option<Box<str>>,
-}
-
-impl Callout {
-    /// Returns the normalized callout category.
-    pub fn kind(&self) -> CalloutKind {
-        self.kind
-    }
-    /// Returns the optional callout title.
-    pub fn title(&self) -> Option<&str> {
-        self.title.as_deref()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1257,10 +1101,6 @@ impl MathValue {
     pub fn source(&self) -> &str {
         &self.source
     }
-    /// Returns the source format.
-    pub fn format(&self) -> MathFormat {
-        self.format
-    }
     /// Returns an accessible text fallback, when available.
     pub fn fallback_text(&self) -> Option<&str> {
         self.fallback_text.as_deref()
@@ -1270,7 +1110,6 @@ impl MathValue {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MathFormat {
     Tex,
-    Text,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1281,10 +1120,6 @@ pub(crate) struct Media {
 }
 
 impl Media {
-    /// Returns the media category.
-    pub fn kind(&self) -> MediaKind {
-        self.kind
-    }
     /// Returns the selected, policy-validated source.
     pub fn source(&self) -> &str {
         &self.source
@@ -1328,6 +1163,7 @@ pub(crate) struct FootnoteRecord {
 pub(crate) struct ValidationError(Box<str>);
 
 impl ValidationError {
+    #[cfg(any(test, feature = "fuzzing", debug_assertions))]
     fn new(message: impl Into<Box<str>>) -> Self {
         Self(message.into())
     }
@@ -1342,247 +1178,75 @@ impl fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn manual_documents_cover_initial_semantic_vocabulary() {
-        let mut builder = DocumentBuilder::with_capacity(20);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
-        builder.append_prose(Some(paragraph), "nested ").unwrap();
-        let emphasis = builder.append(Some(paragraph), NodeKind::Emphasis).unwrap();
-        builder.append_prose(Some(emphasis), "formatting").unwrap();
-
-        let list = builder
-            .append(
-                None,
-                NodeKind::List(List {
-                    kind: ListKind::Unordered,
-                    start: None,
-                }),
-            )
-            .unwrap();
-        builder.append(Some(list), NodeKind::ListItem).unwrap();
-        builder
-            .append(
-                None,
-                NodeKind::CodeBlock(CodeBlock {
-                    language: Some("rust".into()),
-                    text: "fn main() {}\n".into(),
-                }),
-            )
-            .unwrap();
-
-        let table = builder
-            .append(
-                None,
-                NodeKind::Table(Table {
-                    column_count: Some(1),
-                }),
-            )
-            .unwrap();
-        let row = builder.append(Some(table), NodeKind::TableRow).unwrap();
-        builder
-            .append(
-                Some(row),
-                NodeKind::TableCell(TableCell {
-                    header: true,
-                    colspan: 1,
-                    rowspan: 1,
-                    alignment: None,
-                }),
-            )
-            .unwrap();
-
-        let figure = builder.append(None, NodeKind::Figure).unwrap();
-        builder.append(Some(figure), NodeKind::Figcaption).unwrap();
-        let footnote = FootnoteId::from_index(0).unwrap();
-        builder
-            .append(None, NodeKind::FootnoteReference(footnote))
-            .unwrap();
-        let definition = builder
-            .append(None, NodeKind::FootnoteDefinition(footnote))
-            .unwrap();
-        builder
-            .define_footnote(footnote, "note", definition)
-            .unwrap();
-
-        let document = builder.finish();
-        document.validate().unwrap();
-        assert_eq!(document.root_ids().count(), 7);
-        let definition = document.footnote_record(footnote).unwrap();
-        assert_eq!(definition.id, footnote);
-        assert!(matches!(
-            document.node(definition.node).map(|node| node.kind()),
-            Some(NodeKindView::FootnoteDefinition(id)) if id == footnote
-        ));
-        assert_eq!(document.footnotes.len(), 1);
-    }
-
-    #[test]
-    fn event_tape_uses_compact_headers_and_explicit_closes() {
-        assert_eq!(std::mem::size_of::<EventOp>(), 8);
-
-        let mut builder = DocumentBuilder::with_capacity(2);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
-        builder.append_prose(Some(paragraph), "tape").unwrap();
-        let document = builder.finish();
-
-        assert_eq!(document.len(), 2);
-        assert_eq!(document.ops.len(), 3);
-        assert_eq!(document.ops[0].opcode & OP_CLOSE, 0);
-        assert_ne!(document.ops[2].opcode & OP_CLOSE, 0);
-        assert_eq!(document.ends[0], 2);
-        assert_eq!(
-            document.first_child(DocumentNodeId(0)),
-            Some(DocumentNodeId(1))
-        );
-        assert_eq!(document.next_sibling(DocumentNodeId(0)), None);
-    }
-
-    #[test]
-    fn deeply_nested_semantic_documents_are_stack_safe() {
-        const DEPTH: usize = 10_000;
-        let mut builder = DocumentBuilder::with_capacity(DEPTH + 1);
-        let mut parent = None;
-        for _ in 0..DEPTH {
-            parent = Some(builder.append(parent, NodeKind::BlockQuote).unwrap());
-        }
-        builder.append_prose(parent, "deep").unwrap();
-        let document = builder.finish();
-        document.validate().unwrap();
-
-        let mut count = 0;
-        let mut stack: Vec<_> = document.root_ids().collect();
-        while let Some(node) = stack.pop() {
-            count += 1;
-            stack.extend(document.child_ids(node));
-        }
-        assert_eq!(count, DEPTH + 1);
-    }
-
-    #[test]
-    fn prose_stays_under_its_requested_parent() {
-        let mut builder = DocumentBuilder::with_capacity(3);
-        builder.append_prose(None, "root").unwrap();
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
-        builder.append_prose(Some(paragraph), "child").unwrap();
-        assert_eq!(
-            builder.finish().debug_tree(),
-            "Text(\"root\")\nParagraph\n  Text(\"child\")\n"
-        );
-
-        let mut builder = DocumentBuilder::with_capacity(1);
-        assert_eq!(
-            builder.append_prose(Some(DocumentNodeId(u32::MAX)), "bad"),
-            Err(BuildError::InvalidParent)
-        );
-    }
-
-    #[test]
-    fn validation_rejects_cycles_and_invalid_cells() {
-        let mut builder = DocumentBuilder::with_capacity(2);
-        let first = builder.append(None, NodeKind::Paragraph).unwrap();
-        builder.append(Some(first), NodeKind::Strong).unwrap();
-        let mut cycle = builder.finish();
-        cycle.ends[first.index()] = u32::MAX;
-        assert!(cycle.validate().is_err());
-
-        let mut builder = DocumentBuilder::with_capacity(1);
-        builder
-            .append(
-                None,
-                NodeKind::TableCell(TableCell {
-                    header: false,
-                    colspan: 0,
-                    rowspan: 1,
-                    alignment: None,
-                }),
-            )
-            .unwrap();
-        assert!(builder.finish().validate().is_err());
-    }
-}
-
-#[cfg(test)]
-fn debug_tree(document: &Document) -> String {
-    enum Task {
-        Node(DocumentNodeId, usize),
-    }
-
+fn debug_tape(document: &Document) -> String {
     let mut output = String::new();
-    let mut tasks = Vec::new();
-    tasks.extend(document.roots.iter().rev().map(|&id| Task::Node(id, 0)));
-    while let Some(Task::Node(id, depth)) = tasks.pop() {
-        let Some(node) = document.node(id) else {
+    let mut depth = 0usize;
+    for (index, operation) in document.operations().iter().copied().enumerate() {
+        if operation.is_close() {
+            depth = depth.saturating_sub(1);
             continue;
-        };
+        }
         output.push_str(&"  ".repeat(depth));
-        write_kind(&mut output, node.kind());
+        if let Some(kind) = document.operation_view(index) {
+            write_item(&mut output, kind);
+        }
         output.push('\n');
-        let children: Vec<_> = document.child_ids(id).collect();
-        tasks.extend(
-            children
-                .into_iter()
-                .rev()
-                .map(|child| Task::Node(child, depth + 1)),
-        );
+        if operation.kind().is_container() {
+            depth += 1;
+        }
     }
     output
 }
 
 #[cfg(test)]
-fn write_kind(output: &mut String, kind: NodeKindView<'_>) {
-    use NodeKindView as NodeKind;
+fn write_item(output: &mut String, kind: SemanticItemView<'_>) {
+    use SemanticItemView as Item;
     use std::fmt::Write as _;
     match kind {
-        NodeKind::Text(value) => write!(output, "Text({:?})", value).unwrap(),
-        NodeKind::Heading { level } => write!(output, "Heading(level={level})").unwrap(),
-        NodeKind::CodeBlock(code) => write!(
+        Item::Text(value) => write!(output, "Text({:?})", value).unwrap(),
+        Item::Heading { level } => write!(output, "Heading(level={level})").unwrap(),
+        Item::CodeBlock(code) => write!(
             output,
             "CodeBlock(language={:?}, text={:?})",
             code.language,
             code.text()
         )
         .unwrap(),
-        NodeKind::List(list) => {
+        Item::List(list) => {
             write!(output, "List(kind={:?}, start={:?})", list.kind, list.start).unwrap()
         }
-        NodeKind::Table(table) => {
-            write!(output, "Table(columns={:?})", table.column_count).unwrap()
-        }
-        NodeKind::TableCell(cell) => write!(
+        Item::Table(table) => write!(output, "Table(columns={:?})", table.column_count).unwrap(),
+        Item::TableCell(cell) => write!(
             output,
             "TableCell(header={}, colspan={}, rowspan={}, alignment={:?})",
             cell.header, cell.colspan, cell.rowspan, cell.alignment
         )
         .unwrap(),
-        NodeKind::Link(link) => write!(
+        Item::Link(link) => write!(
             output,
             "Link(destination={:?}, title={:?})",
             link.destination, link.title
         )
         .unwrap(),
-        NodeKind::Image(image) => write!(
+        Item::Image(image) => write!(
             output,
             "Image(source={:?}, alt={:?}, title={:?}, width={:?}, height={:?})",
             image.source, image.alt, image.title, image.width, image.height
         )
         .unwrap(),
-        NodeKind::InlineCode(value) => write!(output, "InlineCode({:?})", value).unwrap(),
-        NodeKind::FootnoteReference(id) => write!(output, "FootnoteReference({})", id.0).unwrap(),
-        NodeKind::FootnoteDefinition(id) => write!(output, "FootnoteDefinition({})", id.0).unwrap(),
-        NodeKind::TaskMarker(marker) => write!(
+        Item::InlineCode(value) => write!(output, "InlineCode({:?})", value).unwrap(),
+        Item::FootnoteReference(id) => write!(output, "FootnoteReference({})", id.0).unwrap(),
+        Item::FootnoteDefinition(id) => write!(output, "FootnoteDefinition({})", id.0).unwrap(),
+        Item::TaskMarker(marker) => write!(
             output,
             "TaskMarker(checked={}, fallback={:?})",
             marker.checked, marker.fallback_label
         )
         .unwrap(),
-        NodeKind::InlineMath(value) | NodeKind::DisplayMath(value) => write!(
+        Item::InlineMath(value) | Item::DisplayMath(value) => write!(
             output,
             "{}(source={:?}, format={:?}, fallback={:?})",
-            if matches!(kind, NodeKind::InlineMath(_)) {
+            if matches!(kind, Item::InlineMath(_)) {
                 "InlineMath"
             } else {
                 "DisplayMath"
@@ -1592,13 +1256,13 @@ fn write_kind(output: &mut String, kind: NodeKindView<'_>) {
             value.fallback_text
         )
         .unwrap(),
-        NodeKind::Callout(callout) => write!(
+        Item::Callout(callout) => write!(
             output,
             "Callout(kind={:?}, title={:?})",
             callout.kind, callout.title
         )
         .unwrap(),
-        NodeKind::Media(media) => write!(
+        Item::Media(media) => write!(
             output,
             "Media(kind={:?}, source={:?}, title={:?})",
             media.kind, media.source, media.title

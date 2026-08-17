@@ -23,6 +23,7 @@ impl MathAnalysis {
         Self::analyze_detected(dom, nodes, None)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn analyze_with_inventory(
         dom: &Dom,
         nodes: &[NodeId],
@@ -167,6 +168,7 @@ impl MathAnalysis {
         self.skipped.contains(node)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.values
             .allocated_bytes()

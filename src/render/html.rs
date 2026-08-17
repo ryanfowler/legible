@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::document::{Document, ListKind, MediaKind, NodeKindView as NodeKind, OperationKind};
+use crate::document::{Document, ListKind, MediaKind, OperationKind, SemanticItemView as Item};
 
 pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
     let mut output = String::with_capacity(capacity.max(512));
@@ -32,13 +32,13 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
             continue;
         };
         match node {
-            NodeKind::Text(text) => {
+            Item::Text(text) => {
                 escape_text(&mut output, text);
             }
-            NodeKind::Paragraph => {
+            Item::Paragraph => {
                 open(&mut output, "p");
             }
-            NodeKind::Heading { level } => {
+            Item::Heading { level } => {
                 let tag = match level {
                     1 => "h1",
                     2 => "h2",
@@ -49,22 +49,22 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 };
                 open(&mut output, tag);
             }
-            NodeKind::BlockGroup => {
+            Item::BlockGroup => {
                 open(&mut output, "div");
             }
-            NodeKind::BlockQuote | NodeKind::Callout(_) => {
+            Item::BlockQuote | Item::Callout(_) => {
                 open(&mut output, "blockquote");
             }
-            NodeKind::Strong => {
+            Item::Strong => {
                 open(&mut output, "strong");
             }
-            NodeKind::Emphasis => {
+            Item::Emphasis => {
                 open(&mut output, "em");
             }
-            NodeKind::Strikethrough => {
+            Item::Strikethrough => {
                 open(&mut output, "del");
             }
-            NodeKind::List(list) => match list.kind {
+            Item::List(list) => match list.kind {
                 ListKind::Unordered => {
                     open(&mut output, "ul");
                 }
@@ -76,19 +76,19 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     output.push('>');
                 }
             },
-            NodeKind::ListItem => {
+            Item::ListItem => {
                 open(&mut output, "li");
             }
-            NodeKind::Table(_) => {
+            Item::Table(_) => {
                 open(&mut output, "table");
             }
-            NodeKind::TableCaption => {
+            Item::TableCaption => {
                 open(&mut output, "caption");
             }
-            NodeKind::TableRow => {
+            Item::TableRow => {
                 open(&mut output, "tr");
             }
-            NodeKind::TableCell(cell) => {
+            Item::TableCell(cell) => {
                 let tag = if cell.header { "th" } else { "td" };
                 output.push('<');
                 output.push_str(tag);
@@ -108,28 +108,28 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 }
                 output.push('>');
             }
-            NodeKind::Figure => {
+            Item::Figure => {
                 open(&mut output, "figure");
             }
-            NodeKind::Figcaption => {
+            Item::Figcaption => {
                 open(&mut output, "figcaption");
             }
-            NodeKind::Details => {
+            Item::Details => {
                 open(&mut output, "details");
             }
-            NodeKind::Summary => {
+            Item::Summary => {
                 open(&mut output, "summary");
             }
-            NodeKind::DefinitionList => {
+            Item::DefinitionList => {
                 open(&mut output, "dl");
             }
-            NodeKind::DefinitionTerm => {
+            Item::DefinitionTerm => {
                 open(&mut output, "dt");
             }
-            NodeKind::DefinitionDescription => {
+            Item::DefinitionDescription => {
                 open(&mut output, "dd");
             }
-            NodeKind::FootnoteDefinition(footnote) => {
+            Item::FootnoteDefinition(footnote) => {
                 let tag = if parent_is_list { "li" } else { "aside" };
                 output.push('<');
                 output.push_str(tag);
@@ -143,7 +143,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 }
                 output.push('>');
             }
-            NodeKind::Link(link) => {
+            Item::Link(link) => {
                 output.push_str("<a href=\"");
                 escape_attribute(&mut output, &link.destination);
                 output.push('"');
@@ -154,7 +154,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 }
                 output.push('>');
             }
-            NodeKind::CodeBlock(code) => {
+            Item::CodeBlock(code) => {
                 output.push_str("<pre><code");
                 if let Some(language) = &code.language {
                     output.push_str(" class=\"language-");
@@ -165,12 +165,12 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 escape_text(&mut output, code.text());
                 output.push_str("</code></pre>");
             }
-            NodeKind::InlineCode(code) => {
+            Item::InlineCode(code) => {
                 output.push_str("<code>");
                 escape_text(&mut output, code);
                 output.push_str("</code>");
             }
-            NodeKind::Image(image) => {
+            Item::Image(image) => {
                 output.push_str("<img src=\"");
                 escape_attribute(&mut output, &image.source);
                 output.push_str("\" alt=\"");
@@ -189,13 +189,13 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                 }
                 output.push('>');
             }
-            NodeKind::HardBreak => {
+            Item::HardBreak => {
                 output.push_str("<br>");
             }
-            NodeKind::ThematicBreak => {
+            Item::ThematicBreak => {
                 output.push_str("<hr>");
             }
-            NodeKind::FootnoteReference(footnote) => {
+            Item::FootnoteReference(footnote) => {
                 if let Some(label) = document.footnote_label(footnote) {
                     output.push_str("<sup><a href=\"#footnote-");
                     escape_attribute(&mut output, label);
@@ -204,7 +204,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     output.push_str("</a></sup>");
                 }
             }
-            NodeKind::TaskMarker(marker) => {
+            Item::TaskMarker(marker) => {
                 output.push_str("<input type=\"checkbox\" disabled=\"\"");
                 if marker.checked {
                     output.push_str(" checked=\"\"");
@@ -219,17 +219,17 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     escape_text(&mut output, label);
                 }
             }
-            NodeKind::InlineMath(math) => {
+            Item::InlineMath(math) => {
                 output.push_str("<span class=\"math\">");
                 escape_text(&mut output, &math.source);
                 output.push_str("</span>");
             }
-            NodeKind::DisplayMath(math) => {
+            Item::DisplayMath(math) => {
                 output.push_str("<span class=\"math display-math\">");
                 escape_text(&mut output, &math.source);
                 output.push_str("</span>");
             }
-            NodeKind::Media(media) => match media.kind {
+            Item::Media(media) => match media.kind {
                 MediaKind::Audio => {
                     output.push_str("<audio controls src=\"");
                     escape_attribute(&mut output, &media.source);
@@ -248,7 +248,7 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
                     output.push_str("</a>");
                 }
             },
-            NodeKind::Invalid => {}
+            Item::Invalid => {}
         }
         if document
             .operation_kind(index)
@@ -260,11 +260,11 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
     output
 }
 
-fn html_close_tag(node: NodeKind, parent_is_list: bool) -> Option<&'static str> {
+fn html_close_tag(node: Item, parent_is_list: bool) -> Option<&'static str> {
     Some(match node {
-        NodeKind::Paragraph => "p",
-        NodeKind::BlockGroup => "div",
-        NodeKind::Heading { level } => match level {
+        Item::Paragraph => "p",
+        Item::BlockGroup => "div",
+        Item::Heading { level } => match level {
             1 => "h1",
             2 => "h2",
             3 => "h3",
@@ -272,40 +272,40 @@ fn html_close_tag(node: NodeKind, parent_is_list: bool) -> Option<&'static str> 
             5 => "h5",
             _ => "h6",
         },
-        NodeKind::BlockQuote | NodeKind::Callout(_) => "blockquote",
-        NodeKind::List(list) => match list.kind {
+        Item::BlockQuote | Item::Callout(_) => "blockquote",
+        Item::List(list) => match list.kind {
             ListKind::Unordered => "ul",
             ListKind::Ordered => "ol",
         },
-        NodeKind::ListItem => "li",
-        NodeKind::Table(_) => "table",
-        NodeKind::TableCaption => "caption",
-        NodeKind::TableRow => "tr",
-        NodeKind::TableCell(cell) => {
+        Item::ListItem => "li",
+        Item::Table(_) => "table",
+        Item::TableCaption => "caption",
+        Item::TableRow => "tr",
+        Item::TableCell(cell) => {
             if cell.header {
                 "th"
             } else {
                 "td"
             }
         }
-        NodeKind::Figure => "figure",
-        NodeKind::Figcaption => "figcaption",
-        NodeKind::Details => "details",
-        NodeKind::Summary => "summary",
-        NodeKind::DefinitionList => "dl",
-        NodeKind::DefinitionTerm => "dt",
-        NodeKind::DefinitionDescription => "dd",
-        NodeKind::FootnoteDefinition(_) => {
+        Item::Figure => "figure",
+        Item::Figcaption => "figcaption",
+        Item::Details => "details",
+        Item::Summary => "summary",
+        Item::DefinitionList => "dl",
+        Item::DefinitionTerm => "dt",
+        Item::DefinitionDescription => "dd",
+        Item::FootnoteDefinition(_) => {
             if parent_is_list {
                 "li"
             } else {
                 "aside"
             }
         }
-        NodeKind::Emphasis => "em",
-        NodeKind::Strong => "strong",
-        NodeKind::Strikethrough => "del",
-        NodeKind::Link(_) => "a",
+        Item::Emphasis => "em",
+        Item::Strong => "strong",
+        Item::Strikethrough => "del",
+        Item::Link(_) => "a",
         _ => return None,
     })
 }
@@ -343,30 +343,36 @@ fn escape_attribute(output: &mut String, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{DocumentBuilder, Link, NodeKind};
+    use crate::document::{Link, SemanticKind as Item, SemanticTapeBuilder};
 
     #[test]
     fn deeply_nested_html_rendering_is_stack_safe() {
         const DEPTH: usize = 10_000;
-        let mut builder = DocumentBuilder::with_capacity(DEPTH + 1);
+        let mut builder = SemanticTapeBuilder::with_capacity(DEPTH + 1);
         let mut parent = None;
+        let mut containers = Vec::with_capacity(DEPTH);
         for _ in 0..DEPTH {
-            parent = Some(builder.append(parent, NodeKind::BlockGroup).unwrap());
+            let container = builder.emit(parent, Item::BlockGroup).unwrap();
+            containers.push(container);
+            parent = Some(container);
         }
         builder.append_prose(parent, "deep").unwrap();
-        let html = render_html(&builder.finish(), 0);
+        for container in containers.into_iter().rev() {
+            builder.close(container).unwrap();
+        }
+        let html = render_html(&builder.finish().unwrap(), 0);
         assert!(html.contains("deep"));
     }
 
     #[test]
     fn semantic_values_are_escaped_in_canonical_html() {
-        let mut builder = DocumentBuilder::with_capacity(3);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(3);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
         builder.append_prose(Some(paragraph), "a < b & c").unwrap();
         let link = builder
-            .append(
+            .emit(
                 Some(paragraph),
-                NodeKind::Link(Link {
+                Item::Link(Link {
                     destination: "https://example.test/?a=1&b=2".into(),
                     title: Some("a \"title\"".into()),
                     fragment_only: false,
@@ -374,7 +380,9 @@ mod tests {
             )
             .unwrap();
         builder.append_prose(Some(link), "link").unwrap();
-        let document = builder.finish();
+        builder.close(link).unwrap();
+        builder.close(paragraph).unwrap();
+        let document = builder.finish().unwrap();
         document.validate().unwrap();
         assert_eq!(
             render_html(&document, 0),

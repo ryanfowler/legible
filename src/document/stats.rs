@@ -1,8 +1,6 @@
-use super::{
-    Document, DocumentNodeId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, NodeKind as OwnedNodeKind,
-    NodeKindView as NodeKind,
-};
-use smallvec::SmallVec;
+#[cfg(test)]
+use super::DocumentNodeId;
+use super::{Document, SemanticItemView as Item, SemanticKind as OwnedSemanticKind};
 
 /// Structural measurements collected while semantic operations are emitted.
 ///
@@ -27,41 +25,41 @@ pub(crate) struct CompileStats {
 }
 
 impl CompileStats {
-    pub(crate) fn record_kind(&mut self, kind: &OwnedNodeKind) {
+    pub(crate) fn record_kind(&mut self, kind: &OwnedSemanticKind) {
         match kind {
-            OwnedNodeKind::Paragraph => self.paragraph_count += 1,
-            OwnedNodeKind::Heading { .. } => self.heading_count += 1,
-            OwnedNodeKind::ListItem => self.list_item_count += 1,
-            OwnedNodeKind::CodeBlock(code) => {
+            OwnedSemanticKind::Paragraph => self.paragraph_count += 1,
+            OwnedSemanticKind::Heading { .. } => self.heading_count += 1,
+            OwnedSemanticKind::ListItem => self.list_item_count += 1,
+            OwnedSemanticKind::CodeBlock(code) => {
                 self.code_block_count += 1;
                 self.structured_block_count += 1;
                 self.has_contextual_structure = true;
                 self.raw_code_bytes = self.raw_code_bytes.saturating_add(code.text_len());
             }
-            OwnedNodeKind::Table(_) => {
+            OwnedSemanticKind::Table(_) => {
                 self.table_count += 1;
                 self.structured_block_count += 1;
             }
-            OwnedNodeKind::TableCell(cell) => {
+            OwnedSemanticKind::TableCell(cell) => {
                 self.has_contextual_structure |= cell.header;
             }
-            OwnedNodeKind::Figure => {
+            OwnedSemanticKind::Figure => {
                 self.figure_count += 1;
                 self.structured_block_count += 1;
             }
-            OwnedNodeKind::Image(_) => self.image_count += 1,
-            OwnedNodeKind::FootnoteReference(_) => self.footnote_reference_count += 1,
-            OwnedNodeKind::FootnoteDefinition(_) => self.footnote_definition_count += 1,
-            OwnedNodeKind::InlineMath(_) | OwnedNodeKind::DisplayMath(_) => {
+            OwnedSemanticKind::Image(_) => self.image_count += 1,
+            OwnedSemanticKind::FootnoteReference(_) => self.footnote_reference_count += 1,
+            OwnedSemanticKind::FootnoteDefinition(_) => self.footnote_definition_count += 1,
+            OwnedSemanticKind::InlineMath(_) | OwnedSemanticKind::DisplayMath(_) => {
                 self.math_count += 1;
                 self.structured_block_count += 1;
                 self.has_contextual_structure = true;
             }
-            OwnedNodeKind::BlockQuote
-            | OwnedNodeKind::Details
-            | OwnedNodeKind::DefinitionList
-            | OwnedNodeKind::List(_)
-            | OwnedNodeKind::Callout(_) => self.structured_block_count += 1,
+            OwnedSemanticKind::BlockQuote
+            | OwnedSemanticKind::Details
+            | OwnedSemanticKind::DefinitionList
+            | OwnedSemanticKind::List(_)
+            | OwnedSemanticKind::Callout(_) => self.structured_block_count += 1,
             _ => {}
         }
     }
@@ -81,35 +79,6 @@ pub(crate) struct TextStats {
     pub has_alphanumeric_text: bool,
     pub alphabetic_chars: usize,
     pub digit_chars: usize,
-}
-
-pub(crate) fn visibility_flags(kind: &OwnedNodeKind, text: Option<&str>) -> u8 {
-    match kind {
-        OwnedNodeKind::Text(_) | OwnedNodeKind::InlineCode(_) => {
-            visibility_flag(text.is_some_and(has_visible_inline_text), HAS_VISIBLE_TEXT)
-        }
-        OwnedNodeKind::CodeBlock(code) => {
-            visibility_flag(has_visible_inline_text(code.text()), HAS_VISIBLE_TEXT)
-        }
-        OwnedNodeKind::Image(image) => {
-            visibility_flag(has_visible_inline_text(&image.alt), HAS_VISIBLE_IMAGE)
-        }
-        OwnedNodeKind::TaskMarker(marker) => visibility_flag(
-            marker
-                .fallback_label
-                .as_deref()
-                .is_some_and(has_visible_inline_text),
-            HAS_VISIBLE_TEXT,
-        ),
-        OwnedNodeKind::InlineMath(_) | OwnedNodeKind::DisplayMath(_) | OwnedNodeKind::Media(_) => {
-            HAS_VISIBLE_TEXT
-        }
-        _ => 0,
-    }
-}
-
-fn visibility_flag(visible: bool, flag: u8) -> u8 {
-    if visible { flag } else { 0 }
 }
 
 pub(crate) fn has_visible_inline_text(text: &str) -> bool {
@@ -181,10 +150,10 @@ pub(crate) fn walk_text(
     capacity: Option<usize>,
     collect_stats: bool,
 ) -> (Option<String>, TextStats) {
-    let roots: SmallVec<[_; 16]> = document.root_ids().collect();
-    walk_text_from_roots(
+    walk_text_range(
         document,
-        &roots,
+        0,
+        document.operations().len(),
         block_newlines,
         preserve_line_breaks,
         capacity,
@@ -198,20 +167,25 @@ pub(crate) fn render_document_text(document: &Document, capacity: usize) -> Stri
         .unwrap_or_default()
 }
 
-pub(crate) fn compute_document_stats(document: &Document) -> DocumentStats {
-    let text = walk_text(document, false, false, None, true).1;
-    combine(document.compile_stats(), text)
-}
-
+#[cfg(test)]
 pub(crate) fn render_node_text(document: &Document, root: DocumentNodeId) -> String {
-    walk_text_from_roots(document, &[root], false, false, Some(0), false)
-        .0
-        .unwrap_or_default()
+    walk_text_range(
+        document,
+        root.index(),
+        document.operation_end(root.index()).saturating_add(1),
+        false,
+        false,
+        Some(0),
+        false,
+    )
+    .0
+    .unwrap_or_default()
 }
 
-fn walk_text_from_roots(
+fn walk_text_range(
     document: &Document,
-    roots: &[DocumentNodeId],
+    start: usize,
+    end: usize,
     block_newlines: bool,
     preserve_line_breaks: bool,
     capacity: Option<usize>,
@@ -223,98 +197,95 @@ fn walk_text_from_roots(
         Separator::Space
     };
     let mut output = NormalizedOutput::new(capacity, collect_stats);
-    for root in roots {
-        let mut index = root.index();
-        let end = document.operation_end(index).saturating_add(1);
-        while index < end {
-            let Some(operation) = document.operations().get(index).copied() else {
-                break;
-            };
-            if operation.is_close() {
-                let opening = document.operation_opening_index(operation);
-                match document.operation_kind(opening) {
-                    Some(super::OperationKind::Link) => {
-                        if let Some(NodeKind::Link(link)) = document.operation_view(opening) {
-                            output.end_link(LinkFragment {
-                                hash: link.fragment_only,
-                            });
-                        }
-                    }
-                    Some(kind) if is_block_operation(kind) => output.separator(block),
-                    _ => {}
-                }
-                index += 1;
-                continue;
-            }
-
-            let Some(node) = document.operation_view(index) else {
-                index += 1;
-                continue;
-            };
-            match node {
-                NodeKind::Text(text) => output.text(text),
-                NodeKind::CodeBlock(code) => {
-                    output.separator(block);
-                    output.text(code.text());
-                    output.separator(block);
-                }
-                NodeKind::InlineCode(code) => output.text(code),
-                NodeKind::Image(_) | NodeKind::FootnoteReference(_) | NodeKind::ThematicBreak => {}
-                NodeKind::TaskMarker(marker) => {
-                    if let Some(label) = marker.fallback_label.as_deref() {
-                        output.text(label);
+    let mut index = start;
+    while index < end {
+        let Some(operation) = document.operations().get(index).copied() else {
+            break;
+        };
+        if operation.is_close() {
+            let opening = document.operation_opening_index(operation);
+            match document.operation_kind(opening) {
+                Some(super::OperationKind::Link) => {
+                    if let Some(Item::Link(link)) = document.operation_view(opening) {
+                        output.end_link(LinkFragment {
+                            hash: link.fragment_only,
+                        });
                     }
                 }
-                NodeKind::InlineMath(math) => {
-                    output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
-                }
-                NodeKind::DisplayMath(math) => {
-                    output.separator(block);
-                    output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
-                    output.separator(block);
-                }
-                NodeKind::Media(media) => {
-                    if let Some(title) = media.title.as_deref() {
-                        output.text(title);
-                    }
-                }
-                NodeKind::HardBreak => output.separator(if preserve_line_breaks {
-                    Separator::Newline
-                } else {
-                    Separator::Space
-                }),
-                NodeKind::Link(_) => output.begin_link(),
-                kind => {
-                    if is_block(&kind) {
-                        output.separator(block);
-                    }
-                }
+                Some(kind) if is_block_operation(kind) => output.separator(block),
+                _ => {}
             }
             index += 1;
+            continue;
         }
+
+        let Some(node) = document.operation_view(index) else {
+            index += 1;
+            continue;
+        };
+        match node {
+            Item::Text(text) => output.text(text),
+            Item::CodeBlock(code) => {
+                output.separator(block);
+                output.text(code.text());
+                output.separator(block);
+            }
+            Item::InlineCode(code) => output.text(code),
+            Item::Image(_) | Item::FootnoteReference(_) | Item::ThematicBreak => {}
+            Item::TaskMarker(marker) => {
+                if let Some(label) = marker.fallback_label.as_deref() {
+                    output.text(label);
+                }
+            }
+            Item::InlineMath(math) => {
+                output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
+            }
+            Item::DisplayMath(math) => {
+                output.separator(block);
+                output.text(math.fallback_text.as_deref().unwrap_or(&math.source));
+                output.separator(block);
+            }
+            Item::Media(media) => {
+                if let Some(title) = media.title.as_deref() {
+                    output.text(title);
+                }
+            }
+            Item::HardBreak => output.separator(if preserve_line_breaks {
+                Separator::Newline
+            } else {
+                Separator::Space
+            }),
+            Item::Link(_) => output.begin_link(),
+            kind => {
+                if is_block(&kind) {
+                    output.separator(block);
+                }
+            }
+        }
+        index += 1;
     }
     output.finish()
 }
 
-fn is_block(kind: &NodeKind) -> bool {
+fn is_block(kind: &Item) -> bool {
     matches!(
         kind,
-        NodeKind::Paragraph
-            | NodeKind::BlockGroup
-            | NodeKind::Heading { .. }
-            | NodeKind::BlockQuote
-            | NodeKind::ListItem
-            | NodeKind::TableCaption
-            | NodeKind::TableRow
-            | NodeKind::TableCell(_)
-            | NodeKind::Figure
-            | NodeKind::Figcaption
-            | NodeKind::Details
-            | NodeKind::Summary
-            | NodeKind::DefinitionTerm
-            | NodeKind::DefinitionDescription
-            | NodeKind::Callout(_)
-            | NodeKind::FootnoteDefinition(_)
+        Item::Paragraph
+            | Item::BlockGroup
+            | Item::Heading { .. }
+            | Item::BlockQuote
+            | Item::ListItem
+            | Item::TableCaption
+            | Item::TableRow
+            | Item::TableCell(_)
+            | Item::Figure
+            | Item::Figcaption
+            | Item::Details
+            | Item::Summary
+            | Item::DefinitionTerm
+            | Item::DefinitionDescription
+            | Item::Callout(_)
+            | Item::FootnoteDefinition(_)
     )
 }
 
@@ -670,23 +641,22 @@ pub(crate) fn combine(compile: CompileStats, text: TextStats) -> DocumentStats {
 #[cfg(test)]
 mod tests {
     use crate::document::{
-        CodeBlock, DocumentBuilder, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue,
-        NodeKind, Table, TableCell,
+        CodeBlock, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue,
+        SemanticKind as Item, SemanticTapeBuilder, Table, TableCell,
     };
 
     #[test]
     fn counts_semantic_result_metrics() {
-        let mut builder = DocumentBuilder::with_capacity(30);
-        let heading = builder
-            .append(None, NodeKind::Heading { level: 2 })
-            .unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(30);
+        let heading = builder.emit(None, Item::Heading { level: 2 }).unwrap();
         builder.append_prose(Some(heading), "Heading").unwrap();
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        builder.close(heading).unwrap();
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
         builder.append_prose(Some(paragraph), "Hello ").unwrap();
         let link = builder
-            .append(
+            .emit(
                 Some(paragraph),
-                NodeKind::Link(Link {
+                Item::Link(Link {
                     destination: "https://example.test/guide".into(),
                     title: None,
                     fragment_only: false,
@@ -694,40 +664,45 @@ mod tests {
             )
             .unwrap();
         builder.append_prose(Some(link), "world").unwrap();
+        builder.close(link).unwrap();
+        builder.close(paragraph).unwrap();
         let list = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::List(List {
+                Item::List(List {
                     kind: ListKind::Unordered,
                     start: None,
                 }),
             )
             .unwrap();
-        let item = builder.append(Some(list), NodeKind::ListItem).unwrap();
+        let item = builder.emit(Some(list), Item::ListItem).unwrap();
         builder.append_prose(Some(item), "item").unwrap();
-        builder.append(Some(list), NodeKind::ListItem).unwrap();
+        builder.close(item).unwrap();
+        let empty_item = builder.emit(Some(list), Item::ListItem).unwrap();
+        builder.close(empty_item).unwrap();
+        builder.close(list).unwrap();
         builder
-            .append(
+            .emit(
                 None,
-                NodeKind::CodeBlock(CodeBlock {
+                Item::CodeBlock(CodeBlock {
                     language: None,
                     text: "let x = 1;".into(),
                 }),
             )
             .unwrap();
         let table = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Table(Table {
+                Item::Table(Table {
                     column_count: Some(1),
                 }),
             )
             .unwrap();
-        let row = builder.append(Some(table), NodeKind::TableRow).unwrap();
-        builder
-            .append(
+        let row = builder.emit(Some(table), Item::TableRow).unwrap();
+        let cell = builder
+            .emit(
                 Some(row),
-                NodeKind::TableCell(TableCell {
+                Item::TableCell(TableCell {
                     header: true,
                     colspan: 1,
                     rowspan: 1,
@@ -735,11 +710,14 @@ mod tests {
                 }),
             )
             .unwrap();
-        let figure = builder.append(None, NodeKind::Figure).unwrap();
+        builder.close(cell).unwrap();
+        builder.close(row).unwrap();
+        builder.close(table).unwrap();
+        let figure = builder.emit(None, Item::Figure).unwrap();
         builder
-            .append(
+            .emit(
                 Some(figure),
-                NodeKind::Image(Image {
+                Item::Image(Image {
                     source: "image.png".into(),
                     alt: "An image".into(),
                     title: None,
@@ -748,19 +726,21 @@ mod tests {
                 }),
             )
             .unwrap();
+        builder.close(figure).unwrap();
         let footnote = FootnoteId::from_index(0).unwrap();
         builder
-            .append(None, NodeKind::FootnoteReference(footnote))
+            .emit(None, Item::FootnoteReference(footnote))
             .unwrap();
         let definition = builder
-            .append(None, NodeKind::FootnoteDefinition(footnote))
+            .emit(None, Item::FootnoteDefinition(footnote))
             .unwrap();
         builder.append_prose(Some(definition), "Note").unwrap();
+        builder.close(definition).unwrap();
         builder.define_footnote(footnote, "1", definition).unwrap();
         builder
-            .append(
+            .emit(
                 None,
-                NodeKind::InlineMath(MathValue {
+                Item::InlineMath(MathValue {
                     source: "x".into(),
                     format: MathFormat::Tex,
                     fallback_text: Some("x".into()),
@@ -768,9 +748,9 @@ mod tests {
             )
             .unwrap();
         builder
-            .append(
+            .emit(
                 None,
-                NodeKind::DisplayMath(MathValue {
+                Item::DisplayMath(MathValue {
                     source: "y".into(),
                     format: MathFormat::Tex,
                     fallback_text: Some("y".into()),
@@ -778,7 +758,7 @@ mod tests {
             )
             .unwrap();
 
-        let document = builder.finish();
+        let document = builder.finish().unwrap();
         let stats = document.stats();
         assert_eq!(stats.text_length, document.text().chars().count());
         assert_eq!(stats.word_count, 11);
@@ -799,11 +779,11 @@ mod tests {
 
     #[test]
     fn link_text_excludes_outer_whitespace() {
-        let mut builder = DocumentBuilder::with_capacity(2);
+        let mut builder = SemanticTapeBuilder::with_capacity(2);
         let link = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Link(Link {
+                Item::Link(Link {
                     destination: "#section".into(),
                     title: None,
                     fragment_only: true,
@@ -811,7 +791,8 @@ mod tests {
             )
             .unwrap();
         builder.append_prose(Some(link), "  linked text  ").unwrap();
-        let document = builder.finish();
+        builder.close(link).unwrap();
+        let document = builder.finish().unwrap();
         let stats = document.stats();
         assert_eq!(stats.link_text_length, 11);
         assert_eq!(stats.link_density, 3.3 / 11.0);
@@ -819,15 +800,16 @@ mod tests {
 
     #[test]
     fn ascii_and_unicode_text_paths_preserve_normalization_and_metrics() {
-        let mut builder = DocumentBuilder::with_capacity(4);
-        let paragraph = builder.append(None, NodeKind::Paragraph).unwrap();
+        let mut builder = SemanticTapeBuilder::with_capacity(4);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
         builder
             .append_prose(Some(paragraph), "  ASCII\twords 42!  ")
             .unwrap();
+        builder.close(paragraph).unwrap();
         let link = builder
-            .append(
+            .emit(
                 None,
-                NodeKind::Link(Link {
+                Item::Link(Link {
                     destination: "https://example.test".into(),
                     title: None,
                     fragment_only: false,
@@ -835,7 +817,8 @@ mod tests {
             )
             .unwrap();
         builder.append_prose(Some(link), "  世界  café  ").unwrap();
-        let document = builder.finish();
+        builder.close(link).unwrap();
+        let document = builder.finish().unwrap();
 
         assert_eq!(
             super::render_node_text(&document, paragraph),
@@ -860,13 +843,19 @@ mod tests {
     #[test]
     fn deeply_nested_stats_are_stack_safe() {
         const DEPTH: usize = 10_000;
-        let mut builder = DocumentBuilder::with_capacity(DEPTH + 1);
+        let mut builder = SemanticTapeBuilder::with_capacity(DEPTH + 1);
         let mut parent = None;
+        let mut containers = Vec::with_capacity(DEPTH);
         for _ in 0..DEPTH {
-            parent = Some(builder.append(parent, NodeKind::BlockGroup).unwrap());
+            let container = builder.emit(parent, Item::BlockGroup).unwrap();
+            containers.push(container);
+            parent = Some(container);
         }
         builder.append_prose(parent, "deep").unwrap();
-        let document = builder.finish();
+        for container in containers.into_iter().rev() {
+            builder.close(container).unwrap();
+        }
+        let document = builder.finish().unwrap();
         assert_eq!(document.stats().text_length, 4);
     }
 }

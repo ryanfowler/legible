@@ -60,8 +60,8 @@ The extraction pipeline flows through these stages:
 | `document/ordinary.rs` | Conservative feature routing and stack-safe streaming compilation for ordinary HTML semantics |
 | `quality.rs` | Source-relative DOM metrics, Document-native result metrics, diagnostics-only semantic coverage, access-barrier and short-result checks, and best-attempt scoring |
 | `diagnostics.rs` | Opt-in strategy, cleanup, normalization, semantic coverage, and specialized extractor diagnostics |
-| `document/` | Private compact semantic event tape plus internal retained-source compiler, direct semantic recognition, validation, and stable test debug output; production pages retain this representation instead of a DOM |
-| `document/builder.rs` | Temporary source builder for ordinary lowering and direct compact-tape emission for complex lowering |
+| `document/` | Private compact semantic event tape plus internal retained-source compiler, direct semantic recognition, validation, and sequential test tape output; production pages retain this representation instead of a DOM |
+| `document/builder.rs` | Direct semantic tape builder for ordinary and complex lowering; keeps only source-order close state |
 | `document/sparse.rs` | Sorted sparse node values and node sets for rare semantic evidence and payloads |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
@@ -70,7 +70,6 @@ The extraction pipeline flows through these stages:
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
 | `render/markdown.rs` / `render/text.rs` / `render/html.rs` | Stack-safe format renderers from the semantic document |
-| `benches/support/compact_ir.rs` | Benchmark-only adapters for compact preorder and event-tape representation experiments |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
@@ -98,7 +97,7 @@ These invariants are costly to violate:
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.
 - **Canonicalize discussions once.** Specialized discussion extractors must use the shared builder for primary posts, reply metadata, rich reply bodies, and retained nesting.
 - **Compile output semantics directly.** Footnote, math, and callout source recognition belongs in `document/`. Keep only source protection and external footnote adoption before cleanup.
-- **Lower complex semantics directly.** Complex lowering must emit the compact tape during its task traversal. Do not build the legacy semantic tree and convert it later. Keep source-only parent and close state in the temporary builder.
+- **Lower semantic content directly.** Ordinary lowering and complex lowering must emit the private compact tape during their source traversals. Keep source-only parent and close state in the builder. Do not rebuild a semantic tree before emission.
 - **Route ordinary semantics conservatively.** Use the streaming compiler for supported native HTML only when a cheap source gate finds no inferred semantic dialect. The gate may count source nodes for builder capacity but must not propagate semantic visibility facts. The ordinary compiler validates structural details while it lowers and returns to the complex compiler when required. Do not add a separate ordinary inventory pass.
 - **Share complex semantic facts.** Build feature worklists once. Keep broadly useful node facts compact and dense. Keep feature-specific analysis sparse. Reuse cleanup-safe source facts in final cleanup and semantic compilation. Update derived facts after detach operations.
 - **Cache semantic source evidence.** Collect the tiny source gate during an existing cleanup traversal. Keep feature-specific callout, footnote, math, accessible-math, and data-table evidence as sparse node sets only when the gate finds that feature. Retain sparse feature candidates so complex lowering does not repeat broad gate classification. Resolve fragment references against only their target IDs. Pass the cached evidence through hard cleanup, heuristic cleanup, final cleanup, and semantic compilation. Use cheap tag and attribute gates before rich recognizers. Do not add a standalone whole-fragment pass solely to build the gate.
@@ -106,7 +105,9 @@ These invariants are costly to violate:
 - **Defer rejected-attempt compilation.** Normal extraction uses cheap DOM quality metrics until a candidate can win. Diagnostics may compile every attempt to report semantic metrics.
 - **Use dense semantic indexes.** Renderers should use node-indexed storage for per-document state instead of hash maps when semantic node IDs are dense.
 - **Keep rare semantic storage sparse.** Use sorted node values or node sets for feature-local payloads and candidates that are absent on most source nodes. Keep dense indexes for hot, shared, arbitrary-node lookups.
-- **Keep the semantic representation compact and private.** Production pages retain an immutable event tape with 8-byte operation headers and type-specific payload tables. Do not add general-purpose tree links to the retained representation. The benchmark prototype remains useful for later renderer comparisons.
+- **Keep the semantic representation compact and private.** Production pages retain an immutable event tape with 8-byte operation headers and type-specific payload tables. Do not add general-purpose tree links to the retained representation unless a measured internal need requires them.
+- **Keep the IR layout private.** Do not expose operation storage, builder state, or semantic item indexes through the public API. Common semantic item size is performance-critical.
+- **Close ordinary containers at source boundaries.** Ordinary lowering must emit close operations as it leaves source frames. It must not regain a separate semantic inventory pass.
 - **Render the tape sequentially.** Markdown, canonical HTML, and normalized text renderers must consume the event tape in source order. Do not add tree-link traversal, child collection, or task generation for ordinary rendering. Keep only small formatting and semantic context stacks.
 - **Use one canonical text arena.** Store semantic prose and inline-code text in one document-owned UTF-8 buffer with `TextRef` ranges. Do not add one owned heap string per semantic text leaf. Keep raw block-code payloads separate until measurements justify moving them.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.

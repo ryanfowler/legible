@@ -710,13 +710,6 @@ fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
     cell_count == 1 || has_layout_name(dom, table) && layout_shape
 }
 
-pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {
-    dom.tag(node) == Some(Tag::Table)
-        && dom
-            .attr(node, AttrName::Class)
-            .is_some_and(value_has_layout_name)
-}
-
 fn has_layout_name(dom: &Dom, table: NodeId) -> bool {
     [AttrName::Class, AttrName::Id]
         .into_iter()

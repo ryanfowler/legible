@@ -19,6 +19,7 @@ pub(crate) struct RecognizedCode {
 }
 
 impl RecognizedCode {
+    #[cfg(test)]
     pub(crate) fn content<'a>(&'a self, sources: Option<&'a OwnedSourceTexts>) -> &'a str {
         self.source
             .and_then(|node| sources.and_then(|sources| sources.get(&node)))
@@ -198,20 +199,6 @@ fn gutter_table_sources(dom: &Dom, table: NodeId) -> Option<Vec<NodeId>> {
         .filter(|&pre| !is_gutter_pre(dom, pre))
         .collect::<Vec<_>>();
     (!source_pres.is_empty()).then_some(source_pres)
-}
-
-/// Returns true when a class contains evidence needed by the compiler.
-///
-/// Final DOM cleanup removes unrelated classes. It retains these source markers
-/// until semantic compilation consumes them.
-pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {
-    language_hint(dom, node).is_some()
-        || has_code_wrapper_name(dom, node)
-        || is_language_label(dom, node)
-        || is_line_wrapper(dom, node)
-        || is_line_number_element(dom, node)
-        || is_gutter_cell(dom, node)
-        || has_line_number_table_class(dom, node)
 }
 
 /// Returns true when `code` has block semantics without a `pre` ancestor.

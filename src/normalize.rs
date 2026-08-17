@@ -413,7 +413,7 @@ mod tests {
             &crate::document::CompileContext::default(),
         )
         .unwrap();
-        assert_eq!(streamed.debug_tree(), direct.debug_tree());
+        assert_eq!(streamed.debug_tape(), direct.debug_tape());
     }
 
     #[test]
@@ -552,7 +552,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             .unwrap();
             assert_eq!(
                 document
-                    .debug_tree()
+                    .debug_tape()
                     .lines()
                     .filter(|line| line.trim() == "Figure")
                     .count(),
@@ -572,8 +572,8 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             &crate::document::CompileContext::default(),
         )
         .unwrap();
-        assert!(document.debug_tree().starts_with("Figure\n"));
-        assert!(document.debug_tree().contains("  Figcaption\n"));
+        assert!(document.debug_tape().starts_with("Figure\n"));
+        assert!(document.debug_tape().contains("  Figcaption\n"));
         assert_eq!(
             semantic_markdown(&dom, root),
             "![Plot](plot.png)\n\nResult plot\n"
@@ -615,7 +615,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             &crate::document::CompileContext::default(),
         )
         .unwrap();
-        let tree = document.debug_tree();
+        let tree = document.debug_tape();
         assert_eq!(
             tree.lines()
                 .filter(|line| line.starts_with("List("))
@@ -659,7 +659,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             &crate::document::CompileContext::default(),
         )
         .unwrap();
-        let tree = document.debug_tree();
+        let tree = document.debug_tape();
         assert_eq!(
             tree.lines()
                 .filter(|line| line.starts_with("List("))

@@ -5,20 +5,6 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 use super::images::ImageAnalysis;
 
 /// Classifies figure and caption semantics in linear document passes.
-pub(crate) fn analyze(
-    dom: &Dom,
-    nodes: &[NodeId],
-    images: &ImageAnalysis,
-) -> (Vec<bool>, Vec<bool>) {
-    let has_candidates = nodes.iter().any(|&node| {
-        matches!(
-            dom.tag(node),
-            Some(Tag::Img | Tag::Figure | Tag::Figcaption)
-        ) || class_is_semantic_evidence(dom, node)
-    });
-    analyze_inner(dom, nodes, images, has_candidates)
-}
-
 pub(crate) fn analyze_with_inventory(
     dom: &Dom,
     nodes: &[NodeId],

@@ -2,11 +2,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use legible::{Extractor, extract};
 use std::hint::black_box;
 
-// Criterion benchmarks compile as a separate crate. Include the private DOM module so
-// the parser benchmark measures the same parser that extraction uses.
-#[path = "support/compact_ir.rs"]
-mod compact_ir;
+// Criterion benchmarks compile as a separate crate. Include the private DOM and
+// semantic tape modules so these measurements use the same implementation.
 #[allow(unused_imports)]
+#[allow(dead_code)]
 #[path = "../src/document/mod.rs"]
 mod document;
 #[allow(dead_code, unused_imports)]
@@ -214,7 +213,7 @@ fn bench_extract(c: &mut Criterion) {
             .unwrap()
             .representation;
         eprintln!(
-            "extraction-representation/{size}-{name}: source_dom_nodes={}, final_dom_nodes={}, ir_nodes={}, retained_bytes={}, source_bytes={}",
+            "extraction-representation/{size}-{name}: source_dom_nodes={}, final_dom_nodes={}, semantic_items={}, retained_bytes={}, source_bytes={}",
             representation.source_dom_nodes,
             representation.final_dom_nodes,
             representation.document_nodes,
@@ -235,9 +234,8 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
     let mut fixture_count = 0usize;
 
     eprintln!(
-        "representation/layout: event_op_bytes={}, node_kind_bytes={}, text_ref_bytes={}",
+        "representation/layout: event_op_bytes={}, text_ref_bytes={}",
         std::mem::size_of::<document::EventOp>(),
-        std::mem::size_of::<document::NodeKind>(),
         std::mem::size_of::<document::TextRef>(),
     );
 
@@ -304,7 +302,7 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
         total_semantic_nodes = total_semantic_nodes.saturating_add(semantic_nodes);
         fixture_count += 1;
         eprintln!(
-            "representation/{name}: dom_nodes={}, ir_nodes={semantic_nodes}, roots={}, operation_capacity={}, retained_bytes={retained_bytes}, semantic_string_bytes={}, semantic_string_values={}, source_sized_bytes={source_sized_bytes}",
+            "representation/{name}: dom_nodes={}, semantic_items={semantic_nodes}, roots={}, operation_capacity={}, retained_bytes={retained_bytes}, semantic_string_bytes={}, semantic_string_values={}, source_sized_bytes={source_sized_bytes}",
             dom.len(),
             document.root_count(),
             document.operation_capacity(),
@@ -313,7 +311,7 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
         );
         group.throughput(Throughput::Elements(dom.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new(name, format!("dom-{}-ir-{semantic_nodes}", dom.len())),
+            BenchmarkId::new(name, format!("dom-{}-semantic-{semantic_nodes}", dom.len())),
             &dom,
             |b, dom| {
                 b.iter(|| {
@@ -526,6 +524,5 @@ criterion_group!(
     bench_complex_pages,
     bench_large_compatibility_fixtures,
     bench_deeply_nested,
-    compact_ir::benchmark
 );
 criterion_main!(benches);

@@ -70,13 +70,13 @@ measurements below are the frozen reference for those new benchmark IDs.
 
 ## Representation snapshot
 
-The current private IR is still the linked arena. The benchmark reports these
-layout sizes:
+This section records the linked-arena layout before the compact event-tape
+migration. The benchmark reports the historical layout sizes below:
 
 | Measurement | Value |
 |---|---:|
 | `size_of::<ArenaNode>()` | 80 bytes |
-| `size_of::<NodeKind>()` | 64 bytes |
+| `size_of::<EventOp>()` | 8 bytes |
 | `size_of::<TextValue>()` | 24 bytes |
 
 The lowering benchmark records these values for every retained-fragment fixture:

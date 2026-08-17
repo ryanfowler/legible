@@ -3,14 +3,13 @@
 use crate::diagnostics::{
     SemanticCategoryCoverageInfo, SemanticCoverageCategory, SemanticCoverageInfo,
 };
-use crate::document::{Document, DocumentNodeId, NodeKindView as NodeKind};
+use crate::document::{Document, OperationKind, SemanticItemView as Item};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
     get_or_compute_stats_excluding, has_hidden_utility_class_for_discovery,
     has_static_hidden_marker,
 };
-use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
 /// Text and structure measured for one DOM region.
@@ -320,59 +319,72 @@ pub(crate) struct SemanticStructureCounts {
 impl SemanticStructureCounts {
     pub(crate) fn measure(document: &Document) -> Self {
         let mut counts = Self::default();
-        let mut stack = document
-            .root_ids()
-            .rev()
-            .map(|node| (node, false))
-            .collect::<SmallVec<[(DocumentNodeId, bool); 32]>>();
-        while let Some((node, in_figure)) = stack.pop() {
-            let Some(arena_node) = document.node(node) else {
-                continue;
-            };
-            let node_is_figure = matches!(arena_node.kind(), NodeKind::Figure);
-            let child_in_figure = in_figure || node_is_figure;
-            let children = document.child_ids(node).collect::<SmallVec<[_; 8]>>();
-            match arena_node.kind() {
-                NodeKind::CodeBlock(_) => counts.code_blocks += 1,
-                NodeKind::Table(_) => counts.data_tables += 1,
-                NodeKind::List(_) => {
-                    let items = children
-                        .iter()
-                        .filter(|&&child| {
-                            document
-                                .node(child)
-                                .is_some_and(|child| matches!(child.kind(), NodeKind::ListItem))
-                        })
-                        .map(|&child| list_item_signature(document, child))
-                        .collect::<SmallVec<[_; 8]>>();
-                    for item in &items {
-                        *counts.list_items.entry(item.clone()).or_default() += 1;
-                    }
-                    if items.len() >= 3 {
-                        for item in items {
-                            *counts.substantial_list_items.entry(item).or_default() += 1;
+        struct Frame {
+            opening: usize,
+            kind: OperationKind,
+            in_figure: bool,
+            list_items: Vec<Box<str>>,
+        }
+
+        let mut stack = Vec::<Frame>::new();
+        for (index, operation) in document.operations().iter().copied().enumerate() {
+            if operation.is_close() {
+                let opening = document.operation_opening_index(operation);
+                if let Some(frame) = stack.pop() {
+                    debug_assert_eq!(frame.opening, opening);
+                    if frame.kind == OperationKind::List {
+                        for item in &frame.list_items {
+                            *counts.list_items.entry(item.clone()).or_default() += 1;
+                        }
+                        if frame.list_items.len() >= 3 {
+                            for item in frame.list_items {
+                                *counts.substantial_list_items.entry(item).or_default() += 1;
+                            }
                         }
                     }
                 }
-                NodeKind::Figure => counts.visuals += 1,
-                NodeKind::Image(_) if !in_figure => counts.visuals += 1,
-                NodeKind::Heading { .. } => counts.headings += 1,
-                NodeKind::FootnoteReference(id) => {
-                    if let Some(definition) = document.footnote_record(id) {
-                        counts.referenced_footnotes.insert(definition.label.clone());
-                    }
-                }
-                NodeKind::InlineMath(_) | NodeKind::DisplayMath(_) => {
-                    counts.math_expressions += 1;
-                }
-                _ => {}
+                continue;
             }
-            stack.extend(
-                children
-                    .into_iter()
-                    .rev()
-                    .map(|child| (child, child_in_figure)),
-            );
+
+            let kind = operation.kind();
+            let in_figure = stack.last().is_some_and(|frame| frame.in_figure);
+            if let Some(node) = document.operation_view(index) {
+                match node {
+                    Item::CodeBlock(_) => counts.code_blocks += 1,
+                    Item::Table(_) => counts.data_tables += 1,
+                    Item::ListItem
+                        if stack
+                            .last()
+                            .is_some_and(|frame| frame.kind == OperationKind::List) =>
+                    {
+                        let item = list_item_signature(document, index);
+                        if let Some(list) = stack.last_mut() {
+                            list.list_items.push(item);
+                        }
+                    }
+                    Item::Figure => counts.visuals += 1,
+                    Item::Image(_) if !in_figure => counts.visuals += 1,
+                    Item::Heading { .. } => counts.headings += 1,
+                    Item::FootnoteReference(id) => {
+                        if let Some(definition) = document.footnote_record(id) {
+                            counts.referenced_footnotes.insert(definition.label.clone());
+                        }
+                    }
+                    Item::InlineMath(_) | Item::DisplayMath(_) => {
+                        counts.math_expressions += 1;
+                    }
+                    _ => {}
+                }
+            }
+
+            if kind.is_container() {
+                stack.push(Frame {
+                    opening: index,
+                    kind,
+                    in_figure: in_figure || kind == OperationKind::Figure,
+                    list_items: Vec::new(),
+                });
+            }
         }
         counts
     }
@@ -448,29 +460,39 @@ pub(crate) fn semantic_coverage(
     Some(SemanticCoverageInfo { score, categories })
 }
 
-fn list_item_signature(document: &Document, root: DocumentNodeId) -> Box<str> {
+fn list_item_signature(document: &Document, root: usize) -> Box<str> {
     let mut parts = Vec::<Box<str>>::new();
-    let mut stack = SmallVec::<[DocumentNodeId; 16]>::from_slice(&[root]);
-    while let Some(node) = stack.pop() {
-        let Some(arena_node) = document.node(node) else {
-            continue;
+    let end = document.operation_end(root).saturating_add(1);
+    let mut index = root;
+    while index < end {
+        let Some(operation) = document.operations().get(index).copied() else {
+            break;
         };
-        if node != root && matches!(arena_node.kind(), NodeKind::List(_)) {
+        if operation.is_close() {
+            index += 1;
             continue;
         }
-        let text = match arena_node.kind() {
-            NodeKind::Text(text) | NodeKind::InlineCode(text) => Some(text),
-            NodeKind::CodeBlock(code) => Some(code.text()),
-            NodeKind::Image(image) => Some(if image.alt().is_empty() {
+        let Some(node) = document.operation_view(index) else {
+            index += 1;
+            continue;
+        };
+        if index != root && matches!(node, Item::List(_)) {
+            index = document.operation_end(index).saturating_add(1);
+            continue;
+        }
+        let text = match node {
+            Item::Text(text) | Item::InlineCode(text) => Some(text),
+            Item::CodeBlock(code) => Some(code.text()),
+            Item::Image(image) => Some(if image.alt().is_empty() {
                 image.source()
             } else {
                 image.alt()
             }),
-            NodeKind::TaskMarker(marker) => marker.fallback_label(),
-            NodeKind::InlineMath(math) | NodeKind::DisplayMath(math) => {
+            Item::TaskMarker(marker) => marker.fallback_label(),
+            Item::InlineMath(math) | Item::DisplayMath(math) => {
                 Some(math.fallback_text().unwrap_or_else(|| math.source()))
             }
-            NodeKind::Media(media) => Some(media.title().unwrap_or_else(|| media.source())),
+            Item::Media(media) => Some(media.title().unwrap_or_else(|| media.source())),
             _ => None,
         };
         if let Some(text) = text {
@@ -479,8 +501,7 @@ fn list_item_signature(document: &Document, root: DocumentNodeId) -> Box<str> {
                 parts.push(text.into_boxed_str());
             }
         }
-        let children = document.child_ids(node).collect::<SmallVec<[_; 8]>>();
-        stack.extend(children.into_iter().rev());
+        index += 1;
     }
     parts.join(" ").into_boxed_str()
 }
