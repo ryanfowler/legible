@@ -280,14 +280,11 @@ impl StructuralCounts {
 }
 
 impl CandidateFeatureIndex {
-    pub(crate) fn new(dom: &Dom, store: &NodeStateStore) -> Self {
+    pub(crate) fn new(dom: &Dom, store: &NodeStateStore, nodes: &[(NodeId, u32)]) -> Self {
         let mut counts = vec![StructuralCounts::default(); dom.len()];
-        let mut nodes = Vec::with_capacity(dom.len());
-        nodes.push(dom.root());
-        nodes.extend(dom.descendants(dom.root()));
         let mut has_links = false;
 
-        for &node in &nodes {
+        for &(node, _) in nodes {
             let Some(tag) = dom.tag(node) else { continue };
             let own = &mut counts[node.index()];
             match tag {
@@ -305,7 +302,7 @@ impl CandidateFeatureIndex {
                 _ => {}
             }
         }
-        for &node in nodes.iter().rev() {
+        for &(node, _) in nodes.iter().rev() {
             if let Some(parent) = dom.parent(node) {
                 let child = counts[node.index()];
                 counts[parent.index()].add(child);
@@ -1205,8 +1202,14 @@ mod tests {
             .unwrap();
         let mut store = NodeStateStore::new();
         let mut table_nodes = Vec::new();
-        crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut table_nodes);
-        let index = CandidateFeatureIndex::new(&dom, &store);
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        crate::cleaning::mark_data_tables_from_snapshot(
+            &dom,
+            &snapshot,
+            &mut store,
+            &mut table_nodes,
+        );
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot);
         index.prepare_text_cache(&mut store);
         let features = index.features(&dom, candidate, &mut store, true);
 
@@ -1251,8 +1254,14 @@ mod tests {
             .unwrap();
         let mut store = NodeStateStore::new();
         let mut table_nodes = Vec::new();
-        crate::cleaning::mark_data_tables(&dom, dom.root(), &mut store, &mut table_nodes);
-        let index = CandidateFeatureIndex::new(&dom, &store);
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        crate::cleaning::mark_data_tables_from_snapshot(
+            &dom,
+            &snapshot,
+            &mut store,
+            &mut table_nodes,
+        );
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot);
         let features = index.features(&dom, candidate, &mut store, false);
 
         assert_eq!(features.paragraph_count, 300);

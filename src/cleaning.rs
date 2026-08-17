@@ -16,7 +16,13 @@ use regex::Regex;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
+#[cfg(test)]
 pub fn prep_document(dom: &mut Dom) {
+    let body = dom.body();
+    prep_document_with_body(dom, body);
+}
+
+pub(crate) fn prep_document_with_body(dom: &mut Dom, body: Option<NodeId>) {
     // Preserve the required preparation order. Remove inactive subtrees,
     // normalize BR runs, and only then rename deprecated font elements.
     let mut ids: Vec<_> = dom
@@ -35,7 +41,7 @@ pub fn prep_document(dom: &mut Dom) {
     }
 
     ids.clear();
-    if let Some(body) = dom.body() {
+    if let Some(body) = body {
         ids.extend(dom.descendants(body).filter(|&id| {
             dom.tag(id) == Some(Tag::Br)
                 && !dom
@@ -275,6 +281,15 @@ pub fn mark_data_tables(
     nodes: &mut Vec<NodeId>,
 ) {
     let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    mark_data_tables_from_snapshot(dom, &snapshot, store, nodes);
+}
+
+pub(crate) fn mark_data_tables_from_snapshot(
+    dom: &Dom,
+    snapshot: &[(NodeId, u32)],
+    store: &mut crate::dom::NodeStateStore,
+    nodes: &mut Vec<NodeId>,
+) {
     nodes.clear();
     nodes.extend(
         snapshot
@@ -288,7 +303,7 @@ pub fn mark_data_tables(
     // a deeply nested chain does not rescan each inner subtree.
     let mut summaries = vec![None; dom.len()];
     let mut open = Vec::new();
-    for &(node, depth) in &snapshot {
+    for &(node, depth) in snapshot {
         while open
             .last()
             .is_some_and(|(table_depth, _, _)| *table_depth >= depth)

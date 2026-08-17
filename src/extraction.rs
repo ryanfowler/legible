@@ -14,7 +14,7 @@ use crate::diagnostics::{
     NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo, RootInfo,
     RootSelectionReasonInfo,
 };
-use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag, build_match_string};
+use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, Tag, build_match_string};
 use crate::error::{Error, Result};
 use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::instrumentation::{Phase, PhaseGuard};
@@ -34,7 +34,6 @@ use crate::quality::{
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
-use html5ever::ns;
 use regex::Regex;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -312,6 +311,21 @@ fn find_content_targets(dom: &Dom, target: &ContentHint) -> Vec<NodeId> {
         .collect()
 }
 
+fn find_content_targets_from_snapshot(
+    dom: &Dom,
+    snapshot: &[(NodeId, u32)],
+    target: &ContentHint,
+) -> Vec<NodeId> {
+    if !content_hint_has_value(target) {
+        return Vec::new();
+    }
+    snapshot
+        .iter()
+        .map(|&(node, _)| node)
+        .filter(|&node| content_target_matches(dom, node, target))
+        .collect()
+}
+
 impl<'a> ContentExtractor<'a> {
     pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let source_dom_nodes = dom.len();
@@ -363,12 +377,9 @@ impl<'a> ContentExtractor<'a> {
                 return Err(Error::TooManyElements(n, self.options.max_elements));
             }
         }
-        if let Some(base) = self.dom.descendants(self.dom.root()).find(|&id| {
-            self.dom
-                .qual_name(id)
-                .is_some_and(|name| name.ns == ns!(html) && name.local.as_ref() == "base")
-                && self.dom.attr(id, AttrName::Href).is_some()
-        }) && let Some(href) = self.dom.attr(base, AttrName::Href)
+        let preparation_anchors = self.dom.document_anchors();
+        if let Some(base) = preparation_anchors.first_base_with_href
+            && let Some(href) = self.dom.attr(base, AttrName::Href)
         {
             let base_uri = self
                 .base_uri
@@ -406,7 +417,7 @@ impl<'a> ContentExtractor<'a> {
         drop(_metadata_phase);
         let _preparation_phase = PhaseGuard::new(Phase::Preparation);
         unwrap_noscript_images(&mut self.dom);
-        prep_document(&mut self.dom);
+        prep_document_with_body(&mut self.dom, preparation_anchors.body);
         let document_root = self.dom.root();
         normalize_svg_before_scoring(&mut self.dom, document_root);
         if self.options.content_root.is_none() {
@@ -432,7 +443,7 @@ impl<'a> ContentExtractor<'a> {
             .take()
             .or_else(|| metadata::normalize_title(&title))
             .unwrap_or_default();
-        let content = self.extract_content()?;
+        let content = self.extract_content(preparation_anchors)?;
         self.metadata.title = (!self.page_title.is_empty()).then_some(self.page_title);
         if self.metadata.authors.is_empty()
             && let Some(byline) = self
@@ -478,9 +489,11 @@ impl<'a> ContentExtractor<'a> {
             retained_structured_data,
         ))
     }
-    fn extract_content(&mut self) -> Result<ExtractedContent> {
+    fn extract_content(
+        &mut self,
+        preparation_anchors: DocumentAnchors,
+    ) -> Result<ExtractedContent> {
         let _candidate_preflight_phase = PhaseGuard::new(Phase::CandidateDiscovery);
-        let body = self.dom.body().ok_or(Error::NoBody)?;
         let exact_root = if let Some(target) = &self.options.content_root {
             Some(
                 find_content_targets(&self.dom, target)
@@ -501,18 +514,30 @@ impl<'a> ContentExtractor<'a> {
                 self.base_uri.clone(),
                 self.source_uri.as_ref(),
             );
+            let anchors =
+                if self.specialized_root.is_none() && preparation_anchors.valid_for(&self.dom) {
+                    preparation_anchors
+                } else {
+                    self.dom.document_anchors()
+                };
             #[cfg(feature = "bench-instrumentation")]
             drop(_candidate_preflight_phase);
-            return self.extract_exact_root(root, origin, &compile_context);
+            return self.extract_exact_root(root, origin, &compile_context, anchors);
         }
         let footnote_definitions = exact_root.is_none().then(|| {
             crate::instrumentation::record_external_footnote_scan();
             collect_external_footnotes(&self.dom)
         });
-        let source_metrics = exact_root.map_or_else(
-            || ContentMetrics::measure_source(&self.dom, body),
-            |root| ContentMetrics::measure(&self.dom, root),
-        );
+        let source_anchors = if preparation_anchors.valid_for(&self.dom) {
+            preparation_anchors
+        } else {
+            self.dom.document_anchors()
+        };
+        let initial_nodes = self
+            .dom
+            .element_descendants_snapshot_with_depth(self.dom.root());
+        let body = source_anchors.body.ok_or(Error::NoBody)?;
+        let source_metrics = ContentMetrics::measure_source(&self.dom, body);
         let has_relaxable_hidden_content = self.has_relaxable_hidden_content(body);
         let relaxed_source_metrics = if has_relaxable_hidden_content {
             ContentMetrics::measure_source_relaxed_visibility(&self.dom, body)
@@ -542,15 +567,12 @@ impl<'a> ContentExtractor<'a> {
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
-        // These indexes depend only on the prepared source. Reuse them across
-        // strategy retries instead of rebuilding the same preorder snapshot
-        // and title plan for every attempt.
-        let initial_nodes = self
-            .dom
-            .element_descendants_snapshot_with_depth(self.dom.root());
         let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
-        let base_candidates =
-            CandidateSet::discover_semantic_from_snapshot(&self.dom, &initial_nodes);
+        let base_candidates = CandidateSet::discover_semantic_from_snapshot(
+            &self.dom,
+            &initial_nodes,
+            source_anchors.body,
+        );
         let content_hint_targets =
             self.options
                 .content_hint
@@ -559,10 +581,11 @@ impl<'a> ContentExtractor<'a> {
                     if content_hint_has_value(hint) {
                         crate::instrumentation::record_content_hint_scan();
                     }
-                    find_content_targets(&self.dom, hint)
+                    find_content_targets_from_snapshot(&self.dom, &initial_nodes, hint)
                 });
         let title_plan = title_heading_plan(
             &self.dom,
+            &initial_nodes,
             &self.page_title,
             &self.structured_title,
             self.metadata.site_name.as_deref(),
@@ -570,7 +593,7 @@ impl<'a> ContentExtractor<'a> {
         );
         #[cfg(feature = "bench-instrumentation")]
         drop(_candidate_preflight_phase);
-        if let Some(html) = self.dom.html_element() {
+        if let Some(html) = source_anchors.html {
             if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
                 self.page_language = Some(lang.into())
             }
@@ -669,8 +692,19 @@ impl<'a> ContentExtractor<'a> {
             if let Some(root) = structured_root {
                 candidates.add_structured_data(root);
             }
-            let ranked = self.rank_candidates(
+            let working_snapshot =
+                working_dom.element_descendants_snapshot_with_depth(working_root);
+            let body = source_anchors
+                .body
+                .filter(|&node| {
+                    working_dom.tag(node) == Some(Tag::Body)
+                        && (node == working_root || working_dom.parent(node).is_some())
+                })
+                .ok_or(Error::NoBody)?;
+            let ranked = self.rank_candidates_with_snapshot(
                 &working_dom,
+                body,
+                &working_snapshot,
                 &mut candidates,
                 readability_scores,
                 &excluded_mask,
@@ -678,7 +712,6 @@ impl<'a> ContentExtractor<'a> {
             crate::instrumentation::record_scoring_nodes(working_dom.len());
             #[cfg(feature = "bench-instrumentation")]
             drop(_scoring_phase);
-            let body = working_dom.body().ok_or(Error::NoBody)?;
             let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
             let mut selection = select_content_root(
                 &working_dom,
@@ -735,7 +768,6 @@ impl<'a> ContentExtractor<'a> {
             // Move the selected working tree into the extraction path. Keep the
             // prepared source as the immutable input for a possible retry.
             let source_dom = std::mem::replace(&mut self.dom, working_dom);
-            let body = self.dom.body().ok_or(Error::NoBody)?;
             let (top_id, synthetic) = if !selection.branches.is_empty() {
                 let container = self
                     .create_container(selection.branches[0], &selection.branches)
@@ -1212,6 +1244,7 @@ impl<'a> ContentExtractor<'a> {
         root: NodeId,
         origin: ExactRootOrigin,
         compile_context: &crate::document::CompileContext,
+        anchors: DocumentAnchors,
     ) -> Result<ExtractedContent> {
         let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
         self.strategy = ExtractionStrategy::Normal;
@@ -1219,7 +1252,12 @@ impl<'a> ContentExtractor<'a> {
         self.diagnostic_cleanup_actions.clear();
         self.diagnostic_normalization = NormalizationCountsInfo::default();
 
-        let body = self.dom.body().ok_or(Error::NoBody)?;
+        let body = anchors
+            .body
+            .filter(|&node| {
+                self.dom.tag(node) == Some(Tag::Body) && self.dom.parent(node).is_some()
+            })
+            .ok_or(Error::NoBody)?;
         let mut ancestor = Some(root);
         let mut root_attached = false;
         while let Some(node) = ancestor {
@@ -1242,7 +1280,9 @@ impl<'a> ContentExtractor<'a> {
         }
         Self::normalize_exact_root_structure(&mut self.dom, root, origin);
 
-        if let Some(html) = self.dom.html_element() {
+        if let Some(html) = anchors.html.filter(|&node| {
+            self.dom.tag(node) == Some(Tag::Html) && self.dom.parent(node).is_some()
+        }) {
             if let Some(lang) = self.dom.attr(html, AttrName::Lang) {
                 self.page_language = Some(lang.into());
             }
@@ -1307,8 +1347,10 @@ impl<'a> ContentExtractor<'a> {
         let content_id = fragment
             .first_child(fragment.root())
             .ok_or(Error::NoContent)?;
+        let title_snapshot = fragment.element_descendants_snapshot_with_depth(fragment.root());
         let title_plan = title_heading_plan(
             &fragment,
+            &title_snapshot,
             &self.page_title,
             &self.structured_title,
             self.metadata.site_name.as_deref(),
@@ -2009,13 +2051,17 @@ impl<'a> ContentExtractor<'a> {
         let accessible_math = accessible_math_nodes(&self.dom, &initial_nodes);
         let title_plan = title_heading_plan(
             &self.dom,
+            &initial_nodes,
             &self.page_title,
             &self.structured_title,
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
-        let base_candidates =
-            CandidateSet::discover_semantic_from_snapshot(&self.dom, &initial_nodes);
+        let base_candidates = CandidateSet::discover_semantic_from_snapshot(
+            &self.dom,
+            &initial_nodes,
+            self.dom.body(),
+        );
         self.discover_candidates_with_indexes(
             match_buffer,
             text_buffer,
@@ -2137,9 +2183,31 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
+    #[cfg(test)]
     fn rank_candidates(
         &mut self,
         dom: &Dom,
+        candidates: &mut CandidateSet,
+        readability_scores: SmallVec<[ReadabilityScore; 64]>,
+        excluded: &[bool],
+    ) -> SmallVec<[RankedCandidate; 64]> {
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
+        let body = dom.body().unwrap_or(dom.root());
+        self.rank_candidates_with_snapshot(
+            dom,
+            body,
+            &snapshot,
+            candidates,
+            readability_scores,
+            excluded,
+        )
+    }
+
+    fn rank_candidates_with_snapshot(
+        &mut self,
+        dom: &Dom,
+        body: NodeId,
+        snapshot: &[(NodeId, u32)],
         candidates: &mut CandidateSet,
         readability_scores: SmallVec<[ReadabilityScore; 64]>,
         excluded: &[bool],
@@ -2153,8 +2221,8 @@ impl<'a> ContentExtractor<'a> {
         // unaffected leaf cache. Feature calculation uses the same tree and
         // would otherwise repeat a full postorder text scan.
         let mut table_nodes = Vec::new();
-        mark_data_tables(dom, dom.root(), &mut self.node_data, &mut table_nodes);
-        let feature_index = CandidateFeatureIndex::new(dom, &self.node_data);
+        mark_data_tables_from_snapshot(dom, snapshot, &mut self.node_data, &mut table_nodes);
+        let feature_index = CandidateFeatureIndex::new(dom, &self.node_data, snapshot);
         feature_index.prepare_text_cache(&mut self.node_data);
         for candidate in candidates.iter_mut() {
             candidate.features = feature_index.features(
@@ -2165,7 +2233,7 @@ impl<'a> ContentExtractor<'a> {
             );
         }
 
-        let context = candidates.ranking_context(dom, &self.node_data);
+        let context = candidates.ranking_context(dom, &self.node_data, snapshot);
         let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
             .iter()
             .enumerate()
@@ -2179,7 +2247,7 @@ impl<'a> ContentExtractor<'a> {
                 }
                 let length =
                     get_or_compute_stats(dom, candidate.node, &mut self.node_data).text_length;
-                if length == 0 && Some(candidate.node) != dom.body() {
+                if length == 0 && candidate.node != body {
                     return None;
                 }
                 let is_semantic = candidate.has_source(CandidateSource::Semantic);
@@ -2236,15 +2304,13 @@ impl<'a> ContentExtractor<'a> {
                 // A small boundary bonus lets a focused generic container beat
                 // a broad ancestor with the same structural evidence. It is too
                 // small to override a Readability prose score.
-                let generic_boundary_bonus = if candidate.node
-                    != dom.body().unwrap_or(candidate.node)
-                    && is_generic_only
-                    && has_distinct_structural_content
-                {
-                    0.01
-                } else {
-                    0.0
-                };
+                let generic_boundary_bonus =
+                    if candidate.node != body && is_generic_only && has_distinct_structural_content
+                    {
+                        0.01
+                    } else {
+                        0.0
+                    };
                 let final_score = candidate.features.ranking_score()
                     + short_semantic_bonus
                     + sibling_content_bonus
@@ -2819,13 +2885,13 @@ fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bo
 
 fn title_heading_plan(
     dom: &Dom,
+    snapshot: &[(NodeId, u32)],
     page_title: &str,
     structured_title: &str,
     site_name: Option<&str>,
     source_uri: Option<&Url>,
 ) -> TitleHeadingPlan {
     let root = dom.root();
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
 
     // A heading can be deeply nested in repaired HTML. Compute the score of
     // each node's nearest marked ancestor path once instead of walking that
@@ -2835,7 +2901,7 @@ fn title_heading_plan(
     let context_scores = deeply_nested.then(|| {
         let mut scores = vec![0_i32; dom.len()];
         let root_score = title_heading_context_score(dom, root, 0);
-        for &(node, _) in &snapshot {
+        for &(node, _) in snapshot {
             let parent_score = dom.parent(node).map_or(0, |parent| {
                 if parent == root {
                     root_score
@@ -2854,9 +2920,9 @@ fn title_heading_plan(
         .filter(|&node| has_primary_heading_semantics(dom, node))
         .filter(|&node| is_probably_visible(dom, node))
         .collect();
-    let has_link = dom
-        .descendants(root)
-        .any(|node| dom.tag(node) == Some(Tag::A));
+    let has_link = snapshot
+        .iter()
+        .any(|&(node, _)| dom.tag(node) == Some(Tag::A));
     let brand_headings: SmallVec<[NodeId; 2]> = if has_link {
         // Resolve linked descendants and ancestors in two linear passes for a
         // deep tree. A descendant scan per heading becomes quadratic after
@@ -2878,7 +2944,7 @@ fn title_heading_plan(
             }
             let mut ancestor_links = vec![None; dom.len()];
             let mut in_document_chrome = vec![false; dom.len()];
-            for &(node, _) in &snapshot {
+            for &(node, _) in snapshot {
                 if let Some(parent) = dom.parent(node) {
                     ancestor_links[node.index()] = if dom.tag(parent) == Some(Tag::A) {
                         Some(parent)
@@ -4012,8 +4078,10 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         );
         let dom = Dom::parse_document(&html).unwrap();
         let source = Url::parse("https://example.com/article").unwrap();
+        let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
         let plan = title_heading_plan(
             &dom,
+            &snapshot,
             "Article title | Example",
             "Article title",
             Some("Example"),
