@@ -602,6 +602,7 @@ impl SemanticSourceFacts {
         Self::from_precomputed_preorder(dom, root, preorder, multiline_content, code_blocks)
     }
 
+    #[cfg(test)]
     pub(crate) fn analyze(dom: &Dom, root: NodeId) -> Self {
         let mut preorder = Vec::with_capacity(dom.len());
         preorder.push(root);
@@ -609,6 +610,7 @@ impl SemanticSourceFacts {
         Self::analyze_preorder(dom, root, preorder)
     }
 
+    #[cfg(test)]
     fn analyze_preorder(dom: &Dom, root: NodeId, preorder: Vec<NodeId>) -> Self {
         let mut multiline_content = vec![false; dom.len()];
         let mut code_blocks = vec![false; dom.len()];
@@ -789,6 +791,7 @@ pub(super) struct SemanticFacts {
 
 impl SemanticFacts {
     /// Scans source evidence in preorder and propagates generic facts in reverse order.
+    #[cfg(test)]
     pub(super) fn analyze(dom: &Dom, root: NodeId) -> Self {
         Self::analyze_with_source_facts(dom, root, None, None, None)
     }

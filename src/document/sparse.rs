@@ -74,6 +74,7 @@ impl<T> SparseNodeValues<T> {
         self.entries.into_iter()
     }
 
+    #[allow(dead_code)]
     pub(super) fn allocated_bytes(&self) -> usize {
         self.entries
             .capacity()
@@ -148,10 +149,12 @@ impl SparseNodeSet {
         self.nodes.binary_search(&node).is_ok()
     }
 
+    #[cfg(test)]
     pub(super) fn iter(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.nodes.iter().copied()
     }
 
+    #[allow(dead_code)]
     pub(super) fn allocated_bytes(&self) -> usize {
         self.nodes
             .capacity()

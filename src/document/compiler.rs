@@ -5,7 +5,7 @@ use url::Url;
 
 use super::{
     BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document, DocumentNodeId,
-    FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media, NodeKind,
+    FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media, SemanticKind,
     SemanticTapeBuilder, Table, TableAlignment, TableCell, TaskMarker, ValidationError,
     safe_destination,
 };
@@ -74,7 +74,7 @@ enum ListingPlan {
         metadata: Option<Vec<NodeId>>,
     },
     Group {
-        kind: NodeKind,
+        kind: SemanticKind,
         cells: Vec<NodeId>,
     },
 }
@@ -93,7 +93,7 @@ enum Task {
     WrappedChildren {
         node: NodeId,
         scope: Scope,
-        kind: NodeKind,
+        kind: SemanticKind,
     },
     Close {
         node: DocumentNodeId,
@@ -134,6 +134,7 @@ struct DeferredCaption {
 }
 
 /// Compiles the children of a retained source root into semantic nodes.
+#[allow(dead_code)]
 pub(crate) fn compile_document(
     dom: &Dom,
     root: NodeId,
@@ -142,6 +143,7 @@ pub(crate) fn compile_document(
     compile_document_with_optional_source_facts(dom, root, context, None)
 }
 
+#[allow(dead_code)]
 pub(crate) fn compile_document_with_optional_source_facts(
     dom: &Dom,
     root: NodeId,
@@ -217,6 +219,7 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
 /// Production extraction transfers its winning compact fragment here. This
 /// keeps borrowed compilation available for diagnostics and tests without a
 /// second compiler implementation.
+#[allow(dead_code)]
 pub(crate) fn compile_document_owned(
     dom: Dom,
     root: NodeId,
@@ -226,6 +229,7 @@ pub(crate) fn compile_document_owned(
 }
 
 /// Compiles an owned fragment while reusing source facts from final cleanup.
+#[allow(dead_code)]
 pub(crate) fn compile_document_owned_with_optional_source_facts(
     dom: Dom,
     root: NodeId,
@@ -235,6 +239,7 @@ pub(crate) fn compile_document_owned_with_optional_source_facts(
     compile_document_owned_impl(dom, root, context, source_facts, None, None)
 }
 
+#[allow(dead_code)]
 pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
     dom: Dom,
     root: NodeId,
@@ -336,6 +341,7 @@ struct ComplexSourceAnalysis {
 /// Capacity evidence for the analysis state held immediately before lowering.
 /// This is benchmark-only evidence. It excludes allocator metadata and the
 /// short-lived parser and cleanup buffers.
+#[allow(dead_code)]
 pub(crate) struct ComplexStorageMetrics {
     pub(crate) source_nodes: usize,
     pub(crate) lowering_passes: usize,
@@ -344,6 +350,7 @@ pub(crate) struct ComplexStorageMetrics {
     pub(crate) sparse_bytes: usize,
 }
 
+#[allow(dead_code)]
 pub(crate) fn complex_storage_metrics_for_benchmark(
     dom: &Dom,
     root: NodeId,
@@ -533,10 +540,10 @@ fn lower_complex_document(
                     builder.append_normalized_prose(parent, " ")?;
                 }
                 Task::HardBreak { parent } => {
-                    builder.append(parent, NodeKind::HardBreak)?;
+                    builder.emit(parent, SemanticKind::HardBreak)?;
                 }
                 Task::WrappedChildren { node, scope, kind } => {
-                    let parent = builder.append(scope.parent, kind)?;
+                    let parent = builder.emit(scope.parent, kind)?;
                     tasks.push(Task::Close { node: parent });
                     push_children(
                         dom,
@@ -566,7 +573,7 @@ fn lower_complex_document(
                 Task::Listing { list, plan, scope } => {
                     let (parent, children) = match plan {
                         ListingPlan::Item { primary, metadata } => {
-                            let item = builder.append(Some(list), NodeKind::ListItem)?;
+                            let item = builder.emit(Some(list), SemanticKind::ListItem)?;
                             let mut children = Vec::new();
                             append_cell_tasks(
                                 dom,
@@ -592,7 +599,7 @@ fn lower_complex_document(
                             (item, children)
                         }
                         ListingPlan::Group { kind, cells } => {
-                            let group = builder.append(scope.parent, kind)?;
+                            let group = builder.emit(scope.parent, kind)?;
                             let mut children = Vec::new();
                             append_cell_tasks(
                                 dom,
@@ -618,7 +625,7 @@ fn lower_complex_document(
                     let parent = if let Some(parent) = deferred_footnote_group {
                         parent
                     } else {
-                        let parent = builder.append(None, NodeKind::BlockGroup)?;
+                        let parent = builder.emit(None, SemanticKind::BlockGroup)?;
                         deferred_footnote_group = Some(parent);
                         parent
                     };
@@ -641,11 +648,11 @@ fn lower_complex_document(
                     scope,
                     already_strong,
                 } => {
-                    let paragraph = builder.append(scope.parent, NodeKind::Paragraph)?;
+                    let paragraph = builder.emit(scope.parent, SemanticKind::Paragraph)?;
                     let (parent, close_parent) = if already_strong {
                         (paragraph, None)
                     } else {
-                        let strong = builder.append(Some(paragraph), NodeKind::Strong)?;
+                        let strong = builder.emit(Some(paragraph), SemanticKind::Strong)?;
                         (strong, Some(strong))
                     };
                     tasks.push(Task::Close { node: paragraph });
@@ -733,7 +740,7 @@ fn lower_complex_document(
                         && !meaningful_inline_separator(dom, node, &facts))))
             {
                 let list_item = if scope.parent.is_some() && scope.parent == scope.list {
-                    Some(builder.append(scope.parent, NodeKind::ListItem)?)
+                    Some(builder.emit(scope.parent, SemanticKind::ListItem)?)
                 } else {
                     None
                 };
@@ -764,12 +771,12 @@ fn lower_complex_document(
                 format: MathFormat::Tex,
                 fallback_text: Some(math.fallback.clone()),
             };
-            builder.append(
+            builder.emit(
                 scope.parent,
                 if math.block {
-                    NodeKind::DisplayMath(value)
+                    SemanticKind::DisplayMath(value)
                 } else {
-                    NodeKind::InlineMath(value)
+                    SemanticKind::InlineMath(value)
                 },
             )?;
             continue;
@@ -778,7 +785,7 @@ fn lower_complex_document(
         if let Some(label) = footnotes.reference(node) {
             if footnotes.has_definition(label) {
                 let id = footnote_id(&mut footnote_ids, label)?;
-                builder.append(scope.parent, NodeKind::FootnoteReference(id))?;
+                builder.emit(scope.parent, SemanticKind::FootnoteReference(id))?;
             } else {
                 push_children(dom, node, scope, &mut tasks);
             }
@@ -801,9 +808,9 @@ fn lower_complex_document(
         if tag == Tag::Table
             && let Some(code) = super::code::recognize_gutter_table(dom, node)
         {
-            builder.append(
+            builder.emit(
                 scope.parent,
-                NodeKind::CodeBlock(CodeBlock {
+                SemanticKind::CodeBlock(CodeBlock {
                     language: code.language.as_deref().map(Into::into),
                     text: code.into_text(None),
                 }),
@@ -812,7 +819,7 @@ fn lower_complex_document(
         }
         if tag == Tag::Table {
             let table_list_item = if scope.parent.is_some() && scope.parent == scope.list {
-                Some(builder.append(scope.parent, NodeKind::ListItem)?)
+                Some(builder.emit(scope.parent, SemanticKind::ListItem)?)
             } else {
                 None
             };
@@ -855,9 +862,9 @@ fn lower_complex_document(
         {
             let language = code.language.as_deref().map(Into::into);
             let text = code.into_text(owned_source_texts.as_deref_mut());
-            builder.append(
+            builder.emit(
                 scope.parent,
-                NodeKind::CodeBlock(CodeBlock { language, text }),
+                SemanticKind::CodeBlock(CodeBlock { language, text }),
             )?;
             continue;
         }
@@ -870,9 +877,9 @@ fn lower_complex_document(
                 .attr(node, AttrName::Type)
                 .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
         {
-            builder.append(
+            builder.emit(
                 scope.parent,
-                NodeKind::TaskMarker(TaskMarker {
+                SemanticKind::TaskMarker(TaskMarker {
                     checked: dom.attr(node, AttrName::Checked).is_some(),
                     fallback_label: (!nearest_list_item_has_visible_text(
                         dom, node, &lists, &facts,
@@ -892,9 +899,9 @@ fn lower_complex_document(
             let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
             let source = images.source(node).map(Into::into);
             if let Some(source) = source {
-                builder.append(
+                builder.emit(
                     scope.parent,
-                    NodeKind::Image(semantic_image(dom, node, source)),
+                    SemanticKind::Image(semantic_image(dom, node, source)),
                 )?;
             } else {
                 builder.append_prose(scope.parent, &alt)?;
@@ -903,9 +910,9 @@ fn lower_complex_document(
         }
         if tag == Tag::Picture && images.is_synthetic(node) {
             if let Some(source) = images.source(node).map(Into::into) {
-                builder.append(
+                builder.emit(
                     scope.parent,
-                    NodeKind::Image(semantic_image(dom, node, source)),
+                    SemanticKind::Image(semantic_image(dom, node, source)),
                 )?;
             }
             continue;
@@ -915,9 +922,9 @@ fn lower_complex_document(
                 if media_separators.contains(node) {
                     builder.append_normalized_prose(scope.parent, " ")?;
                 }
-                builder.append(
+                builder.emit(
                     scope.parent,
-                    NodeKind::Media(Media {
+                    SemanticKind::Media(Media {
                         kind: media.kind,
                         source: media.source.clone(),
                         title: Some(media.title.clone()),
@@ -943,67 +950,71 @@ fn lower_complex_document(
             if !facts.heading_has_meaningful_content(node) {
                 None
             } else if facts.has_block_descendant(node) {
-                Some(NodeKind::BlockGroup)
+                Some(SemanticKind::BlockGroup)
             } else {
-                Some(NodeKind::Heading { level })
+                Some(SemanticKind::Heading { level })
             }
         } else if let Some(callout) = &callout {
             callout_kind(callout.kind).map(|kind| {
-                NodeKind::Callout(Callout {
+                SemanticKind::Callout(Callout {
                     kind,
                     title: Some(callout.title.clone()),
                 })
             })
         } else if figures[node.index()] {
-            Some(NodeKind::Figure)
+            Some(SemanticKind::Figure)
         } else if captions[node.index()] && scope.figure.is_some() {
-            Some(NodeKind::Figcaption)
+            Some(SemanticKind::Figcaption)
         } else if let Some(list) = lists.container(node) {
-            Some(NodeKind::List(list))
+            Some(SemanticKind::List(list))
         } else if lists.is_item(node) && scope.list.is_some() {
-            Some(NodeKind::ListItem)
+            Some(SemanticKind::ListItem)
         } else {
             match tag {
-                Tag::Caption if scope.table.is_some() => Some(NodeKind::TableCaption),
-                Tag::P if facts.has_block_descendant(node) => Some(NodeKind::BlockGroup),
-                Tag::P | Tag::Address | Tag::Caption => Some(NodeKind::Paragraph),
+                Tag::Caption if scope.table.is_some() => Some(SemanticKind::TableCaption),
+                Tag::P if facts.has_block_descendant(node) => Some(SemanticKind::BlockGroup),
+                Tag::P | Tag::Address | Tag::Caption => Some(SemanticKind::Paragraph),
                 Tag::Blockquote => dom
                     .attr(node, AttrName::DataCallout)
                     .and_then(callout_kind)
-                    .map(|kind| NodeKind::Callout(Callout { kind, title: None }))
-                    .or(Some(NodeKind::BlockQuote)),
-                Tag::Li if scope.list.is_some() => Some(NodeKind::ListItem),
-                Tag::Table => Some(NodeKind::Table(Table {
+                    .map(|kind| SemanticKind::Callout(Callout { kind, title: None }))
+                    .or(Some(SemanticKind::BlockQuote)),
+                Tag::Li if scope.list.is_some() => Some(SemanticKind::ListItem),
+                Tag::Table => Some(SemanticKind::Table(Table {
                     column_count: Some(0),
                 })),
-                Tag::Tr if scope.table.is_some() => Some(NodeKind::TableRow),
-                Tag::Td | Tag::Th if scope.row.is_some() => Some(NodeKind::TableCell(TableCell {
-                    header: tag == Tag::Th,
-                    colspan: positive_u32(dom.attr(node, AttrName::ColSpan)).unwrap_or(1),
-                    rowspan: positive_u32(dom.attr(node, AttrName::RowSpan)).unwrap_or(1),
-                    alignment: dom.attr(node, AttrName::Align).and_then(table_alignment),
-                })),
-                Tag::Details => Some(NodeKind::Details),
-                Tag::Summary => Some(NodeKind::Summary),
-                Tag::Hr => Some(NodeKind::ThematicBreak),
-                Tag::Dl => Some(NodeKind::DefinitionList),
-                Tag::Dt if scope.definition_list.is_some() => Some(NodeKind::DefinitionTerm),
-                Tag::Dd if scope.definition_list.is_some() => Some(NodeKind::DefinitionDescription),
-                Tag::Dt | Tag::Dd => Some(NodeKind::Paragraph),
+                Tag::Tr if scope.table.is_some() => Some(SemanticKind::TableRow),
+                Tag::Td | Tag::Th if scope.row.is_some() => {
+                    Some(SemanticKind::TableCell(TableCell {
+                        header: tag == Tag::Th,
+                        colspan: positive_u32(dom.attr(node, AttrName::ColSpan)).unwrap_or(1),
+                        rowspan: positive_u32(dom.attr(node, AttrName::RowSpan)).unwrap_or(1),
+                        alignment: dom.attr(node, AttrName::Align).and_then(table_alignment),
+                    }))
+                }
+                Tag::Details => Some(SemanticKind::Details),
+                Tag::Summary => Some(SemanticKind::Summary),
+                Tag::Hr => Some(SemanticKind::ThematicBreak),
+                Tag::Dl => Some(SemanticKind::DefinitionList),
+                Tag::Dt if scope.definition_list.is_some() => Some(SemanticKind::DefinitionTerm),
+                Tag::Dd if scope.definition_list.is_some() => {
+                    Some(SemanticKind::DefinitionDescription)
+                }
+                Tag::Dt | Tag::Dd => Some(SemanticKind::Paragraph),
                 Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
                     if facts.has_block_descendant(node) =>
                 {
-                    Some(NodeKind::BlockGroup)
+                    Some(SemanticKind::BlockGroup)
                 }
                 Tag::Strong | Tag::B | Tag::Em | Tag::I | Tag::Del
                     if !facts.has_meaningful_content(node) =>
                 {
                     None
                 }
-                Tag::Strong | Tag::B => Some(NodeKind::Strong),
-                Tag::Em | Tag::I => Some(NodeKind::Emphasis),
-                Tag::Del => Some(NodeKind::Strikethrough),
-                Tag::Br => Some(NodeKind::HardBreak),
+                Tag::Strong | Tag::B => Some(SemanticKind::Strong),
+                Tag::Em | Tag::I => Some(SemanticKind::Emphasis),
+                Tag::Del => Some(SemanticKind::Strikethrough),
+                Tag::Br => Some(SemanticKind::HardBreak),
                 Tag::A
                     if scope.link.is_none()
                         && !facts.has_block_descendant(node)
@@ -1015,7 +1026,7 @@ fn lower_complex_document(
                         });
                         let fragment_only = trimmed.starts_with('#') && trimmed.len() > 1;
                         context.link_destination(destination).map(|destination| {
-                            NodeKind::Link(Link {
+                            SemanticKind::Link(Link {
                                 destination,
                                 title: dom.attr(node, AttrName::Title).map(Into::into),
                                 fragment_only,
@@ -1028,7 +1039,7 @@ fn lower_complex_document(
                         && parent_is_block_group
                         && has_single_content_child(dom, node)) =>
                 {
-                    Some(NodeKind::BlockGroup)
+                    Some(SemanticKind::BlockGroup)
                 }
                 _ => None,
             }
@@ -1054,36 +1065,36 @@ fn lower_complex_document(
         }
         let semantic_leaf = matches!(
             kind,
-            NodeKind::CodeBlock(_)
-                | NodeKind::Text(_)
-                | NodeKind::InlineCode(_)
-                | NodeKind::Image(_)
-                | NodeKind::HardBreak
-                | NodeKind::ThematicBreak
-                | NodeKind::FootnoteReference(_)
-                | NodeKind::TaskMarker(_)
-                | NodeKind::InlineMath(_)
-                | NodeKind::DisplayMath(_)
-                | NodeKind::Media(_)
+            SemanticKind::CodeBlock(_)
+                | SemanticKind::Image(_)
+                | SemanticKind::HardBreak
+                | SemanticKind::ThematicBreak
+                | SemanticKind::FootnoteReference(_)
+                | SemanticKind::TaskMarker(_)
+                | SemanticKind::InlineMath(_)
+                | SemanticKind::DisplayMath(_)
+                | SemanticKind::Media(_)
         );
         let cell_span = match &kind {
-            NodeKind::TableCell(cell) => Some((cell.colspan, cell.rowspan)),
+            SemanticKind::TableCell(cell) => Some((cell.colspan, cell.rowspan)),
             _ => None,
         };
         let list_item = if scope.parent.is_some()
             && scope.parent == scope.list
             && !matches!(
                 kind,
-                NodeKind::Figcaption | NodeKind::ListItem | NodeKind::FootnoteDefinition(_)
+                SemanticKind::Figcaption
+                    | SemanticKind::ListItem
+                    | SemanticKind::FootnoteDefinition(_)
             ) {
-            Some(builder.append(scope.parent, NodeKind::ListItem)?)
+            Some(builder.emit(scope.parent, SemanticKind::ListItem)?)
         } else {
             None
         };
         if let Some(list_item) = list_item {
             tasks.push(Task::Close { node: list_item });
         }
-        let semantic_parent = if matches!(kind, NodeKind::Figcaption) {
+        let semantic_parent = if matches!(kind, SemanticKind::Figcaption) {
             scope.figure
         } else {
             list_item.or(scope.parent)
@@ -1091,8 +1102,8 @@ fn lower_complex_document(
         let direct_figure_wrapper = scope.figure.is_some()
             && scope.figure_wrapper.is_none()
             && semantic_parent == scope.figure
-            && !matches!(kind, NodeKind::Figcaption);
-        let semantic_node = builder.append(semantic_parent, kind)?;
+            && !matches!(kind, SemanticKind::Figcaption);
+        let semantic_node = builder.emit(semantic_parent, kind)?;
         next_scope.parent = Some(semantic_node);
         if tag == Tag::Figure {
             next_scope.figure_wrapper = None;
@@ -1103,9 +1114,9 @@ fn lower_complex_document(
             && images.is_synthetic(node)
             && let Some(source) = images.source(node).map(Into::into)
         {
-            builder.append(
+            builder.emit(
                 Some(semantic_node),
-                NodeKind::Image(semantic_image(dom, node, source)),
+                SemanticKind::Image(semantic_image(dom, node, source)),
             )?;
         }
         if builder.is_list(semantic_node) {
@@ -1169,8 +1180,8 @@ fn lower_complex_document(
                         &mut tasks,
                     );
                 } else {
-                    let paragraph = builder.append(Some(semantic_node), NodeKind::Paragraph)?;
-                    let strong = builder.append(Some(paragraph), NodeKind::Strong)?;
+                    let paragraph = builder.emit(Some(semantic_node), SemanticKind::Paragraph)?;
+                    let strong = builder.emit(Some(paragraph), SemanticKind::Strong)?;
                     builder.append_prose(Some(strong), &callout.title)?;
                     builder.close(strong)?;
                     builder.close(paragraph)?;
@@ -1184,7 +1195,7 @@ fn lower_complex_document(
         }
     }
 
-    let document = builder.finish();
+    let document = builder.finish()?;
     #[cfg(any(test, debug_assertions))]
     document.validate()?;
     Ok(document)
@@ -1266,7 +1277,7 @@ fn compile_layout_table(
             ordered.push(Task::WrappedChildren {
                 node: caption,
                 scope,
-                kind: NodeKind::Paragraph,
+                kind: SemanticKind::Paragraph,
             });
         } else {
             append_child_tasks(dom, caption, scope, &mut ordered);
@@ -1281,7 +1292,7 @@ fn compile_layout_table(
                 ordered.push(Task::WrappedChildren {
                     node: cell,
                     scope,
-                    kind: NodeKind::Paragraph,
+                    kind: SemanticKind::Paragraph,
                 });
             } else {
                 append_child_tasks(dom, cell, scope, &mut ordered);
@@ -1300,9 +1311,9 @@ fn compile_listing_table(
     builder: &mut SemanticTapeBuilder,
     tasks: &mut Vec<Task>,
 ) -> Result<(), BuildError> {
-    let list = builder.append(
+    let list = builder.emit(
         scope.parent,
-        NodeKind::List(List {
+        SemanticKind::List(List {
             kind: ListKind::Ordered,
             start: (start != 1).then_some(i64::from(start)),
         }),
@@ -1350,9 +1361,9 @@ fn compile_listing_table(
                 .filter(|&cell| analysis.meaningful_cell(cell))
                 .collect::<Vec<_>>();
             let kind = if cells.iter().all(|&cell| analysis.cell_is_phrasing(cell)) {
-                NodeKind::Paragraph
+                SemanticKind::Paragraph
             } else {
-                NodeKind::BlockGroup
+                SemanticKind::BlockGroup
             };
             plans.push(ListingPlan::Group { kind, cells });
         }
@@ -1439,7 +1450,7 @@ fn compile_footnote_definition(
     tasks: &mut Vec<Task>,
 ) -> Result<(), BuildError> {
     let id = footnote_id(footnote_ids, label)?;
-    let definition = builder.append(scope.parent, NodeKind::FootnoteDefinition(id))?;
+    let definition = builder.emit(scope.parent, SemanticKind::FootnoteDefinition(id))?;
     builder.define_footnote(id, label, definition)?;
     tasks.push(Task::Close { node: definition });
     push_children(
@@ -1544,15 +1555,6 @@ pub(super) fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
         }
     }
     count == 1
-}
-
-pub(super) fn is_redundant_formatting(kind: &NodeKind, parent: Option<&NodeKind>) -> bool {
-    matches!(
-        (kind, parent),
-        (NodeKind::Strong, Some(NodeKind::Strong))
-            | (NodeKind::Emphasis, Some(NodeKind::Emphasis))
-            | (NodeKind::Strikethrough, Some(NodeKind::Strikethrough))
-    )
 }
 
 pub(super) fn is_block_tag(tag: Tag) -> bool {
@@ -1692,7 +1694,7 @@ mod tests {
 
         let owned = compile_document_owned(dom, root, &context).unwrap();
 
-        assert_eq!(owned.debug_tree(), borrowed.debug_tree());
+        assert_eq!(owned.debug_tape(), borrowed.debug_tape());
         assert_eq!(owned.stats(), borrowed.stats());
     }
 
@@ -1709,7 +1711,7 @@ mod tests {
 
         let owned = compile_document_owned(dom, root, &context).unwrap();
 
-        assert_eq!(owned.debug_tree(), borrowed.debug_tree());
+        assert_eq!(owned.debug_tape(), borrowed.debug_tape());
         assert_eq!(owned.stats(), borrowed.stats());
     }
 
@@ -1748,8 +1750,8 @@ mod tests {
         let complex =
             compile_complex_document(&dom, dom.root(), &context, None, &source_evidence, None)
                 .unwrap();
-        assert_eq!(ordinary.debug_tree(), complex.debug_tree());
-        assert_eq!(ordinary.debug_tree(), retained.debug_tree());
+        assert_eq!(ordinary.debug_tape(), complex.debug_tape());
+        assert_eq!(ordinary.debug_tape(), retained.debug_tape());
     }
 
     #[test]
@@ -1759,7 +1761,7 @@ mod tests {
         assert!(uses_ordinary_compiler(html));
         let document = compile(html, Some("https://example.test/base/"));
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Heading(level=2)\n",
                 "  Text(\"Read \")\n",
@@ -1802,7 +1804,7 @@ mod tests {
         assert!(uses_ordinary_compiler(html));
         let document = compile(html, Some("https://example.test/docs/"));
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Figure\n",
                 "  Image(source=\"https://example.test/chart.png\", alt=\"Chart\", title=None, width=Some(640), height=Some(320))\n",
@@ -1828,7 +1830,7 @@ mod tests {
         assert!(uses_ordinary_compiler(html));
         let document = compile(html, None);
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!("Paragraph\n", "  Text(\"onetwo three unsafe fallback\")\n",)
         );
     }
@@ -2026,7 +2028,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Heading(level=3)\n",
                 "  Text(\"Overview\")\n",
@@ -2045,7 +2047,7 @@ mod tests {
             r##"<h2><a href="#native">#</a></h2><div role="heading" aria-level="3"><a class="heading-anchor" href="#aria"></a></div><p>Content.</p>"##,
             None,
         );
-        assert_eq!(document.debug_tree(), "Paragraph\n  Text(\"Content.\")\n");
+        assert_eq!(document.debug_tape(), "Paragraph\n  Text(\"Content.\")\n");
     }
 
     #[test]
@@ -2055,7 +2057,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             "BlockGroup\n  Paragraph\n    Text(\"Content.\")\n"
         );
     }
@@ -2066,7 +2068,7 @@ mod tests {
             r#"<div class="admonition warning"><p>Warning</p><p>Take care.</p></div><div class="warning"><p>Warning</p><p>Also take care.</p></div><blockquote data-legible-callout="warning"><p>Another warning.</p></blockquote><p data-legible-math="inline" data-latex="x^2">x 2</p><div id="footnotes"><p id="fn1">A note.</p></div>"#,
             None,
         );
-        let tree = document.debug_tree();
+        let tree = document.debug_tape();
         assert_eq!(tree.matches("Callout(kind=Warning").count(), 3, "{tree}");
         assert!(tree.contains("DisplayMath(source=\"x^2\""), "{tree}");
         assert!(tree.contains("FootnoteDefinition"), "{tree}");
@@ -2078,7 +2080,7 @@ mod tests {
             r#"<blockquote data-legible-callout="warning"><p>Warning text.</p></blockquote>"#,
             None,
         );
-        assert!(document.debug_tree().starts_with("Callout(kind=Warning"));
+        assert!(document.debug_tape().starts_with("Callout(kind=Warning"));
     }
 
     #[test]
@@ -2088,7 +2090,7 @@ mod tests {
             Some("https://example.test/page"),
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Heading(level=2)\n",
                 "  Text(\"Guide\")\n",
@@ -2122,7 +2124,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Callout(kind=Warning, title=None)\n",
                 "  Paragraph\n",
@@ -2162,7 +2164,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Callout(kind=Warning, title=Some(\"Warning\"))\n",
                 "  Paragraph\n",
@@ -2193,7 +2195,7 @@ mod tests {
         let document = compile_document(&dom, dom.root(), &context).unwrap();
         assert!(
             document
-                .debug_tree()
+                .debug_tape()
                 .contains("destination=\"https://cdn.example.test/content/#part\"")
         );
         assert_eq!(document.stats().link_text_length, 4);
@@ -2207,13 +2209,8 @@ mod tests {
             None,
         );
         assert!(matches!(
-            document
-                .root_ids()
-                .next()
-                .and_then(|root| document.child_ids(root).next())
-                .and_then(|node| document.node(node))
-                .map(|node| node.kind()),
-            Some(super::super::NodeKindView::Link(_))
+            document.operation_view(1),
+            Some(super::super::SemanticItemView::Link(_))
         ));
     }
 
@@ -2224,7 +2221,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             "BlockGroup\n  CodeBlock(language=Some(\"rust\"), text=\"fn main() {\\n    run();\\n}\")\n"
         );
         assert_eq!(document.len(), 2);
@@ -2233,7 +2230,7 @@ mod tests {
     #[test]
     fn preserves_spaces_from_empty_inline_wrappers() {
         let document = compile("<p>a<em> </em><span> </span>b</p>", None);
-        assert_eq!(document.debug_tree(), "Paragraph\n  Text(\"a b\")\n");
+        assert_eq!(document.debug_tape(), "Paragraph\n  Text(\"a b\")\n");
     }
 
     #[test]
@@ -2243,7 +2240,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Paragraph\n",
                 "  Media(kind=Video, source=\"movie.mp4\", title=Some(\"Interview recording\"))\n",
@@ -2269,7 +2266,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             "Paragraph\n  Text(\"safe labeldiagram\")\n"
         );
     }
@@ -2281,7 +2278,7 @@ mod tests {
             Some("https://example.test/article"),
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             "Image(source=\"https://example.test/safe.jpg\", alt=\"diagram label\", title=None, width=None, height=None)\n"
         );
     }
@@ -2293,7 +2290,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "Image(source=\"photo.jpg\", alt=\"\", title=Some(\"Photo\"), width=None, height=None)\n",
                 "Figure\n",
@@ -2317,7 +2314,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "List(kind=Ordered, start=Some(3))\n",
                 "  ListItem\n",
@@ -2338,7 +2335,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            document.debug_tree(),
+            document.debug_tape(),
             concat!(
                 "List(kind=Ordered, start=None)\n",
                 "  ListItem\n",
@@ -2358,7 +2355,7 @@ mod tests {
         document.validate().unwrap();
         assert_eq!(
             document
-                .debug_tree()
+                .debug_tape()
                 .lines()
                 .filter(|line| line.trim() == "ListItem")
                 .count(),
@@ -2373,7 +2370,7 @@ mod tests {
             None,
         );
         document.validate().unwrap();
-        let tree = document.debug_tree();
+        let tree = document.debug_tape();
         assert!(tree.contains("Figcaption\n    Text(\"Caption\")"), "{tree}");
         assert!(tree.contains("Text(\"After\")"), "{tree}");
     }
@@ -2384,7 +2381,7 @@ mod tests {
             r#"<table role="presentation"><caption><h3>Overview</h3></caption><tr><td><h2>Left</h2><p>Prose</p></td><td>Right</td></tr></table><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table>"#,
             None,
         );
-        let tree = document.debug_tree();
+        let tree = document.debug_tape();
         assert_eq!(
             tree.lines()
                 .filter(|line| line.starts_with("Table("))
@@ -2405,7 +2402,7 @@ mod tests {
             None,
         );
         document.validate().unwrap();
-        let tree = document.debug_tree();
+        let tree = document.debug_tape();
         assert!(tree.starts_with("List(kind=Ordered, start=None)"), "{tree}");
         assert!(tree.contains("BlockGroup\n  Paragraph"), "{tree}");
     }
@@ -2419,7 +2416,7 @@ mod tests {
         native_layout.validate().unwrap();
         assert_eq!(
             native_layout
-                .debug_tree()
+                .debug_tape()
                 .lines()
                 .filter(|line| line.trim() == "ListItem")
                 .count(),
@@ -2431,7 +2428,7 @@ mod tests {
             None,
         );
         aria_listing.validate().unwrap();
-        let tree = aria_listing.debug_tree();
+        let tree = aria_listing.debug_tape();
         assert!(
             tree.contains("  ListItem\n    List(kind=Ordered, start=None)"),
             "{tree}"
@@ -2450,7 +2447,7 @@ mod tests {
         document.validate().unwrap();
         assert!(
             !document
-                .debug_tree()
+                .debug_tape()
                 .lines()
                 .any(|line| line.starts_with("Table("))
         );
@@ -2466,12 +2463,8 @@ mod tests {
         let document = compile(&html, None);
         assert_eq!(document.len(), 1);
         assert!(matches!(
-            document
-                .root_ids()
-                .next()
-                .and_then(|root| document.node(root))
-                .map(|node| node.kind()),
-            Some(super::super::NodeKindView::CodeBlock(_))
+            document.operation_view(0),
+            Some(super::super::SemanticItemView::CodeBlock(_))
         ));
     }
 

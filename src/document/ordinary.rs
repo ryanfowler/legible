@@ -2,9 +2,11 @@
 
 use super::compiler::{
     CompileContext, CompileError, has_single_content_child, heading_level, is_block_tag,
-    is_redundant_formatting, semantic_image,
+    semantic_image,
 };
-use super::{CodeBlock, Document, DocumentBuilder, DocumentNodeId, Link, List, ListKind, NodeKind};
+use super::{
+    CodeBlock, Document, DocumentNodeId, Link, List, ListKind, SemanticKind, SemanticTapeBuilder,
+};
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 /// Returns the source-node count when a fragment is safe to try on the ordinary path.
@@ -13,6 +15,7 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 /// validation belongs to [`compile`], which can reject the fragment while it
 /// is already lowering it. Keeping those decisions together removes the old
 /// full inventory traversal from ordinary pages.
+#[cfg(test)]
 pub(super) fn ordinary_source_gate(dom: &Dom, root: NodeId) -> Option<usize> {
     ordinary_source_gate_with_retained_nodes(dom, root, None)
 }
@@ -407,6 +410,7 @@ enum Visit {
 struct Frame {
     tag: Option<Tag>,
     scope: Scope,
+    semantic: Option<DocumentNodeId>,
     has_content: bool,
     requires_content: bool,
     first_visible: Option<char>,
@@ -416,10 +420,10 @@ struct Frame {
     previous_child_last_visible: Option<char>,
     boundary_source: Option<usize>,
     boundary_pending: bool,
-    boundary_anchor: Option<DocumentNodeId>,
 }
 
 /// Compiles an ordinary fragment in one stack-safe source traversal.
+#[cfg(test)]
 pub(super) fn compile(
     dom: &Dom,
     root: NodeId,
@@ -439,11 +443,11 @@ pub(super) fn compile_with_retained_nodes(
     source_node_count: usize,
     retained_nodes: Option<&[NodeId]>,
 ) -> Result<Document, CompileError> {
-    let mut builder = DocumentBuilder::with_capacity(source_node_count);
-    builder.enable_preorder_insertions();
+    let mut builder = SemanticTapeBuilder::with_capacity(source_node_count);
     let mut frames = vec![Frame {
         tag: None,
         scope: Scope::default(),
+        semantic: None,
         has_content: false,
         requires_content: false,
         first_visible: None,
@@ -453,7 +457,6 @@ pub(super) fn compile_with_retained_nodes(
         previous_child_last_visible: None,
         boundary_source: None,
         boundary_pending: false,
-        boundary_anchor: None,
     }];
     let mut tasks = retained_nodes.map_or_else(
         || {
@@ -469,6 +472,9 @@ pub(super) fn compile_with_retained_nodes(
             let frame = frames.pop().expect("compile frame must match an element");
             if frame.requires_content && !frame.has_content {
                 return Err(CompileError::RequiresComplex);
+            }
+            if let Some(semantic) = frame.semantic {
+                builder.close(semantic)?;
             }
             complete_child(
                 frames
@@ -561,9 +567,9 @@ pub(super) fn compile_with_retained_nodes(
             consume_boundary(&mut frames, &mut builder, frame_index, first)?;
             let language = code.language.as_deref().map(Into::into);
             let text = code.into_text(None);
-            builder.append(
+            builder.emit(
                 scope.parent,
-                NodeKind::CodeBlock(CodeBlock { language, text }),
+                SemanticKind::CodeBlock(CodeBlock { language, text }),
             )?;
             complete_child(frames.last_mut().unwrap(), Some(tag), first, last, true);
             continue;
@@ -596,24 +602,18 @@ pub(super) fn compile_with_retained_nodes(
                 .and_then(|value| context.image_destination(value));
             let frame_index = frames.len() - 1;
             if let Some(source) = source {
-                let image = builder.append(
+                let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
+                let first = alt.chars().find(|character| !character.is_whitespace());
+                consume_boundary(&mut frames, &mut builder, frame_index, first)?;
+                builder.emit(
                     scope.parent,
-                    NodeKind::Image(semantic_image(dom, node, source)),
+                    SemanticKind::Image(semantic_image(dom, node, source)),
                 )?;
-                remember_boundary_anchor(&mut frames, frame_index, image);
             } else {
                 let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
-                let needs_boundary_anchor = frames[frame_index]
-                    .boundary_source
-                    .is_some_and(|source| frames[source].boundary_pending);
-                let text = if needs_boundary_anchor {
-                    builder.append_prose_unmerged(scope.parent, &alt)?
-                } else {
-                    builder.append_prose(scope.parent, &alt)?
-                };
-                if needs_boundary_anchor && let Some(text) = text {
-                    remember_boundary_anchor(&mut frames, frame_index, text);
-                }
+                let first = alt.chars().find(|character| !character.is_whitespace());
+                consume_boundary(&mut frames, &mut builder, frame_index, first)?;
+                builder.append_prose(scope.parent, &alt)?;
             }
             complete_child(frames.last_mut().unwrap(), Some(tag), None, None, true);
             continue;
@@ -660,43 +660,45 @@ pub(super) fn compile_with_retained_nodes(
         let mut next = scope;
         let parent_is_block_group = scope
             .parent
-            .is_some_and(|parent| matches!(builder.kind(parent), Some(NodeKind::BlockGroup)));
+            .is_some_and(|parent| builder.is_block_group(parent));
         let kind = match tag {
-            Tag::P | Tag::Address => Some(NodeKind::Paragraph),
-            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => Some(NodeKind::Heading {
-                level: heading_level(dom, node).unwrap_or(1),
-            }),
-            Tag::Blockquote => Some(NodeKind::BlockQuote),
-            Tag::Ul => Some(NodeKind::List(List {
+            Tag::P | Tag::Address => Some(SemanticKind::Paragraph),
+            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
+                Some(SemanticKind::Heading {
+                    level: heading_level(dom, node).unwrap_or(1),
+                })
+            }
+            Tag::Blockquote => Some(SemanticKind::BlockQuote),
+            Tag::Ul => Some(SemanticKind::List(List {
                 kind: ListKind::Unordered,
                 start: None,
             })),
-            Tag::Ol => Some(NodeKind::List(List {
+            Tag::Ol => Some(SemanticKind::List(List {
                 kind: ListKind::Ordered,
                 start: dom
                     .attr(node, AttrName::Start)
                     .and_then(|value| value.parse().ok()),
             })),
-            Tag::Li if scope.list.is_some() => Some(NodeKind::ListItem),
-            Tag::Figure => Some(NodeKind::Figure),
-            Tag::Figcaption if scope.figure.is_some() => Some(NodeKind::Figcaption),
-            Tag::Details => Some(NodeKind::Details),
-            Tag::Summary => Some(NodeKind::Summary),
-            Tag::Hr => Some(NodeKind::ThematicBreak),
-            Tag::Dl => Some(NodeKind::DefinitionList),
-            Tag::Dt if scope.definition_list.is_some() => Some(NodeKind::DefinitionTerm),
-            Tag::Dd if scope.definition_list.is_some() => Some(NodeKind::DefinitionDescription),
-            Tag::Strong | Tag::B => Some(NodeKind::Strong),
-            Tag::Em | Tag::I => Some(NodeKind::Emphasis),
-            Tag::Del => Some(NodeKind::Strikethrough),
-            Tag::Br => Some(NodeKind::HardBreak),
+            Tag::Li if scope.list.is_some() => Some(SemanticKind::ListItem),
+            Tag::Figure => Some(SemanticKind::Figure),
+            Tag::Figcaption if scope.figure.is_some() => Some(SemanticKind::Figcaption),
+            Tag::Details => Some(SemanticKind::Details),
+            Tag::Summary => Some(SemanticKind::Summary),
+            Tag::Hr => Some(SemanticKind::ThematicBreak),
+            Tag::Dl => Some(SemanticKind::DefinitionList),
+            Tag::Dt if scope.definition_list.is_some() => Some(SemanticKind::DefinitionTerm),
+            Tag::Dd if scope.definition_list.is_some() => Some(SemanticKind::DefinitionDescription),
+            Tag::Strong | Tag::B => Some(SemanticKind::Strong),
+            Tag::Em | Tag::I => Some(SemanticKind::Emphasis),
+            Tag::Del => Some(SemanticKind::Strikethrough),
+            Tag::Br => Some(SemanticKind::HardBreak),
             Tag::A if scope.link.is_none() => dom.attr(node, AttrName::Href).and_then(|value| {
                 let trimmed = value.trim_matches(|character: char| {
                     character.is_ascii_whitespace() || character.is_control()
                 });
                 let fragment_only = trimmed.starts_with('#') && trimmed.len() > 1;
                 context.link_destination(value).map(|destination| {
-                    NodeKind::Link(Link {
+                    SemanticKind::Link(Link {
                         destination,
                         title: dom.attr(node, AttrName::Title).map(Into::into),
                         fragment_only,
@@ -708,13 +710,13 @@ pub(super) fn compile_with_retained_nodes(
                     && parent_is_block_group
                     && has_single_content_child(dom, node)) =>
             {
-                Some(NodeKind::BlockGroup)
+                Some(SemanticKind::BlockGroup)
             }
             _ => None,
         };
-        let redundant = kind.as_ref().is_some_and(|kind| {
-            is_redundant_formatting(kind, scope.parent.and_then(|parent| builder.kind(parent)))
-        });
+        let redundant = kind
+            .as_ref()
+            .is_some_and(|kind| builder.is_redundant_formatting(scope.parent, kind));
         let transparent = kind.is_none() || redundant;
         let transparent_inline = transparent && !is_block_tag(tag);
         let inherited_boundary = frames
@@ -743,10 +745,18 @@ pub(super) fn compile_with_retained_nodes(
         let semantic = if transparent {
             None
         } else {
-            Some(builder.append(
+            if let Some(source) = inherited_boundary.filter(|_| !block) {
+                let first_visible = first_visible_character(dom, node);
+                frames[source].boundary_pending = false;
+                if first_visible.is_some_and(char::is_alphanumeric) {
+                    builder.append_normalized_prose(frames[source].scope.parent, " ")?;
+                }
+            }
+            let semantic = builder.emit(
                 semantic_parent,
                 kind.expect("nontransparent node has a kind"),
-            )?)
+            )?;
+            builder.is_container(semantic).then_some(semantic)
         };
         next.forbids_blocks = scope.forbids_blocks
             || !block
@@ -770,6 +780,7 @@ pub(super) fn compile_with_retained_nodes(
         frames.push(Frame {
             tag: Some(tag),
             scope: next,
+            semantic,
             has_content: matches!(tag, Tag::Br | Tag::Hr),
             requires_content,
             first_visible: None,
@@ -779,14 +790,7 @@ pub(super) fn compile_with_retained_nodes(
             previous_child_last_visible: None,
             boundary_source,
             boundary_pending: boundary_before,
-            boundary_anchor: None,
         });
-        if let Some(source) = boundary_source
-            && frames[source].boundary_anchor.is_none()
-            && let Some(semantic) = semantic
-        {
-            frames[source].boundary_anchor = Some(semantic);
-        }
         if retained_nodes.is_none() {
             tasks.push(Visit::End);
             if !matches!(tag, Tag::Hr | Tag::Br) {
@@ -798,7 +802,7 @@ pub(super) fn compile_with_retained_nodes(
         }
     }
 
-    let document = builder.finish();
+    let document = builder.finish()?;
     #[cfg(any(test, debug_assertions))]
     if document.validate().is_err() {
         return Err(CompileError::RequiresComplex);
@@ -879,19 +883,10 @@ fn complete_child(
     parent.previous_child_last_visible = last_visible;
 }
 
-fn remember_boundary_anchor(frames: &mut [Frame], frame_index: usize, anchor: DocumentNodeId) {
-    let Some(source) = frames[frame_index].boundary_source else {
-        return;
-    };
-    if frames[source].boundary_pending && frames[source].boundary_anchor.is_none() {
-        frames[source].boundary_anchor = Some(anchor);
-    }
-}
-
 /// Consumes a deferred boundary once the first meaningful child is known.
 fn consume_boundary(
     frames: &mut [Frame],
-    builder: &mut DocumentBuilder,
+    builder: &mut SemanticTapeBuilder,
     frame_index: usize,
     first_visible: Option<char>,
 ) -> Result<(), CompileError> {
@@ -903,11 +898,7 @@ fn consume_boundary(
     }
     frames[source].boundary_pending = false;
     if first_visible.is_some_and(char::is_alphanumeric) {
-        if let Some(anchor) = frames[source].boundary_anchor {
-            builder.insert_normalized_prose_before(frames[source].scope.parent, anchor, " ")?;
-        } else {
-            builder.append_normalized_prose(frames[source].scope.parent, " ")?;
-        }
+        builder.append_normalized_prose(frames[source].scope.parent, " ")?;
     }
     Ok(())
 }
@@ -916,4 +907,21 @@ fn is_inline_source(dom: &Dom, node: NodeId) -> bool {
     dom.text_node(node)
         .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
         || dom.tag(node).is_some_and(|tag| !is_block_tag(tag))
+}
+
+fn first_visible_character(dom: &Dom, node: NodeId) -> Option<char> {
+    let mut tasks = dom.children_rev(node).collect::<Vec<_>>();
+    while let Some(node) = tasks.pop() {
+        if let Some(text) = dom.text_node(node) {
+            if let Some(character) = text.chars().find(|character| !character.is_whitespace()) {
+                return Some(character);
+            }
+            continue;
+        }
+        if dom.is_comment(node) {
+            continue;
+        }
+        tasks.extend(dom.children_rev(node));
+    }
+    None
 }
