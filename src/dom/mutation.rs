@@ -206,6 +206,28 @@ impl Dom {
         fragment.append_child(fragment.root(), copied);
         Ok(fragment)
     }
+
+    /// Copies several disjoint source roots into one fragment without
+    /// materializing the rest of the source DOM.
+    pub(crate) fn copy_subtrees_as_fragment(
+        &self,
+        source_roots: &[NodeId],
+    ) -> Result<Dom, DomError> {
+        crate::instrumentation::record_fragment_copy();
+        #[cfg(test)]
+        FRAGMENT_COPY_COUNT.with(|count| count.set(count.get() + 1));
+
+        let capacity = 1 + source_roots
+            .iter()
+            .map(|&root| 1 + self.descendants(root).count())
+            .sum::<usize>();
+        let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
+        for &source_root in source_roots {
+            let copied = fragment.import_subtree(self, source_root)?;
+            fragment.append_child(fragment.root(), copied);
+        }
+        Ok(fragment)
+    }
     pub(crate) fn import_subtree(
         &mut self,
         source: &Dom,
