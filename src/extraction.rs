@@ -23,7 +23,7 @@ use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
     accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes,
     cleanup_selected_content_in_workspace, collect_external_footnotes,
-    has_primary_heading_semantics, normalize_scoring_structure, normalize_svg_before_scoring,
+    has_primary_heading_semantics, materialize_scoring_structure, normalize_svg_before_scoring,
     prepare_media_before_cleanup_in_workspace, remove_decorative_media_before_cleanup_in_workspace,
     remove_empty_content_with_source_facts,
 };
@@ -368,14 +368,9 @@ struct ScoredVariant {
 }
 
 struct ScoringAnalysis {
-    // This is the only mutable scoring view for a visibility policy. It is
-    // never consumed by an attempt: selected roots are copied out of it into
-    // isolated fragments before cleanup. That keeps retries from cloning the
-    // complete source DOM again.
-    dom: Dom,
+    view: ScoringView,
     weighted: ScoredVariant,
     unweighted: Option<ScoredVariant>,
-    prepared: SmallVec<[NodeId; 256]>,
     working_snapshot: Vec<(NodeId, u32)>,
     excluded_mask: Vec<bool>,
     feature_index: CandidateFeatureIndex,
@@ -773,7 +768,7 @@ impl<'a> ContentExtractor<'a> {
             let body = analysis.body;
             self.page_byline = discovery.byline.clone();
             self.node_data = variant.node_data.clone();
-            let working_dom = &analysis.dom;
+            let working_dom = &self.dom;
             let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
             let mut selection = select_content_root(
                 working_dom,
@@ -851,10 +846,14 @@ impl<'a> ContentExtractor<'a> {
                                     || candidate.has_source(CandidateSource::Semantic)
                             })
                         })
-                        .map(|candidate| working_dom.ancestors(candidate.node).collect())
+                        .map(|candidate| {
+                            analysis
+                                .view
+                                .effective_ancestors(working_dom, candidate.node)
+                        })
                         .collect();
                     if alternatives.len() >= 3 {
-                        let mut parent = working_dom.parent(top_id);
+                        let mut parent = analysis.view.effective_parent(working_dom, top_id);
                         while let Some(node) = parent {
                             if node == body {
                                 break;
@@ -868,7 +867,7 @@ impl<'a> ContentExtractor<'a> {
                                 top_id = node;
                                 break;
                             }
-                            parent = working_dom.parent(node)
+                            parent = analysis.view.effective_parent(working_dom, node)
                         }
                     }
                     if !self.node_data.has(top_id) {
@@ -881,7 +880,7 @@ impl<'a> ContentExtractor<'a> {
                     }
                     let threshold = self.node_data.get_content_score(top_id) / 3.0;
                     let mut last = self.node_data.get_content_score(top_id);
-                    let mut parent = working_dom.parent(top_id);
+                    let mut parent = analysis.view.effective_parent(working_dom, top_id);
                     while let Some(node) = parent {
                         if node == body {
                             break;
@@ -896,14 +895,16 @@ impl<'a> ContentExtractor<'a> {
                             }
                             last = score;
                         }
-                        parent = working_dom.parent(node)
+                        parent = analysis.view.effective_parent(working_dom, node)
                     }
-                    while let Some(parent) = working_dom.parent(top_id) {
+                    while let Some(parent) = analysis.view.effective_parent(working_dom, top_id) {
                         if parent == body {
                             break;
                         }
-                        let mut children = working_dom.element_children(parent);
-                        if children.next().is_some() && children.next().is_none() {
+                        let children = analysis
+                            .view
+                            .effective_element_children(working_dom, parent);
+                        if children.len() == 1 {
                             top_id = parent;
                         } else {
                             break;
@@ -919,10 +920,15 @@ impl<'a> ContentExtractor<'a> {
                         || working_dom
                             .descendants(top_id)
                             .any(|node| working_dom.tag(node) == Some(Tag::Pre)))
-                    && let Some(article) = working_dom.ancestors(top_id).take(8).find(|&ancestor| {
-                        matches!(working_dom.tag(ancestor), Some(Tag::Article | Tag::Main))
-                            && working_dom.normalized_char_count(ancestor) <= 10_000
-                    })
+                    && let Some(article) = analysis
+                        .view
+                        .effective_ancestors(working_dom, top_id)
+                        .into_iter()
+                        .take(8)
+                        .find(|&ancestor| {
+                            matches!(working_dom.tag(ancestor), Some(Tag::Article | Tag::Main))
+                                && working_dom.normalized_char_count(ancestor) <= 10_000
+                        })
                     && has_compact_code_page_structure(working_dom, article)
                     && (has_compact_code_lead(working_dom, article, top_id)
                         || has_line_number_table_marker(working_dom, top_id))
@@ -952,13 +958,18 @@ impl<'a> ContentExtractor<'a> {
                 .and_then(|&branch| working_dom.parent(branch))
                 .unwrap_or(top_id);
             let source_direction = std::iter::once(direction_root)
-                .chain(working_dom.ancestors(direction_root))
+                .chain(
+                    analysis
+                        .view
+                        .effective_ancestors(working_dom, direction_root),
+                )
                 .find_map(|node| working_dom.attr(node, AttrName::Dir))
                 .map(str::to_owned);
-            let source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
+            let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
                 if selection.reason == RootSelectionReason::Ranked {
                     Self::gather_siblings(
                         working_dom,
+                        &analysis.view,
                         top_id,
                         &mut self.node_data,
                         self.options.debug,
@@ -973,15 +984,23 @@ impl<'a> ContentExtractor<'a> {
             } else {
                 SmallVec::from_slice(&[body])
             };
+            source_siblings.retain(|node| {
+                !analysis
+                    .excluded_mask
+                    .get(node.index())
+                    .copied()
+                    .unwrap_or(false)
+            });
             // Copy only the selected source roots. The scoring view remains
             // available for later strategies, so a rejected attempt does not
             // require another complete DOM clone.
-            let fragment = {
+            let mut fragment = {
                 let _phase = PhaseGuard::new(Phase::FragmentCopy);
                 working_dom
-                    .copy_subtrees_as_fragment(&source_siblings)
+                    .copy_subtrees_as_fragment_excluding(&source_siblings, &analysis.excluded_mask)
                     .map_err(|_| Error::NoContent)?
             };
+            materialize_scoring_structure(&mut fragment);
             let copied_siblings: SmallVec<[NodeId; 16]> =
                 fragment.children(fragment.root()).collect();
             let copied_top = if synthetic {
@@ -1355,7 +1374,8 @@ impl<'a> ContentExtractor<'a> {
     ) {
         let _scoring_phase = PhaseGuard::new(Phase::Scoring);
         let discovery = &analysis.weighted.discovery;
-        let working_root = analysis.dom.root();
+        let working_dom = &self.dom;
+        let working_root = working_dom.root();
         let mut node_data = NodeStateStore::new();
         if discovery.has_links {
             node_data.enable_link_lengths();
@@ -1366,16 +1386,11 @@ impl<'a> ContentExtractor<'a> {
                 to_score.push(node);
             }
         }
-        for &node in &analysis.prepared {
-            if node_data.mark_score_seen(node) {
-                to_score.push(node);
-            }
-        }
-        let readability_scores = compute_readability_scores(
-            &mut analysis.dom,
-            Some(prepared_source),
+        let readability_scores = compute_readability_scores_in_view(
+            working_dom,
+            prepared_source,
+            &analysis.view,
             to_score,
-            &discovery.remove_after_scoring,
             &analysis.excluded_mask,
             &mut node_data,
             false,
@@ -1384,8 +1399,7 @@ impl<'a> ContentExtractor<'a> {
         let mut candidates = discovery.candidates.clone();
         for &node in content_hint_targets {
             let attached = node == working_root
-                || analysis
-                    .dom
+                || working_dom
                     .ancestors(node)
                     .any(|ancestor| ancestor == working_root);
             if attached
@@ -1393,7 +1407,7 @@ impl<'a> ContentExtractor<'a> {
                     .options
                     .content_hint
                     .as_ref()
-                    .is_some_and(|hint| content_target_matches(&analysis.dom, node, hint))
+                    .is_some_and(|hint| content_target_matches(working_dom, node, hint))
             {
                 candidates.add_caller_hint(node);
             }
@@ -1403,8 +1417,9 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let (ranked, _) = Self::rank_candidates_with_snapshot(
-            &analysis.dom,
+            working_dom,
             Some(prepared_source),
+            Some(&analysis.view),
             analysis.body,
             &analysis.working_snapshot,
             &mut candidates,
@@ -1470,15 +1485,15 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let _scoring_phase = PhaseGuard::new(Phase::Scoring);
-        let mut working_dom = self.dom.clone();
+        let working_dom = &self.dom;
         let working_root = working_dom.root();
-        normalize_scoring_structure(&mut working_dom, working_root);
-        let prepared = prepare_readability_structure(
-            &mut working_dom,
+        let view = ScoringView::build(
+            working_dom,
+            prepared_source,
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
-        let excluded_mask = build_exclusion_mask(&working_dom, &discovery.remove_after_scoring);
+        let excluded_mask = build_exclusion_mask(working_dom, &discovery.remove_after_scoring);
         let body = source_anchors
             .body
             .filter(|&node| {
@@ -1490,7 +1505,7 @@ impl<'a> ContentExtractor<'a> {
         // Class weighting changes only score inputs. Keep the normal weighted
         // ranking on the shared scoring view. The unweighted variant is built
         // lazily only if a later broad or body-fallback strategy needs it.
-        let mut score_variant =
+        let score_variant =
             |weight_classes: bool, shared_feature_index: Option<&CandidateFeatureIndex>| {
                 let mut node_data = NodeStateStore::new();
                 if discovery.has_links {
@@ -1502,22 +1517,26 @@ impl<'a> ContentExtractor<'a> {
                         to_score.push(node);
                     }
                 }
-                for &node in &prepared {
-                    if node_data.mark_score_seen(node) {
-                        to_score.push(node);
-                    }
-                }
-                let readability_scores = compute_readability_scores(
-                    &mut working_dom,
-                    Some(prepared_source),
+                let readability_scores = compute_readability_scores_in_view(
+                    working_dom,
+                    prepared_source,
+                    &view,
                     to_score,
-                    &discovery.remove_after_scoring,
                     &excluded_mask,
                     &mut node_data,
                     weight_classes,
                 );
-                let working_snapshot =
-                    working_dom.element_descendants_snapshot_with_depth(working_root);
+                let working_snapshot: Vec<_> = prepared_source
+                    .elements()
+                    .filter(|entry| {
+                        !excluded_mask
+                            .get(entry.node.index())
+                            .copied()
+                            .unwrap_or(false)
+                            && !view.ignores_wrapper(entry.node)
+                    })
+                    .map(|entry| (entry.node, entry.depth))
+                    .collect();
 
                 let mut candidates = discovery.candidates.clone();
                 for &node in content_hint_targets {
@@ -1530,7 +1549,7 @@ impl<'a> ContentExtractor<'a> {
                             .options
                             .content_hint
                             .as_ref()
-                            .is_some_and(|hint| content_target_matches(&working_dom, node, hint))
+                            .is_some_and(|hint| content_target_matches(working_dom, node, hint))
                     {
                         candidates.add_caller_hint(node);
                     }
@@ -1540,8 +1559,9 @@ impl<'a> ContentExtractor<'a> {
                 }
 
                 let (ranked, feature_index) = Self::rank_candidates_with_snapshot(
-                    &working_dom,
+                    working_dom,
                     Some(prepared_source),
+                    Some(&view),
                     body,
                     &working_snapshot,
                     &mut candidates,
@@ -1565,13 +1585,12 @@ impl<'a> ContentExtractor<'a> {
             };
 
         let (weighted, feature_index, working_snapshot) = score_variant(true, None);
-        crate::instrumentation::record_scoring_nodes(working_dom.len());
+        crate::instrumentation::record_scoring_nodes(working_snapshot.len());
 
         Ok(ScoringAnalysis {
-            dom: working_dom,
+            view,
             weighted,
             unweighted: None,
-            prepared,
             working_snapshot,
             excluded_mask,
             feature_index,
@@ -2518,6 +2537,7 @@ impl<'a> ContentExtractor<'a> {
         Self::rank_candidates_with_snapshot(
             dom,
             None,
+            None,
             body,
             &snapshot,
             candidates,
@@ -2535,6 +2555,7 @@ impl<'a> ContentExtractor<'a> {
     fn rank_candidates_with_snapshot(
         dom: &Dom,
         source: Option<&SourceAnalysis>,
+        scoring_view: Option<&ScoringView>,
         body: NodeId,
         snapshot: &[(NodeId, u32)],
         candidates: &mut CandidateSet,
@@ -2560,9 +2581,12 @@ impl<'a> ContentExtractor<'a> {
         } else {
             let mut table_nodes = Vec::new();
             mark_data_tables_from_snapshot(dom, dom.root(), snapshot, store, &mut table_nodes);
-            CandidateFeatureIndex::new(dom, store, snapshot, candidates)
+            CandidateFeatureIndex::new(dom, store, snapshot, candidates, scoring_view)
         };
         feature_index.prepare_text_cache(store);
+        if let Some(scoring_view) = scoring_view {
+            scoring_view.seed_text_overrides(store);
+        }
         for (candidate_index, candidate) in candidates.iter_mut().enumerate() {
             candidate.features = feature_index.features(
                 dom,
@@ -2571,6 +2595,7 @@ impl<'a> ContentExtractor<'a> {
                 *candidate,
                 store,
                 weight_classes,
+                excluded,
             );
         }
 
@@ -2586,7 +2611,22 @@ impl<'a> ContentExtractor<'a> {
                 {
                     return None;
                 }
-                let length = get_or_compute_stats(dom, candidate.node, store).text_length;
+                let length = match source {
+                    Some(source) => {
+                        get_or_compute_stats_from_source_excluding(
+                            dom,
+                            source,
+                            candidate.node,
+                            store,
+                            excluded,
+                        )
+                        .text_length
+                    }
+                    None => {
+                        get_or_compute_stats_excluding(dom, candidate.node, store, excluded)
+                            .text_length
+                    }
+                };
                 if length == 0 && candidate.node != body {
                     return None;
                 }
@@ -2684,11 +2724,12 @@ impl<'a> ContentExtractor<'a> {
 
     fn gather_siblings(
         dom: &Dom,
+        scoring_view: &ScoringView,
         top: NodeId,
         store: &mut NodeStateStore,
         debug: bool,
     ) -> SmallVec<[NodeId; 8]> {
-        let Some(parent) = dom.parent(top) else {
+        let Some(parent) = scoring_view.effective_parent(dom, top) else {
             let mut out = SmallVec::new();
             out.push(top);
             return out;
@@ -2696,7 +2737,7 @@ impl<'a> ContentExtractor<'a> {
         let threshold = 10f64.max(store.get_content_score(top) * 0.2);
         let class = dom.attr(top, AttrName::Class);
         let mut out = SmallVec::<[NodeId; 8]>::new();
-        for x in dom.element_children(parent) {
+        for x in scoring_view.effective_element_children(dom, parent) {
             let mut yes = x == top;
             if !yes {
                 let bonus = if class.is_some() && dom.attr(x, AttrName::Class) == class {
@@ -2707,7 +2748,7 @@ impl<'a> ContentExtractor<'a> {
                 if store.has(x) && store.get_content_score(x) + bonus >= threshold {
                     yes = true
                 }
-                if !yes && dom.tag(x) == Some(Tag::P) {
+                if !yes && scoring_view.effective_tag(dom, x) == Some(Tag::P) {
                     let s = get_or_compute_stats(dom, x, store);
                     let d = get_link_density_cached(dom, x, s.text_length, store);
                     yes = (s.text_length > 80 && d < 0.25)
@@ -2717,8 +2758,11 @@ impl<'a> ContentExtractor<'a> {
                             && s.has_sentence_end())
                 }
                 if !yes
-                    && is_near_preceding_sibling(dom, x, top)
-                    && matches!(dom.tag(x), Some(Tag::H2 | Tag::H3 | Tag::H4))
+                    && is_near_preceding_sibling_in_view(dom, scoring_view, x, top)
+                    && matches!(
+                        scoring_view.effective_tag(dom, x),
+                        Some(Tag::H2 | Tag::H3 | Tag::H4)
+                    )
                     && [AttrName::Class, AttrName::Id]
                         .into_iter()
                         .filter_map(|attribute| dom.attr(x, attribute))
@@ -3228,6 +3272,35 @@ fn has_compact_code_lead(dom: &Dom, ancestor: NodeId, selected: NodeId) -> bool 
     )
 }
 
+fn is_near_preceding_sibling_in_view(
+    dom: &Dom,
+    scoring_view: &ScoringView,
+    candidate: NodeId,
+    target: NodeId,
+) -> bool {
+    let mut sibling = dom.next_sibling(candidate);
+    let mut intervening_elements = 0_u8;
+    while let Some(node) = sibling {
+        if scoring_view.projected_node(node) == target {
+            return true;
+        }
+        if dom.is_element(node) {
+            intervening_elements += 1;
+            if intervening_elements > 1 {
+                return false;
+            }
+        } else if dom
+            .text_node(node)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return false;
+        }
+        sibling = dom.next_sibling(node);
+    }
+    false
+}
+
+#[cfg(test)]
 fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bool {
     let mut sibling = dom.next_sibling(candidate);
     let mut intervening_elements = 0_u8;
@@ -3542,6 +3615,26 @@ fn heading_matches_page_title(page_title: &str, heading: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn generic_scoring_does_not_clone_the_source_dom() {
+        crate::instrumentation::reset();
+        crate::extract(
+            r#"<body><div class="content"><p>This generic document contains enough prose, punctuation, and detail to require normal readability scoring.</p><p>A second paragraph confirms the selected content and keeps the extraction result substantial.</p></div></body>"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(crate::instrumentation::snapshot().counters.dom_clones, 0);
+
+        crate::instrumentation::reset();
+        crate::extract(
+            r#"<body><main class="d-none"><p>This hidden document contains enough useful prose for relaxed visibility scoring and extraction.</p><p>A second paragraph makes the hidden result coherent and substantial.</p></main></body>"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(crate::instrumentation::snapshot().counters.dom_clones, 0);
+    }
+
     #[test]
     fn accepted_extraction_copies_the_selected_region_once() {
         let html = r#"<body><article><h1>Direct compilation</h1>
@@ -3726,6 +3819,7 @@ mod tests {
 
         let (ranked, _) = ContentExtractor::rank_candidates_with_snapshot(
             &dom,
+            None,
             None,
             body,
             &snapshot,

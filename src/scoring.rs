@@ -1,9 +1,399 @@
 //! Content scoring and DOM text helpers.
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
-use crate::constants::{has_byline, is_div_to_p_elem, is_phrasing_elem, is_unlikely_role, regexps};
+use crate::constants::is_div_to_p_elem;
+use crate::constants::{has_byline, is_phrasing_elem, is_unlikely_role, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use crate::prepared::{SourceAnalysis, SourceEntry};
 use smallvec::SmallVec;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PreparedScoreSeed {
+    Node { node: NodeId, parent: NodeId },
+    Virtual { parent: NodeId, stats: NodeStats },
+}
+
+/// The differences between the immutable source tree and Readability's
+/// temporary scoring tree.
+///
+/// Scoring used to apply these differences to a complete DOM clone. Keep them
+/// sparse instead. The source topology and attributes stay shared by normal
+/// and relaxed scoring.
+pub(crate) struct ScoringView {
+    tag_overrides: SmallVec<[(NodeId, Tag); 64]>,
+    prepared_seeds: SmallVec<[PreparedScoreSeed; 256]>,
+    wrapper_replacements: SmallVec<[(NodeId, NodeId); 32]>,
+    parent_overrides: SmallVec<[(NodeId, NodeId); 32]>,
+    text_overrides: SmallVec<[(NodeId, NodeStats); 32]>,
+}
+
+impl ScoringView {
+    pub(crate) fn build(
+        dom: &Dom,
+        source: &SourceAnalysis,
+        divs: &[NodeId],
+        candidates: &CandidateSet,
+    ) -> Self {
+        let mut view = Self {
+            tag_overrides: SmallVec::new(),
+            prepared_seeds: SmallVec::new(),
+            wrapper_replacements: SmallVec::new(),
+            parent_overrides: SmallVec::new(),
+            text_overrides: SmallVec::new(),
+        };
+        view.project_aria_structure(dom, source);
+        view.sort_and_compact_tags();
+        let projected_tag_count = view.tag_overrides.len();
+        view.prepare_divs(dom, source, divs, candidates, projected_tag_count);
+        view.tag_overrides.sort_unstable_by_key(|(node, _)| *node);
+        view.wrapper_replacements
+            .sort_unstable_by_key(|(wrapper, _)| *wrapper);
+        view.parent_overrides
+            .sort_unstable_by_key(|(node, _)| *node);
+        view.text_overrides.sort_by_key(|(node, _)| *node);
+        let mut compacted_text = SmallVec::<[(NodeId, NodeStats); 32]>::new();
+        for (node, stats) in view.text_overrides.drain(..) {
+            if let Some((last_node, last_stats)) = compacted_text.last_mut()
+                && *last_node == node
+            {
+                *last_stats = stats;
+            } else {
+                compacted_text.push((node, stats));
+            }
+        }
+        view.text_overrides = compacted_text;
+        view
+    }
+
+    #[inline]
+    pub(crate) fn effective_tag(&self, dom: &Dom, node: NodeId) -> Option<Tag> {
+        self.tag_overrides
+            .binary_search_by_key(&node, |(node, _)| *node)
+            .ok()
+            .map(|index| self.tag_overrides[index].1)
+            .or_else(|| dom.tag(node))
+    }
+
+    pub(crate) fn prepared_seeds(&self) -> &[PreparedScoreSeed] {
+        &self.prepared_seeds
+    }
+
+    pub(crate) fn ignores_wrapper(&self, node: NodeId) -> bool {
+        self.wrapper_replacements
+            .binary_search_by_key(&node, |(wrapper, _)| *wrapper)
+            .is_ok()
+    }
+
+    pub(crate) fn effective_parent(&self, dom: &Dom, node: NodeId) -> Option<NodeId> {
+        let mut parent = self
+            .parent_overrides
+            .binary_search_by_key(&node, |(node, _)| *node)
+            .ok()
+            .map(|index| self.parent_overrides[index].1)
+            .or_else(|| dom.parent(node));
+        while parent.is_some_and(|parent| {
+            self.ignores_wrapper(parent) && self.projected_node(parent) == parent
+        }) {
+            parent = parent.and_then(|parent| dom.parent(parent));
+        }
+        parent
+    }
+
+    pub(crate) fn effective_element_children(
+        &self,
+        dom: &Dom,
+        parent: NodeId,
+    ) -> SmallVec<[NodeId; 16]> {
+        dom.element_children(parent)
+            .map(|child| self.projected_node(child))
+            .filter(|&child| !(self.ignores_wrapper(child) && self.projected_node(child) == child))
+            .collect()
+    }
+
+    pub(crate) fn effective_ancestors(&self, dom: &Dom, node: NodeId) -> SmallVec<[NodeId; 16]> {
+        let mut ancestors = SmallVec::new();
+        let mut current = self.effective_parent(dom, node);
+        while let Some(parent) = current {
+            ancestors.push(parent);
+            current = self.effective_parent(dom, parent);
+        }
+        ancestors
+    }
+
+    pub(crate) fn projected_node(&self, node: NodeId) -> NodeId {
+        self.wrapper_replacements
+            .binary_search_by_key(&node, |(wrapper, _)| *wrapper)
+            .ok()
+            .map_or(node, |index| self.wrapper_replacements[index].1)
+    }
+
+    pub(crate) fn seed_text_overrides(&self, store: &mut NodeStateStore) {
+        for &(node, stats) in &self.text_overrides {
+            store.set_stats(node, stats);
+        }
+    }
+
+    fn projected_tag(&self, dom: &Dom, node: NodeId, projected_tag_count: usize) -> Option<Tag> {
+        self.tag_overrides
+            .get(..projected_tag_count)
+            .and_then(|overrides| {
+                overrides
+                    .binary_search_by_key(&node, |(node, _)| *node)
+                    .ok()
+                    .map(|index| overrides[index].1)
+            })
+            .or_else(|| dom.tag(node))
+    }
+
+    fn set_tag(&mut self, node: NodeId, tag: Tag) {
+        self.tag_overrides.push((node, tag));
+    }
+
+    fn sort_and_compact_tags(&mut self) {
+        self.tag_overrides.sort_by_key(|(node, _)| *node);
+        let mut compacted = SmallVec::<[(NodeId, Tag); 64]>::new();
+        for (node, tag) in self.tag_overrides.drain(..) {
+            if let Some((last_node, last_tag)) = compacted.last_mut()
+                && *last_node == node
+            {
+                *last_tag = tag;
+            } else {
+                compacted.push((node, tag));
+            }
+        }
+        self.tag_overrides = compacted;
+    }
+
+    fn project_aria_structure(&mut self, dom: &Dom, source: &SourceAnalysis) {
+        for entry in source.elements() {
+            let node = entry.node;
+            let roles = dom.attr(node, AttrName::Role).unwrap_or_default();
+            if roles
+                .split_ascii_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("heading"))
+                && let Some(tag) = dom
+                    .attr_by_local_name(node, "aria-level")
+                    .and_then(|value| value.trim().parse::<u8>().ok())
+                    .and_then(|level| match level {
+                        1 => Some(Tag::H1),
+                        2 => Some(Tag::H2),
+                        3 => Some(Tag::H3),
+                        4 => Some(Tag::H4),
+                        5 => Some(Tag::H5),
+                        6 => Some(Tag::H6),
+                        _ => None,
+                    })
+            {
+                self.set_tag(node, tag);
+            }
+            if !roles
+                .split_ascii_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("list"))
+            {
+                continue;
+            }
+            let items: SmallVec<[NodeId; 16]> = dom
+                .element_children(node)
+                .filter(|&child| {
+                    dom.attr(child, AttrName::Role).is_some_and(|roles| {
+                        roles
+                            .split_ascii_whitespace()
+                            .any(|role| role.eq_ignore_ascii_case("listitem"))
+                    })
+                })
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            if !matches!(dom.tag(node), Some(Tag::Ol | Tag::Ul)) {
+                if let Some(markers) = scoring_ordered_markers(dom, &items) {
+                    self.set_tag(node, Tag::Ol);
+                    for (_, text, replacement) in markers {
+                        self.text_overrides
+                            .push((text, stats_for_text(replacement)));
+                    }
+                } else {
+                    self.set_tag(node, Tag::Ul);
+                }
+            }
+            for item in items {
+                self.set_tag(item, Tag::Li);
+            }
+        }
+    }
+
+    fn prepare_divs(
+        &mut self,
+        dom: &Dom,
+        source: &SourceAnalysis,
+        divs: &[NodeId],
+        candidates: &CandidateSet,
+        projected_tag_count: usize,
+    ) {
+        let mut stats = NodeStateStore::new();
+        for &div in divs {
+            if dom.parent(div).is_none()
+                || self.projected_tag(dom, div, projected_tag_count) != Some(Tag::Div)
+            {
+                continue;
+            }
+            let children: SmallVec<[NodeId; 8]> = dom.children(div).collect();
+            let mut effective = SmallVec::<[PreparedScoreSeed; 8]>::new();
+            let mut index = 0;
+            while index < children.len() {
+                if !is_phrasing_content(dom, children[index]) {
+                    effective.push(PreparedScoreSeed::Node {
+                        node: children[index],
+                        parent: div,
+                    });
+                    index += 1;
+                    continue;
+                }
+                let start = index;
+                let mut has_content = false;
+                while index < children.len() && is_phrasing_content(dom, children[index]) {
+                    has_content |= dom.is_element(children[index])
+                        || dom
+                            .text_node(children[index])
+                            .is_some_and(|text| !trim_text(text).is_empty());
+                    index += 1;
+                }
+                if !has_content {
+                    continue;
+                }
+                let mut first = start;
+                let mut end = index;
+                while first < end && is_whitespace(dom, children[first]) {
+                    first += 1;
+                }
+                while first < end && is_whitespace(dom, children[end - 1]) {
+                    end -= 1;
+                }
+                if first < end {
+                    let mut combined = NodeStats::default();
+                    for &child in &children[first..end] {
+                        let child_stats = get_or_compute_stats_from_source(
+                            dom,
+                            Some(source),
+                            child,
+                            &mut stats,
+                            &[],
+                        );
+                        append_stats(&mut combined, &child_stats);
+                    }
+                    effective.push(PreparedScoreSeed::Virtual {
+                        parent: div,
+                        stats: combined,
+                    });
+                }
+            }
+
+            let paragraph_seed = |seed: PreparedScoreSeed, parent| match seed {
+                PreparedScoreSeed::Node { node, .. } if dom.tag(node) == Some(Tag::P) => {
+                    Some(PreparedScoreSeed::Node { node, parent })
+                }
+                PreparedScoreSeed::Virtual { stats, .. } => {
+                    Some(PreparedScoreSeed::Virtual { parent, stats })
+                }
+                _ => None,
+            };
+            if candidates.is_semantic(div) {
+                self.prepared_seeds.extend(
+                    effective
+                        .into_iter()
+                        .filter_map(|seed| paragraph_seed(seed, div)),
+                );
+            } else if effective.len() == 1
+                && paragraph_seed(effective[0], div).is_some()
+                && get_link_density(dom, div) < 0.25
+            {
+                let parent = dom.parent(div).expect("attached div has a parent");
+                if let PreparedScoreSeed::Node { node, .. } = effective[0] {
+                    self.parent_overrides.push((node, parent));
+                }
+                self.prepared_seeds
+                    .push(paragraph_seed(effective[0], parent).expect("paragraph seed"));
+                let promoted = match effective[0] {
+                    PreparedScoreSeed::Node { node, .. } => node,
+                    PreparedScoreSeed::Virtual { .. } => div,
+                };
+                // A virtual paragraph has no source NodeId. A self replacement
+                // marks its old wrapper as absent while the virtual seed carries
+                // the paragraph score at the projected parent.
+                self.wrapper_replacements.push((div, promoted));
+            } else if !dom.descendants(div).any(|node| {
+                dom.is_element(node)
+                    && self
+                        .projected_tag(dom, node, projected_tag_count)
+                        .is_some_and(crate::constants::is_div_to_p_elem)
+            }) {
+                self.set_tag(div, Tag::P);
+                self.prepared_seeds.push(PreparedScoreSeed::Node {
+                    node: div,
+                    parent: dom.parent(div).expect("attached div has a parent"),
+                });
+            } else {
+                self.prepared_seeds.extend(
+                    effective
+                        .into_iter()
+                        .filter_map(|seed| paragraph_seed(seed, div)),
+                );
+            }
+        }
+    }
+}
+
+fn scoring_ordered_markers<'a>(
+    dom: &'a Dom,
+    items: &[NodeId],
+) -> Option<Vec<(u32, NodeId, &'a str)>> {
+    if items.len() < 2 {
+        return None;
+    }
+    let markers: Vec<_> = items
+        .iter()
+        .map(|&item| scoring_first_text_marker(dom, item))
+        .collect::<Option<_>>()?;
+    let first = markers.first()?.0;
+    if !markers
+        .iter()
+        .enumerate()
+        .all(|(index, marker)| marker.0 == first.saturating_add(index as u32))
+    {
+        return None;
+    }
+    markers
+        .into_iter()
+        .map(|(number, text, prefix_end)| {
+            Some((
+                number,
+                text,
+                dom.text_node(text)?[prefix_end..].trim_start(),
+            ))
+        })
+        .collect()
+}
+
+fn scoring_first_text_marker(dom: &Dom, item: NodeId) -> Option<(u32, NodeId, usize)> {
+    let text = dom.descendants(item).find(|&node| {
+        dom.text_node(node)
+            .is_some_and(|value| !value.trim().is_empty())
+    })?;
+    let value = dom.text_node(text)?;
+    let leading = value.len() - value.trim_start().len();
+    let trimmed = &value[leading..];
+    let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || !matches!(trimmed.as_bytes().get(digits), Some(b'.' | b')')) {
+        return None;
+    }
+    if trimmed
+        .as_bytes()
+        .get(digits + 1)
+        .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    Some((trimmed[..digits].parse().ok()?, text, leading + digits + 1))
+}
 
 /// A Readability-derived score for a possible content root.
 #[derive(Clone, Copy, Debug)]
@@ -259,6 +649,16 @@ fn get_or_compute_stats_from_source(
     excluded: &[bool],
 ) -> NodeStats {
     get_or_compute_stats_excluding_impl(dom, source, id, store, excluded)
+}
+
+pub(crate) fn get_or_compute_stats_from_source_excluding(
+    dom: &Dom,
+    source: &SourceAnalysis,
+    id: NodeId,
+    store: &mut NodeStateStore,
+    excluded: &[bool],
+) -> NodeStats {
+    get_or_compute_stats_excluding_impl(dom, Some(source), id, store, excluded)
 }
 
 pub(crate) type SourceTextMetrics = (NodeStats, f64, usize);
@@ -573,6 +973,7 @@ impl CandidateFeatureIndex {
         store: &NodeStateStore,
         nodes: &[(NodeId, u32)],
         candidates: &CandidateSet,
+        scoring_view: Option<&ScoringView>,
     ) -> Self {
         let candidate_nodes: Vec<_> = candidates.iter().map(|candidate| candidate.node).collect();
         let mut counts = vec![StructuralCounts::default(); candidate_nodes.len()];
@@ -580,9 +981,35 @@ impl CandidateFeatureIndex {
         let mut active_candidates = Vec::<(u32, usize)>::new();
         let mut candidate_order = Vec::with_capacity(candidate_nodes.len());
         let mut has_links = false;
+        let mut virtual_paragraphs = Vec::<(NodeId, u32)>::new();
+        if let Some(scoring_view) = scoring_view {
+            for seed in scoring_view.prepared_seeds() {
+                let PreparedScoreSeed::Virtual { parent, .. } = *seed else {
+                    continue;
+                };
+                virtual_paragraphs.push((parent, 1));
+            }
+            virtual_paragraphs.sort_unstable_by_key(|(node, _)| *node);
+            let mut compacted = Vec::<(NodeId, u32)>::with_capacity(virtual_paragraphs.len());
+            for (parent, count) in virtual_paragraphs.drain(..) {
+                if let Some((last_parent, last_count)) = compacted.last_mut()
+                    && *last_parent == parent
+                {
+                    *last_count = last_count.saturating_add(count);
+                } else {
+                    compacted.push((parent, count));
+                }
+            }
+            virtual_paragraphs = compacted;
+        }
 
         for &(node, depth) in nodes {
-            let Some(tag) = dom.tag(node) else { continue };
+            let Some(tag) = scoring_view
+                .and_then(|view| view.effective_tag(dom, node))
+                .or_else(|| dom.tag(node))
+            else {
+                continue;
+            };
             if tag == Tag::A {
                 has_links = true;
             }
@@ -599,6 +1026,14 @@ impl CandidateFeatureIndex {
                     active_candidates.last().map(|&(_, parent)| parent);
                 active_candidates.push((depth, candidate_index));
                 candidate_order.push(candidate_index);
+            }
+
+            if let Ok(index) = virtual_paragraphs.binary_search_by_key(&node, |(parent, _)| *parent)
+                && let Some(&(_, candidate_index)) = active_candidates.last()
+            {
+                counts[candidate_index].paragraphs = counts[candidate_index]
+                    .paragraphs
+                    .saturating_add(virtual_paragraphs[index].1);
             }
 
             let mut own = StructuralCounts::default();
@@ -652,6 +1087,7 @@ impl CandidateFeatureIndex {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn features(
         &self,
         dom: &Dom,
@@ -660,8 +1096,18 @@ impl CandidateFeatureIndex {
         candidate: Candidate,
         store: &mut NodeStateStore,
         weight_classes: bool,
+        excluded: &[bool],
     ) -> CandidateFeatures {
-        let text = get_or_compute_stats_from_source(dom, source, candidate.node, store, &[]);
+        let text = match source {
+            Some(source) => get_or_compute_stats_from_source_excluding(
+                dom,
+                source,
+                candidate.node,
+                store,
+                excluded,
+            ),
+            None => get_or_compute_stats_excluding(dom, candidate.node, store, excluded),
+        };
         let counts = self
             .counts
             .get(candidate_index)
@@ -840,8 +1286,9 @@ pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, weight
 
 /// Prepares a scoring-only DOM and returns paragraphs created by the pass.
 ///
-/// The caller must pass a copy of the source DOM. This function can wrap
-/// phrasing content, replace simple wrappers, and rename leaf `div` elements.
+/// The caller must pass a selected fragment or a test-only source copy. This
+/// function can wrap phrasing content, replace simple wrappers, and rename
+/// leaf `div` elements.
 pub(crate) fn prepare_readability_structure(
     dom: &mut Dom,
     divs: &[NodeId],
@@ -887,6 +1334,7 @@ pub(crate) fn prepare_readability_structure(
 /// `dom` contains the scoring-only structural preparation. This function first
 /// propagates scores. It then detaches deferred clutter and calculates link
 /// density. This order avoids a second full DOM copy.
+#[cfg(test)]
 pub(crate) fn compute_readability_scores(
     dom: &mut Dom,
     source: Option<&SourceAnalysis>,
@@ -961,6 +1409,115 @@ pub(crate) fn compute_readability_scores(
         });
     }
     scores
+}
+
+pub(crate) fn compute_readability_scores_in_view(
+    dom: &Dom,
+    source: &SourceAnalysis,
+    view: &ScoringView,
+    to_score: impl IntoIterator<Item = NodeId>,
+    excluded_mask: &[bool],
+    store: &mut NodeStateStore,
+    weight_classes: bool,
+) -> SmallVec<[ReadabilityScore; 64]> {
+    let mut discovered = SmallVec::<[NodeId; 256]>::new();
+    view.seed_text_overrides(store);
+    let mut score_seed = |parent: NodeId, stats: NodeStats, store: &mut NodeStateStore| {
+        if stats.text_length < 25 {
+            return;
+        }
+        let content_score =
+            2.0 + f64::from(stats.comma_count) + f64::from((stats.text_length / 100).min(3));
+        let mut ancestor = Some(parent);
+        for level in 0..5 {
+            let Some(node) = ancestor else { break };
+            ancestor = dom.parent(node);
+            if !dom.is_element(node) || !ancestor.is_some_and(|parent| dom.is_element(parent)) {
+                continue;
+            }
+            let score = initial_readability_for_tag(
+                view.effective_tag(dom, node),
+                source.class_weight(node),
+                weight_classes,
+            );
+            if store.initialize_if_absent(node, score) {
+                discovered.push(node);
+            }
+            let divisor = match level {
+                0 => 1.0,
+                1 => 2.0,
+                _ => (level * 3) as f64,
+            };
+            store.add_content_score(node, content_score / divisor);
+        }
+    };
+
+    for node in to_score {
+        let Some(parent) = view
+            .effective_parent(dom, node)
+            .filter(|&parent| dom.is_element(parent))
+        else {
+            continue;
+        };
+        let stats = get_or_compute_stats_from_source(dom, Some(source), node, store, &[]);
+        score_seed(parent, stats, store);
+    }
+    for seed in view.prepared_seeds() {
+        match *seed {
+            PreparedScoreSeed::Node { node, parent } => {
+                if !store.mark_score_seen(node) {
+                    continue;
+                }
+                let stats = get_or_compute_stats_from_source(dom, Some(source), node, store, &[]);
+                score_seed(parent, stats, store);
+            }
+            PreparedScoreSeed::Virtual { parent, stats } => score_seed(parent, stats, store),
+        }
+    }
+
+    // Paragraph propagation uses the unfiltered source, just as the mutable
+    // implementation did before detach. Candidate metrics use the retained
+    // scoring view, so discard only cached text and link facts now.
+    store.clear_stats();
+    view.seed_text_overrides(store);
+    let mut scores = SmallVec::new();
+    for node in discovered {
+        if excluded_mask.get(node.index()).copied().unwrap_or(false) || view.ignores_wrapper(node) {
+            continue;
+        }
+        let content_score = store.get_content_score(node);
+        let length =
+            get_or_compute_stats_from_source_excluding(dom, source, node, store, excluded_mask)
+                .text_length;
+        let density = get_link_density_cached(dom, node, length, store);
+        scores.push(ReadabilityScore {
+            node,
+            score: content_score * (1.0 - density),
+        });
+    }
+    scores
+}
+
+fn initial_readability_for_tag(
+    tag: Option<Tag>,
+    class_weight: Option<i32>,
+    weight_classes: bool,
+) -> f64 {
+    let score = match tag {
+        Some(Tag::Div) => 5.0,
+        Some(Tag::Pre | Tag::Td | Tag::Blockquote) => 3.0,
+        Some(
+            Tag::Address | Tag::Ol | Tag::Ul | Tag::Dl | Tag::Dd | Tag::Dt | Tag::Li | Tag::Form,
+        ) => -3.0,
+        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::Th) => -5.0,
+        _ => 0.0,
+    };
+    score
+        + if weight_classes {
+            f64::from(class_weight.unwrap_or_default())
+        } else {
+            0.0
+        }
 }
 
 /// Marks excluded roots and their descendants before the scoring tree is mutated.
@@ -1485,12 +2042,15 @@ fn valid_opacity(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateFeatureIndex, build_exclusion_mask, compute_readability_scores, get_link_density,
+        CandidateFeatureIndex, PreparedScoreSeed, ScoringView, build_exclusion_mask,
+        compute_readability_scores, compute_readability_scores_in_view, get_link_density,
         get_link_density_cached, get_or_compute_stats, has_hidden_utility_class,
-        has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text,
+        has_hidden_utility_class_for_discovery, is_probably_visible, prepare_readability_structure,
+        stats_for_text,
     };
     use crate::candidate::CandidateSet;
     use crate::dom::{AttrName, Dom, NodeStateStore, Tag};
+    use crate::prepared::SourceAnalysis;
 
     #[test]
     fn static_visibility_handles_inline_css_declarations() {
@@ -1603,9 +2163,17 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates, None);
         index.prepare_text_cache(&mut store);
-        let features = index.features(&dom, None, candidate_index, candidate, &mut store, true);
+        let features = index.features(
+            &dom,
+            None,
+            candidate_index,
+            candidate,
+            &mut store,
+            true,
+            &[],
+        );
 
         assert!(features.word_count >= 12);
         assert_eq!(features.paragraph_count, 2);
@@ -1621,7 +2189,15 @@ mod tests {
         assert!(features.positive_name_score > 0.0);
         assert!(features.negative_name_score > 0.0);
 
-        let unweighted = index.features(&dom, None, candidate_index, candidate, &mut store, false);
+        let unweighted = index.features(
+            &dom,
+            None,
+            candidate_index,
+            candidate,
+            &mut store,
+            false,
+            &[],
+        );
         assert_eq!(unweighted.positive_name_score, 0.0);
         assert_eq!(unweighted.negative_name_score, 0.0);
     }
@@ -1657,8 +2233,16 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
-        let features = index.features(&dom, None, candidate_index, candidate, &mut store, false);
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates, None);
+        let features = index.features(
+            &dom,
+            None,
+            candidate_index,
+            candidate,
+            &mut store,
+            false,
+            &[],
+        );
 
         assert_eq!(features.paragraph_count, 300);
         assert_eq!(features.heading_count, 300);
@@ -1692,7 +2276,7 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
+        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates, None);
 
         assert_eq!(index.counts.len(), candidates.iter().count());
         let outer_features = index.features(
@@ -1702,6 +2286,7 @@ mod tests {
             *candidates.get(outer).unwrap(),
             &mut store,
             false,
+            &[],
         );
         let inner_features = index.features(
             &dom,
@@ -1710,6 +2295,7 @@ mod tests {
             *candidates.get(inner).unwrap(),
             &mut store,
             false,
+            &[],
         );
 
         assert_eq!(inner_features.paragraph_count, 1);
@@ -1783,6 +2369,173 @@ mod tests {
             .map(|candidate| candidate.score)
             .unwrap();
         assert!(article_score > 2.0);
+    }
+
+    #[test]
+    fn immutable_view_matches_div_preparation_scores() {
+        let source_dom = Dom::parse_document(
+            r#"<body><main><div>Long inline prose contains enough detail, commas, and useful explanation <span>for stable scoring.</span></div><div><p>A second paragraph contains enough useful words, punctuation, and detail for propagation.</p></div></main></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&source_dom);
+        let candidates = CandidateSet::discover_semantic(&source_dom);
+        let divs: Vec<_> = source_dom
+            .descendants(source_dom.root())
+            .filter(|&node| source_dom.tag(node) == Some(Tag::Div))
+            .collect();
+        let paragraphs: Vec<_> = source_dom
+            .descendants(source_dom.root())
+            .filter(|&node| source_dom.tag(node) == Some(Tag::P))
+            .collect();
+
+        let view = ScoringView::build(&source_dom, &source, &divs, &candidates);
+        let mut view_store = NodeStateStore::new();
+        for &paragraph in &paragraphs {
+            view_store.mark_score_seen(paragraph);
+        }
+        let view_scores = compute_readability_scores_in_view(
+            &source_dom,
+            &source,
+            &view,
+            paragraphs.clone(),
+            &[],
+            &mut view_store,
+            true,
+        );
+
+        let original_len = source_dom.len();
+        let mut legacy = source_dom.clone();
+        let prepared = prepare_readability_structure(&mut legacy, &divs, &candidates);
+        let mut legacy_store = NodeStateStore::new();
+        let mut legacy_seeds = paragraphs;
+        legacy_seeds.extend(prepared);
+        legacy_seeds.sort_unstable();
+        legacy_seeds.dedup();
+        let legacy_scores = compute_readability_scores(
+            &mut legacy,
+            None,
+            legacy_seeds,
+            &[],
+            &[],
+            &mut legacy_store,
+            true,
+        );
+
+        assert_eq!(source_dom.len(), original_len);
+        for expected in legacy_scores {
+            let actual = view_scores
+                .iter()
+                .find(|score| score.node == expected.node)
+                .expect("view preserves each legacy candidate");
+            assert!(
+                (actual.score - expected.score).abs() < f64::EPSILON,
+                "node {:?}: view={}, legacy={}",
+                expected.node,
+                actual.score,
+                expected.score
+            );
+        }
+    }
+
+    #[test]
+    fn aria_projections_bypass_div_paragraph_preparation() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div role="heading" aria-level="2">Heading</div><div role="list"><div role="listitem">First item</div><div role="listitem">Second item</div></div></main></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let divs: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Div))
+            .collect();
+        let view = ScoringView::build(&dom, &source, &divs, &candidates);
+        let heading = divs[0];
+        let list = divs[1];
+
+        assert_eq!(view.effective_tag(&dom, heading), Some(Tag::H2));
+        assert_eq!(view.effective_tag(&dom, list), Some(Tag::Ul));
+        assert!(view.prepared_seeds().is_empty());
+        assert!(divs.iter().all(|&node| dom.tag(node) == Some(Tag::Div)));
+    }
+
+    #[test]
+    fn ignored_wrapper_projects_parent_and_sibling_topology() {
+        let dom = Dom::parse_document(
+            r#"<body><div><p>Wrapped paragraph contains enough useful prose for scoring.</p></div><p>Adjacent paragraph remains a sibling.</p></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let wrapper = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
+        let wrapped = dom.first_descendant_by_tag(wrapper, Tag::P).unwrap();
+        let body = dom.body().unwrap();
+        let view = ScoringView::build(&dom, &source, &[wrapper], &candidates);
+
+        assert_eq!(view.effective_parent(&dom, wrapped), Some(body));
+        let children = view.effective_element_children(&dom, body);
+        assert_eq!(children.first(), Some(&wrapped));
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn virtual_paragraph_removes_its_source_wrapper_from_topology() {
+        let dom = Dom::parse_document(
+            r#"<body><div>Useful phrasing <strong>continues here</strong>.</div><p>Adjacent paragraph remains visible.</p></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let wrapper = dom.first_descendant_by_tag(dom.root(), Tag::Div).unwrap();
+        let strong = dom.first_descendant_by_tag(wrapper, Tag::Strong).unwrap();
+        let body = dom.body().unwrap();
+        let view = ScoringView::build(&dom, &source, &[wrapper], &candidates);
+
+        assert!(view.ignores_wrapper(wrapper));
+        assert_eq!(view.effective_parent(&dom, strong), Some(body));
+        assert!(
+            !view
+                .effective_element_children(&dom, body)
+                .contains(&wrapper)
+        );
+        assert!(view.prepared_seeds().iter().any(|seed| {
+            matches!(seed, PreparedScoreSeed::Virtual { parent, .. } if *parent == body)
+        }));
+    }
+
+    #[test]
+    fn ordered_aria_list_projects_marker_text_stats() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div role="list"><div role="listitem">3. Three</div><div role="listitem">4. Four</div></div></main></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let divs: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Div))
+            .collect();
+        let list = divs[0];
+        let first_item = divs[1];
+        let view = ScoringView::build(&dom, &source, &divs, &candidates);
+        let mut view_store = NodeStateStore::new();
+        view.seed_text_overrides(&mut view_store);
+        let view_stats = get_or_compute_stats(&dom, first_item, &mut view_store);
+
+        let mut legacy = dom.clone();
+        crate::normalize::materialize_scoring_structure(&mut legacy);
+        let mut legacy_store = NodeStateStore::new();
+        let legacy_stats = get_or_compute_stats(&legacy, first_item, &mut legacy_store);
+
+        assert_eq!(view.effective_tag(&dom, list), Some(Tag::Ol));
+        assert_eq!(view_stats.text_length, legacy_stats.text_length);
+        assert_eq!(view_stats.word_count, legacy_stats.word_count);
+        assert_eq!(view_stats.alphabetic_chars, legacy_stats.alphabetic_chars);
+        assert_eq!(view_stats.digit_chars, legacy_stats.digit_chars);
+        assert_eq!(
+            dom.text_node(dom.first_child(first_item).unwrap()),
+            Some("3. Three")
+        );
     }
 
     #[test]

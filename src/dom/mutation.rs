@@ -10,6 +10,20 @@ std::thread_local! {
     static FRAGMENT_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+fn copied_node_data(source: &Dom, id: NodeId) -> NodeData {
+    match &source.node(id).data {
+        NodeData::Element(element) => NodeData::Element(ElementData {
+            name: element.name.clone(),
+            tag: element.tag,
+            attrs: element.attrs.clone(),
+            template_contents: NodeLink::NONE,
+            mathml_annotation_xml_integration_point: element
+                .mathml_annotation_xml_integration_point,
+        }),
+        data => data.clone(),
+    }
+}
+
 impl Dom {
     #[cfg(test)]
     pub(crate) fn reset_fragment_copy_count() {
@@ -207,11 +221,12 @@ impl Dom {
         Ok(fragment)
     }
 
-    /// Copies several disjoint source roots into one fragment without
-    /// materializing the rest of the source DOM.
-    pub(crate) fn copy_subtrees_as_fragment(
+    /// Copies disjoint roots while omitting source subtrees that scoring
+    /// marked as deferred clutter.
+    pub(crate) fn copy_subtrees_as_fragment_excluding(
         &self,
         source_roots: &[NodeId],
+        excluded: &[bool],
     ) -> Result<Dom, DomError> {
         crate::instrumentation::record_fragment_copy();
         #[cfg(test)]
@@ -219,49 +234,75 @@ impl Dom {
 
         let capacity = 1 + source_roots
             .iter()
-            .map(|&root| 1 + self.descendants(root).count())
+            .map(|&root| {
+                1 + self
+                    .descendants(root)
+                    .filter(|node| !excluded.get(node.index()).copied().unwrap_or(false))
+                    .count()
+            })
             .sum::<usize>();
         let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
         for &source_root in source_roots {
-            let copied = fragment.import_subtree(self, source_root)?;
+            if excluded.get(source_root.index()).copied().unwrap_or(false) {
+                return Err(DomError("selected root is excluded".into()));
+            }
+            let copied = fragment.import_subtree_excluding(self, source_root, excluded)?;
             fragment.append_child(fragment.root(), copied);
         }
         Ok(fragment)
     }
-    pub(crate) fn import_subtree(
+
+    fn import_subtree_excluding(
         &mut self,
         source: &Dom,
         source_root: NodeId,
+        excluded: &[bool],
     ) -> Result<NodeId, DomError> {
-        fn copy_data(source: &Dom, id: NodeId) -> NodeData {
-            match &source.node(id).data {
-                NodeData::Element(e) => NodeData::Element(ElementData {
-                    name: e.name.clone(),
-                    tag: e.tag,
-                    attrs: e.attrs.clone(),
-                    template_contents: NodeLink::NONE,
-                    mathml_annotation_xml_integration_point: e
-                        .mathml_annotation_xml_integration_point,
-                }),
-                data => data.clone(),
-            }
-        }
-
-        let root = self.create(copy_data(source, source_root))?;
+        let root = self.create(copied_node_data(source, source_root))?;
         let mut work = SmallVec::<[(NodeId, NodeId); 16]>::new();
         work.push((source_root, root));
         while let Some((source_id, dest_id)) = work.pop() {
             if let NodeData::Element(element) = &source.node(source_id).data
                 && let Some(template) = element.template_contents.get()
+                && !excluded.get(template.index()).copied().unwrap_or(false)
             {
-                let template_copy = self.create(copy_data(source, template))?;
+                let template_copy = self.create(copied_node_data(source, template))?;
                 if let NodeData::Element(destination) = &mut self.node_mut(dest_id).data {
                     destination.template_contents = NodeLink::from_option(Some(template_copy));
                 }
                 work.push((template, template_copy));
             }
             for child in source.children(source_id) {
-                let child_copy = self.create(copy_data(source, child))?;
+                if excluded.get(child.index()).copied().unwrap_or(false) {
+                    continue;
+                }
+                let child_copy = self.create(copied_node_data(source, child))?;
+                self.append_child(dest_id, child_copy);
+                work.push((child, child_copy));
+            }
+        }
+        Ok(root)
+    }
+    pub(crate) fn import_subtree(
+        &mut self,
+        source: &Dom,
+        source_root: NodeId,
+    ) -> Result<NodeId, DomError> {
+        let root = self.create(copied_node_data(source, source_root))?;
+        let mut work = SmallVec::<[(NodeId, NodeId); 16]>::new();
+        work.push((source_root, root));
+        while let Some((source_id, dest_id)) = work.pop() {
+            if let NodeData::Element(element) = &source.node(source_id).data
+                && let Some(template) = element.template_contents.get()
+            {
+                let template_copy = self.create(copied_node_data(source, template))?;
+                if let NodeData::Element(destination) = &mut self.node_mut(dest_id).data {
+                    destination.template_contents = NodeLink::from_option(Some(template_copy));
+                }
+                work.push((template, template_copy));
+            }
+            for child in source.children(source_id) {
+                let child_copy = self.create(copied_node_data(source, child))?;
                 self.append_child(dest_id, child_copy);
                 work.push((child, child_copy));
             }

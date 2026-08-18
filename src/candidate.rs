@@ -7,7 +7,6 @@ use crate::scoring::has_static_hidden_marker;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
-#[cfg(test)]
 const STRONG_IDS: &[&str] = &["post", "content", "article-content"];
 const ARTICLE_TAG_PRIOR: f64 = 0.003;
 const MAIN_TAG_PRIOR: f64 = 0.0025;
@@ -15,7 +14,6 @@ const ARTICLE_ROLE_PRIOR: f64 = 0.00275;
 const OTHER_SEMANTIC_PRIOR: f64 = 0.0025;
 const ADDITIONAL_SIGNAL_BONUS: f64 = 0.0005;
 const MAX_SEMANTIC_PRIOR: f64 = 0.004;
-#[cfg(test)]
 const STRONG_CLASSES: &[&str] = &[
     "post-content",
     "post-body",
@@ -236,7 +234,6 @@ impl CandidateSet {
         Self::discover_semantic_from_snapshot(dom, &snapshot, dom.body())
     }
 
-    #[cfg(test)]
     pub(crate) fn discover_semantic_from_snapshot(
         dom: &Dom,
         snapshot: &[(NodeId, u32)],
@@ -245,7 +242,6 @@ impl CandidateSet {
         Self::discover_semantic_from_entries(dom, snapshot.iter().copied(), body)
     }
 
-    #[cfg(test)]
     fn discover_semantic_from_entries(
         dom: &Dom,
         entries: impl IntoIterator<Item = (NodeId, u32)>,
@@ -1050,12 +1046,9 @@ fn lead_heading_branches(
         return None;
     }
     let previous = previous_substantive_element(dom, branch)?;
-    let heading = dom.descendants(previous).find(|&node| {
-        matches!(
-            dom.tag(node),
-            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-        )
-    })?;
+    let heading = dom
+        .descendants(previous)
+        .find(|&node| crate::normalize::heading_level(dom, node).is_some())?;
     let heading_chars = dom.normalized_char_count(heading);
     let branch_chars = dom.normalized_char_count(previous);
     let auxiliary_chars = branch_chars.saturating_sub(heading_chars);
@@ -1139,12 +1132,7 @@ fn starts_with_heading(dom: &Dom, branch: NodeId) -> bool {
                 && dom.tag(node) != Some(Tag::Section)
                 && dom.tag(node) != Some(Tag::Header)
         })
-        .is_some_and(|node| {
-            matches!(
-                dom.tag(node),
-                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-            )
-        })
+        .is_some_and(|node| crate::normalize::heading_level(dom, node).is_some())
 }
 
 fn previous_substantive_element(dom: &Dom, node: NodeId) -> Option<NodeId> {
@@ -2144,6 +2132,15 @@ mod tests {
     #[test]
     fn root_selection_keeps_an_adjacent_lead_heading() {
         let html = r#"<body><main id="broad"><section><h1>Important label</h1></section><section id="specific"><p>The complete details occupy almost all text in the parent boundary.</p></section></main></body>"#;
+        assert_eq!(
+            select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
+            "broad"
+        );
+    }
+
+    #[test]
+    fn root_selection_keeps_an_adjacent_aria_lead_heading() {
+        let html = r#"<body><main id="broad"><section><div role="heading" aria-level="1">Important label</div></section><section id="specific"><p>The complete details occupy almost all text in the parent boundary.</p></section></main></body>"#;
         assert_eq!(
             select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
             "broad"

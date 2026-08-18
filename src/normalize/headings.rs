@@ -93,8 +93,6 @@ pub(super) fn remove_artifacts_with_snapshot(
 }
 
 pub(super) fn normalize_roles(dom: &mut Dom, root: NodeId) {
-    // Capture ARIA heading semantics before class and role cleanup. This small
-    // pass is also safe to run on the scoring-only DOM.
     let nodes = dom.element_descendants_snapshot_with_depth(root);
     for &(node, _) in &nodes {
         if dom.parent(node).is_none() || !has_role(dom, node, "heading") {
@@ -139,7 +137,7 @@ fn heading_tag(level: u8) -> Option<Tag> {
     }
 }
 
-fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
+pub(crate) fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
     match dom.tag(node) {
         Some(Tag::H1) => Some(1),
         Some(Tag::H2) => Some(2),

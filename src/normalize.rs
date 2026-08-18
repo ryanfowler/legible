@@ -6,8 +6,29 @@ mod lists;
 mod media;
 mod svg;
 
+pub(crate) use headings::heading_level;
+
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::is_element_without_content;
+
+/// Applies the historical scoring projections to the selected fragment.
+///
+/// The projections affect retained block boundaries. Apply them after root
+/// selection so the complete source tree stays immutable and shared.
+pub(crate) fn materialize_scoring_structure(dom: &mut Dom) {
+    let root = dom.root();
+    headings::normalize_roles(dom, root);
+    lists::normalize_for_scoring(dom, root);
+    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    let candidates =
+        crate::candidate::CandidateSet::discover_semantic_from_snapshot(dom, &snapshot, None);
+    let divs: smallvec::SmallVec<[NodeId; 128]> = snapshot
+        .iter()
+        .map(|&(node, _)| node)
+        .filter(|&node| dom.tag(node) == Some(Tag::Div))
+        .collect();
+    crate::scoring::prepare_readability_structure(dom, &divs, &candidates);
+}
 
 /// Prepares and cleans retained source markup before semantic compilation.
 ///
@@ -161,16 +182,6 @@ pub(crate) fn collect_external_footnotes(
     dom: &Dom,
 ) -> crate::document::ExternalFootnoteDefinitions {
     crate::document::collect_external_footnotes(dom)
-}
-
-/// Preserves explicit ARIA document structure in the scoring-only DOM.
-///
-/// Readability preparation can turn leaf `div` elements into paragraphs. Run
-/// the same heading and list passes first so that operation cannot erase
-/// author-provided semantics. The retained fragment runs the full pipeline.
-pub(crate) fn normalize_scoring_structure(dom: &mut Dom, root: NodeId) {
-    headings::normalize_roles(dom, root);
-    lists::normalize_for_scoring(dom, root);
 }
 
 pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
@@ -379,6 +390,26 @@ mod tests {
         normalize_semantics(&mut dom, root, &mut nodes);
         remove_empty_content(&mut dom, root, &mut nodes);
         (dom, root)
+    }
+
+    #[test]
+    fn materializes_a_selected_top_level_div() {
+        let mut dom = Dom::parse_fragment(
+            "<div>Selected phrasing <strong>stays together</strong>.</div>",
+            Tag::Div,
+        )
+        .unwrap();
+        materialize_scoring_structure(&mut dom);
+
+        let selected = dom
+            .element_children(dom.root())
+            .next()
+            .expect("fragment keeps its selected content");
+        assert_eq!(dom.tag(selected), Some(Tag::P));
+        assert_eq!(
+            dom.normalized_text(selected, 32).0,
+            "Selected phrasing stays together."
+        );
     }
 
     #[test]
