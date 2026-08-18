@@ -66,3 +66,7 @@ harness = false
 [[bench]]
 name = "smoke"
 harness = false
+
+[[bench]]
+name = "real_world"
+harness = false

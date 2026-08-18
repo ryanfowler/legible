@@ -500,12 +500,12 @@ fn bench_large_compatibility_fixtures(c: &mut Criterion) {
     for (name, html, url) in [
         (
             "guardian-article",
-            include_str!("fixtures/guardian-article/source.html"),
+            include_str!("fixtures/readability-js/guardian-1/source.html"),
             "https://www.theguardian.com/example",
         ),
         (
             "wikipedia-reference",
-            include_str!("fixtures/wikipedia-reference/source.html"),
+            include_str!("fixtures/readability-js/wikipedia-2/source.html"),
             "https://en.wikipedia.org/wiki/Example",
         ),
     ] {

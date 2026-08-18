@@ -13,6 +13,7 @@ cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
 cargo bench --bench smoke      # Run the quick performance smoke benchmarks
 cargo bench --bench extraction # Run the full compatibility performance suite
+cargo bench --bench real_world # Run the Mozilla Readability real-world fixtures
 cargo +nightly fuzz run <target> # Run a fuzz target (requires nightly + cargo-fuzz)
 prettier -w .          # Format other files
 node scripts/compare-extractors/performance.mjs  # Compare extractors
