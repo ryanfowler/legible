@@ -262,7 +262,7 @@ impl ContentMetrics {
         store.enable_link_lengths();
         let text = get_or_compute_stats(dom, root, &mut store);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
         for node in std::iter::once(root).chain(dom.descendants(root)) {
             metrics.count_structure(dom.tag(node));
             if dom.tag(node) == Some(Tag::A) {
@@ -285,7 +285,7 @@ impl ContentMetrics {
         store.enable_link_lengths();
         let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
         let mut included_nodes = Vec::with_capacity(elements.len() + 1);
         if !excluded.get(root.index()).copied().unwrap_or(false) {
             included_nodes.push(root);
@@ -329,7 +329,7 @@ impl ContentMetrics {
         store.enable_link_lengths();
         let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric);
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
         let Some(range) = source.subtree_range(root) else {
             return metrics;
         };

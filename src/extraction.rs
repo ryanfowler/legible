@@ -821,8 +821,7 @@ impl<'a> ContentExtractor<'a> {
                         if node == body {
                             break;
                         }
-                        if let Some(score) = self.node_data.get(node).map(|data| data.content_score)
-                        {
+                        if let Some(score) = self.node_data.get_content_score_if_initialized(node) {
                             if score < threshold {
                                 break;
                             }
@@ -1284,7 +1283,6 @@ impl<'a> ContentExtractor<'a> {
         let discovery = &analysis.weighted.discovery;
         let working_root = analysis.dom.root();
         let mut node_data = NodeStateStore::new();
-        node_data.sync_len(analysis.dom.len());
         if discovery.has_links {
             node_data.enable_link_lengths();
         }
@@ -1421,7 +1419,6 @@ impl<'a> ContentExtractor<'a> {
         let mut score_variant =
             |weight_classes: bool, shared_feature_index: Option<&CandidateFeatureIndex>| {
                 let mut node_data = NodeStateStore::new();
-                node_data.sync_len(working_dom.len());
                 if discovery.has_links {
                     node_data.enable_link_lengths();
                 }
@@ -2648,7 +2645,7 @@ impl<'a> ContentExtractor<'a> {
                         || (s.text_length < 80
                             && s.text_length > 0
                             && d == 0.0
-                            && s.has_sentence_end)
+                            && s.has_sentence_end())
                 }
                 if !yes
                     && is_near_preceding_sibling(dom, x, top)
@@ -3584,7 +3581,6 @@ mod tests {
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
-        readability.node_data.sync_len(scoring_dom.len());
         for node in prepared {
             if readability.node_data.mark_score_seen(node) {
                 to_score.push(node);
@@ -4478,7 +4474,6 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
-        readability.node_data.sync_len(scoring_dom.len());
         for node in prepared {
             if readability.node_data.mark_score_seen(node) {
                 to_score.push(node);
@@ -4523,7 +4518,6 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
-        readability.node_data.sync_len(scoring_dom.len());
         for node in prepared {
             if readability.node_data.mark_score_seen(node) {
                 to_score.push(node);
@@ -4616,7 +4610,6 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             &discovery.candidates,
         );
         let mut to_score = discovery.to_score.clone();
-        readability.node_data.sync_len(scoring_dom.len());
         for id in prepared {
             if readability.node_data.mark_score_seen(id) {
                 to_score.push(id)
