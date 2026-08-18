@@ -2,11 +2,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use legible::extract;
 use std::hint::black_box;
 
-fn bench_mozilla_readability_fixtures(c: &mut Criterion) {
-    let mut group = c.benchmark_group("mozilla_readability");
-    group.sample_size(10);
-
-    for (name, html, url) in [
+fn fixtures() -> [(&'static str, &'static str, &'static str); 9] {
+    [
         (
             "medium-2",
             include_str!("fixtures/readability-js/medium-2/source.html"),
@@ -52,7 +49,14 @@ fn bench_mozilla_readability_fixtures(c: &mut Criterion) {
             include_str!("fixtures/readability-js/guardian-1/source.html"),
             "https://www.theguardian.com/environment/2019/jan/03/what-is-the-sea-telling-us-maori-tribes-fearful-over-whale-strandings",
         ),
-    ] {
+    ]
+}
+
+fn bench_mozilla_readability_fixtures(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mozilla_readability");
+    group.sample_size(10);
+
+    for (name, html, url) in fixtures() {
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), html, |b, html| {
             b.iter(|| extract(black_box(html), Some(url)).unwrap())
@@ -62,5 +66,26 @@ fn bench_mozilla_readability_fixtures(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_mozilla_readability_fixtures);
+fn bench_mozilla_readability_markdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mozilla_readability_markdown");
+    group.sample_size(10);
+
+    for (name, html, url) in fixtures() {
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), html, |b, html| {
+            b.iter(|| {
+                let page = extract(black_box(html), Some(url)).unwrap();
+                black_box(page.markdown())
+            })
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_mozilla_readability_fixtures,
+    bench_mozilla_readability_markdown
+);
 criterion_main!(benches);

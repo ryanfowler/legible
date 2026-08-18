@@ -50,6 +50,14 @@ impl Dom {
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
+    /// Reserves space for a known small set of synthetic nodes.
+    ///
+    /// Use an exact reservation here. A geometric growth at the end of a
+    /// large parsed arena can retain almost one full unused copy of the node
+    /// storage for only a few new wrappers.
+    pub(crate) fn reserve_additional_nodes_exact(&mut self, additional: usize) {
+        self.nodes.reserve_exact(additional);
+    }
     pub(crate) fn root(&self) -> NodeId {
         self.root
     }

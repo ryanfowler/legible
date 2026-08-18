@@ -14,7 +14,7 @@ use crate::diagnostics::{
     NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo, RootInfo,
     RootSelectionReasonInfo,
 };
-use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, Tag, build_match_string};
+use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, Tag};
 use crate::error::{Error, Result};
 use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::instrumentation::{Phase, PhaseGuard};
@@ -66,6 +66,68 @@ pub(crate) struct ContentExtractor<'a> {
     specialized_root: Option<NodeId>,
     specialized_identity: Option<&'static str>,
     page_kind: PageKind,
+}
+
+#[derive(Clone, Copy)]
+enum CommonTableWrapper {
+    Rows,
+    Cells,
+    Sections,
+    Columns,
+}
+
+impl CommonTableWrapper {
+    fn node_count(self) -> usize {
+        match self {
+            Self::Rows | Self::Columns => 2,
+            Self::Cells => 3,
+            Self::Sections => 1,
+        }
+    }
+}
+
+fn common_table_wrapper(tags: &[Tag], sibling_count: usize) -> Option<CommonTableWrapper> {
+    if sibling_count == 0 || tags.len() != sibling_count {
+        return None;
+    }
+    if tags.iter().all(|&tag| tag == Tag::Tr) {
+        Some(CommonTableWrapper::Rows)
+    } else if tags.iter().all(|tag| matches!(tag, Tag::Td | Tag::Th)) {
+        Some(CommonTableWrapper::Cells)
+    } else if tags.iter().all(|tag| {
+        matches!(
+            tag,
+            Tag::Caption | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead
+        )
+    }) {
+        Some(CommonTableWrapper::Sections)
+    } else if tags.iter().all(|&tag| tag == Tag::Col) {
+        Some(CommonTableWrapper::Columns)
+    } else {
+        None
+    }
+}
+
+fn table_wrapper_count(tag: Tag) -> usize {
+    match tag {
+        Tag::Tr | Tag::Col => 2,
+        Tag::Td | Tag::Th => 3,
+        Tag::Caption | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead => 1,
+        _ => 0,
+    }
+}
+
+fn table_wrapper_plan(tags: &[Tag], sibling_count: usize) -> (Option<CommonTableWrapper>, usize) {
+    let common = common_table_wrapper(tags, sibling_count);
+    let node_count = common.map_or_else(
+        || {
+            tags.iter().fold(0usize, |count, &tag| {
+                count.saturating_add(table_wrapper_count(tag))
+            })
+        },
+        CommonTableWrapper::node_count,
+    );
+    (common, node_count)
 }
 
 #[derive(Default)]
@@ -609,7 +671,6 @@ impl<'a> ContentExtractor<'a> {
             self.structured_data
                 .primary_texts(&self.structured_title, self.source_uri.as_ref()),
         );
-        let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
         let mut fragment_workspace = FragmentWorkspace::default();
@@ -675,7 +736,6 @@ impl<'a> ContentExtractor<'a> {
                 record_generic_scoring_call();
                 let analysis = self.build_scoring_analysis(
                     visibility,
-                    &mut match_buffer,
                     &mut text_buffer,
                     &prepared_source,
                     &accessible_math,
@@ -938,6 +998,7 @@ impl<'a> ContentExtractor<'a> {
             fragment_workspace.reset();
             let (_top_id, content_id) = if selection.node == body {
                 Self::prune_body_fallback_chrome(&mut self.dom, copied_top);
+                self.dom.reserve_additional_nodes_exact(2);
                 let container = self
                     .dom
                     .create_html_element(Tag::Div)
@@ -1011,7 +1072,6 @@ impl<'a> ContentExtractor<'a> {
                 selection.node != body && strategy != ExtractionStrategy::BodyFallback,
                 &compile_context,
                 &video,
-                &mut match_buffer,
                 &mut text_buffer,
                 &mut cleaning_nodes,
                 &mut fragment_workspace,
@@ -1356,7 +1416,6 @@ impl<'a> ContentExtractor<'a> {
     fn build_scoring_analysis(
         &mut self,
         visibility: VisibilityVariant,
-        match_buffer: &mut String,
         text_buffer: &mut String,
         prepared_source: &PreparedSource,
         accessible_math: &HashSet<NodeId>,
@@ -1379,7 +1438,6 @@ impl<'a> ContentExtractor<'a> {
             let discovery = {
                 let _phase = PhaseGuard::new(Phase::CandidateDiscovery);
                 self.discover_candidates_with_indexes(
-                    match_buffer,
                     text_buffer,
                     prepared_source,
                     accessible_math,
@@ -1567,6 +1625,7 @@ impl<'a> ContentExtractor<'a> {
 
         if synthetic {
             Self::prune_body_fallback_chrome(&mut self.dom, body);
+            self.dom.reserve_additional_nodes_exact(1);
             let container = self
                 .dom
                 .create_html_element(Tag::Div)
@@ -1625,7 +1684,6 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
-        let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut fragment_workspace = FragmentWorkspace::default();
         self.prepare_exact_fragment(
@@ -1633,7 +1691,6 @@ impl<'a> ContentExtractor<'a> {
             content_id,
             origin,
             &title_plan,
-            &mut match_buffer,
             &mut text_buffer,
         );
         remove_title_brand_headings(&mut fragment, content_id, &title_plan);
@@ -1650,7 +1707,6 @@ impl<'a> ContentExtractor<'a> {
             root != body,
             compile_context,
             &video,
-            &mut match_buffer,
             &mut text_buffer,
             &mut cleaning_nodes,
             &mut fragment_workspace,
@@ -1799,7 +1855,6 @@ impl<'a> ContentExtractor<'a> {
         root: NodeId,
         origin: ExactRootOrigin,
         title_plan: &TitleHeadingPlan,
-        match_buffer: &mut String,
         text_buffer: &mut String,
     ) {
         if origin != ExactRootOrigin::Caller {
@@ -1827,8 +1882,7 @@ impl<'a> ContentExtractor<'a> {
                 continue;
             }
             if self.page_byline.is_none() && !self.metadata.has_source_author {
-                build_match_string(dom, node, match_buffer);
-                if is_valid_byline(dom, node, match_buffer, text_buffer) {
+                if is_valid_byline(dom, node, text_buffer) {
                     self.page_byline = Some(
                         metadata::byline_name(dom, node)
                             .unwrap_or_else(|| get_inner_text(dom, node, text_buffer).to_owned()),
@@ -2305,11 +2359,7 @@ impl<'a> ContentExtractor<'a> {
     }
 
     #[cfg(test)]
-    fn discover_candidates(
-        &mut self,
-        match_buffer: &mut String,
-        text_buffer: &mut String,
-    ) -> CandidateDiscovery {
+    fn discover_candidates(&mut self, text_buffer: &mut String) -> CandidateDiscovery {
         let prepared_source = PreparedSource::build(&self.dom);
         let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
         let title_plan = title_heading_plan(
@@ -2326,7 +2376,6 @@ impl<'a> ContentExtractor<'a> {
             prepared_source.anchors.body,
         );
         self.discover_candidates_with_indexes(
-            match_buffer,
             text_buffer,
             &prepared_source,
             &accessible_math,
@@ -2339,7 +2388,6 @@ impl<'a> ContentExtractor<'a> {
     #[allow(clippy::too_many_arguments)]
     fn discover_candidates_with_indexes(
         &mut self,
-        match_buffer: &mut String,
         text_buffer: &mut String,
         prepared_source: &PreparedSource,
         accessible_math: &HashSet<NodeId>,
@@ -2387,8 +2435,7 @@ impl<'a> ContentExtractor<'a> {
                 continue;
             }
             if byline.is_none() && !self.metadata.has_source_author {
-                build_match_string(&self.dom, id, match_buffer);
-                if is_valid_byline(&self.dom, id, match_buffer, text_buffer) {
+                if is_valid_byline(&self.dom, id, text_buffer) {
                     byline =
                         Some(metadata::byline_name(&self.dom, id).unwrap_or_else(|| {
                             get_inner_text(&self.dom, id, text_buffer).to_owned()
@@ -2685,6 +2732,16 @@ impl<'a> ContentExtractor<'a> {
     }
     fn create_container(&mut self, _top: NodeId, siblings: &[NodeId]) -> Option<NodeId> {
         let first = *siblings.first()?;
+        let tags: SmallVec<[Tag; 8]> = siblings
+            .iter()
+            .filter_map(|&node| self.dom.tag(node))
+            .collect();
+        let (common_table_wrapper, wrapper_count) = table_wrapper_plan(&tags, siblings.len());
+
+        // Copied fragments are often exactly at capacity. Reserve only the
+        // container and the table wrappers that this selection needs.
+        self.dom
+            .reserve_additional_nodes_exact(1usize.saturating_add(wrapper_count));
         let container = self.dom.create_html_element(Tag::Div).ok()?;
         self.dom.insert_before(first, container);
 
@@ -2692,46 +2749,36 @@ impl<'a> ContentExtractor<'a> {
         // model. Keep one common wrapper when the selected siblings are rows,
         // cells, or table sections. This also prevents a row from being
         // renamed to a div while it still contains cells.
-        let tags: SmallVec<[Tag; 8]> = siblings
-            .iter()
-            .filter_map(|&node| self.dom.tag(node))
-            .collect();
-        let table_parent = if tags.len() == siblings.len() && tags.iter().all(|tag| *tag == Tag::Tr)
-        {
-            let table = self.dom.create_html_element(Tag::Table).ok()?;
-            let body = self.dom.create_html_element(Tag::Tbody).ok()?;
-            self.dom.append_child(container, table);
-            self.dom.append_child(table, body);
-            Some(body)
-        } else if tags.len() == siblings.len()
-            && tags.iter().all(|tag| matches!(tag, Tag::Td | Tag::Th))
-        {
-            let table = self.dom.create_html_element(Tag::Table).ok()?;
-            let body = self.dom.create_html_element(Tag::Tbody).ok()?;
-            let row = self.dom.create_html_element(Tag::Tr).ok()?;
-            self.dom.append_child(container, table);
-            self.dom.append_child(table, body);
-            self.dom.append_child(body, row);
-            Some(row)
-        } else if tags.len() == siblings.len()
-            && tags.iter().all(|tag| {
-                matches!(
-                    tag,
-                    Tag::Caption | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead
-                )
-            })
-        {
-            let table = self.dom.create_html_element(Tag::Table).ok()?;
-            self.dom.append_child(container, table);
-            Some(table)
-        } else if tags.len() == siblings.len() && tags.iter().all(|tag| *tag == Tag::Col) {
-            let table = self.dom.create_html_element(Tag::Table).ok()?;
-            let group = self.dom.create_html_element(Tag::Colgroup).ok()?;
-            self.dom.append_child(container, table);
-            self.dom.append_child(table, group);
-            Some(group)
-        } else {
-            None
+        let table_parent = match common_table_wrapper {
+            Some(CommonTableWrapper::Rows) => {
+                let table = self.dom.create_html_element(Tag::Table).ok()?;
+                let body = self.dom.create_html_element(Tag::Tbody).ok()?;
+                self.dom.append_child(container, table);
+                self.dom.append_child(table, body);
+                Some(body)
+            }
+            Some(CommonTableWrapper::Cells) => {
+                let table = self.dom.create_html_element(Tag::Table).ok()?;
+                let body = self.dom.create_html_element(Tag::Tbody).ok()?;
+                let row = self.dom.create_html_element(Tag::Tr).ok()?;
+                self.dom.append_child(container, table);
+                self.dom.append_child(table, body);
+                self.dom.append_child(body, row);
+                Some(row)
+            }
+            Some(CommonTableWrapper::Sections) => {
+                let table = self.dom.create_html_element(Tag::Table).ok()?;
+                self.dom.append_child(container, table);
+                Some(table)
+            }
+            Some(CommonTableWrapper::Columns) => {
+                let table = self.dom.create_html_element(Tag::Table).ok()?;
+                let group = self.dom.create_html_element(Tag::Colgroup).ok()?;
+                self.dom.append_child(container, table);
+                self.dom.append_child(table, group);
+                Some(group)
+            }
+            None => None,
         };
 
         for &node in siblings {
@@ -2790,7 +2837,6 @@ impl<'a> ContentExtractor<'a> {
         credible_semantic_candidate: bool,
         compile_context: &crate::document::CompileContext,
         video: &Regex,
-        _match_buffer: &mut String,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
         workspace: &mut FragmentWorkspace,
@@ -3608,9 +3654,8 @@ mod tests {
         let dom = Dom::parse_document(html).unwrap();
         let config = ExtractorConfig::default();
         let mut readability = ContentExtractor::from_document(dom, None, &config);
-        let mut match_buffer = String::new();
         let mut text_buffer = String::new();
-        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let discovery = readability.discover_candidates(&mut text_buffer);
         let mut scoring_dom = readability.dom.clone();
         let mut to_score = discovery.to_score;
         let prepared = prepare_readability_structure(
@@ -3719,6 +3764,23 @@ mod tests {
                     .any(|node| extractor.dom.tag(node) == Some(Tag::Table))
             );
         }
+    }
+
+    #[test]
+    fn synthetic_container_counts_only_required_table_wrappers() {
+        assert_eq!(table_wrapper_plan(&[Tag::P; 64], 64).1, 0);
+        assert_eq!(table_wrapper_plan(&[Tag::Tr; 64], 64).1, 2);
+        assert_eq!(table_wrapper_plan(&[Tag::Td, Tag::Th], 2).1, 3);
+        assert_eq!(
+            table_wrapper_plan(&[Tag::Thead, Tag::Tbody, Tag::Tfoot], 3).1,
+            1
+        );
+        assert_eq!(table_wrapper_plan(&[Tag::Col; 64], 64).1, 2);
+        assert_eq!(table_wrapper_plan(&[Tag::Tr, Tag::P, Tag::Td], 3).1, 5);
+
+        // A non-element sibling prevents one shared wrapper chain. Count the
+        // wrappers for the element siblings that still need protection.
+        assert_eq!(table_wrapper_plan(&[Tag::Tr], 2).1, 2);
     }
 
     #[test]
@@ -4500,9 +4562,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .unwrap();
         let config = ExtractorConfig::default();
         let mut readability = ContentExtractor::from_document(dom, None, &config);
-        let mut match_buffer = String::new();
         let mut text_buffer = String::new();
-        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let discovery = readability.discover_candidates(&mut text_buffer);
         assert!(!discovery.candidates.is_semantic(content));
         let mut scoring_dom = readability.dom.clone();
         let mut to_score = discovery.to_score;
@@ -4545,9 +4606,8 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .unwrap();
         let config = ExtractorConfig::default();
         let mut readability = ContentExtractor::from_document(dom, None, &config);
-        let mut match_buffer = String::new();
         let mut text_buffer = String::new();
-        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let discovery = readability.discover_candidates(&mut text_buffer);
         let mut scoring_dom = readability.dom.clone();
         let mut to_score = discovery.to_score;
         let prepared = prepare_readability_structure(
@@ -4628,10 +4688,9 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .unwrap();
         let parent = readability.dom.parent(unlikely);
         let dom_len = readability.dom.len();
-        let mut match_buffer = String::new();
         let mut text_buffer = String::new();
 
-        let discovery = readability.discover_candidates(&mut match_buffer, &mut text_buffer);
+        let discovery = readability.discover_candidates(&mut text_buffer);
         let normal = readability
             .dom
             .descendants(readability.dom.root())
