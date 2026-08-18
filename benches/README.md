@@ -26,7 +26,8 @@ cargo bench --bench real_world
 ```
 
 This target measures `medium-2`, `ars-1`, `heise`, `nytimes-5`, `wikipedia-2`,
-`yahoo-2`, `buzzfeed-1`, `engadget`, and `guardian-1`.
+`yahoo-2`, `buzzfeed-1`, `engadget`, and `guardian-1`. It measures extraction
+and the full raw HTML to Markdown path for each fixture.
 
 ## Phase and allocation report
 

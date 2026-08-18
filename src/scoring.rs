@@ -13,91 +13,107 @@ pub(crate) struct ReadabilityScore {
 fn is_hash_url(s: &str) -> bool {
     s.starts_with('#') && s.len() > 1
 }
+
+const ASCII_ALPHA: u8 = 1 << 0;
+const ASCII_DIGIT: u8 = 1 << 1;
+const ASCII_WHITESPACE: u8 = 1 << 2;
+const ASCII_COMMA: u8 = 1 << 3;
+const ASCII_SENTENCE_END: u8 = 1 << 4;
+const ASCII_DOT: u8 = 1 << 5;
+
+const fn ascii_classes() -> [u8; 256] {
+    let mut classes = [0; 256];
+    let mut value = 0;
+    while value < classes.len() {
+        let byte = value as u8;
+        let mut class = 0;
+        if (byte >= b'a' && byte <= b'z') || (byte >= b'A' && byte <= b'Z') {
+            class |= ASCII_ALPHA;
+        }
+        if byte >= b'0' && byte <= b'9' {
+            class |= ASCII_DIGIT;
+        }
+        if byte == b' ' || (byte >= b'\t' && byte <= b'\r') {
+            class |= ASCII_WHITESPACE;
+        }
+        if byte == b',' {
+            class |= ASCII_COMMA;
+        }
+        if byte == b'.' || byte == b'!' || byte == b'?' {
+            class |= ASCII_SENTENCE_END;
+        }
+        if byte == b'.' {
+            class |= ASCII_DOT;
+        }
+        classes[value] = class;
+        value += 1;
+    }
+    classes
+}
+
+const ASCII_CLASSES: [u8; 256] = ascii_classes();
+
 fn stats_for_text(text: &str) -> NodeStats {
     let mut s = NodeStats::default();
     s.set_has_text(!text.is_empty());
-    s.set_starts_with_whitespace(text.starts_with(char::is_whitespace));
-    s.set_ends_with_whitespace(text.ends_with(char::is_whitespace));
     let mut prev = true;
     let mut dot = false;
     let mut text_length = 0usize;
     let mut word_count = 0usize;
     let mut comma_count = 0usize;
     let mut sentence_end_count = 0usize;
+    let mut has_non_whitespace = false;
+    let mut has_alphanumeric = false;
+    let mut has_sentence_break = false;
 
     // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
     // Unicode whitespace tables in the hot loop.
     if text.is_ascii() {
         let bytes = text.as_bytes();
-        // Keep the normalization-dependent state in one loop. Use memchr's
-        // vectorized searches for independent punctuation counts instead of
-        // testing each punctuation byte in the stateful hot loop.
-        comma_count = memchr::memchr_iter(b',', bytes).count();
-        sentence_end_count = memchr::memchr3_iter(b'.', b'!', b'?', bytes).count();
+        s.set_starts_with_whitespace(bytes.first().is_some_and(u8::is_ascii_whitespace));
+        s.set_ends_with_whitespace(bytes.last().is_some_and(u8::is_ascii_whitespace));
         let mut alphabetic_chars = 0_usize;
         let mut digit_chars = 0_usize;
         for &byte in bytes {
-            s.set_has_alphanumeric(s.has_alphanumeric() || byte.is_ascii_alphanumeric());
-            alphabetic_chars += usize::from(byte.is_ascii_alphabetic());
-            digit_chars += usize::from(byte.is_ascii_digit());
-        }
-        s.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
-        s.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
-        let has_control_whitespace = memchr::memchr3(b'\t', b'\n', b'\r', bytes).is_some()
-            || memchr::memchr2(0x0b, 0x0c, bytes).is_some();
-        if !has_control_whitespace {
-            // Normal HTML text uses spaces between words. Iterate only those
-            // separators. This avoids a branch and state update for every
-            // letter in prose.
-            let mut spaces = 0;
-            let mut non_whitespace_runs = 0;
-            for index in memchr::memchr_iter(b' ', bytes) {
-                spaces += 1;
-                if index > 0 && bytes[index - 1] != b' ' {
-                    s.set_has_sentence_break(s.has_sentence_break() || bytes[index - 1] == b'.');
-                }
-                if index + 1 < bytes.len() && bytes[index + 1] != b' ' {
-                    non_whitespace_runs += 1;
-                }
-            }
-            s.set_has_non_whitespace(spaces != bytes.len());
-            if s.has_non_whitespace() {
-                word_count = non_whitespace_runs + usize::from(bytes.first() != Some(&b' '));
-                text_length = bytes.len() - spaces + word_count.saturating_sub(1);
-                dot = bytes.last() == Some(&b'.');
-                // `text_length` already excludes a trailing separator.
-                prev = false;
-            }
-        } else {
-            for &byte in bytes {
-                if byte.is_ascii_whitespace() {
-                    s.set_has_sentence_break(s.has_sentence_break() || dot);
-                    dot = false;
-                    if !prev {
-                        text_length += 1;
-                        prev = true
-                    }
-                } else {
-                    s.set_has_non_whitespace(true);
-                    word_count += usize::from(prev);
-                    dot = byte == b'.';
-                    text_length += 1;
-                    prev = false
-                }
-            }
-        }
-    } else {
-        for c in text.chars() {
-            if c.is_whitespace() {
-                s.set_has_sentence_break(s.has_sentence_break() || dot);
+            let class = ASCII_CLASSES[usize::from(byte)];
+            alphabetic_chars += usize::from(class & ASCII_ALPHA != 0);
+            digit_chars += usize::from(class & ASCII_DIGIT != 0);
+            comma_count += usize::from(class & ASCII_COMMA != 0);
+            sentence_end_count += usize::from(class & ASCII_SENTENCE_END != 0);
+            if class & ASCII_WHITESPACE != 0 {
+                has_sentence_break |= dot;
                 dot = false;
                 if !prev {
                     text_length += 1;
                     prev = true
                 }
             } else {
-                s.set_has_non_whitespace(true);
-                s.set_has_alphanumeric(s.has_alphanumeric() || c.is_alphanumeric());
+                has_non_whitespace = true;
+                word_count += usize::from(prev);
+                dot = class & ASCII_DOT != 0;
+                text_length += 1;
+                prev = false
+            }
+        }
+        s.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
+        s.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
+        has_alphanumeric = alphabetic_chars != 0 || digit_chars != 0;
+    } else {
+        s.set_starts_with_whitespace(text.starts_with(char::is_whitespace));
+        s.set_ends_with_whitespace(text.ends_with(char::is_whitespace));
+        for c in text.chars() {
+            if c.is_whitespace() {
+                has_sentence_break |= dot;
+                dot = false;
+                if !prev {
+                    text_length += 1;
+                    prev = true
+                }
+            } else {
+                has_non_whitespace = true;
+                if !has_alphanumeric {
+                    has_alphanumeric = c.is_alphanumeric();
+                }
                 s.alphabetic_chars = s
                     .alphabetic_chars
                     .saturating_add(u32::from(c.is_alphabetic()));
@@ -134,8 +150,11 @@ fn stats_for_text(text: &str) -> NodeStats {
     s.word_count = word_count.min(u32::MAX as usize) as u32;
     s.comma_count = comma_count.min(u32::MAX as usize) as u32;
     s.sentence_end_count = sentence_end_count.min(u32::MAX as usize) as u32;
+    s.set_has_non_whitespace(has_non_whitespace);
+    s.set_has_alphanumeric(has_alphanumeric);
+    s.set_has_sentence_break(has_sentence_break);
     s.set_ends_with_dot(dot);
-    s.set_has_sentence_end(s.has_sentence_break() || dot);
+    s.set_has_sentence_end(has_sentence_break || dot);
     s
 }
 fn append_stats(a: &mut NodeStats, b: &NodeStats) {
@@ -146,23 +165,22 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
         *a = *b;
         return;
     }
-    a.set_has_sentence_break(
-        a.has_sentence_break()
-            || b.has_sentence_break()
-            || (a.ends_with_dot() && b.starts_with_whitespace()),
-    );
-    if a.has_non_whitespace()
-        && b.has_non_whitespace()
-        && (a.ends_with_whitespace() || b.starts_with_whitespace())
+
+    let a_non_whitespace = a.has_non_whitespace();
+    let b_non_whitespace = b.has_non_whitespace();
+    let a_ends_with_whitespace = a.ends_with_whitespace();
+    let b_starts_with_whitespace = b.starts_with_whitespace();
+    let sentence_break = a.has_sentence_break()
+        || b.has_sentence_break()
+        || a.ends_with_dot() && b_starts_with_whitespace;
+
+    if a_non_whitespace && b_non_whitespace && (a_ends_with_whitespace || b_starts_with_whitespace)
     {
-        a.text_length = a.text_length.saturating_add(1)
+        a.text_length = a.text_length.saturating_add(1);
     }
     a.text_length = a.text_length.saturating_add(b.text_length);
     a.word_count = a.word_count.saturating_add(b.word_count);
-    if a.has_non_whitespace()
-        && b.has_non_whitespace()
-        && !a.ends_with_whitespace()
-        && !b.starts_with_whitespace()
+    if a_non_whitespace && b_non_whitespace && !a_ends_with_whitespace && !b_starts_with_whitespace
     {
         a.word_count = a.word_count.saturating_sub(1);
     }
@@ -170,11 +188,12 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     a.sentence_end_count = a.sentence_end_count.saturating_add(b.sentence_end_count);
     a.alphabetic_chars = a.alphabetic_chars.saturating_add(b.alphabetic_chars);
     a.digit_chars = a.digit_chars.saturating_add(b.digit_chars);
-    a.set_has_non_whitespace(a.has_non_whitespace() || b.has_non_whitespace());
+    a.set_has_sentence_break(sentence_break);
+    a.set_has_non_whitespace(a_non_whitespace || b_non_whitespace);
     a.set_has_alphanumeric(a.has_alphanumeric() || b.has_alphanumeric());
     a.set_ends_with_whitespace(b.ends_with_whitespace());
     a.set_ends_with_dot(b.ends_with_dot());
-    a.set_has_sentence_end(a.has_sentence_break() || a.ends_with_dot());
+    a.set_has_sentence_end(sentence_break || b.ends_with_dot());
 }
 pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
     get_or_compute_stats_excluding(dom, id, store, &[])
@@ -193,53 +212,71 @@ pub(crate) fn get_or_compute_stats_excluding(
         return *s;
     }
 
-    let mut stack = SmallVec::<[(NodeId, bool); 16]>::new();
-    stack.push((id, false));
-    while let Some((n, expanded)) = stack.pop() {
-        if store.get_stats(n).is_some() {
-            continue;
-        }
-        if !expanded {
-            stack.push((n, true));
-            for c in dom.children_rev(n) {
-                if !excluded.get(c.index()).copied().unwrap_or(false)
-                    && store.get_stats(c).is_none()
-                {
-                    stack.push((c, false))
-                }
+    struct StatsFrame {
+        node: NodeId,
+        next_child: Option<NodeId>,
+        stats: NodeStats,
+        link_length: f64,
+    }
+
+    impl StatsFrame {
+        fn new(dom: &Dom, node: NodeId) -> Self {
+            Self {
+                node,
+                next_child: dom.first_child(node),
+                stats: dom
+                    .text_node(node)
+                    .map_or_else(NodeStats::default, stats_for_text),
+                link_length: 0.0,
             }
-            continue;
         }
-        let mut s = match dom.text_node(n) {
-            Some(t) => stats_for_text(t),
-            None => NodeStats::default(),
-        };
-        let cache_links = store.link_lengths_enabled();
-        let mut link_length = 0.0;
-        for c in dom.children(n) {
-            if excluded.get(c.index()).copied().unwrap_or(false) {
+    }
+
+    let cache_links = store.link_lengths_enabled();
+    let mut stack = SmallVec::<[StatsFrame; 16]>::new();
+    stack.push(StatsFrame::new(dom, id));
+    while let Some(frame) = stack.last_mut() {
+        if let Some(child) = frame.next_child {
+            frame.next_child = dom.next_sibling(child);
+            if excluded.get(child.index()).copied().unwrap_or(false) {
                 continue;
             }
-            if let Some(cs) = store.get_stats(c) {
-                append_stats(&mut s, cs)
+            if let Some(child_stats) = store.get_stats(child) {
+                append_stats(&mut frame.stats, child_stats);
+                if cache_links {
+                    frame.link_length += store.link_length(child);
+                }
+            } else {
+                stack.push(StatsFrame::new(dom, child));
             }
-            if cache_links {
-                link_length += store.link_length(c);
-            }
+            continue;
         }
+
+        let mut completed = stack.pop().expect("stats frame exists");
+        completed.stats.set_has_sentence_end(
+            completed.stats.has_sentence_break() || completed.stats.ends_with_dot(),
+        );
         if cache_links {
-            if dom.tag(n) == Some(Tag::A) {
-                link_length = s.text_length as f64
-                    * if dom.attr(n, AttrName::Href).is_some_and(is_hash_url) {
+            if dom.tag(completed.node) == Some(Tag::A) {
+                completed.link_length = completed.stats.text_length as f64
+                    * if dom
+                        .attr(completed.node, AttrName::Href)
+                        .is_some_and(is_hash_url)
+                    {
                         0.3
                     } else {
                         1.0
                     };
             }
-            store.set_link_length(n, link_length);
+            store.set_link_length(completed.node, completed.link_length);
         }
-        s.set_has_sentence_end(s.has_sentence_break() || s.ends_with_dot());
-        store.set_stats(n, s)
+        store.set_stats(completed.node, completed.stats);
+        if let Some(parent) = stack.last_mut() {
+            append_stats(&mut parent.stats, &completed.stats);
+            if cache_links {
+                parent.link_length += completed.link_length;
+            }
+        }
     }
     store.get_stats(id).copied().unwrap_or_default()
 }
@@ -537,6 +574,11 @@ pub(crate) fn prepare_readability_structure(
     divs: &[NodeId],
     candidates: &CandidateSet,
 ) -> SmallVec<[NodeId; 256]> {
+    // Most prepared divs create at most one scoring paragraph. The parsed DOM
+    // often ends at its vector capacity, so reserve before the first wrapper.
+    // Exact growth avoids doubling the entire scoring arena for this temporary
+    // set of nodes.
+    dom.reserve_additional_nodes_exact(divs.len());
     let mut to_score = SmallVec::new();
     for &id in divs {
         if dom.parent(id).is_none() || dom.tag(id) != Some(Tag::Div) {
@@ -898,12 +940,13 @@ pub fn is_probably_visible(dom: &Dom, id: NodeId) -> bool {
     }
     true
 }
-pub fn is_valid_byline(dom: &Dom, id: NodeId, ms: &str, text_buffer: &mut String) -> bool {
+pub fn is_valid_byline(dom: &Dom, id: NodeId, text_buffer: &mut String) -> bool {
     let ok = dom.attr(id, AttrName::Rel) == Some("author")
         || dom
             .attr(id, AttrName::ItemProp)
             .is_some_and(|x| x.contains("author"))
-        || has_byline(ms);
+        || dom.attr(id, AttrName::Class).is_some_and(has_byline)
+        || dom.attr(id, AttrName::Id).is_some_and(has_byline);
     if !ok {
         return false;
     }

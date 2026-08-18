@@ -17,7 +17,7 @@ pub(crate) use node::{ElementData, Node, NodeData};
 pub(crate) use parse::{ParseError, ParseLimitKind};
 pub(crate) use state::{DataTableState, NodeStateStore, NodeStats};
 pub(crate) use tag::Tag;
-pub(crate) use traversal::{DocumentAnchors, build_match_string};
+pub(crate) use traversal::DocumentAnchors;
 
 #[cfg(test)]
 mod tests {

@@ -240,49 +240,28 @@ pub fn is_json_ld_article_type(s: &str) -> bool {
 /// The original regex `(?i)byline|author|dateline|writtenby|p-author` has no word
 /// boundaries, so we match substrings anywhere.
 pub fn has_byline(s: &str) -> bool {
-    let b = s.as_bytes();
-    let len = b.len();
-    // byline (6)
-    if len >= 6 {
-        for i in 0..=len - 6 {
-            if b[i..i + 6].eq_ignore_ascii_case(b"byline") {
-                return true;
-            }
+    let bytes = s.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        let rest = &bytes[index..];
+        match byte.to_ascii_lowercase() {
+            b'a' => rest
+                .get(..6)
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"author")),
+            b'b' => rest
+                .get(..6)
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"byline")),
+            b'd' => rest
+                .get(..8)
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"dateline")),
+            b'p' => rest
+                .get(..8)
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"p-author")),
+            b'w' => rest
+                .get(..9)
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"writtenby")),
+            _ => false,
         }
-    }
-    // author (6)
-    if len >= 6 {
-        for i in 0..=len - 6 {
-            if b[i..i + 6].eq_ignore_ascii_case(b"author") {
-                return true;
-            }
-        }
-    }
-    // dateline (8)
-    if len >= 8 {
-        for i in 0..=len - 8 {
-            if b[i..i + 8].eq_ignore_ascii_case(b"dateline") {
-                return true;
-            }
-        }
-    }
-    // writtenby (9)
-    if len >= 9 {
-        for i in 0..=len - 9 {
-            if b[i..i + 9].eq_ignore_ascii_case(b"writtenby") {
-                return true;
-            }
-        }
-    }
-    // p-author (8)
-    if len >= 8 {
-        for i in 0..=len - 8 {
-            if b[i..i + 8].eq_ignore_ascii_case(b"p-author") {
-                return true;
-            }
-        }
-    }
-    false
+    })
 }
 
 /// Parse a base64 data URL and return `(end_of_match_byte_index, media_type)`.

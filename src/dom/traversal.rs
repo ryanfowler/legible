@@ -583,14 +583,3 @@ fn append_normalized_text_chunk(text: &str, out: &mut String) {
         }
     }
 }
-
-pub(crate) fn build_match_string(dom: &Dom, node: NodeId, buf: &mut String) {
-    buf.clear();
-    if let Some(v) = dom.attr(node, super::AttrName::Class) {
-        buf.push_str(v)
-    }
-    buf.push(' ');
-    if let Some(v) = dom.attr(node, super::AttrName::Id) {
-        buf.push_str(v)
-    }
-}
