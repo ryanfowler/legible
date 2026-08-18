@@ -2,11 +2,12 @@
 
 use crate::constants::split_word_tokens;
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
-use crate::prepared::PreparedSource;
+use crate::prepared::{SourceAnalysis, SourceFlags};
 use crate::scoring::has_static_hidden_marker;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
+#[cfg(test)]
 const STRONG_IDS: &[&str] = &["post", "content", "article-content"];
 const ARTICLE_TAG_PRIOR: f64 = 0.003;
 const MAIN_TAG_PRIOR: f64 = 0.0025;
@@ -14,6 +15,7 @@ const ARTICLE_ROLE_PRIOR: f64 = 0.00275;
 const OTHER_SEMANTIC_PRIOR: f64 = 0.0025;
 const ADDITIONAL_SIGNAL_BONUS: f64 = 0.0005;
 const MAX_SEMANTIC_PRIOR: f64 = 0.004;
+#[cfg(test)]
 const STRONG_CLASSES: &[&str] = &[
     "post-content",
     "post-body",
@@ -112,6 +114,70 @@ pub(crate) struct CandidateSet {
     positions: Vec<u32>,
 }
 
+pub(crate) struct SourceCandidateBuilder {
+    candidates: CandidateSet,
+    generic_clutter_depth: Option<u32>,
+}
+
+impl SourceCandidateBuilder {
+    pub(crate) fn new(source_node_count: usize) -> Self {
+        Self {
+            candidates: CandidateSet::empty(source_node_count),
+            generic_clutter_depth: None,
+        }
+    }
+
+    pub(crate) fn observe(&mut self, dom: &Dom, entry: &crate::prepared::SourceEntry) {
+        let node = entry.node;
+        let depth = entry.depth;
+        if self
+            .generic_clutter_depth
+            .is_some_and(|root_depth| depth <= root_depth)
+        {
+            self.generic_clutter_depth = None;
+        }
+        let in_generic_clutter = self.generic_clutter_depth.is_some();
+        if !in_generic_clutter && is_generic_clutter_entry(entry) {
+            self.generic_clutter_depth = Some(depth);
+        }
+        if entry.tag == Some(Tag::Body) {
+            self.candidates.add(node, CandidateSource::Generic, 0.0);
+        }
+        let prior = match entry.tag {
+            Some(Tag::Article) => Some(ARTICLE_TAG_PRIOR),
+            Some(Tag::Main) => Some(MAIN_TAG_PRIOR),
+            _ => None,
+        };
+        if let Some(prior) = prior {
+            self.candidates.add(node, CandidateSource::Semantic, prior);
+        }
+        if !in_generic_clutter
+            && self.generic_clutter_depth != Some(depth)
+            && is_generic_candidate(dom, node, entry.tag)
+        {
+            self.candidates.add(node, CandidateSource::Generic, 0.0);
+        }
+        if entry.flags.contains(SourceFlags::ARTICLE_ROLE) {
+            self.candidates
+                .add(node, CandidateSource::Semantic, ARTICLE_ROLE_PRIOR);
+        }
+        if entry.flags.contains(SourceFlags::MAIN_ROLE) {
+            self.candidates
+                .add(node, CandidateSource::Semantic, OTHER_SEMANTIC_PRIOR);
+        }
+        if entry.flags.contains(SourceFlags::STRONG_CONTENT_ID)
+            || entry.flags.contains(SourceFlags::STRONG_CONTENT_CLASS)
+        {
+            self.candidates
+                .add(node, CandidateSource::Semantic, OTHER_SEMANTIC_PRIOR);
+        }
+    }
+
+    pub(crate) fn finish(self) -> CandidateSet {
+        self.candidates
+    }
+}
+
 pub(crate) struct CandidateContext {
     // All relationship values are indexed by CandidateSet order. Most source
     // nodes are not candidates, so these must not be DOM-sized arrays.
@@ -157,6 +223,13 @@ impl CandidateContext {
 }
 
 impl CandidateSet {
+    pub(crate) fn empty(source_node_count: usize) -> Self {
+        Self {
+            candidates: Vec::new(),
+            positions: vec![NO_CANDIDATE; source_node_count],
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn discover_semantic(dom: &Dom) -> Self {
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
@@ -172,18 +245,7 @@ impl CandidateSet {
         Self::discover_semantic_from_entries(dom, snapshot.iter().copied(), body)
     }
 
-    pub(crate) fn discover_semantic_from_prepared(
-        dom: &Dom,
-        source: &PreparedSource,
-        body: Option<NodeId>,
-    ) -> Self {
-        Self::discover_semantic_from_entries(
-            dom,
-            source.elements().map(|entry| (entry.node, entry.depth)),
-            body,
-        )
-    }
-
+    #[cfg(test)]
     fn discover_semantic_from_entries(
         dom: &Dom,
         entries: impl IntoIterator<Item = (NodeId, u32)>,
@@ -504,6 +566,13 @@ fn is_generic_clutter_container(dom: &Dom, node: NodeId) -> bool {
             .into_iter()
             .any(|role| matches_role(roles, role))
     })
+}
+
+fn is_generic_clutter_entry(entry: &crate::prepared::SourceEntry) -> bool {
+    matches!(
+        entry.tag,
+        Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
+    ) || entry.flags.contains(SourceFlags::GENERIC_CLUTTER_ROLE)
 }
 
 fn matches_role(roles: &str, expected: &str) -> bool {
@@ -1197,7 +1266,7 @@ fn structured_agreement(dom: &Dom, node: NodeId, hints: &[StructuredHint]) -> f6
 /// split across inline elements.
 pub(crate) fn locate_structured_content<'a>(
     dom: &Dom,
-    source: &PreparedSource,
+    source: &SourceAnalysis,
     texts: impl IntoIterator<Item = &'a str>,
 ) -> Option<NodeId> {
     let hints: Vec<_> = texts
@@ -1262,7 +1331,7 @@ struct PhraseScanContext {
 }
 
 impl PhraseScanContext {
-    fn new(dom: &Dom, source: &PreparedSource) -> Self {
+    fn new(dom: &Dom, source: &SourceAnalysis) -> Self {
         let mut blocked = vec![false; dom.len()];
         let mut flow_root = vec![None; dom.len()];
         for entry in source.elements() {
@@ -1282,7 +1351,7 @@ impl PhraseScanContext {
 
 fn visible_phrase_matches(
     dom: &Dom,
-    source: &PreparedSource,
+    source: &SourceAnalysis,
     context: &PhraseScanContext,
     phrase: &[String],
 ) -> SmallVec<[NodeId; 4]> {
@@ -2221,7 +2290,7 @@ mod tests {
         let article = dom
             .first_descendant_by_tag(dom.root(), Tag::Article)
             .unwrap();
-        let source = PreparedSource::build(&dom);
+        let source = SourceAnalysis::build(&dom);
         let root = locate_structured_content(
             &dom,
             &source,
@@ -2244,7 +2313,7 @@ mod tests {
             "<body><header>alpha beta gamma</header><article><p>delta epsilon zeta</p></article></body>",
         )
         .unwrap();
-        let source = PreparedSource::build(&dom);
+        let source = SourceAnalysis::build(&dom);
         assert!(
             locate_structured_content(&dom, &source, ["alpha beta gamma delta epsilon zeta"])
                 .is_none()

@@ -5,12 +5,12 @@ use crate::diagnostics::{
 };
 use crate::document::{Document, OperationKind, SemanticItemView as Item};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
-use crate::prepared::{PreparedSource, SourceFlags};
+use crate::prepared::{SourceAnalysis, SourceFlags};
 #[cfg(test)]
 use crate::scoring::get_or_compute_stats_excluding;
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
-    stats_from_prepared_entries,
+    stats_from_analysis_entries_pair,
 };
 #[cfg(test)]
 use crate::scoring::{has_hidden_utility_class_for_discovery, has_static_hidden_marker};
@@ -49,18 +49,17 @@ impl ContentMetrics {
         Self::measure_source_with_visibility(dom, root, false)
     }
 
-    /// Measures source content while retaining static visibility markers.
-    /// ARIA-hidden content and document chrome remain excluded.
-    pub(crate) fn measure_source_prepared(
+    /// Measures normal and optional relaxed source views in one source-order
+    /// pass. ARIA-hidden content and document chrome remain excluded.
+    pub(crate) fn measure_source_analysis(
         dom: &Dom,
-        source: &PreparedSource,
+        source: &SourceAnalysis,
         root: NodeId,
-        relax_static_visibility: bool,
+        include_relaxed: bool,
         include_semantic_counts: bool,
-        excluded: &mut Vec<bool>,
-    ) -> Self {
+    ) -> (Self, Option<Self>) {
         let Some(range) = source.subtree_range(root) else {
-            return Self::default();
+            return (Self::default(), None);
         };
         let entries = &source.entries[range];
         let has_primary_region = entries
@@ -72,8 +71,8 @@ impl ContentMetrics {
         // kept a DOM-sized primary-region mask. A depth stack gives the same
         // parent state without an extra allocation and without a second
         // ancestry lookup for every element.
-        excluded.resize(dom.len(), false);
-        excluded.fill(false);
+        let mut normal_excluded = vec![false; dom.len()];
+        let mut relaxed_excluded = include_relaxed.then(|| vec![false; dom.len()]);
         let mut primary_path = Vec::<(u32, bool)>::new();
         for entry in entries.iter().filter(|entry| entry.is_element()) {
             while primary_path
@@ -85,45 +84,127 @@ impl ContentMetrics {
             let in_primary_region = primary_path.last().is_some_and(|&(_, primary)| primary)
                 || entry.node != root && entry.flags.contains(SourceFlags::PRIMARY_REGION);
             let tag = entry.tag;
-            let hidden = entry.flags.contains(SourceFlags::ARIA_HIDDEN)
-                || !relax_static_visibility
-                    && (entry.flags.contains(SourceFlags::STATIC_HIDDEN)
-                        || entry.flags.contains(SourceFlags::UTILITY_HIDDEN))
+            let always_hidden = entry.flags.contains(SourceFlags::ARIA_HIDDEN)
                 || entry.flags.contains(SourceFlags::MODAL_DIALOG)
                 || entry.flags.contains(SourceFlags::ARIA_MODAL);
-            let hard_non_content = hidden
-                || matches!(
-                    tag,
-                    Some(
-                        Tag::Script
-                            | Tag::Style
-                            | Tag::Template
-                            | Tag::Meta
-                            | Tag::Link
-                            | Tag::Input
-                            | Tag::Textarea
-                            | Tag::Select
-                            | Tag::Button
-                            | Tag::Datalist
-                            | Tag::Option
-                            | Tag::Iframe
-                            | Tag::Embed
-                            | Tag::Object
-                    )
-                );
+            let static_hidden = entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                || entry.flags.contains(SourceFlags::UTILITY_HIDDEN);
+            let non_content_tag = matches!(
+                tag,
+                Some(
+                    Tag::Script
+                        | Tag::Style
+                        | Tag::Template
+                        | Tag::Meta
+                        | Tag::Link
+                        | Tag::Input
+                        | Tag::Textarea
+                        | Tag::Select
+                        | Tag::Button
+                        | Tag::Datalist
+                        | Tag::Option
+                        | Tag::Iframe
+                        | Tag::Embed
+                        | Tag::Object
+                )
+            );
             let document_chrome = entry.flags.contains(SourceFlags::DOCUMENT_CHROME);
-            let contextual_sidebar = tag == Some(Tag::Aside)
-                || dom.attr(entry.node, AttrName::Role).is_some_and(|roles| {
-                    roles
-                        .split_whitespace()
-                        .any(|role| role.eq_ignore_ascii_case("complementary"))
-                });
-            excluded[entry.node.index()] = hard_non_content
+            let contextual_sidebar =
+                tag == Some(Tag::Aside) || entry.flags.contains(SourceFlags::COMPLEMENTARY_REGION);
+            let common_excluded = always_hidden
+                || non_content_tag
                 || document_chrome && !in_primary_region
                 || contextual_sidebar && has_primary_region && !in_primary_region;
+            normal_excluded[entry.node.index()] = common_excluded || static_hidden;
+            if let Some(excluded) = &mut relaxed_excluded {
+                excluded[entry.node.index()] = common_excluded;
+            }
             primary_path.push((entry.depth, in_primary_region));
         }
-        Self::measure_filtered_prepared(dom, root, source, excluded, include_semantic_counts)
+        let (normal_stats, relaxed_stats) = stats_from_analysis_entries_pair(
+            dom,
+            source,
+            entries,
+            &normal_excluded,
+            relaxed_excluded.as_deref(),
+        );
+        let mut normal = Self::from_source_stats(normal_stats);
+        let mut relaxed = relaxed_stats.map(Self::from_source_stats);
+        let semantic_capacity = source.element_count.min(entries.len());
+        let mut normal_nodes =
+            include_semantic_counts.then(|| Vec::with_capacity(semantic_capacity));
+        let mut relaxed_nodes = (include_semantic_counts && include_relaxed)
+            .then(|| Vec::with_capacity(semantic_capacity));
+        let mut normal_excluded_depth = None;
+        let mut relaxed_excluded_depth = None;
+        for entry in entries.iter().filter(|entry| entry.is_element()) {
+            Self::observe_source_structure(
+                entry,
+                &normal_excluded,
+                &mut normal_excluded_depth,
+                &mut normal,
+                normal_nodes.as_mut(),
+            );
+            if let (Some(metrics), Some(excluded)) = (relaxed.as_mut(), relaxed_excluded.as_deref())
+            {
+                Self::observe_source_structure(
+                    entry,
+                    excluded,
+                    &mut relaxed_excluded_depth,
+                    metrics,
+                    relaxed_nodes.as_mut(),
+                );
+            }
+        }
+        if let Some(nodes) = normal_nodes {
+            Self::add_semantic_counts(dom, root, &nodes, &mut normal);
+        }
+        if let (Some(nodes), Some(metrics)) = (relaxed_nodes, relaxed.as_mut()) {
+            Self::add_semantic_counts(dom, root, &nodes, metrics);
+        }
+        (normal, relaxed)
+    }
+
+    fn from_source_stats(
+        (text, weighted_links, link_text_chars): (crate::dom::NodeStats, f64, usize),
+    ) -> Self {
+        let density = if text.text_length == 0 {
+            0.0
+        } else {
+            (weighted_links / f64::from(text.text_length)).clamp(0.0, 1.0)
+        };
+        let mut metrics = Self::from_text_stats(text, density, text.has_alphanumeric());
+        metrics.link_text_chars = link_text_chars;
+        metrics
+    }
+
+    fn observe_source_structure(
+        entry: &crate::prepared::SourceEntry,
+        excluded: &[bool],
+        excluded_depth: &mut Option<u32>,
+        metrics: &mut Self,
+        mut included_nodes: Option<&mut Vec<NodeId>>,
+    ) {
+        if excluded_depth.is_some_and(|depth| entry.depth > depth) {
+            return;
+        }
+        *excluded_depth = None;
+        if excluded.get(entry.node.index()).copied().unwrap_or(false) {
+            *excluded_depth = Some(entry.depth);
+            return;
+        }
+        metrics.count_structure(entry.tag);
+        if let Some(nodes) = &mut included_nodes {
+            nodes.push(entry.node);
+        }
+    }
+
+    fn add_semantic_counts(dom: &Dom, root: NodeId, nodes: &[NodeId], metrics: &mut Self) {
+        let (references, definitions, expressions) =
+            crate::document::semantic_normalization_counts_for_nodes(dom, root, nodes);
+        metrics.footnote_reference_count = references;
+        metrics.footnote_definition_count = definitions;
+        metrics.math_count = expressions;
     }
 
     #[cfg(test)]
@@ -323,67 +404,6 @@ impl ContentMetrics {
         metrics.footnote_reference_count = references;
         metrics.footnote_definition_count = definitions;
         metrics.math_count = expressions;
-        metrics
-    }
-
-    fn measure_filtered_prepared(
-        dom: &Dom,
-        root: NodeId,
-        source: &PreparedSource,
-        excluded: &[bool],
-        include_semantic_counts: bool,
-    ) -> Self {
-        let Some(range) = source.subtree_range(root) else {
-            return Self::default();
-        };
-        let entries = &source.entries[range];
-        let (text, weighted_link_chars, link_text_chars) =
-            stats_from_prepared_entries(dom, entries, root, excluded);
-        let link_density = if text.text_length == 0 {
-            0.0
-        } else {
-            (weighted_link_chars / f64::from(text.text_length)).clamp(0.0, 1.0)
-        };
-        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
-        metrics.link_text_chars = link_text_chars;
-        let mut included_nodes = include_semantic_counts
-            .then(|| Vec::with_capacity(source.element_count.min(entries.len()) + 1));
-        if !excluded.get(root.index()).copied().unwrap_or(false)
-            && let Some(nodes) = &mut included_nodes
-        {
-            nodes.push(root);
-        }
-        let mut excluded_depth = None;
-        for entry in entries.iter().filter(|entry| entry.is_element()) {
-            if entry.node == root {
-                continue;
-            }
-            if let Some(boundary) = excluded_depth {
-                if entry.depth > boundary {
-                    continue;
-                }
-                excluded_depth = None;
-            }
-            if excluded.get(entry.node.index()).copied().unwrap_or(false) {
-                excluded_depth = Some(entry.depth);
-                continue;
-            }
-            if let Some(nodes) = &mut included_nodes {
-                nodes.push(entry.node);
-            }
-            metrics.count_structure(entry.tag);
-        }
-        if let Some(included_nodes) = included_nodes {
-            let (references, definitions, expressions) =
-                crate::document::semantic_normalization_counts_for_nodes(
-                    dom,
-                    root,
-                    &included_nodes,
-                );
-            metrics.footnote_reference_count = references;
-            metrics.footnote_definition_count = definitions;
-            metrics.math_count = expressions;
-        }
         metrics
     }
 
@@ -763,11 +783,11 @@ pub(crate) fn is_access_barrier(dom: &Dom, root: NodeId) -> bool {
     is_access_barrier_impl(dom, root, None)
 }
 
-pub(crate) fn is_access_barrier_prepared(dom: &Dom, source: &PreparedSource, root: NodeId) -> bool {
+pub(crate) fn is_access_barrier_prepared(dom: &Dom, source: &SourceAnalysis, root: NodeId) -> bool {
     is_access_barrier_impl(dom, root, Some(source))
 }
 
-fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&PreparedSource>) -> bool {
+fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysis>) -> bool {
     crate::instrumentation::record_source_full_scan();
     let mut buffer = String::new();
     get_normalized_inner_text(dom, root, &mut buffer);
@@ -1080,7 +1100,7 @@ mod tests {
             .first_descendant_by_tag(expected.root(), Tag::Main)
             .unwrap();
         let actual = ContentMetrics::measure_source(&source, source_body);
-        let prepared = crate::prepared::PreparedSource::build(&source);
+        let prepared = crate::prepared::SourceAnalysis::build(&source);
         let prepared_actual = prepared.source_metrics;
         let expected = ContentMetrics::measure(&expected, expected_main);
 
@@ -1111,6 +1131,14 @@ mod tests {
             prepared_actual.has_alphanumeric_text,
             actual.has_alphanumeric_text
         );
+        let relaxed = prepared.relaxed_metrics.expect("hidden source view");
+        let expected_relaxed =
+            ContentMetrics::measure_source_with_visibility(&source, source_body, true);
+        assert_eq!(relaxed.word_count, expected_relaxed.word_count);
+        assert_eq!(relaxed.text_chars, expected_relaxed.text_chars);
+        assert_eq!(relaxed.link_text_chars, expected_relaxed.link_text_chars);
+        assert_eq!(relaxed.paragraph_count, expected_relaxed.paragraph_count);
+        assert_eq!(relaxed.link_density, expected_relaxed.link_density);
     }
 
     #[test]
