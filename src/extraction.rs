@@ -29,7 +29,7 @@ use crate::normalize::{
 };
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
-use crate::prepared::{PreparedSource, SourceElements, SourceEntry, SourceFlags};
+use crate::prepared::{SourceAnalysis, SourceElements, SourceEntry, SourceFlags};
 use crate::quality::{
     ContentMetrics, ExtractionQuality, SemanticStructureCounts, interactive_shell_evidence,
     is_access_barrier, is_access_barrier_prepared, is_incoherent_short_result,
@@ -432,7 +432,7 @@ fn content_target_matches(dom: &Dom, node: NodeId, target: &ContentHint) -> bool
 
 fn find_content_targets_from_prepared(
     dom: &Dom,
-    source: &PreparedSource,
+    source: &SourceAnalysis,
     target: &ContentHint,
 ) -> Vec<NodeId> {
     if !content_hint_has_value(target) {
@@ -612,7 +612,7 @@ impl<'a> ContentExtractor<'a> {
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let _candidate_preflight_phase = PhaseGuard::new(Phase::CandidateDiscovery);
         let prepared_source =
-            PreparedSource::build_with_semantic_counts(&self.dom, self.options.diagnostics);
+            SourceAnalysis::build_with_semantic_counts(&self.dom, self.options.diagnostics);
         let exact_root = if let Some(target) = &self.options.content_root {
             Some(
                 find_content_targets_from_prepared(&self.dom, &prepared_source, target)
@@ -681,11 +681,7 @@ impl<'a> ContentExtractor<'a> {
         let mut cleaning_nodes = Vec::new();
         let mut fragment_workspace = FragmentWorkspace::default();
         let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
-        let base_candidates = CandidateSet::discover_semantic_from_prepared(
-            &self.dom,
-            &prepared_source,
-            source_anchors.body,
-        );
+        let base_candidates = prepared_source.candidates().clone();
         let content_hint_targets =
             self.options
                 .content_hint
@@ -761,6 +757,7 @@ impl<'a> ContentExtractor<'a> {
                 if analysis.unweighted.is_none() {
                     self.prepare_unweighted_scoring(
                         analysis,
+                        &prepared_source,
                         &content_hint_targets,
                         structured_root,
                     );
@@ -1352,6 +1349,7 @@ impl<'a> ContentExtractor<'a> {
     fn prepare_unweighted_scoring(
         &self,
         analysis: &mut ScoringAnalysis,
+        prepared_source: &SourceAnalysis,
         content_hint_targets: &[NodeId],
         structured_root: Option<NodeId>,
     ) {
@@ -1375,6 +1373,7 @@ impl<'a> ContentExtractor<'a> {
         }
         let readability_scores = compute_readability_scores(
             &mut analysis.dom,
+            Some(prepared_source),
             to_score,
             &discovery.remove_after_scoring,
             &analysis.excluded_mask,
@@ -1405,6 +1404,7 @@ impl<'a> ContentExtractor<'a> {
 
         let (ranked, _) = Self::rank_candidates_with_snapshot(
             &analysis.dom,
+            Some(prepared_source),
             analysis.body,
             &analysis.working_snapshot,
             &mut candidates,
@@ -1428,7 +1428,7 @@ impl<'a> ContentExtractor<'a> {
         &mut self,
         visibility: VisibilityVariant,
         text_buffer: &mut String,
-        prepared_source: &PreparedSource,
+        prepared_source: &SourceAnalysis,
         accessible_math: &HashSet<NodeId>,
         title_plan: &TitleHeadingPlan,
         base_candidates: &CandidateSet,
@@ -1509,6 +1509,7 @@ impl<'a> ContentExtractor<'a> {
                 }
                 let readability_scores = compute_readability_scores(
                     &mut working_dom,
+                    Some(prepared_source),
                     to_score,
                     &discovery.remove_after_scoring,
                     &excluded_mask,
@@ -1540,6 +1541,7 @@ impl<'a> ContentExtractor<'a> {
 
                 let (ranked, feature_index) = Self::rank_candidates_with_snapshot(
                     &working_dom,
+                    Some(prepared_source),
                     body,
                     &working_snapshot,
                     &mut candidates,
@@ -2261,7 +2263,7 @@ impl<'a> ContentExtractor<'a> {
 
     /// Marks hidden roots that have semantic or repeated structural evidence.
     /// Reverse preorder aggregates each subtree without rescanning descendants.
-    fn relaxed_hidden_roots(&self, prepared_source: &PreparedSource) -> Vec<bool> {
+    fn relaxed_hidden_roots(&self, prepared_source: &SourceAnalysis) -> Vec<bool> {
         let mut paragraphs = vec![0_u8; self.dom.len()];
         let mut structured = vec![false; self.dom.len()];
         let mut allowed = vec![false; self.dom.len()];
@@ -2279,11 +2281,7 @@ impl<'a> ContentExtractor<'a> {
                     .min(2);
                 structured[node.index()] |= structured[child.index()];
             }
-            let authoritative = matches!(tag, Some(Tag::Article | Tag::Main))
-                || self
-                    .dom
-                    .attr(node, AttrName::Role)
-                    .is_some_and(Self::has_primary_role);
+            let authoritative = entry.flags.contains(SourceFlags::PRIMARY_REGION);
             allowed[node.index()] =
                 authoritative || paragraphs[node.index()] >= 2 || structured[node.index()];
         }
@@ -2333,10 +2331,7 @@ impl<'a> ContentExtractor<'a> {
         if accessible_math.contains(&node) {
             return true;
         }
-        let fallback_image = self
-            .dom
-            .attr(node, AttrName::Class)
-            .is_some_and(|class| class.contains("fallback-image"));
+        let fallback_image = entry.flags.contains(SourceFlags::FALLBACK_IMAGE);
         if entry.flags.contains(SourceFlags::ARIA_HIDDEN) && !fallback_image {
             return false;
         }
@@ -2371,7 +2366,7 @@ impl<'a> ContentExtractor<'a> {
 
     #[cfg(test)]
     fn discover_candidates(&mut self, text_buffer: &mut String) -> CandidateDiscovery {
-        let prepared_source = PreparedSource::build(&self.dom);
+        let prepared_source = SourceAnalysis::build(&self.dom);
         let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
         let title_plan = title_heading_plan(
             &self.dom,
@@ -2381,11 +2376,7 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
-        let base_candidates = CandidateSet::discover_semantic_from_prepared(
-            &self.dom,
-            &prepared_source,
-            prepared_source.anchors.body,
-        );
+        let base_candidates = prepared_source.candidates().clone();
         self.discover_candidates_with_indexes(
             text_buffer,
             &prepared_source,
@@ -2400,7 +2391,7 @@ impl<'a> ContentExtractor<'a> {
     fn discover_candidates_with_indexes(
         &mut self,
         text_buffer: &mut String,
-        prepared_source: &PreparedSource,
+        prepared_source: &SourceAnalysis,
         accessible_math: &HashSet<NodeId>,
         title_plan: &TitleHeadingPlan,
         base_candidates: &CandidateSet,
@@ -2526,6 +2517,7 @@ impl<'a> ContentExtractor<'a> {
         let body = dom.body().unwrap_or(dom.root());
         Self::rank_candidates_with_snapshot(
             dom,
+            None,
             body,
             &snapshot,
             candidates,
@@ -2542,6 +2534,7 @@ impl<'a> ContentExtractor<'a> {
     #[allow(clippy::too_many_arguments)]
     fn rank_candidates_with_snapshot(
         dom: &Dom,
+        source: Option<&SourceAnalysis>,
         body: NodeId,
         snapshot: &[(NodeId, u32)],
         candidates: &mut CandidateSet,
@@ -2571,8 +2564,14 @@ impl<'a> ContentExtractor<'a> {
         };
         feature_index.prepare_text_cache(store);
         for (candidate_index, candidate) in candidates.iter_mut().enumerate() {
-            candidate.features =
-                feature_index.features(dom, candidate_index, *candidate, store, weight_classes);
+            candidate.features = feature_index.features(
+                dom,
+                source,
+                candidate_index,
+                *candidate,
+                store,
+                weight_classes,
+            );
         }
 
         let context = candidates.ranking_context(dom, store, snapshot);
@@ -3686,6 +3685,7 @@ mod tests {
         let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
+            None,
             to_score,
             &discovery.remove_after_scoring,
             &excluded_mask,
@@ -3726,6 +3726,7 @@ mod tests {
 
         let (ranked, _) = ContentExtractor::rank_candidates_with_snapshot(
             &dom,
+            None,
             body,
             &snapshot,
             &mut candidates,
@@ -4595,6 +4596,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
+            None,
             to_score,
             &discovery.remove_after_scoring,
             &excluded_mask,
@@ -4638,6 +4640,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
+            None,
             to_score,
             &discovery.remove_after_scoring,
             &excluded_mask,
@@ -4729,6 +4732,7 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let excluded_mask = build_exclusion_mask(&scoring_dom, &discovery.remove_after_scoring);
         let scores = compute_readability_scores(
             &mut scoring_dom,
+            None,
             to_score,
             &discovery.remove_after_scoring,
             &excluded_mask,

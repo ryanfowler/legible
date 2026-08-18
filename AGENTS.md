@@ -68,7 +68,7 @@ The extraction pipeline flows through these stages:
 | `document/sparse.rs` | Sorted sparse node values and node sets for rare semantic evidence and payloads |
 | `metadata.rs` | Structured-data parsing and multi-source metadata resolution |
 | `page_kind.rs` | Internal page categories that control cleanup policy, including job-profile boundaries |
-| `prepared.rs` | Immutable prepared-source preorder index, interval ancestry, anchors, and reusable source metrics |
+| `prepared.rs` | Unified immutable source analysis with preorder intervals, anchors, visibility metrics, lexical facts, source signals, and base candidates |
 | `specialized/` | Internal registry and extractors for non-article page structures |
 | `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
@@ -117,7 +117,7 @@ These invariants are costly to violate:
 - **Render the tape sequentially.** Markdown, canonical HTML, and normalized text renderers must consume the event tape in source order. Do not add tree-link traversal, child collection, or task generation for ordinary rendering. Keep only small formatting and semantic context stacks.
 - **Use one canonical text arena.** Store semantic prose and inline-code text in one document-owned UTF-8 buffer with `TextRef` ranges. Do not add one owned heap string per semantic text leaf. Keep raw block-code payloads separate until measurements justify moving them.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
-- **Reuse immutable source snapshots.** Share one prepared source preorder/depth snapshot with title planning, candidate context, structural features, table marking, and content hints. Cache body, HTML, and base handles only while their tree remains unchanged. Build a new snapshot after fragment mutation.
+- **Reuse immutable source snapshots.** Share one source analysis preorder/depth snapshot with title planning, candidate context, structural features, table marking, and content hints. Cache body, HTML, and base handles only while their tree remains unchanged. Build a new snapshot after fragment mutation.
 - **Reserve small DOM extensions exactly.** A parsed or copied arena can be at full capacity. Reserve the known wrapper count before you add synthetic nodes. Do not double a large arena for a small set of wrappers.
 
 ### Common Pitfalls

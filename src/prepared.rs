@@ -1,19 +1,22 @@
-//! Immutable facts for the prepared source document.
+//! Immutable analysis for the prepared source document.
 //!
 //! This index is valid only while the prepared source DOM remains immutable.
 //! Selected fragments and scoring views must build their own indexes because
 //! those trees can be detached, renamed, or otherwise changed.
 
+use crate::candidate::{CandidateSet, SourceCandidateBuilder};
+use crate::constants::{is_unlikely_role, regexps};
 use crate::document::{has_math_wrapper_class, is_math_root, is_tex_annotation};
-use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, Tag};
+use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStats, Tag};
 use crate::quality::ContentMetrics;
-use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible, trim_text};
+use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text};
 use std::collections::HashSet;
 
 const NO_POSITION: u32 = u32::MAX;
+const NO_TEXT_STATS: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SourceFlags(u16);
+pub(crate) struct SourceFlags(u32);
 
 impl SourceFlags {
     pub(crate) const ELEMENT: Self = Self(1 << 0);
@@ -27,6 +30,15 @@ impl SourceFlags {
     pub(crate) const PRIMARY_HEADING: Self = Self(1 << 7);
     pub(crate) const HAS_NON_WHITESPACE_TEXT: Self = Self(1 << 9);
     pub(crate) const ARIA_MODAL: Self = Self(1 << 10);
+    pub(crate) const COMPLEMENTARY_REGION: Self = Self(1 << 11);
+    pub(crate) const ARTICLE_ROLE: Self = Self(1 << 12);
+    pub(crate) const MAIN_ROLE: Self = Self(1 << 13);
+    pub(crate) const STRONG_CONTENT_ID: Self = Self(1 << 14);
+    pub(crate) const STRONG_CONTENT_CLASS: Self = Self(1 << 15);
+    pub(crate) const POSITIVE_NAME: Self = Self(1 << 16);
+    pub(crate) const NEGATIVE_NAME: Self = Self(1 << 17);
+    pub(crate) const FALLBACK_IMAGE: Self = Self(1 << 18);
+    pub(crate) const GENERIC_CLUTTER_ROLE: Self = Self(1 << 19);
 
     fn insert(&mut self, flag: Self) {
         self.0 |= flag.0;
@@ -44,6 +56,8 @@ pub(crate) struct SourceEntry {
     pub(crate) depth: u32,
     pub(crate) tag: Option<Tag>,
     pub(crate) flags: SourceFlags,
+    class_weight: i8,
+    text_stats_index: u32,
 }
 
 impl SourceEntry {
@@ -52,7 +66,7 @@ impl SourceEntry {
     }
 }
 
-pub(crate) struct PreparedSource {
+pub(crate) struct SourceAnalysis {
     /// The attached source root and every attached descendant, including text
     /// and comment nodes. Consumers filter on `SourceEntry::is_element` when
     /// they need structural facts.
@@ -63,11 +77,15 @@ pub(crate) struct PreparedSource {
     has_possible_footnote_reference: bool,
     pub(crate) source_metrics: ContentMetrics,
     pub(crate) relaxed_metrics: Option<ContentMetrics>,
+    /// General lexical facts for text leaves. The source-order position keeps
+    /// this storage proportional to text nodes instead of all DOM nodes.
+    text_stats: Vec<NodeStats>,
+    candidates: CandidateSet,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum SourceElements<'a> {
-    Prepared(&'a PreparedSource),
+    Prepared(&'a SourceAnalysis),
     Snapshot(&'a [(NodeId, u32)]),
 }
 
@@ -115,7 +133,7 @@ impl DoubleEndedIterator for SourceElementsIter<'_> {
     }
 }
 
-impl PreparedSource {
+impl SourceAnalysis {
     #[cfg(test)]
     pub(crate) fn build(dom: &Dom) -> Self {
         Self::build_with_semantic_counts(dom, true)
@@ -131,6 +149,8 @@ impl PreparedSource {
         let mut anchors = DocumentAnchors::new(dom.root());
         let mut element_count = 0;
         let mut has_possible_footnote_reference = false;
+        let mut text_stats = Vec::new();
+        let mut candidate_builder = SourceCandidateBuilder::new(dom.len());
 
         for node in std::iter::once(dom.root()).chain(dom.descendants(dom.root())) {
             dom.record_document_anchor(node, &mut anchors);
@@ -153,18 +173,28 @@ impl PreparedSource {
                 entries[parent].subtree_end = position as u32;
             }
 
-            let flags = source_flags(dom, node, tag);
+            let (flags, class_weight) = source_signals(dom, node, tag);
             has_possible_footnote_reference |= possible_footnote_reference(dom, node, tag);
             if flags.contains(SourceFlags::ELEMENT) {
                 element_count += 1;
             }
+            let text_stats_index = dom.text_node(node).map_or(NO_TEXT_STATS, |text| {
+                let index = u32::try_from(text_stats.len()).unwrap_or(NO_TEXT_STATS);
+                if index != NO_TEXT_STATS {
+                    text_stats.push(stats_for_text(text));
+                }
+                index
+            });
             entries.push(SourceEntry {
                 node,
                 subtree_end: 0,
                 depth,
                 tag,
                 flags,
+                class_weight,
+                text_stats_index,
             });
+            candidate_builder.observe(dom, &entries[position]);
             if let Some(slot) = position_by_node.get_mut(node.index()) {
                 *slot = position as u32;
             }
@@ -180,9 +210,9 @@ impl PreparedSource {
         // structural wrappers without rescanning each descendant subtree.
         for position in (0..entries.len()).rev() {
             let node = entries[position].node;
-            if dom
-                .text_node(node)
-                .is_some_and(|text| !trim_text(text).is_empty())
+            let text_stats_index = entries[position].text_stats_index;
+            if text_stats_index != NO_TEXT_STATS
+                && text_stats[text_stats_index as usize].has_non_whitespace()
             {
                 entries[position]
                     .flags
@@ -211,30 +241,19 @@ impl PreparedSource {
             has_possible_footnote_reference,
             source_metrics: ContentMetrics::default(),
             relaxed_metrics: None,
+            text_stats,
+            candidates: candidate_builder.finish(),
         };
         if let Some(body) = source.anchors.body {
-            // Reuse the exclusion mask when a relaxed visibility view is
-            // needed. The metric pass owns the mask only for the duration of
-            // source preparation, so it adds no retained source state.
-            let mut excluded = Vec::new();
-            source.source_metrics = ContentMetrics::measure_source_prepared(
-                dom,
-                &source,
-                body,
-                false,
-                include_semantic_counts,
-                &mut excluded,
-            );
-            if source.has_relaxable_hidden_content(body) {
-                source.relaxed_metrics = Some(ContentMetrics::measure_source_prepared(
+            let include_relaxed = source.has_relaxable_hidden_content(body);
+            (source.source_metrics, source.relaxed_metrics) =
+                ContentMetrics::measure_source_analysis(
                     dom,
                     &source,
                     body,
-                    true,
+                    include_relaxed,
                     include_semantic_counts,
-                    &mut excluded,
-                ));
-            }
+                );
         }
         crate::instrumentation::record_prepared_source_entries(source.entries.len());
         source
@@ -294,6 +313,23 @@ impl PreparedSource {
 
     pub(crate) fn has_possible_footnote_reference(&self) -> bool {
         self.has_possible_footnote_reference
+    }
+
+    pub(crate) fn candidates(&self) -> &CandidateSet {
+        &self.candidates
+    }
+
+    pub(crate) fn class_weight(&self, node: NodeId) -> Option<i32> {
+        self.entry(node).map(|entry| i32::from(entry.class_weight))
+    }
+
+    pub(crate) fn text_stats(&self, node: NodeId) -> Option<NodeStats> {
+        self.text_stats_for_entry(self.entry(node)?)
+    }
+
+    pub(crate) fn text_stats_for_entry(&self, entry: &SourceEntry) -> Option<NodeStats> {
+        let index = entry.text_stats_index;
+        (index != NO_TEXT_STATS).then(|| self.text_stats[index as usize])
     }
 
     pub(crate) fn has_relaxable_hidden_content(&self, root: NodeId) -> bool {
@@ -402,9 +438,9 @@ fn possible_footnote_reference(dom: &Dom, node: NodeId, tag: Option<Tag>) -> boo
         || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
 }
 
-fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
+fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8) {
     let Some(tag) = tag else {
-        return SourceFlags::default();
+        return (SourceFlags::default(), 0);
     };
     let mut flags = SourceFlags::ELEMENT;
     let utility_hidden = has_hidden_utility_class_for_discovery(dom, node);
@@ -426,8 +462,16 @@ fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
     if is_modal_or_dialog(dom, node, static_hidden, utility_hidden, aria_modal) {
         flags.insert(SourceFlags::MODAL_DIALOG);
     }
+    let role = dom.attr(node, AttrName::Role);
+    if role.is_some_and(|roles| {
+        roles.split_whitespace().any(|role| {
+            matches_ignore_ascii_case(role, &["banner", "complementary", "dialog", "navigation"])
+        })
+    }) {
+        flags.insert(SourceFlags::GENERIC_CLUTTER_ROLE);
+    }
     if matches!(tag, Tag::Header | Tag::Footer | Tag::Nav)
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+        || role.is_some_and(|roles| {
             roles.split_whitespace().any(|role| {
                 role.eq_ignore_ascii_case("banner") || role.eq_ignore_ascii_case("navigation")
             })
@@ -435,14 +479,73 @@ fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
     {
         flags.insert(SourceFlags::DOCUMENT_CHROME);
     }
-    if matches!(tag, Tag::Article | Tag::Main)
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles.split_whitespace().any(|role| {
-                role.eq_ignore_ascii_case("article") || role.eq_ignore_ascii_case("main")
-            })
-        })
-    {
+    let article_role = role.is_some_and(|roles| {
+        roles
+            .split_whitespace()
+            .any(|role| role.eq_ignore_ascii_case("article"))
+    });
+    let main_role = role.is_some_and(|roles| {
+        roles
+            .split_whitespace()
+            .any(|role| role.eq_ignore_ascii_case("main"))
+    });
+    if article_role {
+        flags.insert(SourceFlags::ARTICLE_ROLE);
+    }
+    if main_role {
+        flags.insert(SourceFlags::MAIN_ROLE);
+    }
+    if matches!(tag, Tag::Article | Tag::Main) || article_role || main_role {
         flags.insert(SourceFlags::PRIMARY_REGION);
+    }
+    if role.is_some_and(|roles| {
+        roles
+            .split_whitespace()
+            .any(|role| role.eq_ignore_ascii_case("complementary"))
+    }) {
+        flags.insert(SourceFlags::COMPLEMENTARY_REGION);
+    }
+    let mut class_weight = 0_i8;
+    for name in [AttrName::Class, AttrName::Id] {
+        let Some(value) = dom.attr(node, name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let matches = regexps::CLASS_WEIGHT_SET.matches(value);
+        if matches.matched(0) {
+            class_weight = class_weight.saturating_sub(25);
+            flags.insert(SourceFlags::NEGATIVE_NAME);
+        }
+        if matches.matched(1) {
+            class_weight = class_weight.saturating_add(25);
+            flags.insert(SourceFlags::POSITIVE_NAME);
+        }
+        if regexps::UNLIKELY_CANDIDATES.is_match(value) {
+            flags.insert(SourceFlags::NEGATIVE_NAME);
+        }
+    }
+    if role.is_some_and(is_unlikely_role) {
+        flags.insert(SourceFlags::NEGATIVE_NAME);
+    }
+    if article_role || main_role {
+        flags.insert(SourceFlags::POSITIVE_NAME);
+    }
+    if dom
+        .attr(node, AttrName::Id)
+        .is_some_and(is_strong_content_id)
+    {
+        flags.insert(SourceFlags::STRONG_CONTENT_ID);
+    }
+    if dom
+        .attr(node, AttrName::Class)
+        .is_some_and(has_strong_content_class)
+    {
+        flags.insert(SourceFlags::STRONG_CONTENT_CLASS);
+    }
+    if dom
+        .attr(node, AttrName::Class)
+        .is_some_and(|class| class.contains("fallback-image"))
+    {
+        flags.insert(SourceFlags::FALLBACK_IMAGE);
     }
     if tag == Tag::A {
         flags.insert(SourceFlags::LINK);
@@ -457,7 +560,37 @@ fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
     {
         flags.insert(SourceFlags::PRIMARY_HEADING);
     }
-    flags
+    (flags, class_weight)
+}
+
+fn is_strong_content_id(id: &str) -> bool {
+    ["post", "content", "article-content"]
+        .into_iter()
+        .any(|pattern| id.eq_ignore_ascii_case(pattern))
+}
+
+fn matches_ignore_ascii_case(value: &str, expected: &[&str]) -> bool {
+    expected
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+}
+
+fn has_strong_content_class(classes: &str) -> bool {
+    const STRONG_CLASSES: &[&str] = &[
+        "post-content",
+        "post-body",
+        "article-content",
+        "article-body",
+        "entry-content",
+        "content-article",
+        "markdown-body",
+        "post",
+    ];
+    classes.split_whitespace().any(|token| {
+        STRONG_CLASSES
+            .iter()
+            .any(|pattern| token.eq_ignore_ascii_case(pattern))
+    })
 }
 
 fn is_modal_or_dialog(
@@ -491,7 +624,7 @@ mod tests {
             "<body><main><div><p>one</p><p>two</p></div></main><aside>side</aside></body>",
         )
         .unwrap();
-        let source = PreparedSource::build(&dom);
+        let source = SourceAnalysis::build(&dom);
         let main = source
             .anchors
             .body
@@ -539,7 +672,7 @@ mod tests {
             "<html lang='en'><head><base href='/docs'></head><body><header>chrome</header><main><h1>Title</h1><a href='/x'>link</a></main></body></html>",
         )
         .unwrap();
-        let source = PreparedSource::build(&dom);
+        let source = SourceAnalysis::build(&dom);
         let html = source.anchors.html.unwrap();
         let body = source.anchors.body.unwrap();
         assert_eq!(dom.attr(html, AttrName::Lang), Some("en"));
@@ -554,19 +687,61 @@ mod tests {
     }
 
     #[test]
+    fn source_analysis_caches_lexical_name_and_candidate_signals() {
+        let dom = Dom::parse_document(
+            "<body><div id='content' class='article-body'><p>Alpha, beta.</p></div><aside class='comment'>Side</aside></body>",
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let content = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("content"))
+            .unwrap();
+        let aside = dom.first_descendant_by_tag(dom.root(), Tag::Aside).unwrap();
+        let text = dom
+            .descendants(content)
+            .find(|&node| dom.is_text(node))
+            .unwrap();
+
+        assert_eq!(source.class_weight(content), Some(50));
+        assert_eq!(source.class_weight(aside), Some(-25));
+        assert!(source.candidates().is_semantic(content));
+        assert_eq!(source.text_stats(text).unwrap().word_count, 2);
+        assert_eq!(source.text_stats(text).unwrap().comma_count, 1);
+    }
+
+    #[test]
+    fn cached_candidate_clutter_roles_match_legacy_discovery() {
+        let dom = Dom::parse_document(
+            "<body><div id='aria-modal' aria-modal='true'><ul><li>Kept</li></ul></div><div id='alert' role='alertdialog'><table><tr><td>Kept</td></tr></table></div><div id='dialog' role='dialog'><ul><li>Skipped</li></ul></div></body>",
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let node = |id| {
+            dom.descendants(dom.root())
+                .find(|&node| dom.attr(node, AttrName::Id) == Some(id))
+                .unwrap()
+        };
+
+        assert!(source.candidates().get(node("aria-modal")).is_some());
+        assert!(source.candidates().get(node("alert")).is_some());
+        assert!(source.candidates().get(node("dialog")).is_none());
+    }
+
+    #[test]
     fn source_index_detects_reference_targets_without_a_second_scan() {
         let dom = Dom::parse_document(
             "<body><main><p><a href='#note'>1</a></p><p data-footnote-ref='note'>2</p><label class='footref' for='note'>3</label></main></body>",
         )
         .unwrap();
-        let source = PreparedSource::build(&dom);
+        let source = SourceAnalysis::build(&dom);
         assert!(source.has_possible_footnote_reference());
 
         let external = Dom::parse_document(
             "<body><main><p><a href='https://example.test/page#section'>section</a></p></main></body>",
         )
         .unwrap();
-        assert!(!PreparedSource::build(&external).has_possible_footnote_reference());
+        assert!(!SourceAnalysis::build(&external).has_possible_footnote_reference());
     }
 
     #[test]
@@ -576,7 +751,7 @@ mod tests {
                 .unwrap();
         let aside = dom.first_descendant_by_tag(dom.root(), Tag::Aside).unwrap();
         dom.detach(aside);
-        let source = PreparedSource::build(&dom);
+        let source = SourceAnalysis::build(&dom);
 
         assert!(source.entry(aside).is_none());
         assert!(!source.contains(dom.root(), aside));
@@ -594,8 +769,8 @@ mod tests {
             Tag::Div,
         )
         .unwrap();
-        let document_source = PreparedSource::build(&document);
-        let fragment_source = PreparedSource::build(&fragment);
+        let document_source = SourceAnalysis::build(&document);
+        let fragment_source = SourceAnalysis::build(&fragment);
         let document_nodes: Vec<_> = std::iter::once(document.root())
             .chain(document.descendants(document.root()))
             .collect();

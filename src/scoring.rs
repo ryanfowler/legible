@@ -2,7 +2,7 @@
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
 use crate::constants::{has_byline, is_div_to_p_elem, is_phrasing_elem, is_unlikely_role, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
-use crate::prepared::SourceEntry;
+use crate::prepared::{SourceAnalysis, SourceEntry};
 use smallvec::SmallVec;
 
 /// A Readability-derived score for a possible content root.
@@ -54,7 +54,7 @@ const fn ascii_classes() -> [u8; 256] {
 
 const ASCII_CLASSES: [u8; 256] = ascii_classes();
 
-fn stats_for_text(text: &str) -> NodeStats {
+pub(crate) fn stats_for_text(text: &str) -> NodeStats {
     let mut s = NodeStats::default();
     s.set_has_text(!text.is_empty());
     if let [byte] = text.as_bytes()
@@ -178,70 +178,6 @@ fn stats_for_text(text: &str) -> NodeStats {
     s
 }
 
-/// Computes only the text fields needed by source-quality measurement.
-/// Sentence and punctuation counters do not affect that metric, so keep this
-/// hot path smaller than the general scoring statistics.
-fn stats_for_content_metrics(text: &str) -> NodeStats {
-    let mut stats = NodeStats::default();
-    stats.set_has_text(!text.is_empty());
-    let mut prev = true;
-    let mut text_length = 0usize;
-    let mut word_count = 0usize;
-    let mut has_non_whitespace = false;
-    let mut alphabetic_chars = 0usize;
-    let mut digit_chars = 0usize;
-
-    if text.is_ascii() {
-        let bytes = text.as_bytes();
-        stats.set_starts_with_whitespace(bytes.first().is_some_and(u8::is_ascii_whitespace));
-        stats.set_ends_with_whitespace(bytes.last().is_some_and(u8::is_ascii_whitespace));
-        for &byte in bytes {
-            let class = ASCII_CLASSES[usize::from(byte)];
-            alphabetic_chars += usize::from(class & ASCII_ALPHA != 0);
-            digit_chars += usize::from(class & ASCII_DIGIT != 0);
-            if class & ASCII_WHITESPACE != 0 {
-                if !prev {
-                    text_length += 1;
-                    prev = true;
-                }
-            } else {
-                has_non_whitespace = true;
-                word_count += usize::from(prev);
-                text_length += 1;
-                prev = false;
-            }
-        }
-    } else {
-        stats.set_starts_with_whitespace(text.starts_with(char::is_whitespace));
-        stats.set_ends_with_whitespace(text.ends_with(char::is_whitespace));
-        for character in text.chars() {
-            if character.is_whitespace() {
-                if !prev {
-                    text_length += 1;
-                    prev = true;
-                }
-            } else {
-                has_non_whitespace = true;
-                word_count += usize::from(prev);
-                text_length += 1;
-                prev = false;
-                alphabetic_chars += usize::from(character.is_alphabetic());
-                digit_chars += usize::from(character.is_numeric());
-            }
-        }
-    }
-    if prev && text_length > 0 {
-        text_length -= 1;
-    }
-    stats.text_length = text_length.min(u32::MAX as usize) as u32;
-    stats.word_count = word_count.min(u32::MAX as usize) as u32;
-    stats.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
-    stats.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
-    stats.set_has_non_whitespace(has_non_whitespace);
-    stats.set_has_alphanumeric(alphabetic_chars != 0 || digit_chars != 0);
-    stats
-}
-
 fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     if !b.has_text() {
         return;
@@ -315,18 +251,28 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
     get_or_compute_stats_excluding(dom, id, store, &[])
 }
 
-/// Computes source statistics from an existing preorder index.
-///
-/// Source quality measurement runs before candidate scoring and does not need
-/// the general cache. Combining direct children from the prepared index avoids
-/// the stack frames and dense cache epoch checks used by the general-purpose
-/// subtree query.
-pub(crate) fn stats_from_prepared_entries(
+fn get_or_compute_stats_from_source(
     dom: &Dom,
-    entries: &[SourceEntry],
-    _root: NodeId,
+    source: Option<&SourceAnalysis>,
+    id: NodeId,
+    store: &mut NodeStateStore,
     excluded: &[bool],
-) -> (NodeStats, f64, usize) {
+) -> NodeStats {
+    get_or_compute_stats_excluding_impl(dom, source, id, store, excluded)
+}
+
+pub(crate) type SourceTextMetrics = (NodeStats, f64, usize);
+
+/// Computes normal and relaxed source metrics during one source-order walk.
+/// Text leaves use the lexical facts that `SourceAnalysis` collected while it
+/// built the source index.
+pub(crate) fn stats_from_analysis_entries_pair(
+    dom: &Dom,
+    source: &SourceAnalysis,
+    entries: &[SourceEntry],
+    normal_excluded: &[bool],
+    relaxed_excluded: Option<&[bool]>,
+) -> (SourceTextMetrics, Option<SourceTextMetrics>) {
     #[derive(Clone, Copy)]
     struct Frame {
         node: NodeId,
@@ -337,28 +283,24 @@ pub(crate) fn stats_from_prepared_entries(
         link_text_length: u32,
     }
 
-    let mut stack = SmallVec::<[Frame; 32]>::new();
-    let mut result = NodeStats::default();
-    let mut result_link_length = 0.0;
-    let mut result_link_text_length = 0_u32;
-    let mut excluded_depth = None;
+    struct Accumulator<'a> {
+        dom: &'a Dom,
+        excluded: &'a [bool],
+        excluded_depth: Option<u32>,
+        stack: SmallVec<[Frame; 32]>,
+        result: NodeStats,
+        link_length: f64,
+        link_text_length: u32,
+    }
 
-    for entry in entries {
-        if excluded_depth.is_some_and(|depth| entry.depth > depth) {
-            continue;
-        }
-        excluded_depth = None;
-        if excluded.get(entry.node.index()).copied().unwrap_or(false) {
-            excluded_depth = Some(entry.depth);
-            continue;
-        }
-
-        while stack.last().is_some_and(|frame| frame.depth >= entry.depth) {
-            let mut finished = stack.pop().expect("prepared stats frame exists");
+    impl Accumulator<'_> {
+        fn close_top(&mut self) {
+            let mut finished = self.stack.pop().expect("source stats frame exists");
             if finished.tag == Some(Tag::A) {
                 finished.link_text_length = finished.stats.text_length;
                 finished.link_length = finished.stats.text_length as f64
-                    * if dom
+                    * if self
+                        .dom
                         .attr(finished.node, AttrName::Href)
                         .is_some_and(is_hash_url)
                     {
@@ -367,65 +309,96 @@ pub(crate) fn stats_from_prepared_entries(
                         1.0
                     };
             }
-            if let Some(parent) = stack.last_mut() {
+            if let Some(parent) = self.stack.last_mut() {
                 append_content_stats(&mut parent.stats, &finished.stats);
                 parent.link_length += finished.link_length;
                 parent.link_text_length = parent
                     .link_text_length
                     .saturating_add(finished.link_text_length);
             } else {
-                result = finished.stats;
-                result_link_length = finished.link_length;
-                result_link_text_length = finished.link_text_length;
+                self.result = finished.stats;
+                self.link_length = finished.link_length;
+                self.link_text_length = finished.link_text_length;
             }
         }
 
-        if entry.is_element() {
-            stack.push(Frame {
-                node: entry.node,
-                depth: entry.depth,
-                tag: entry.tag,
-                stats: NodeStats::default(),
-                link_length: 0.0,
-                link_text_length: 0,
-            });
-        } else if let Some(text) = dom.text_node(entry.node) {
-            let stats = stats_for_content_metrics(text);
-            if let Some(parent) = stack.last_mut() {
-                append_content_stats(&mut parent.stats, &stats);
-            } else {
-                append_stats(&mut result, &stats);
+        fn observe(&mut self, entry: &SourceEntry, text: Option<NodeStats>) {
+            if self.excluded_depth.is_some_and(|depth| entry.depth > depth) {
+                return;
             }
-        }
-    }
-
-    while let Some(mut finished) = stack.pop() {
-        if finished.tag == Some(Tag::A) {
-            finished.link_text_length = finished.stats.text_length;
-            finished.link_length = finished.stats.text_length as f64
-                * if dom
-                    .attr(finished.node, AttrName::Href)
-                    .is_some_and(is_hash_url)
-                {
-                    0.3
+            self.excluded_depth = None;
+            if self
+                .excluded
+                .get(entry.node.index())
+                .copied()
+                .unwrap_or(false)
+            {
+                self.excluded_depth = Some(entry.depth);
+                return;
+            }
+            while self
+                .stack
+                .last()
+                .is_some_and(|frame| frame.depth >= entry.depth)
+            {
+                self.close_top();
+            }
+            if entry.is_element() {
+                self.stack.push(Frame {
+                    node: entry.node,
+                    depth: entry.depth,
+                    tag: entry.tag,
+                    stats: NodeStats::default(),
+                    link_length: 0.0,
+                    link_text_length: 0,
+                });
+            } else if let Some(stats) = text {
+                if let Some(parent) = self.stack.last_mut() {
+                    append_content_stats(&mut parent.stats, &stats);
                 } else {
-                    1.0
-                };
+                    append_content_stats(&mut self.result, &stats);
+                }
+            }
         }
-        if let Some(parent) = stack.last_mut() {
-            append_content_stats(&mut parent.stats, &finished.stats);
-            parent.link_length += finished.link_length;
-            parent.link_text_length = parent
-                .link_text_length
-                .saturating_add(finished.link_text_length);
-        } else {
-            result = finished.stats;
-            result_link_length = finished.link_length;
-            result_link_text_length = finished.link_text_length;
+
+        fn finish(mut self) -> (NodeStats, f64, usize) {
+            while !self.stack.is_empty() {
+                self.close_top();
+            }
+            (
+                self.result,
+                self.link_length,
+                self.link_text_length as usize,
+            )
         }
     }
 
-    (result, result_link_length, result_link_text_length as usize)
+    let mut normal = Accumulator {
+        dom,
+        excluded: normal_excluded,
+        excluded_depth: None,
+        stack: SmallVec::new(),
+        result: NodeStats::default(),
+        link_length: 0.0,
+        link_text_length: 0,
+    };
+    let mut relaxed = relaxed_excluded.map(|excluded| Accumulator {
+        dom,
+        excluded,
+        excluded_depth: None,
+        stack: SmallVec::new(),
+        result: NodeStats::default(),
+        link_length: 0.0,
+        link_text_length: 0,
+    });
+    for entry in entries {
+        let text = source.text_stats_for_entry(entry);
+        normal.observe(entry, text);
+        if let Some(relaxed) = &mut relaxed {
+            relaxed.observe(entry, text);
+        }
+    }
+    (normal.finish(), relaxed.map(Accumulator::finish))
 }
 
 /// Computes text statistics while omitting the roots marked in `excluded`.
@@ -437,6 +410,16 @@ pub(crate) fn get_or_compute_stats_excluding(
     store: &mut NodeStateStore,
     excluded: &[bool],
 ) -> NodeStats {
+    get_or_compute_stats_excluding_impl(dom, None, id, store, excluded)
+}
+
+fn get_or_compute_stats_excluding_impl(
+    dom: &Dom,
+    source: Option<&SourceAnalysis>,
+    id: NodeId,
+    store: &mut NodeStateStore,
+    excluded: &[bool],
+) -> NodeStats {
     if let Some(s) = store.get_stats(id) {
         return *s;
     }
@@ -444,12 +427,17 @@ pub(crate) fn get_or_compute_stats_excluding(
     // Most small content elements have no descendants or exactly one text
     // child. Avoid creating a traversal frame for these nodes.
     let simple_text = match dom.first_child(id) {
-        None => Some(dom.text_node(id).unwrap_or("")),
-        Some(child) if dom.next_sibling(child).is_none() => dom.text_node(child),
+        None => Some((dom.text_node(id).unwrap_or(""), None)),
+        Some(child) if dom.next_sibling(child).is_none() => {
+            dom.text_node(child).map(|text| (text, Some(child)))
+        }
         _ => None,
     };
-    if let Some(text) = simple_text {
-        let stats = stats_for_text(text);
+    if let Some((text, child)) = simple_text {
+        let stats = child
+            .and_then(|child| store.get_stats(child).copied())
+            .or_else(|| child.and_then(|child| source.and_then(|source| source.text_stats(child))))
+            .unwrap_or_else(|| stats_for_text(text));
         if store.link_lengths_enabled() {
             let link_length = if dom.tag(id) == Some(Tag::A) {
                 stats.text_length as f64
@@ -475,12 +463,14 @@ pub(crate) fn get_or_compute_stats_excluding(
     }
 
     impl StatsFrame {
-        fn new(dom: &Dom, node: NodeId) -> Self {
+        fn new(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> Self {
             Self {
                 node,
                 next_child: dom.first_child(node),
                 stats: match dom.text_node(node) {
-                    Some(text) => stats_for_text(text),
+                    Some(text) => source
+                        .and_then(|source| source.text_stats(node))
+                        .unwrap_or_else(|| stats_for_text(text)),
                     None => NodeStats::default(),
                 },
                 link_length: 0.0,
@@ -490,7 +480,7 @@ pub(crate) fn get_or_compute_stats_excluding(
 
     let cache_links = store.link_lengths_enabled();
     let mut stack = SmallVec::<[StatsFrame; 16]>::new();
-    stack.push(StatsFrame::new(dom, id));
+    stack.push(StatsFrame::new(dom, source, id));
     while let Some(frame) = stack.last_mut() {
         if let Some(child) = frame.next_child {
             frame.next_child = dom.next_sibling(child);
@@ -503,7 +493,7 @@ pub(crate) fn get_or_compute_stats_excluding(
                     frame.link_length += store.link_length(child);
                 }
             } else {
-                stack.push(StatsFrame::new(dom, child));
+                stack.push(StatsFrame::new(dom, source, child));
             }
             continue;
         }
@@ -665,12 +655,13 @@ impl CandidateFeatureIndex {
     pub(crate) fn features(
         &self,
         dom: &Dom,
+        source: Option<&SourceAnalysis>,
         candidate_index: usize,
         candidate: Candidate,
         store: &mut NodeStateStore,
         weight_classes: bool,
     ) -> CandidateFeatures {
-        let text = get_or_compute_stats(dom, candidate.node, store);
+        let text = get_or_compute_stats_from_source(dom, source, candidate.node, store, &[]);
         let counts = self
             .counts
             .get(candidate_index)
@@ -687,7 +678,7 @@ impl CandidateFeatureIndex {
             (link_text_chars / f64::from(text.text_length)).clamp(0.0, 1.0)
         };
         let (positive_name_score, negative_name_score) = if weight_classes {
-            name_signals(dom, candidate.node)
+            name_signals(dom, source, candidate.node)
         } else {
             (0.0, 0.0)
         };
@@ -772,8 +763,18 @@ impl CandidateFeatures {
     }
 }
 
-fn name_signals(dom: &Dom, node: NodeId) -> (f64, f64) {
-    fn signals_for_node(dom: &Dom, node: NodeId) -> (bool, bool) {
+fn name_signals(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> (f64, f64) {
+    fn signals_for_node(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> (bool, bool) {
+        if let Some(entry) = source.and_then(|source| source.entry(node)) {
+            return (
+                entry
+                    .flags
+                    .contains(crate::prepared::SourceFlags::POSITIVE_NAME),
+                entry
+                    .flags
+                    .contains(crate::prepared::SourceFlags::NEGATIVE_NAME),
+            );
+        }
         let mut positive = false;
         let mut negative = false;
         for name in [AttrName::Class, AttrName::Id] {
@@ -794,15 +795,24 @@ fn name_signals(dom: &Dom, node: NodeId) -> (f64, f64) {
         (positive, negative)
     }
 
-    let (positive, mut negative) = signals_for_node(dom, node);
+    let (positive, mut negative) = signals_for_node(dom, source, node);
     for ancestor in dom.ancestors(node).take(3) {
-        let (ancestor_positive, ancestor_negative) = signals_for_node(dom, ancestor);
+        let (ancestor_positive, ancestor_negative) = signals_for_node(dom, source, ancestor);
         negative |= ancestor_negative && !ancestor_positive;
     }
     (f64::from(positive), f64::from(negative))
 }
 
 pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, weight_classes: bool) -> f64 {
+    compute_initial_readability_data_from_source(dom, None, id, weight_classes)
+}
+
+pub(crate) fn compute_initial_readability_data_from_source(
+    dom: &Dom,
+    source: Option<&SourceAnalysis>,
+    id: NodeId,
+    weight_classes: bool,
+) -> f64 {
     let score = match dom.tag(id) {
         Some(Tag::Div) => 5.,
         Some(Tag::Pre | Tag::Td | Tag::Blockquote) => 3.,
@@ -812,7 +822,14 @@ pub fn compute_initial_readability_data(dom: &Dom, id: NodeId, weight_classes: b
         Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::Th) => -5.,
         _ => 0.,
     };
-    score + get_class_weight(dom, id, weight_classes) as f64
+    let class_weight = if weight_classes {
+        source
+            .and_then(|source| source.class_weight(id))
+            .unwrap_or_else(|| get_class_weight(dom, id, true))
+    } else {
+        0
+    };
+    score + f64::from(class_weight)
 }
 pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, weight_classes: bool) {
     store.initialize_if_absent(
@@ -872,6 +889,7 @@ pub(crate) fn prepare_readability_structure(
 /// density. This order avoids a second full DOM copy.
 pub(crate) fn compute_readability_scores(
     dom: &mut Dom,
+    source: Option<&SourceAnalysis>,
     to_score: impl IntoIterator<Item = NodeId>,
     excluded: &[NodeId],
     excluded_mask: &[bool],
@@ -883,7 +901,7 @@ pub(crate) fn compute_readability_scores(
         let Some(parent) = dom.parent(node).filter(|&parent| dom.is_element(parent)) else {
             continue;
         };
-        let stats = get_or_compute_stats(dom, node, store);
+        let stats = get_or_compute_stats_from_source(dom, source, node, store, &[]);
         if stats.text_length < 25 {
             continue;
         }
@@ -896,7 +914,8 @@ pub(crate) fn compute_readability_scores(
             if !dom.is_element(node) || !ancestor.is_some_and(|parent| dom.is_element(parent)) {
                 continue;
             }
-            let initial = compute_initial_readability_data(dom, node, weight_classes);
+            let initial =
+                compute_initial_readability_data_from_source(dom, source, node, weight_classes);
             if store.initialize_if_absent(node, initial) {
                 discovered.push(node)
             }
@@ -934,7 +953,7 @@ pub(crate) fn compute_readability_scores(
             continue;
         }
         let content_score = store.get_content_score(node);
-        let length = get_or_compute_stats(dom, node, store).text_length;
+        let length = get_or_compute_stats_from_source(dom, source, node, store, &[]).text_length;
         let density = get_link_density_cached(dom, node, length, store);
         scores.push(ReadabilityScore {
             node,
@@ -1586,7 +1605,7 @@ mod tests {
         );
         let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
         index.prepare_text_cache(&mut store);
-        let features = index.features(&dom, candidate_index, candidate, &mut store, true);
+        let features = index.features(&dom, None, candidate_index, candidate, &mut store, true);
 
         assert!(features.word_count >= 12);
         assert_eq!(features.paragraph_count, 2);
@@ -1602,7 +1621,7 @@ mod tests {
         assert!(features.positive_name_score > 0.0);
         assert!(features.negative_name_score > 0.0);
 
-        let unweighted = index.features(&dom, candidate_index, candidate, &mut store, false);
+        let unweighted = index.features(&dom, None, candidate_index, candidate, &mut store, false);
         assert_eq!(unweighted.positive_name_score, 0.0);
         assert_eq!(unweighted.negative_name_score, 0.0);
     }
@@ -1639,7 +1658,7 @@ mod tests {
             &mut table_nodes,
         );
         let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates);
-        let features = index.features(&dom, candidate_index, candidate, &mut store, false);
+        let features = index.features(&dom, None, candidate_index, candidate, &mut store, false);
 
         assert_eq!(features.paragraph_count, 300);
         assert_eq!(features.heading_count, 300);
@@ -1678,6 +1697,7 @@ mod tests {
         assert_eq!(index.counts.len(), candidates.iter().count());
         let outer_features = index.features(
             &dom,
+            None,
             candidates.index_of(outer).unwrap(),
             *candidates.get(outer).unwrap(),
             &mut store,
@@ -1685,6 +1705,7 @@ mod tests {
         );
         let inner_features = index.features(
             &dom,
+            None,
             candidates.index_of(inner).unwrap(),
             *candidates.get(inner).unwrap(),
             &mut store,
@@ -1753,7 +1774,8 @@ mod tests {
             .collect();
         let mut store = NodeStateStore::new();
 
-        let scores = compute_readability_scores(&mut dom, paragraphs, &[], &[], &mut store, true);
+        let scores =
+            compute_readability_scores(&mut dom, None, paragraphs, &[], &[], &mut store, true);
 
         let article_score = scores
             .iter()
@@ -1787,6 +1809,7 @@ mod tests {
         let excluded_mask = build_exclusion_mask(&dom, &[excluded]);
         let scores = compute_readability_scores(
             &mut dom,
+            None,
             [visible],
             &[excluded],
             &excluded_mask,
