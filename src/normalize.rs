@@ -24,16 +24,46 @@ fn normalize_semantics(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
 ///
 /// Responsive source selection, figure recognition, and heading semantics stay
 /// in source form until semantic compilation.
+#[cfg(test)]
 pub(crate) fn cleanup_selected_content(
     dom: &mut Dom,
     root: NodeId,
     nodes: &mut Vec<NodeId>,
     flatten_javascript_links: bool,
 ) {
-    images::remove_duplicates(dom, root, nodes);
-    headings::remove_artifacts(dom, root);
+    let mut workspace = crate::cleaning::FragmentWorkspace::default();
+    cleanup_selected_content_in_workspace(
+        dom,
+        root,
+        nodes,
+        flatten_javascript_links,
+        &mut workspace,
+    );
+}
+
+pub(crate) fn cleanup_selected_content_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    flatten_javascript_links: bool,
+    workspace: &mut crate::cleaning::FragmentWorkspace,
+) {
+    workspace.ensure_snapshot(dom, root);
+    {
+        let source_nodes = workspace.preorder();
+        images::remove_duplicates_with_source_nodes(dom, root, source_nodes, nodes);
+    }
+    workspace.invalidate();
+    workspace.ensure_snapshot(dom, root);
+    {
+        let source_nodes = workspace.preorder();
+        let elements_with_depth = workspace.elements_with_depth();
+        headings::remove_artifacts_with_snapshot(dom, root, elements_with_depth, source_nodes);
+    }
+    workspace.invalidate();
     if flatten_javascript_links {
         flatten_javascript_links_for_quality(dom, root);
+        workspace.invalidate();
     }
 }
 
@@ -67,8 +97,24 @@ pub(crate) fn flatten_javascript_links_for_quality(dom: &mut Dom, root: NodeId) 
 }
 
 /// Protects meaningful media from hard cleanup.
+#[cfg(test)]
 pub(crate) fn prepare_media_before_cleanup(dom: &mut Dom, root: NodeId) {
     media::prepare(dom, root);
+}
+
+pub(crate) fn prepare_media_before_cleanup_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    workspace: &mut crate::cleaning::FragmentWorkspace,
+) {
+    let mut scratch = workspace.take_scratch();
+    workspace.ensure_snapshot(dom, root);
+    {
+        let source_nodes = workspace.preorder();
+        media::prepare_with_source_nodes(dom, root, source_nodes, &mut scratch);
+    }
+    workspace.invalidate();
+    workspace.restore_scratch(scratch);
 }
 
 /// Removes SVG implementation details and replaces accessible charts before scoring.
@@ -77,8 +123,25 @@ pub(crate) fn normalize_svg_before_scoring(dom: &mut Dom, root: NodeId) {
 }
 
 /// Removes decorative media while source sizing and naming evidence is intact.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn remove_decorative_media_before_cleanup(dom: &mut Dom, root: NodeId) {
     images::remove_decorative_media(dom, root);
+}
+
+pub(crate) fn remove_decorative_media_before_cleanup_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    workspace: &mut crate::cleaning::FragmentWorkspace,
+) {
+    let mut scratch = workspace.take_scratch();
+    workspace.ensure_snapshot(dom, root);
+    {
+        let snapshot = workspace.elements_with_depth();
+        images::remove_decorative_media_with_snapshot(dom, root, snapshot, &mut scratch);
+    }
+    workspace.invalidate();
+    workspace.restore_scratch(scratch);
 }
 
 pub(crate) fn adjacent_lead_media(dom: &Dom, root: NodeId) -> Option<NodeId> {

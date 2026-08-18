@@ -2,21 +2,30 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 use smallvec::SmallVec;
 
 /// Removes heading controls and named placeholders that are irrelevant to quality metrics.
+#[cfg(test)]
 pub(super) fn remove_artifacts(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
+    let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    remove_artifacts_with_snapshot(dom, root, &nodes, &source_nodes);
+}
 
+pub(super) fn remove_artifacts_with_snapshot(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &[(NodeId, u32)],
+    source_nodes: &[NodeId],
+) {
     // The compiler also ignores permalink controls when it compiles an
     // arbitrary source fragment. Remove them here so source-relative result metrics
     // measure the same visible heading content during extraction retries. Use
     // one ancestry index instead of scanning each heading subtree.
     if nodes.iter().any(|&(node, _)| dom.tag(node) == Some(Tag::A)) {
-        let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-        let heading_permalinks = crate::document::heading_permalink_nodes(dom, &source_nodes);
+        let heading_permalinks = crate::document::heading_permalink_nodes(dom, source_nodes);
         let mut nearest_heading = vec![None; dom.len()];
         let mut affected_headings = vec![false; dom.len()];
         nearest_heading[root.index()] = heading_level(dom, root).map(|_| root);
         let mut permalinks = SmallVec::<[NodeId; 8]>::new();
-        for &(node, _) in &nodes {
+        for &(node, _) in nodes {
             nearest_heading[node.index()] = if heading_level(dom, node).is_some() {
                 Some(node)
             } else {

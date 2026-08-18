@@ -153,23 +153,46 @@ pub(crate) struct SourceEvidence {
     data_table: HashSet<NodeId>,
 }
 
+type SourceSnapshot<'a> = (&'a [NodeId], &'a [(NodeId, u32)]);
+
 impl SourceEvidence {
     /// Analyzes source evidence in one pass when no earlier cleanup traversal
     /// supplied a gate.
     pub(crate) fn analyze(dom: &Dom, root: NodeId, store: &NodeStateStore) -> Self {
-        Self::analyze_impl(dom, root, store, None)
+        Self::analyze_impl(dom, root, store, None, None)
     }
 
     /// Completes targeted source analysis after a cleanup pass has collected
     /// the broad gate. This scan is needed only when the gate found a feature
     /// that needs semantic recognition.
+    #[cfg(test)]
     pub(crate) fn analyze_with_gate(
         dom: &Dom,
         root: NodeId,
         store: &NodeStateStore,
         gate: SemanticGate,
     ) -> Self {
-        Self::analyze_impl(dom, root, store, Some(gate))
+        Self::analyze_impl(dom, root, store, Some(gate), None)
+    }
+
+    /// Completes gated source analysis from a fragment workspace snapshot.
+    /// The snapshot is valid because cleanup has not structurally mutated the
+    /// fragment since the gate was collected.
+    pub(crate) fn analyze_with_gate_and_snapshot(
+        dom: &Dom,
+        root: NodeId,
+        store: &NodeStateStore,
+        gate: SemanticGate,
+        preorder: &[NodeId],
+        elements_with_depth: &[(NodeId, u32)],
+    ) -> Self {
+        Self::analyze_impl(
+            dom,
+            root,
+            store,
+            Some(gate),
+            Some((preorder, elements_with_depth)),
+        )
     }
 
     fn analyze_impl(
@@ -177,6 +200,7 @@ impl SourceEvidence {
         root: NodeId,
         store: &NodeStateStore,
         precollected_gate: Option<SemanticGate>,
+        snapshot: Option<SourceSnapshot<'_>>,
     ) -> Self {
         if precollected_gate
             .as_ref()
@@ -187,10 +211,21 @@ impl SourceEvidence {
         let gate_was_precollected = precollected_gate.is_some();
         let mut gate = precollected_gate.unwrap_or_default();
         if !gate_was_precollected {
-            for node in std::iter::once(root).chain(dom.descendants(root)) {
-                gate.observe(dom, node);
-                if dom.tag(node) == Some(Tag::Table) && store.is_data_table(node) == Some(true) {
-                    gate.add_data_table_node(node);
+            if let Some((preorder, _)) = snapshot {
+                for &node in preorder {
+                    gate.observe(dom, node);
+                    if dom.tag(node) == Some(Tag::Table) && store.is_data_table(node) == Some(true)
+                    {
+                        gate.add_data_table_node(node);
+                    }
+                }
+            } else {
+                for node in std::iter::once(root).chain(dom.descendants(root)) {
+                    gate.observe(dom, node);
+                    if dom.tag(node) == Some(Tag::Table) && store.is_data_table(node) == Some(true)
+                    {
+                        gate.add_data_table_node(node);
+                    }
                 }
             }
         }
@@ -216,12 +251,23 @@ impl SourceEvidence {
         if let Some(targets) = fragment_targets {
             let mut resolved_targets = HashSet::new();
             let mut footnote_nodes = HashSet::new();
-            for node in std::iter::once(root).chain(dom.descendants(root)) {
-                if let Some(id) = dom.attr(node, AttrName::Id)
-                    && targets.contains(id)
-                {
-                    resolved_targets.insert(id);
-                    footnote_nodes.insert(node);
+            if let Some((preorder, _)) = snapshot {
+                for &node in preorder {
+                    if let Some(id) = dom.attr(node, AttrName::Id)
+                        && targets.contains(id)
+                    {
+                        resolved_targets.insert(id);
+                        footnote_nodes.insert(node);
+                    }
+                }
+            } else {
+                for node in std::iter::once(root).chain(dom.descendants(root)) {
+                    if let Some(id) = dom.attr(node, AttrName::Id)
+                        && targets.contains(id)
+                    {
+                        resolved_targets.insert(id);
+                        footnote_nodes.insert(node);
+                    }
                 }
             }
             for (node, target) in fragment_links {
@@ -258,9 +304,12 @@ impl SourceEvidence {
             return Self::default();
         }
 
-        let mut nodes = Vec::with_capacity(dom.len());
-        nodes.push((root, 0));
-        nodes.extend(dom.element_descendants_snapshot_with_depth(root));
+        let owned_nodes = snapshot.is_none().then(|| {
+            let mut nodes = Vec::with_capacity(dom.len());
+            nodes.push((root, 0));
+            nodes.extend(dom.element_descendants_snapshot_with_depth(root));
+            nodes
+        });
 
         let has_math_candidate = gated
             .iter()
@@ -348,12 +397,16 @@ impl SourceEvidence {
         }
 
         let accessible_math = if has_math_candidate {
-            super::math::accessible_math_nodes(dom, &nodes)
+            if let Some((_, elements)) = snapshot {
+                super::math::accessible_math_nodes_with_root(dom, root, elements)
+            } else {
+                super::math::accessible_math_nodes(dom, owned_nodes.as_deref().unwrap_or_default())
+            }
         } else {
             HashSet::new()
         };
         let mut contains_semantic = HashSet::new();
-        for &(node, _) in nodes.iter().rev() {
+        let add_contains = |node: NodeId, contains_semantic: &mut HashSet<NodeId>| {
             let value = callout.contains(&node)
                 || footnote.contains(&node)
                 || math.contains(&node)
@@ -364,6 +417,16 @@ impl SourceEvidence {
                     .any(|child| contains_semantic.contains(&child));
             if value {
                 contains_semantic.insert(node);
+            }
+        };
+        if let Some((_, elements)) = snapshot {
+            for &(node, _) in elements.iter().rev() {
+                add_contains(node, &mut contains_semantic);
+            }
+            add_contains(root, &mut contains_semantic);
+        } else {
+            for &(node, _) in owned_nodes.as_deref().unwrap_or_default().iter().rev() {
+                add_contains(node, &mut contains_semantic);
             }
         }
         Self {

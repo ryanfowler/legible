@@ -32,7 +32,7 @@ pub(crate) const HAS_VISIBLE_IMAGE: u8 = 1 << 1;
 
 pub(crate) use builder::{BuildCapacityPlan, BuildError, SemanticTapeBuilder};
 pub(crate) use code::{
-    count_blocks as source_code_block_count,
+    count_blocks_for_nodes as source_code_block_count_for_nodes,
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
     multiline_content as code_multiline_content,
 };
@@ -60,6 +60,15 @@ pub(crate) fn media_cleanup_evidence(
     nodes: &[crate::dom::NodeId],
 ) -> (Vec<bool>, Vec<Option<crate::dom::NodeId>>) {
     media::cleanup_evidence(dom, nodes)
+}
+
+pub(crate) fn media_cleanup_evidence_into(
+    dom: &crate::dom::Dom,
+    nodes: &[crate::dom::NodeId],
+    sources: &mut [bool],
+    fallbacks: &mut [u32],
+) {
+    media::cleanup_evidence_into(dom, nodes, sources, fallbacks);
 }
 
 pub(crate) fn selected_image_sources_for_cleanup(
@@ -207,12 +216,22 @@ pub(crate) fn semantic_normalization_counts_for_nodes(
     (references, definitions, expressions)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn table_normalization_counts(
     dom: &crate::dom::Dom,
     root: crate::dom::NodeId,
 ) -> (usize, usize) {
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    let analysis = tables::TableAnalysis::analyze(dom, &nodes);
+    table_normalization_counts_for_nodes(dom, root, &nodes)
+}
+
+pub(crate) fn table_normalization_counts_for_nodes(
+    dom: &crate::dom::Dom,
+    _root: crate::dom::NodeId,
+    nodes: &[crate::dom::NodeId],
+) -> (usize, usize) {
+    let analysis = tables::TableAnalysis::analyze(dom, nodes);
     (analysis.flattened_count(), analysis.semantic_table_count())
 }
 

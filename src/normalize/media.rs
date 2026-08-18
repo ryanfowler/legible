@@ -6,9 +6,34 @@ use crate::scoring::{has_hidden_utility_class, has_static_hidden_marker};
 /// Meaningful media stays in source form. The document compiler interprets it
 /// after content selection. This pass only applies visibility and active
 /// object/embed policy while the source evidence is available.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn prepare(dom: &mut Dom, root: NodeId) {
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    let (sources, fallbacks) = crate::document::media_cleanup_evidence(dom, &nodes);
+    let mut scratch = crate::cleaning::FragmentScratch {
+        u32_values: Vec::new(),
+        bytes: Vec::new(),
+        bits: Vec::new(),
+    };
+    prepare_with_source_nodes(dom, root, &nodes, &mut scratch);
+}
+
+pub(super) fn prepare_with_source_nodes(
+    dom: &mut Dom,
+    _root: NodeId,
+    nodes: &[NodeId],
+    scratch: &mut crate::cleaning::FragmentScratch,
+) {
+    scratch.bits.resize(dom.len(), false);
+    scratch.bits.fill(false);
+    scratch.u32_values.resize(dom.len(), u32::MAX);
+    scratch.u32_values.fill(u32::MAX);
+    crate::document::media_cleanup_evidence_into(
+        dom,
+        nodes,
+        &mut scratch.bits,
+        &mut scratch.u32_values,
+    );
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_none() || !dom.is_element(node) {
             continue;
@@ -18,9 +43,10 @@ pub(super) fn prepare(dom: &mut Dom, root: NodeId) {
             Some(Tag::Iframe | Tag::Video | Tag::Audio) if is_statically_hidden(dom, node) => {
                 dom.detach(node)
             }
-            Some(Tag::Iframe | Tag::Video | Tag::Audio) if !sources[node.index()] => {
-                if let Some(fallback) = fallbacks[node.index()] {
-                    dom.insert_before(node, fallback);
+            Some(Tag::Iframe | Tag::Video | Tag::Audio) if !scratch.bits[node.index()] => {
+                let fallback = scratch.u32_values[node.index()];
+                if fallback != u32::MAX {
+                    dom.insert_before(node, NodeId(fallback));
                 }
                 dom.detach(node);
             }

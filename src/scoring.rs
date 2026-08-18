@@ -1262,6 +1262,7 @@ mod tests {
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
         crate::cleaning::mark_data_tables_from_snapshot(
             &dom,
+            dom.root(),
             &snapshot,
             &mut store,
             &mut table_nodes,
@@ -1315,6 +1316,7 @@ mod tests {
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
         crate::cleaning::mark_data_tables_from_snapshot(
             &dom,
+            dom.root(),
             &snapshot,
             &mut store,
             &mut table_nodes,
@@ -1349,6 +1351,7 @@ mod tests {
         let mut table_nodes = Vec::new();
         crate::cleaning::mark_data_tables_from_snapshot(
             &dom,
+            dom.root(),
             &snapshot,
             &mut store,
             &mut table_nodes,

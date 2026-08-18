@@ -21,10 +21,11 @@ use crate::instrumentation::{Phase, PhaseGuard};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
-    accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes, cleanup_selected_content,
-    collect_external_footnotes, has_primary_heading_semantics, normalize_scoring_structure,
-    normalize_svg_before_scoring, prepare_media_before_cleanup,
-    remove_decorative_media_before_cleanup, remove_empty_content_with_source_facts,
+    accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes,
+    cleanup_selected_content_in_workspace, collect_external_footnotes,
+    has_primary_heading_semantics, normalize_scoring_structure, normalize_svg_before_scoring,
+    prepare_media_before_cleanup_in_workspace, remove_decorative_media_before_cleanup_in_workspace,
+    remove_empty_content_with_source_facts,
 };
 use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
@@ -611,6 +612,7 @@ impl<'a> ContentExtractor<'a> {
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
+        let mut fragment_workspace = FragmentWorkspace::default();
         let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
         let base_candidates = CandidateSet::discover_semantic_from_prepared(
             &self.dom,
@@ -933,6 +935,7 @@ impl<'a> ContentExtractor<'a> {
             // DOM is restored after rejection, while the immutable scoring
             // view stays cached for any later retry.
             let source_dom = std::mem::replace(&mut self.dom, fragment);
+            fragment_workspace.reset();
             let (_top_id, content_id) = if selection.node == body {
                 Self::prune_body_fallback_chrome(&mut self.dom, copied_top);
                 let container = self
@@ -1011,6 +1014,7 @@ impl<'a> ContentExtractor<'a> {
                 &mut match_buffer,
                 &mut text_buffer,
                 &mut cleaning_nodes,
+                &mut fragment_workspace,
             );
             if synthetic {
                 self.dom
@@ -1033,7 +1037,8 @@ impl<'a> ContentExtractor<'a> {
             let (mut source_facts, mut retained_stream) =
                 self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
             crate::instrumentation::record_cleaned_nodes(self.dom.len());
-            self.capture_normalization_counts(content_id);
+            fragment_workspace.invalidate();
+            self.capture_normalization_counts(content_id, &mut fragment_workspace);
             #[cfg(feature = "bench-instrumentation")]
             drop(_cleanup_phase);
             if synthetic
@@ -1622,6 +1627,7 @@ impl<'a> ContentExtractor<'a> {
         );
         let mut match_buffer = String::new();
         let mut text_buffer = String::new();
+        let mut fragment_workspace = FragmentWorkspace::default();
         self.prepare_exact_fragment(
             &mut fragment,
             content_id,
@@ -1647,6 +1653,7 @@ impl<'a> ContentExtractor<'a> {
             &mut match_buffer,
             &mut text_buffer,
             &mut cleaning_nodes,
+            &mut fragment_workspace,
         );
         if synthetic {
             self.dom
@@ -1670,7 +1677,8 @@ impl<'a> ContentExtractor<'a> {
         let (mut source_facts, mut retained_stream) =
             self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
         crate::instrumentation::record_cleaned_nodes(self.dom.len());
-        self.capture_normalization_counts(content_id);
+        fragment_workspace.invalidate();
+        self.capture_normalization_counts(content_id, &mut fragment_workspace);
         #[cfg(feature = "bench-instrumentation")]
         drop(_cleanup_phase);
         if synthetic
@@ -2496,7 +2504,7 @@ impl<'a> ContentExtractor<'a> {
             feature_index.clone()
         } else {
             let mut table_nodes = Vec::new();
-            mark_data_tables_from_snapshot(dom, snapshot, store, &mut table_nodes);
+            mark_data_tables_from_snapshot(dom, dom.root(), snapshot, store, &mut table_nodes);
             CandidateFeatureIndex::new(dom, store, snapshot, candidates)
         };
         feature_index.prepare_text_cache(store);
@@ -2785,6 +2793,7 @@ impl<'a> ContentExtractor<'a> {
         _match_buffer: &mut String,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
+        workspace: &mut FragmentWorkspace,
     ) -> (
         Option<SemanticStructureCounts>,
         crate::document::SourceEvidence,
@@ -2792,32 +2801,41 @@ impl<'a> ContentExtractor<'a> {
         // Cleanup mutates only the compact selected fragment. Hard cleanup
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
-        prepare_media_before_cleanup(&mut self.dom, root);
+        prepare_media_before_cleanup_in_workspace(&mut self.dom, root, workspace);
         let before = self.diagnostic_element_count(root);
-        remove_decorative_media_before_cleanup(&mut self.dom, root);
+        remove_decorative_media_before_cleanup_in_workspace(&mut self.dom, root, workspace);
         self.record_cleanup_delta(CleanupActionKind::DecorativeMedia, before, root);
         let mut semantic_gate = crate::document::SemanticGate::default();
-        clean_styles_with_semantic_gate(&mut self.dom, root, nodes, &mut semantic_gate);
-        mark_data_tables(&self.dom, root, &mut self.node_data, nodes);
+        clean_styles_with_semantic_gate_in_workspace(
+            &mut self.dom,
+            root,
+            nodes,
+            &mut semantic_gate,
+            workspace,
+        );
+        mark_data_tables_in_workspace(&self.dom, root, &mut self.node_data, nodes, workspace);
         for &node in nodes.iter() {
             if self.node_data.is_data_table(node) == Some(true) {
                 semantic_gate.add_data_table_node(node);
             }
         }
-        let source_evidence = crate::document::SourceEvidence::analyze_with_gate(
+        let source_evidence = crate::document::SourceEvidence::analyze_with_gate_and_snapshot(
             &self.dom,
             root,
             &self.node_data,
             semantic_gate,
+            workspace.preorder(),
+            workspace.elements_with_depth(),
         );
         let before = self.diagnostic_element_count(root);
-        hard_cleanup(
+        hard_cleanup_in_workspace(
             &mut self.dom,
             root,
             video,
             self.strategy == ExtractionStrategy::RelaxedVisibility,
             &source_evidence,
             nodes,
+            workspace,
         );
         self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
         // Semantic coverage starts after high-confidence removal of active,
@@ -2841,7 +2859,7 @@ impl<'a> ContentExtractor<'a> {
         if self.page_kind.uses_article_cleanup() {
             if self.strategy.conditional_cleanup() {
                 let before = self.diagnostic_element_count(root);
-                heuristic_cleanup(
+                heuristic_cleanup_in_workspace(
                     &mut self.dom,
                     root,
                     self.page_kind,
@@ -2849,19 +2867,32 @@ impl<'a> ContentExtractor<'a> {
                     &source_evidence,
                     text_buffer,
                     nodes,
+                    workspace,
                 );
                 self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
             }
             // Global chrome is high-confidence cleanup. Apply it to every
             // extraction strategy, including broad and fallback attempts.
             let before = self.diagnostic_element_count(root);
-            remove_global_chrome(&mut self.dom, root, &mut self.node_data, &source_evidence);
+            remove_global_chrome_in_workspace(
+                &mut self.dom,
+                root,
+                &mut self.node_data,
+                &source_evidence,
+                workspace,
+            );
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 
         // Remove duplicate media and named placeholders. Keep all output
         // semantics in source form for the document compiler.
-        cleanup_selected_content(&mut self.dom, root, nodes, self.base_uri.is_some());
+        cleanup_selected_content_in_workspace(
+            &mut self.dom,
+            root,
+            nodes,
+            self.base_uri.is_some(),
+            workspace,
+        );
 
         // Single traversal collects both paragraphs and line breaks,
         // replacing two separate filters over `descendants`.
@@ -2998,16 +3029,22 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
-    fn capture_normalization_counts(&mut self, root: NodeId) {
+    fn capture_normalization_counts(&mut self, root: NodeId, workspace: &mut FragmentWorkspace) {
         if self.diagnostic_attempts.is_none() {
             return;
         }
+        workspace.ensure_snapshot(&self.dom, root);
+        let source_nodes = workspace.preorder();
         let (flattened_layout_tables, semantic_tables) =
-            crate::document::table_normalization_counts(&self.dom, root);
+            crate::document::table_normalization_counts_for_nodes(&self.dom, root, source_nodes);
         let (footnote_references, footnote_definitions, math_expressions) =
-            crate::document::semantic_normalization_counts(&self.dom, root);
+            crate::document::semantic_normalization_counts_for_nodes(&self.dom, root, source_nodes);
         let mut counts = NormalizationCountsInfo {
-            code_blocks: crate::document::source_code_block_count(&self.dom, root),
+            code_blocks: crate::document::source_code_block_count_for_nodes(
+                &self.dom,
+                root,
+                source_nodes,
+            ),
             flattened_layout_tables,
             tables: semantic_tables,
             footnote_references,
@@ -3015,7 +3052,7 @@ impl<'a> ContentExtractor<'a> {
             math_expressions,
             ..NormalizationCountsInfo::default()
         };
-        for node in self.dom.descendants(root) {
+        for &node in source_nodes.iter().skip(1) {
             if self.dom.tag(node) == Some(Tag::Img) {
                 counts.images += 1;
             }
