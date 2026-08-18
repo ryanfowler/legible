@@ -39,7 +39,7 @@ use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
 use regex::Regex;
 use smallvec::SmallVec;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 pub(crate) struct ContentExtractor<'a> {
@@ -229,7 +229,7 @@ fn has_exact_single_paragraph_child(dom: &Dom, node: NodeId) -> bool {
 }
 
 struct BestAttempt {
-    content: FrozenContent,
+    physical_key: AttemptKey,
     quality: ExtractionQuality,
     excerpt: Option<String>,
     direction: Option<String>,
@@ -250,6 +250,79 @@ struct FrozenContent {
     retained_stream: Option<crate::document::RetainedStream>,
 }
 
+#[derive(Clone, Debug)]
+struct AttemptPlan {
+    strategy: ExtractionStrategy,
+    visibility: VisibilityVariant,
+    analysis_index: usize,
+    selection: RootSelection,
+    source_siblings: SmallVec<[NodeId; 16]>,
+    top_id: NodeId,
+    synthetic: bool,
+    rename_top: bool,
+    lead_media: Option<NodeId>,
+    source_direction: Option<String>,
+    root_info: Option<RootInfo>,
+    root_in_document_chrome: bool,
+    visibility_root_semantic: bool,
+    byline: Option<String>,
+    key: AttemptKey,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AttemptKey {
+    source_roots: SmallVec<[NodeId; 16]>,
+    selection_node: NodeId,
+    top_id: NodeId,
+    synthetic: bool,
+    visibility: VisibilityVariant,
+    conditional_cleanup: bool,
+    body_fallback: bool,
+    rename_top: bool,
+    lead_media: Option<NodeId>,
+    source_direction: Option<String>,
+}
+
+struct CachedPhysicalAttempt {
+    result_metrics: ContentMetrics,
+    semantic_coverage: Option<crate::diagnostics::SemanticCoverageInfo>,
+    representation: Option<RepresentationMetricsInfo>,
+    cleanup_actions: Vec<CleanupActionInfo>,
+    normalization: NormalizationCountsInfo,
+    access_barrier: bool,
+    interactive_shell: bool,
+    incoherent_short: bool,
+    excerpt: Option<String>,
+    content: Option<FrozenContent>,
+}
+
+impl CachedPhysicalAttempt {
+    #[allow(clippy::too_many_arguments)]
+    fn from_result(
+        result_metrics: ContentMetrics,
+        semantic_coverage: Option<crate::diagnostics::SemanticCoverageInfo>,
+        representation: Option<RepresentationMetricsInfo>,
+        cleanup_actions: Vec<CleanupActionInfo>,
+        normalization: NormalizationCountsInfo,
+        access_barrier: bool,
+        interactive_shell: bool,
+        incoherent_short: bool,
+    ) -> Self {
+        Self {
+            result_metrics,
+            semantic_coverage,
+            representation,
+            cleanup_actions,
+            normalization,
+            access_barrier,
+            interactive_shell,
+            incoherent_short,
+            excerpt: None,
+            content: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum ExtractionStrategy {
@@ -261,7 +334,7 @@ enum ExtractionStrategy {
     BodyFallback,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VisibilityVariant {
     Normal,
     Relaxed,
@@ -709,7 +782,15 @@ impl<'a> ContentExtractor<'a> {
             crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref());
         let mut analysis_cache = AnalysisCache::default();
         let mut discovery_cache: Vec<(VisibilityVariant, CandidateDiscovery)> = Vec::new();
+        let mut physical_cache: HashMap<AttemptKey, CachedPhysicalAttempt> = HashMap::new();
+        let mut plans = Vec::new();
         for strategy in ExtractionStrategy::ORDER {
+            if matches!(
+                strategy,
+                ExtractionStrategy::BroadContent | ExtractionStrategy::BodyFallback
+            ) {
+                continue;
+            }
             if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
                 continue;
             }
@@ -723,274 +804,241 @@ impl<'a> ContentExtractor<'a> {
             }
             self.strategy = strategy;
             crate::instrumentation::record_strategy(strategy as u8);
-            self.diagnostic_cleanup_actions.clear();
-            self.diagnostic_normalization = NormalizationCountsInfo::default();
-            let visibility = strategy.visibility_variant();
-            let analysis_index = if let Some(index) = analysis_cache.find(visibility) {
-                index
-            } else {
-                #[cfg(test)]
-                record_generic_scoring_call();
-                let analysis = self.build_scoring_analysis(
-                    visibility,
-                    &mut text_buffer,
+            crate::instrumentation::record_logical_attempt_plan();
+            let plan = self.build_attempt_plan(
+                strategy,
+                exact_root,
+                structured_root,
+                short_source_access_barrier,
+                &prepared_source,
+                &accessible_math,
+                &title_plan,
+                &base_candidates,
+                &content_hint_targets,
+                source_anchors,
+                &mut text_buffer,
+                &mut analysis_cache,
+                &mut discovery_cache,
+            )?;
+            plans.push(plan);
+        }
+
+        let mut plan_index = 0;
+        let mut broad_planned = false;
+        let mut body_planned = false;
+        while plan_index < plans.len() || !body_planned {
+            if plan_index == 2 && !broad_planned {
+                broad_planned = true;
+                if source_metrics.has_meaningful_text() {
+                    let broad = self.build_attempt_plan(
+                        ExtractionStrategy::BroadContent,
+                        exact_root,
+                        structured_root,
+                        short_source_access_barrier,
+                        &prepared_source,
+                        &accessible_math,
+                        &title_plan,
+                        &base_candidates,
+                        &content_hint_targets,
+                        source_anchors,
+                        &mut text_buffer,
+                        &mut analysis_cache,
+                        &mut discovery_cache,
+                    )?;
+                    crate::instrumentation::record_strategy(ExtractionStrategy::BroadContent as u8);
+                    crate::instrumentation::record_logical_attempt_plan();
+                    plans.insert(plan_index, broad);
+                }
+            }
+            if plan_index == plans.len() {
+                if !source_metrics.has_meaningful_text() {
+                    break;
+                }
+                let body = self.build_attempt_plan(
+                    ExtractionStrategy::BodyFallback,
+                    exact_root,
+                    structured_root,
+                    short_source_access_barrier,
                     &prepared_source,
                     &accessible_math,
                     &title_plan,
                     &base_candidates,
                     &content_hint_targets,
-                    structured_root,
                     source_anchors,
+                    &mut text_buffer,
+                    &mut analysis_cache,
                     &mut discovery_cache,
                 )?;
-                crate::instrumentation::record_unique_attempt_plan(visibility as u8);
-                analysis_cache.variants.push((visibility, analysis));
-                analysis_cache.variants.len() - 1
-            };
-            if !strategy.weight_classes() {
-                let analysis = &mut analysis_cache.variants[analysis_index].1;
-                if analysis.unweighted.is_none() {
-                    self.prepare_unweighted_scoring(
-                        analysis,
-                        &prepared_source,
-                        &content_hint_targets,
-                        structured_root,
-                    );
-                }
+                crate::instrumentation::record_strategy(ExtractionStrategy::BodyFallback as u8);
+                crate::instrumentation::record_logical_attempt_plan();
+                plans.push(body);
+                body_planned = true;
             }
+            let plan = plans[plan_index].clone();
+            plan_index += 1;
+            let strategy = plan.strategy;
+            debug_assert_eq!(plan.visibility, strategy.visibility_variant());
+            let analysis_index = plan.analysis_index;
+            self.strategy = strategy;
+            self.diagnostic_cleanup_actions.clear();
+            self.diagnostic_normalization = NormalizationCountsInfo::default();
             let analysis = &analysis_cache.variants[analysis_index].1;
             let variant = analysis
                 .variant(strategy.weight_classes())
                 .ok_or(Error::NoContent)?;
-            let discovery = &variant.discovery;
-            let candidates = &variant.candidates;
-            let ranked = &variant.ranked;
             let body = analysis.body;
-            self.page_byline = discovery.byline.clone();
+            self.page_byline = plan.byline.clone();
             self.node_data = variant.node_data.clone();
-            let working_dom = &self.dom;
-            let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
-            let mut selection = select_content_root(
-                working_dom,
-                candidates,
-                ranked,
-                body,
-                self.structured_data
-                    .primary_texts(&self.structured_title, self.source_uri.as_ref()),
-            );
-            selection = self.selection_for_strategy(
-                strategy,
-                working_dom,
-                body,
-                selection,
-                structured_root,
-            );
-            if strategy == ExtractionStrategy::RelaxedVisibility
-                && short_source_access_barrier
-                && let Some(hidden) = ranked
-                    .iter()
-                    .find(|candidate| self.is_inside_static_hidden(candidate.node))
-            {
-                selection = RootSelection {
-                    node: hidden.node,
-                    reason: RootSelectionReason::SpecificChild,
-                    branches: SmallVec::new(),
-                };
-            }
-            if let Some(node) = exact_root {
-                selection = RootSelection {
-                    node,
-                    reason: RootSelectionReason::SpecificChild,
-                    branches: SmallVec::new(),
-                };
-            }
-            let visibility_root_semantic = matches!(
-                working_dom.tag(selection.node),
-                Some(Tag::Article | Tag::Main)
-            ) || working_dom
-                .attr(selection.node, AttrName::Role)
-                .is_some_and(Self::has_primary_role);
-            let root_info = self.root_info(
-                working_dom,
-                candidates,
-                &selection,
-                ranked.first().map(|candidate| candidate.node),
-            );
-            let root_in_document_chrome =
-                Self::is_document_chrome_root(working_dom, selection.node, body);
-            if selection.node == body {
-                selection.branches.clear();
-            }
-
-            // Root selection only reads the immutable scoring view. Record the
-            // boundary edits that the old mutable scoring path applied so they
-            // can be made on the selected fragment after the copy.
-            let mut top_id = selection.node;
-            let rename_top = selection.reason == RootSelectionReason::CompleteAncestor
-                && matches!(working_dom.tag(top_id), Some(Tag::Article | Tag::Main));
-            if !selection.branches.is_empty() || selection.node == body {
-                top_id = selection.branches.first().copied().unwrap_or(body);
-            } else {
-                // Preserve useful boundary expansion from the prose scoring algorithm when the
-                // structural selector accepts the raw ranking winner. Explicit
-                // child, parent, or schema choices are already final.
-                if selection.reason == RootSelectionReason::Ranked {
-                    let top_score = ranked[0].score;
-                    let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = ranked
-                        .iter()
-                        .skip(1)
-                        .filter(|candidate| candidate.score / top_score >= 0.75)
-                        .filter(|candidate| {
-                            candidates.get(candidate.node).is_some_and(|candidate| {
-                                candidate.has_source(CandidateSource::Readability)
-                                    || candidate.has_source(CandidateSource::Semantic)
-                            })
-                        })
-                        .map(|candidate| {
-                            analysis
-                                .view
-                                .effective_ancestors(working_dom, candidate.node)
-                        })
-                        .collect();
-                    if alternatives.len() >= 3 {
-                        let mut parent = analysis.view.effective_parent(working_dom, top_id);
-                        while let Some(node) = parent {
-                            if node == body {
-                                break;
-                            }
-                            if alternatives
-                                .iter()
-                                .filter(|ancestors| ancestors.contains(&node))
-                                .count()
-                                >= 3
-                            {
-                                top_id = node;
-                                break;
-                            }
-                            parent = analysis.view.effective_parent(working_dom, node)
-                        }
-                    }
-                    if !self.node_data.has(top_id) {
-                        initialize_node(
-                            working_dom,
-                            top_id,
-                            &mut self.node_data,
-                            self.strategy.weight_classes(),
-                        )
-                    }
-                    let threshold = self.node_data.get_content_score(top_id) / 3.0;
-                    let mut last = self.node_data.get_content_score(top_id);
-                    let mut parent = analysis.view.effective_parent(working_dom, top_id);
-                    while let Some(node) = parent {
-                        if node == body {
-                            break;
-                        }
-                        if let Some(score) = self.node_data.get_content_score_if_initialized(node) {
-                            if score < threshold {
-                                break;
-                            }
-                            if score > last {
-                                top_id = node;
-                                break;
-                            }
-                            last = score;
-                        }
-                        parent = analysis.view.effective_parent(working_dom, node)
-                    }
-                    while let Some(parent) = analysis.view.effective_parent(working_dom, top_id) {
-                        if parent == body {
-                            break;
-                        }
-                        let children = analysis
-                            .view
-                            .effective_element_children(working_dom, parent);
-                        if children.len() == 1 {
-                            top_id = parent;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                // A compact semantic article can lose its lead heading when a
-                // syntax-highlighted wrapper wins readability scoring. Promote
-                // to that boundary only when it is small, link-light, and the
-                // omitted prefix is a heading with at most one lead paragraph.
-                if selection.reason == RootSelectionReason::Ranked
-                    && (working_dom.tag(top_id) == Some(Tag::Pre)
-                        || working_dom
-                            .descendants(top_id)
-                            .any(|node| working_dom.tag(node) == Some(Tag::Pre)))
-                    && let Some(article) = analysis
-                        .view
-                        .effective_ancestors(working_dom, top_id)
-                        .into_iter()
-                        .take(8)
-                        .find(|&ancestor| {
-                            matches!(working_dom.tag(ancestor), Some(Tag::Article | Tag::Main))
-                                && working_dom.normalized_char_count(ancestor) <= 10_000
-                        })
-                    && has_compact_code_page_structure(working_dom, article)
-                    && (has_compact_code_lead(working_dom, article, top_id)
-                        || has_line_number_table_marker(working_dom, top_id))
-                {
-                    top_id = article;
-                }
-                if !self.node_data.has(top_id) {
-                    initialize_node(
-                        working_dom,
-                        top_id,
-                        &mut self.node_data,
-                        self.strategy.weight_classes(),
-                    )
-                }
-            }
-
-            let synthetic = !selection.branches.is_empty() || selection.node == body;
-            let lead_media = (!synthetic && exact_root.is_none())
-                .then(|| adjacent_lead_media(working_dom, top_id))
+            let selection = plan.selection.clone();
+            let source_siblings = plan.source_siblings.clone();
+            let top_id = plan.top_id;
+            let synthetic = plan.synthetic;
+            let rename_top = plan.rename_top;
+            let lead_media = plan.lead_media;
+            let source_direction = plan.source_direction.clone();
+            let root_info = plan.root_info.clone();
+            let root_in_document_chrome = plan.root_in_document_chrome;
+            let visibility_root_semantic = plan.visibility_root_semantic;
+            let key = plan.key.clone();
+            let cached_attempt = (strategy == ExtractionStrategy::StructuredDataHint)
+                .then(|| physical_cache.remove(&key))
                 .flatten();
-            // A synthetic branch container is a sibling of the selected
-            // branches. Its direction therefore comes from the common parent,
-            // not from the first branch's own attributes.
-            let direction_root = selection
-                .branches
-                .first()
-                .and_then(|&branch| working_dom.parent(branch))
-                .unwrap_or(top_id);
-            let source_direction = std::iter::once(direction_root)
-                .chain(
-                    analysis
-                        .view
-                        .effective_ancestors(working_dom, direction_root),
-                )
-                .find_map(|node| working_dom.attr(node, AttrName::Dir))
-                .map(str::to_owned);
-            let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
-                if selection.reason == RootSelectionReason::Ranked {
-                    Self::gather_siblings(
-                        working_dom,
-                        &analysis.view,
-                        top_id,
-                        &mut self.node_data,
-                        self.options.debug,
-                    )
-                    .into_iter()
-                    .collect()
+            if let Some(mut cached) = cached_attempt {
+                crate::instrumentation::record_deduplicated_attempt();
+                self.diagnostic_cleanup_actions = cached.cleanup_actions.clone();
+                self.diagnostic_normalization = cached.normalization;
+                let attempt_source_metrics = if strategy == ExtractionStrategy::RelaxedVisibility {
+                    relaxed_source_metrics
                 } else {
-                    SmallVec::from_slice(&[top_id])
+                    source_metrics
+                };
+                let result_metrics = cached.result_metrics;
+                let quality = ExtractionQuality::new(
+                    attempt_source_metrics,
+                    result_metrics,
+                    selection.node != body && strategy != ExtractionStrategy::BodyFallback,
+                );
+                let schema_match = structured_root == Some(selection.node)
+                    && !quality.is_suspiciously_small()
+                    && (quality.coverage >= 0.2 || quality.text_chars >= 500);
+                let ignores_visible_source_barrier = strategy
+                    == ExtractionStrategy::RelaxedVisibility
+                    && has_relaxable_hidden_content;
+                let valid_result = !root_in_document_chrome
+                    && !cached.access_barrier
+                    && !(short_source_access_barrier && !ignores_visible_source_barrier)
+                    && !cached.interactive_shell
+                    && !cached.incoherent_short;
+                let visibility_candidate_coherent = strategy
+                    != ExtractionStrategy::RelaxedVisibility
+                    || result_metrics.paragraph_count >= 2
+                    || visibility_root_semantic && result_metrics.structured_block_count > 0;
+                let visibility_improves = visibility_candidate_coherent
+                    && (strategy != ExtractionStrategy::RelaxedVisibility
+                        || self.best_attempt.as_ref().is_none_or(|best| {
+                            quality.text_chars >= best.quality.text_chars.saturating_mul(2)
+                                || quality.text_chars > best.quality.text_chars
+                                    && quality.coverage >= best.quality.coverage + 0.2
+                        }));
+                let deferred_for_visibility =
+                    visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
+                let accepted = valid_result
+                    && (exact_root.is_some()
+                        || visibility_improves
+                            && !deferred_for_visibility
+                            && (quality.is_good() || schema_match));
+                if accepted {
+                    let excerpt = cached.excerpt.take();
+                    self.page_direction = source_direction.clone();
+                    self.record_attempt(
+                        strategy,
+                        root_info,
+                        attempt_source_metrics,
+                        result_metrics,
+                        quality,
+                        cached.semantic_coverage.clone(),
+                        cached.representation,
+                        true,
+                        None,
+                    );
+                    let content = cached.content.take().ok_or(Error::NoContent)?;
+                    let FrozenContent {
+                        dom,
+                        source_facts,
+                        source_evidence,
+                        retained_stream,
+                    } = content;
+                    let root = dom.root();
+                    let document = crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+                        dom,
+                        root,
+                        &compile_context,
+                        source_facts.as_ref(),
+                        &source_evidence,
+                        retained_stream.as_ref(),
+                    )
+                    .map_err(|_| Error::NoContent)?;
+                    return Ok(ExtractedContent { excerpt, document });
                 }
-            } else if !selection.branches.is_empty() {
-                selection.branches.iter().copied().collect()
-            } else {
-                SmallVec::from_slice(&[body])
-            };
-            source_siblings.retain(|node| {
-                !analysis
-                    .excluded_mask
-                    .get(node.index())
-                    .copied()
-                    .unwrap_or(false)
-            });
+                let rejection = Self::attempt_rejection_reason(
+                    root_in_document_chrome,
+                    cached.access_barrier,
+                    short_source_access_barrier && !ignores_visible_source_barrier,
+                    cached.interactive_shell,
+                    cached.incoherent_short,
+                    visibility_improves,
+                    deferred_for_visibility,
+                );
+                let diagnostic_index = self.record_attempt(
+                    strategy,
+                    root_info,
+                    attempt_source_metrics,
+                    result_metrics,
+                    quality,
+                    cached.semantic_coverage.clone(),
+                    cached.representation,
+                    false,
+                    Some(rejection),
+                );
+                if valid_result
+                    && visibility_improves
+                    && self.best_attempt.as_ref().is_none_or(|best| {
+                        quality.best_attempt_score() > best.quality.best_attempt_score()
+                    })
+                {
+                    if let Some(previous) = self
+                        .best_attempt
+                        .as_ref()
+                        .and_then(|best| best.diagnostic_index)
+                        && let Some(attempts) = self.diagnostic_attempts.as_mut()
+                    {
+                        attempts[previous].rejection_reason =
+                            Some(AttemptRejectionReason::Superseded);
+                    }
+                    self.best_attempt = Some(BestAttempt {
+                        physical_key: key.clone(),
+                        quality,
+                        excerpt: cached.excerpt.take(),
+                        direction: source_direction.clone(),
+                        strategy,
+                        diagnostic_index,
+                    });
+                    physical_cache.insert(key, cached);
+                    self.page_byline = None;
+                    self.page_direction = None;
+                    self.page_language = None;
+                    self.node_data.clear();
+                } else {
+                    physical_cache.insert(key, cached);
+                    self.page_byline = None;
+                    self.page_direction = None;
+                    self.page_language = None;
+                    self.node_data.clear();
+                }
+                continue;
+            }
+            crate::instrumentation::record_physical_attempt_execution();
+            let working_dom = &self.dom;
             // Copy only the selected source roots. The scoring view remains
             // available for later strategies, so a rejected attempt does not
             // require another complete DOM clone.
@@ -1073,13 +1121,11 @@ impl<'a> ContentExtractor<'a> {
             );
             remove_title_brand_headings(&mut self.dom, content_id, &fragment_title_plan);
 
-            self.page_direction = source_direction;
+            self.page_direction = source_direction.clone();
 
             // Cleanup owns a compact copy of the selected region. The source
             // DOM remains available for a retry and is never affected by an
             // earlier attempt's mutations.
-            #[cfg(feature = "bench-instrumentation")]
-            drop(_root_selection_phase);
             if let Some(footnote_definitions) = footnote_definitions.as_ref() {
                 adopt_external_footnotes(
                     footnote_definitions,
@@ -1288,17 +1334,41 @@ impl<'a> ContentExtractor<'a> {
                 attempt_source_metrics,
                 result_metrics,
                 quality,
-                semantic_coverage,
+                semantic_coverage.clone(),
                 representation,
                 false,
                 Some(rejection),
             );
-            if valid_result
+            let mut cached = CachedPhysicalAttempt::from_result(
+                result_metrics,
+                semantic_coverage.clone(),
+                representation,
+                self.diagnostic_cleanup_actions.clone(),
+                self.diagnostic_normalization,
+                access_barrier,
+                interactive_shell,
+                incoherent_short,
+            );
+            let can_be_best = valid_result
                 && visibility_improves
                 && self.best_attempt.as_ref().is_none_or(|best| {
                     quality.best_attempt_score() > best.quality.best_attempt_score()
-                })
-            {
+                });
+            let may_have_a_later_duplicate =
+                strategy == ExtractionStrategy::Normal && structured_root.is_some();
+            if can_be_best || may_have_a_later_duplicate {
+                cached.excerpt = self.content_excerpt_if_needed(result_root);
+                cached.content = Some(FrozenContent {
+                    dom: std::mem::replace(&mut self.dom, source_dom),
+                    source_facts,
+                    source_evidence,
+                    retained_stream,
+                });
+            } else {
+                self.dom = source_dom;
+            }
+            physical_cache.insert(key.clone(), cached);
+            if can_be_best {
                 if let Some(previous) = self
                     .best_attempt
                     .as_ref()
@@ -1307,17 +1377,24 @@ impl<'a> ContentExtractor<'a> {
                 {
                     attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
                 }
-                let excerpt = self.content_excerpt_if_needed(result_root);
+                if let Some(previous_key) = self
+                    .best_attempt
+                    .as_ref()
+                    .map(|best| best.physical_key.clone())
+                    && !(previous_key.visibility == VisibilityVariant::Normal
+                        && previous_key.conditional_cleanup
+                        && !previous_key.body_fallback
+                        && structured_root.is_some())
+                {
+                    physical_cache.remove(&previous_key);
+                }
                 self.best_attempt = Some(BestAttempt {
-                    content: FrozenContent {
-                        dom: std::mem::replace(&mut self.dom, source_dom),
-                        source_facts,
-                        source_evidence,
-                        retained_stream,
-                    },
+                    physical_key: key.clone(),
                     quality,
-                    excerpt,
-                    direction: self.page_direction.clone(),
+                    excerpt: physical_cache
+                        .get(&key)
+                        .and_then(|cached| cached.excerpt.clone()),
+                    direction: source_direction.clone(),
                     strategy,
                     diagnostic_index,
                 });
@@ -1326,7 +1403,10 @@ impl<'a> ContentExtractor<'a> {
                 self.page_language = None;
                 self.node_data.clear();
             } else {
-                self.restore_source(source_dom);
+                self.page_byline = None;
+                self.page_direction = None;
+                self.page_language = None;
+                self.node_data.clear();
             }
         }
 
@@ -1347,7 +1427,10 @@ impl<'a> ContentExtractor<'a> {
             source_facts,
             source_evidence,
             retained_stream,
-        } = best.content;
+        } = physical_cache
+            .remove(&best.physical_key)
+            .and_then(|cached| cached.content)
+            .ok_or(Error::NoContent)?;
         let root = dom.root();
         let document =
             crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
@@ -1362,6 +1445,301 @@ impl<'a> ContentExtractor<'a> {
         Ok(ExtractedContent {
             excerpt: best.excerpt,
             document,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_attempt_plan(
+        &mut self,
+        strategy: ExtractionStrategy,
+        exact_root: Option<NodeId>,
+        structured_root: Option<NodeId>,
+        short_source_access_barrier: bool,
+        prepared_source: &SourceAnalysis,
+        accessible_math: &HashSet<NodeId>,
+        title_plan: &TitleHeadingPlan,
+        base_candidates: &CandidateSet,
+        content_hint_targets: &[NodeId],
+        source_anchors: DocumentAnchors,
+        text_buffer: &mut String,
+        analysis_cache: &mut AnalysisCache,
+        discovery_cache: &mut Vec<(VisibilityVariant, CandidateDiscovery)>,
+    ) -> Result<AttemptPlan> {
+        let visibility = strategy.visibility_variant();
+        let analysis_index = if let Some(index) = analysis_cache.find(visibility) {
+            index
+        } else {
+            #[cfg(test)]
+            record_generic_scoring_call();
+            let analysis = self.build_scoring_analysis(
+                visibility,
+                text_buffer,
+                prepared_source,
+                accessible_math,
+                title_plan,
+                base_candidates,
+                content_hint_targets,
+                structured_root,
+                source_anchors,
+                discovery_cache,
+            )?;
+            crate::instrumentation::record_unique_attempt_plan(visibility as u8);
+            analysis_cache.variants.push((visibility, analysis));
+            analysis_cache.variants.len() - 1
+        };
+        if !strategy.weight_classes() {
+            let analysis = &mut analysis_cache.variants[analysis_index].1;
+            if analysis.unweighted.is_none() {
+                self.prepare_unweighted_scoring(
+                    analysis,
+                    prepared_source,
+                    content_hint_targets,
+                    structured_root,
+                );
+            }
+        }
+        let analysis = &analysis_cache.variants[analysis_index].1;
+        let variant = analysis
+            .variant(strategy.weight_classes())
+            .ok_or(Error::NoContent)?;
+        let discovery = &variant.discovery;
+        let candidates = &variant.candidates;
+        let ranked = &variant.ranked;
+        let body = analysis.body;
+        self.node_data = variant.node_data.clone();
+        let working_dom = &self.dom;
+        let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
+        let mut selection = select_content_root(
+            working_dom,
+            candidates,
+            ranked,
+            body,
+            self.structured_data
+                .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+        );
+        selection =
+            self.selection_for_strategy(strategy, working_dom, body, selection, structured_root);
+        if strategy == ExtractionStrategy::RelaxedVisibility
+            && short_source_access_barrier
+            && let Some(hidden) = ranked
+                .iter()
+                .find(|candidate| self.is_inside_static_hidden(candidate.node))
+        {
+            selection = RootSelection {
+                node: hidden.node,
+                reason: RootSelectionReason::SpecificChild,
+                branches: SmallVec::new(),
+            };
+        }
+        if let Some(node) = exact_root {
+            selection = RootSelection {
+                node,
+                reason: RootSelectionReason::SpecificChild,
+                branches: SmallVec::new(),
+            };
+        }
+        let visibility_root_semantic = matches!(
+            working_dom.tag(selection.node),
+            Some(Tag::Article | Tag::Main)
+        ) || working_dom
+            .attr(selection.node, AttrName::Role)
+            .is_some_and(Self::has_primary_role);
+        let root_info = self.root_info(
+            working_dom,
+            candidates,
+            &selection,
+            ranked.first().map(|candidate| candidate.node),
+        );
+        let root_in_document_chrome =
+            Self::is_document_chrome_root(working_dom, selection.node, body);
+        if selection.node == body {
+            selection.branches.clear();
+        }
+
+        let mut top_id = selection.node;
+        let rename_top = selection.reason == RootSelectionReason::CompleteAncestor
+            && matches!(working_dom.tag(top_id), Some(Tag::Article | Tag::Main));
+        if !selection.branches.is_empty() || selection.node == body {
+            top_id = selection.branches.first().copied().unwrap_or(body);
+        } else {
+            if selection.reason == RootSelectionReason::Ranked {
+                let top_score = ranked[0].score;
+                let alternatives: SmallVec<[SmallVec<[NodeId; 16]>; 3]> = ranked
+                    .iter()
+                    .skip(1)
+                    .filter(|candidate| candidate.score / top_score >= 0.75)
+                    .filter(|candidate| {
+                        candidates.get(candidate.node).is_some_and(|candidate| {
+                            candidate.has_source(CandidateSource::Readability)
+                                || candidate.has_source(CandidateSource::Semantic)
+                        })
+                    })
+                    .map(|candidate| {
+                        analysis
+                            .view
+                            .effective_ancestors(working_dom, candidate.node)
+                    })
+                    .collect();
+                if alternatives.len() >= 3 {
+                    let mut parent = analysis.view.effective_parent(working_dom, top_id);
+                    while let Some(node) = parent {
+                        if node == body {
+                            break;
+                        }
+                        if alternatives
+                            .iter()
+                            .filter(|ancestors| ancestors.contains(&node))
+                            .count()
+                            >= 3
+                        {
+                            top_id = node;
+                            break;
+                        }
+                        parent = analysis.view.effective_parent(working_dom, node)
+                    }
+                }
+                if !self.node_data.has(top_id) {
+                    initialize_node(
+                        working_dom,
+                        top_id,
+                        &mut self.node_data,
+                        self.strategy.weight_classes(),
+                    )
+                }
+                let threshold = self.node_data.get_content_score(top_id) / 3.0;
+                let mut last = self.node_data.get_content_score(top_id);
+                let mut parent = analysis.view.effective_parent(working_dom, top_id);
+                while let Some(node) = parent {
+                    if node == body {
+                        break;
+                    }
+                    if let Some(score) = self.node_data.get_content_score_if_initialized(node) {
+                        if score < threshold {
+                            break;
+                        }
+                        if score > last {
+                            top_id = node;
+                            break;
+                        }
+                        last = score;
+                    }
+                    parent = analysis.view.effective_parent(working_dom, node)
+                }
+                while let Some(parent) = analysis.view.effective_parent(working_dom, top_id) {
+                    if parent == body {
+                        break;
+                    }
+                    let children = analysis
+                        .view
+                        .effective_element_children(working_dom, parent);
+                    if children.len() == 1 {
+                        top_id = parent;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if selection.reason == RootSelectionReason::Ranked
+                && (working_dom.tag(top_id) == Some(Tag::Pre)
+                    || working_dom
+                        .descendants(top_id)
+                        .any(|node| working_dom.tag(node) == Some(Tag::Pre)))
+                && let Some(article) = analysis
+                    .view
+                    .effective_ancestors(working_dom, top_id)
+                    .into_iter()
+                    .take(8)
+                    .find(|&ancestor| {
+                        matches!(working_dom.tag(ancestor), Some(Tag::Article | Tag::Main))
+                            && working_dom.normalized_char_count(ancestor) <= 10_000
+                    })
+                && has_compact_code_page_structure(working_dom, article)
+                && (has_compact_code_lead(working_dom, article, top_id)
+                    || has_line_number_table_marker(working_dom, top_id))
+            {
+                top_id = article;
+            }
+            if !self.node_data.has(top_id) {
+                initialize_node(
+                    working_dom,
+                    top_id,
+                    &mut self.node_data,
+                    self.strategy.weight_classes(),
+                )
+            }
+        }
+
+        let synthetic = !selection.branches.is_empty() || selection.node == body;
+        let lead_media = (!synthetic && exact_root.is_none())
+            .then(|| adjacent_lead_media(working_dom, top_id))
+            .flatten();
+        let direction_root = selection
+            .branches
+            .first()
+            .and_then(|&branch| working_dom.parent(branch))
+            .unwrap_or(top_id);
+        let source_direction = std::iter::once(direction_root)
+            .chain(
+                analysis
+                    .view
+                    .effective_ancestors(working_dom, direction_root),
+            )
+            .find_map(|node| working_dom.attr(node, AttrName::Dir))
+            .map(str::to_owned);
+        let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
+            if selection.reason == RootSelectionReason::Ranked {
+                Self::gather_siblings(
+                    working_dom,
+                    &analysis.view,
+                    top_id,
+                    &mut self.node_data,
+                    self.options.debug,
+                )
+                .into_iter()
+                .collect()
+            } else {
+                SmallVec::from_slice(&[top_id])
+            }
+        } else if !selection.branches.is_empty() {
+            selection.branches.iter().copied().collect()
+        } else {
+            SmallVec::from_slice(&[body])
+        };
+        source_siblings.retain(|node| {
+            !analysis
+                .excluded_mask
+                .get(node.index())
+                .copied()
+                .unwrap_or(false)
+        });
+        let key = AttemptKey {
+            source_roots: source_siblings.clone(),
+            selection_node: selection.node,
+            top_id,
+            synthetic,
+            visibility,
+            conditional_cleanup: strategy.conditional_cleanup(),
+            body_fallback: strategy == ExtractionStrategy::BodyFallback,
+            rename_top,
+            lead_media,
+            source_direction: source_direction.clone(),
+        };
+        Ok(AttemptPlan {
+            strategy,
+            visibility,
+            analysis_index,
+            selection,
+            source_siblings,
+            top_id,
+            synthetic,
+            rename_top,
+            lead_media,
+            source_direction,
+            root_info,
+            root_in_document_chrome,
+            visibility_root_semantic,
+            byline: discovery.byline.clone(),
+            key,
         })
     }
 
@@ -3163,14 +3541,6 @@ impl<'a> ContentExtractor<'a> {
         }
         self.diagnostic_normalization = counts;
     }
-
-    fn restore_source(&mut self, source: Dom) {
-        self.dom = source;
-        self.page_byline = None;
-        self.page_direction = None;
-        self.page_language = None;
-        self.node_data.clear();
-    }
 }
 fn has_line_number_table_marker(dom: &Dom, root: NodeId) -> bool {
     std::iter::once(root)
@@ -3696,6 +4066,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(generic_scoring_calls(), 2);
+    }
+
+    #[test]
+    fn physical_attempt_keys_include_cleanup_visibility_and_boundaries() {
+        let base = AttemptKey {
+            source_roots: SmallVec::from_slice(&[NodeId(1), NodeId(2)]),
+            selection_node: NodeId(1),
+            top_id: NodeId(1),
+            synthetic: false,
+            visibility: VisibilityVariant::Normal,
+            conditional_cleanup: true,
+            body_fallback: false,
+            rename_top: false,
+            lead_media: None,
+            source_direction: Some("ltr".to_owned()),
+        };
+
+        let mut cleanup = base.clone();
+        cleanup.conditional_cleanup = false;
+        assert_ne!(base, cleanup);
+
+        let mut visibility = base.clone();
+        visibility.visibility = VisibilityVariant::Relaxed;
+        assert_ne!(base, visibility);
+
+        let mut boundary = base.clone();
+        boundary.synthetic = true;
+        assert_ne!(base, boundary);
     }
 
     #[test]

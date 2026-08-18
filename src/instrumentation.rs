@@ -87,6 +87,9 @@ pub struct ExtractionCounters {
     pub dom_clones: u64,
     pub fragment_copies: u64,
     pub strategies_started: u64,
+    pub logical_attempt_plans: u64,
+    pub physical_attempt_executions: u64,
+    pub deduplicated_attempts: u64,
     pub unique_attempt_plans: u64,
     pub scoring_nodes: u64,
     pub cleaned_nodes: u64,
@@ -195,6 +198,9 @@ std::thread_local! {
             dom_clones: 0,
             fragment_copies: 0,
             strategies_started: 0,
+            logical_attempt_plans: 0,
+            physical_attempt_executions: 0,
+            deduplicated_attempts: 0,
             unique_attempt_plans: 0,
             scoring_nodes: 0,
             cleaned_nodes: 0,
@@ -403,6 +409,31 @@ pub(crate) fn record_unique_attempt_plan(plan_id: u8) {
     });
     #[cfg(not(feature = "bench-instrumentation"))]
     let _ = plan_id;
+}
+
+#[inline(always)]
+pub(crate) fn record_logical_attempt_plan() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.logical_attempt_plans = counters.logical_attempt_plans.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_physical_attempt_execution() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.physical_attempt_executions =
+            counters.physical_attempt_executions.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_deduplicated_attempt() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.deduplicated_attempts = counters.deduplicated_attempts.saturating_add(1)
+    });
 }
 
 #[inline(always)]
