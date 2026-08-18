@@ -7,7 +7,7 @@ use super::{
     BuildCapacityPlan, BuildError, Callout, CalloutKind, CodeBlock, DestinationKind, Document,
     DocumentNodeId, FootnoteId, Image, Link, List, ListKind, MathFormat, MathValue, Media,
     SemanticKind, SemanticTapeBuilder, Table, TableAlignment, TableCell, TaskMarker,
-    ValidationError, safe_destination,
+    ValidationError, safe_destination, trim_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::instrumentation::{Phase, PhaseGuard};
@@ -1051,9 +1051,7 @@ fn lower_complex_document(
                         && facts.has_meaningful_content(node) =>
                 {
                     dom.attr(node, AttrName::Href).and_then(|destination| {
-                        let trimmed = destination.trim_matches(|character: char| {
-                            character.is_ascii_whitespace() || character.is_control()
-                        });
+                        let trimmed = trim_destination(destination);
                         let fragment_only = trimmed.starts_with('#') && trimmed.len() > 1;
                         context.link_destination(destination).map(|destination| {
                             SemanticKind::Link(Link {

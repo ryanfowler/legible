@@ -11,7 +11,9 @@ const MAX_ACCESSIBLE_REFERENCES: usize = 256;
 /// SVG elements share one internal tag. Use qualified local names in this pass
 /// so that style, animation, title, text, and grouping elements stay distinct.
 pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
-    remove_implementation_nodes(dom, root);
+    if !remove_implementation_nodes(dom, root) {
+        return;
+    }
     let labelled_content = labelled_content(dom, root);
     let hidden = hidden_nodes(dom, root);
 
@@ -24,30 +26,33 @@ pub(super) fn normalize(dom: &mut Dom, root: NodeId) {
     }
 }
 
-fn remove_implementation_nodes(dom: &mut Dom, root: NodeId) {
-    let nodes: SmallVec<[NodeId; 32]> = dom
-        .element_descendants_snapshot_with_depth(root)
-        .into_iter()
-        .filter_map(|(node, _)| {
-            let local = svg_local_name(dom, node)?;
-            matches!(
-                local,
-                "style"
-                    | "script"
-                    | "animate"
-                    | "animateColor"
-                    | "animateMotion"
-                    | "animateTransform"
-                    | "discard"
-                    | "mpath"
-                    | "set"
-            )
-            .then_some(node)
-        })
-        .collect();
+fn remove_implementation_nodes(dom: &mut Dom, root: NodeId) -> bool {
+    let mut has_svg = false;
+    let mut nodes = SmallVec::<[NodeId; 32]>::new();
+    for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
+        let Some(local) = svg_local_name(dom, node) else {
+            continue;
+        };
+        has_svg |= local == "svg";
+        if matches!(
+            local,
+            "style"
+                | "script"
+                | "animate"
+                | "animateColor"
+                | "animateMotion"
+                | "animateTransform"
+                | "discard"
+                | "mpath"
+                | "set"
+        ) {
+            nodes.push(node);
+        }
+    }
     for node in nodes {
         dom.detach(node);
     }
+    has_svg
 }
 
 fn replace_svg(

@@ -193,7 +193,7 @@ pub(super) fn remove_decorative_media_with_snapshot(
             first_paragraph.is_some_and(|first| positions[node.index()] < first),
             repeated,
         );
-        let strong_peripheral = has_strong_peripheral_role(dom, node);
+        let strong_peripheral = role.strong_peripheral;
         if !strong_peripheral
             && (responsive_picture_context[node.index()]
                 || has_responsive_candidate(dom, node)
@@ -226,6 +226,7 @@ struct ImageRoleEvidence {
     logo_or_icon_context: bool,
     strong_logo_context: bool,
     card_grid_context: bool,
+    strong_peripheral: bool,
     repetitions: u16,
 }
 
@@ -248,8 +249,15 @@ impl ImageRoleEvidence {
         let names = image_context_name(dom, image);
         let structural_names = image_structural_context_name(dom, image);
         let context = image_context_flags(&names, &structural_names);
+        let strong_peripheral = has_strong_peripheral_role_name(&structural_names);
         Self {
-            descriptive: has_meaningful_image_description(dom, image),
+            descriptive: has_meaningful_image_description_with_context(
+                dom,
+                image,
+                &names,
+                &structural_names,
+                context,
+            ),
             captioned: has_figure_caption(dom, image),
             responsive: has_responsive_candidate(dom, image) || has_lazy_candidate(dom, image),
             meaningful_dimensions,
@@ -268,6 +276,7 @@ impl ImageRoleEvidence {
             logo_or_icon_context: context.logo_or_icon,
             strong_logo_context: context.strong_logo,
             card_grid_context: context.card_grid,
+            strong_peripheral,
             repetitions,
         }
     }
@@ -277,6 +286,7 @@ impl ImageRoleEvidence {
 struct ImageRoleScore {
     positive: i16,
     negative: i16,
+    strong_peripheral: bool,
 }
 
 impl ImageRoleScore {
@@ -296,7 +306,10 @@ fn image_role_score(
     repetitions: u16,
 ) -> ImageRoleScore {
     let evidence = ImageRoleEvidence::collect(dom, image, before_first_paragraph, repetitions);
-    let mut score = ImageRoleScore::default();
+    let mut score = ImageRoleScore {
+        strong_peripheral: evidence.strong_peripheral,
+        ..ImageRoleScore::default()
+    };
 
     score.positive += i16::from(evidence.descriptive) * 7;
     score.positive += i16::from(evidence.captioned) * 7;
@@ -350,7 +363,8 @@ fn image_context_name(dom: &Dom, image: NodeId) -> String {
             }
         }
     }
-    name.to_ascii_lowercase()
+    name.make_ascii_lowercase();
+    name
 }
 
 fn image_structural_context_name(dom: &Dom, image: NodeId) -> String {
@@ -367,7 +381,8 @@ fn image_structural_context_name(dom: &Dom, image: NodeId) -> String {
             }
         }
     }
-    name.to_ascii_lowercase()
+    name.make_ascii_lowercase();
+    name
 }
 
 #[derive(Clone, Copy, Default)]
@@ -409,8 +424,10 @@ fn image_context_flags(names: &str, structural_names: &str) -> ImageContextFlags
                 _ => {}
             }
         }
-        if normalized_tokens_equal(field, "more-stories")
-            || normalized_tokens_equal(field, "more_articles")
+        if matches!(field, "more-stories" | "more_articles")
+            || field.starts_with("more")
+                && (normalized_tokens_equal(field, "more-stories")
+                    || normalized_tokens_equal(field, "more_articles"))
         {
             flags.related = true;
         }
@@ -499,8 +516,12 @@ fn is_lead_position(dom: &Dom, image: NodeId, before_first_paragraph: bool) -> b
 
 fn has_strong_peripheral_role(dom: &Dom, image: NodeId) -> bool {
     let names = image_structural_context_name(dom, image);
+    has_strong_peripheral_role_name(&names)
+}
+
+fn has_strong_peripheral_role_name(names: &str) -> bool {
     contains_role_token(
-        &names,
+        names,
         &[
             "avatar",
             "avatars",
@@ -544,12 +565,26 @@ fn has_adjacent_lead_peripheral_role(dom: &Dom, image: NodeId) -> bool {
 }
 
 fn contains_role_token(value: &str, patterns: &[&str]) -> bool {
-    patterns.iter().any(|pattern| {
+    // Split the value once for the common single-token case. The old pattern-
+    // first loop rescanned the complete image context once per pattern, which
+    // made role matching disproportionately expensive on image-heavy pages.
+    let mut single_tokens = SmallVec::<[&str; 24]>::new();
+    let mut compound_tokens = SmallVec::<[&str; 8]>::new();
+    for &pattern in patterns {
         if pattern.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-            return value
-                .split(|character: char| !character.is_ascii_alphanumeric())
-                .any(|token| token == *pattern);
+            single_tokens.push(pattern);
+        } else {
+            compound_tokens.push(pattern);
         }
+    }
+    if value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| single_tokens.contains(&token))
+    {
+        return true;
+    }
+    compound_tokens.iter().any(|pattern| {
         value
             .split_ascii_whitespace()
             .any(|field| normalized_tokens_equal(field, pattern))
@@ -1444,7 +1479,22 @@ fn image_variant_marker(token: &str) -> Option<ImageVariant> {
 }
 
 fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
-    if has_direct_meaningful_description(dom, image) || has_nearby_explanatory_text(dom, image) {
+    let names = image_context_name(dom, image);
+    let structural_names = image_structural_context_name(dom, image);
+    let context = image_context_flags(&names, &structural_names);
+    has_meaningful_image_description_with_context(dom, image, &names, &structural_names, context)
+}
+
+fn has_meaningful_image_description_with_context(
+    dom: &Dom,
+    image: NodeId,
+    names: &str,
+    structural_names: &str,
+    context: ImageContextFlags,
+) -> bool {
+    if has_direct_meaningful_description(dom, image)
+        || has_nearby_explanatory_text_with_context(dom, image, names, structural_names, context)
+    {
         return true;
     }
     dom.ancestors(image)
@@ -1461,20 +1511,21 @@ fn has_meaningful_image_description(dom: &Dom, image: NodeId) -> bool {
         })
 }
 
-fn has_nearby_explanatory_text(dom: &Dom, image: NodeId) -> bool {
-    let names = image_context_name(dom, image);
+fn has_nearby_explanatory_text_with_context(
+    dom: &Dom,
+    image: NodeId,
+    names: &str,
+    structural_names: &str,
+    context: ImageContextFlags,
+) -> bool {
     if dom.tag(image) != Some(Tag::Img)
         || !has_usable_image_source(dom, image)
-        || has_strong_peripheral_role(dom, image)
-        || has_media_control_context(
-            dom,
-            image,
-            image_context_flags(&names, &image_structural_context_name(dom, image)).media_control,
-        )
-        || contains_role_token(&names, &["badge", "favicon", "logo", "sprite"])
-        || contains_role_token(&names, &["icon"])
+        || has_strong_peripheral_role_name(structural_names)
+        || has_media_control_context(dom, image, context.media_control)
+        || contains_role_token(names, &["badge", "favicon", "logo", "sprite"])
+        || contains_role_token(names, &["icon"])
             && !contains_role_token(
-                &names,
+                names,
                 &[
                     "chart",
                     "diagram",

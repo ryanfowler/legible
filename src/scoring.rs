@@ -57,6 +57,26 @@ const ASCII_CLASSES: [u8; 256] = ascii_classes();
 fn stats_for_text(text: &str) -> NodeStats {
     let mut s = NodeStats::default();
     s.set_has_text(!text.is_empty());
+    if let [byte] = text.as_bytes()
+        && byte.is_ascii()
+    {
+        let class = ASCII_CLASSES[usize::from(*byte)];
+        s.set_starts_with_whitespace(class & ASCII_WHITESPACE != 0);
+        s.set_ends_with_whitespace(class & ASCII_WHITESPACE != 0);
+        if class & ASCII_WHITESPACE == 0 {
+            s.text_length = 1;
+            s.word_count = 1;
+            s.alphabetic_chars = u32::from(class & ASCII_ALPHA != 0);
+            s.digit_chars = u32::from(class & ASCII_DIGIT != 0);
+            s.comma_count = u32::from(class & ASCII_COMMA != 0);
+            s.sentence_end_count = u32::from(class & ASCII_SENTENCE_END != 0);
+            s.set_has_non_whitespace(true);
+            s.set_has_alphanumeric(class & (ASCII_ALPHA | ASCII_DIGIT) != 0);
+            s.set_ends_with_dot(class & ASCII_DOT != 0);
+            s.set_has_sentence_end(class & ASCII_SENTENCE_END != 0);
+        }
+        return s;
+    }
     let mut prev = true;
     let mut dot = false;
     let mut text_length = 0usize;
@@ -66,7 +86,6 @@ fn stats_for_text(text: &str) -> NodeStats {
     let mut has_non_whitespace = false;
     let mut has_alphanumeric = false;
     let mut has_sentence_break = false;
-
     // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
     // Unicode whitespace tables in the hot loop.
     if text.is_ascii() {
@@ -158,6 +177,71 @@ fn stats_for_text(text: &str) -> NodeStats {
     s.set_has_sentence_end(has_sentence_break || dot);
     s
 }
+
+/// Computes only the text fields needed by source-quality measurement.
+/// Sentence and punctuation counters do not affect that metric, so keep this
+/// hot path smaller than the general scoring statistics.
+fn stats_for_content_metrics(text: &str) -> NodeStats {
+    let mut stats = NodeStats::default();
+    stats.set_has_text(!text.is_empty());
+    let mut prev = true;
+    let mut text_length = 0usize;
+    let mut word_count = 0usize;
+    let mut has_non_whitespace = false;
+    let mut alphabetic_chars = 0usize;
+    let mut digit_chars = 0usize;
+
+    if text.is_ascii() {
+        let bytes = text.as_bytes();
+        stats.set_starts_with_whitespace(bytes.first().is_some_and(u8::is_ascii_whitespace));
+        stats.set_ends_with_whitespace(bytes.last().is_some_and(u8::is_ascii_whitespace));
+        for &byte in bytes {
+            let class = ASCII_CLASSES[usize::from(byte)];
+            alphabetic_chars += usize::from(class & ASCII_ALPHA != 0);
+            digit_chars += usize::from(class & ASCII_DIGIT != 0);
+            if class & ASCII_WHITESPACE != 0 {
+                if !prev {
+                    text_length += 1;
+                    prev = true;
+                }
+            } else {
+                has_non_whitespace = true;
+                word_count += usize::from(prev);
+                text_length += 1;
+                prev = false;
+            }
+        }
+    } else {
+        stats.set_starts_with_whitespace(text.starts_with(char::is_whitespace));
+        stats.set_ends_with_whitespace(text.ends_with(char::is_whitespace));
+        for character in text.chars() {
+            if character.is_whitespace() {
+                if !prev {
+                    text_length += 1;
+                    prev = true;
+                }
+            } else {
+                has_non_whitespace = true;
+                word_count += usize::from(prev);
+                text_length += 1;
+                prev = false;
+                alphabetic_chars += usize::from(character.is_alphabetic());
+                digit_chars += usize::from(character.is_numeric());
+            }
+        }
+    }
+    if prev && text_length > 0 {
+        text_length -= 1;
+    }
+    stats.text_length = text_length.min(u32::MAX as usize) as u32;
+    stats.word_count = word_count.min(u32::MAX as usize) as u32;
+    stats.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
+    stats.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
+    stats.set_has_non_whitespace(has_non_whitespace);
+    stats.set_has_alphanumeric(alphabetic_chars != 0 || digit_chars != 0);
+    stats
+}
+
 fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     if !b.has_text() {
         return;
@@ -196,6 +280,37 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     a.set_ends_with_dot(b.ends_with_dot());
     a.set_has_sentence_end(sentence_break || b.ends_with_dot());
 }
+
+#[inline]
+fn append_content_stats(a: &mut NodeStats, b: &NodeStats) {
+    if !b.has_text() {
+        return;
+    }
+    if !a.has_text() {
+        *a = *b;
+        return;
+    }
+
+    let a_non_whitespace = a.has_non_whitespace();
+    let b_non_whitespace = b.has_non_whitespace();
+    let a_ends_with_whitespace = a.ends_with_whitespace();
+    let b_starts_with_whitespace = b.starts_with_whitespace();
+    if a_non_whitespace && b_non_whitespace && (a_ends_with_whitespace || b_starts_with_whitespace)
+    {
+        a.text_length = a.text_length.saturating_add(1);
+    }
+    a.text_length = a.text_length.saturating_add(b.text_length);
+    a.word_count = a.word_count.saturating_add(b.word_count);
+    if a_non_whitespace && b_non_whitespace && !a_ends_with_whitespace && !b_starts_with_whitespace
+    {
+        a.word_count = a.word_count.saturating_sub(1);
+    }
+    a.alphabetic_chars = a.alphabetic_chars.saturating_add(b.alphabetic_chars);
+    a.digit_chars = a.digit_chars.saturating_add(b.digit_chars);
+    a.set_has_non_whitespace(a_non_whitespace || b_non_whitespace);
+    a.set_has_alphanumeric(a.has_alphanumeric() || b.has_alphanumeric());
+    a.set_ends_with_whitespace(b.ends_with_whitespace());
+}
 pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
     get_or_compute_stats_excluding(dom, id, store, &[])
 }
@@ -209,70 +324,108 @@ pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -
 pub(crate) fn stats_from_prepared_entries(
     dom: &Dom,
     entries: &[SourceEntry],
-    root: NodeId,
+    _root: NodeId,
     excluded: &[bool],
 ) -> (NodeStats, f64, usize) {
-    let storage_len = entries
-        .iter()
-        .map(|entry| entry.node.index().saturating_add(1))
-        .max()
-        .unwrap_or_else(|| root.index().saturating_add(1));
-    let mut stats = vec![NodeStats::default(); storage_len];
-    let mut link_lengths = vec![0.0_f64; storage_len];
-    let mut link_text_lengths = vec![0_u32; storage_len];
-    let mut skipped = vec![false; entries.len()];
+    #[derive(Clone, Copy)]
+    struct Frame {
+        node: NodeId,
+        depth: u32,
+        tag: Option<Tag>,
+        stats: NodeStats,
+        link_length: f64,
+        link_text_length: u32,
+    }
+
+    let mut stack = SmallVec::<[Frame; 32]>::new();
+    let mut result = NodeStats::default();
+    let mut result_link_length = 0.0;
+    let mut result_link_text_length = 0_u32;
     let mut excluded_depth = None;
-    for (position, entry) in entries.iter().enumerate() {
+
+    for entry in entries {
         if excluded_depth.is_some_and(|depth| entry.depth > depth) {
-            skipped[position] = true;
             continue;
         }
         excluded_depth = None;
         if excluded.get(entry.node.index()).copied().unwrap_or(false) {
-            skipped[position] = true;
             excluded_depth = Some(entry.depth);
-        }
-    }
-    let mut position = entries.len();
-    while position > 0 {
-        position -= 1;
-        let entry = &entries[position];
-        let node = entry.node;
-        if skipped[position] {
             continue;
         }
-        let mut value = dom
-            .text_node(node)
-            .map_or_else(NodeStats::default, stats_for_text);
-        let mut link_length = 0.0;
-        let mut link_text_length = 0_u32;
-        for child in dom.children(node) {
-            if excluded.get(child.index()).copied().unwrap_or(false) {
-                continue;
+
+        while stack.last().is_some_and(|frame| frame.depth >= entry.depth) {
+            let mut finished = stack.pop().expect("prepared stats frame exists");
+            if finished.tag == Some(Tag::A) {
+                finished.link_text_length = finished.stats.text_length;
+                finished.link_length = finished.stats.text_length as f64
+                    * if dom
+                        .attr(finished.node, AttrName::Href)
+                        .is_some_and(is_hash_url)
+                    {
+                        0.3
+                    } else {
+                        1.0
+                    };
             }
-            append_stats(&mut value, &stats[child.index()]);
-            link_length += link_lengths[child.index()];
-            link_text_length = link_text_length.saturating_add(link_text_lengths[child.index()]);
+            if let Some(parent) = stack.last_mut() {
+                append_content_stats(&mut parent.stats, &finished.stats);
+                parent.link_length += finished.link_length;
+                parent.link_text_length = parent
+                    .link_text_length
+                    .saturating_add(finished.link_text_length);
+            } else {
+                result = finished.stats;
+                result_link_length = finished.link_length;
+                result_link_text_length = finished.link_text_length;
+            }
         }
-        value.set_has_sentence_end(value.has_sentence_break() || value.ends_with_dot());
-        if dom.tag(node) == Some(Tag::A) {
-            link_text_length = value.text_length;
-            link_length = value.text_length as f64
-                * if dom.attr(node, AttrName::Href).is_some_and(is_hash_url) {
+
+        if entry.is_element() {
+            stack.push(Frame {
+                node: entry.node,
+                depth: entry.depth,
+                tag: entry.tag,
+                stats: NodeStats::default(),
+                link_length: 0.0,
+                link_text_length: 0,
+            });
+        } else if let Some(text) = dom.text_node(entry.node) {
+            let stats = stats_for_content_metrics(text);
+            if let Some(parent) = stack.last_mut() {
+                append_content_stats(&mut parent.stats, &stats);
+            } else {
+                append_stats(&mut result, &stats);
+            }
+        }
+    }
+
+    while let Some(mut finished) = stack.pop() {
+        if finished.tag == Some(Tag::A) {
+            finished.link_text_length = finished.stats.text_length;
+            finished.link_length = finished.stats.text_length as f64
+                * if dom
+                    .attr(finished.node, AttrName::Href)
+                    .is_some_and(is_hash_url)
+                {
                     0.3
                 } else {
                     1.0
                 };
         }
-        stats[node.index()] = value;
-        link_lengths[node.index()] = link_length;
-        link_text_lengths[node.index()] = link_text_length;
+        if let Some(parent) = stack.last_mut() {
+            append_content_stats(&mut parent.stats, &finished.stats);
+            parent.link_length += finished.link_length;
+            parent.link_text_length = parent
+                .link_text_length
+                .saturating_add(finished.link_text_length);
+        } else {
+            result = finished.stats;
+            result_link_length = finished.link_length;
+            result_link_text_length = finished.link_text_length;
+        }
     }
-    (
-        stats[root.index()],
-        link_lengths[root.index()],
-        link_text_lengths[root.index()] as usize,
-    )
+
+    (result, result_link_length, result_link_text_length as usize)
 }
 
 /// Computes text statistics while omitting the roots marked in `excluded`.
@@ -288,6 +441,32 @@ pub(crate) fn get_or_compute_stats_excluding(
         return *s;
     }
 
+    // Most small content elements have no descendants or exactly one text
+    // child. Avoid creating a traversal frame for these nodes.
+    let simple_text = match dom.first_child(id) {
+        None => Some(dom.text_node(id).unwrap_or("")),
+        Some(child) if dom.next_sibling(child).is_none() => dom.text_node(child),
+        _ => None,
+    };
+    if let Some(text) = simple_text {
+        let stats = stats_for_text(text);
+        if store.link_lengths_enabled() {
+            let link_length = if dom.tag(id) == Some(Tag::A) {
+                stats.text_length as f64
+                    * if dom.attr(id, AttrName::Href).is_some_and(is_hash_url) {
+                        0.3
+                    } else {
+                        1.0
+                    }
+            } else {
+                0.0
+            };
+            store.set_link_length(id, link_length);
+        }
+        store.set_stats(id, stats);
+        return stats;
+    }
+
     struct StatsFrame {
         node: NodeId,
         next_child: Option<NodeId>,
@@ -300,9 +479,10 @@ pub(crate) fn get_or_compute_stats_excluding(
             Self {
                 node,
                 next_child: dom.first_child(node),
-                stats: dom
-                    .text_node(node)
-                    .map_or_else(NodeStats::default, stats_for_text),
+                stats: match dom.text_node(node) {
+                    Some(text) => stats_for_text(text),
+                    None => NodeStats::default(),
+                },
                 link_length: 0.0,
             }
         }
@@ -810,7 +990,7 @@ pub fn has_non_empty_inner_text(dom: &Dom, id: NodeId) -> bool {
 pub fn get_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String) -> &'a str {
     out.clear();
     dom.append_text(id, out);
-    out.trim()
+    trim_text(out)
 }
 
 pub fn get_inner_text_limited<'a>(
@@ -825,7 +1005,29 @@ pub fn get_inner_text_limited<'a>(
     } else {
         dom.append_text_limited(id, out, limit);
     }
-    out.trim()
+    trim_text(out)
+}
+
+/// Trims HTML text without invoking the Unicode whitespace iterator for the
+/// overwhelmingly common ASCII source path.
+#[inline]
+pub(crate) fn trim_text(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        while start < bytes.len()
+            && (bytes[start] == b' ' || (b'\t'..=b'\r').contains(&bytes[start]))
+        {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && (bytes[end - 1] == b' ' || (b'\t'..=b'\r').contains(&bytes[end - 1])) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim()
+    }
 }
 pub fn get_normalized_inner_text<'a>(dom: &Dom, id: NodeId, out: &'a mut String) -> &'a str {
     out.clear();
@@ -917,7 +1119,7 @@ pub fn get_link_density_cached(dom: &Dom, id: NodeId, len: u32, store: &mut Node
     }
 }
 pub fn is_whitespace(dom: &Dom, id: NodeId) -> bool {
-    dom.text_node(id).is_some_and(|t| t.trim().is_empty()) || dom.tag(id) == Some(Tag::Br)
+    dom.text_node(id).is_some_and(|t| trim_text(t).is_empty()) || dom.tag(id) == Some(Tag::Br)
 }
 pub fn is_phrasing_content(dom: &Dom, id: NodeId) -> bool {
     fn go(d: &Dom, n: NodeId, depth: u32) -> bool {
@@ -948,7 +1150,7 @@ pub fn wrap_phrasing_content_in_p(dom: &mut Dom, div: NodeId) {
             content |= dom.is_element(children[j])
                 || dom
                     .text_node(children[j])
-                    .is_some_and(|t| !t.trim().is_empty());
+                    .is_some_and(|t| !trim_text(t).is_empty());
             j += 1
         }
         if content {
@@ -1036,36 +1238,35 @@ pub(crate) fn has_static_hidden_marker(dom: &Dom, id: NodeId) -> bool {
 
 pub(crate) fn has_hidden_utility_class(dom: &Dom, id: NodeId) -> bool {
     dom.attr(id, AttrName::Class).is_some_and(|classes| {
-        let display_show = classes
-            .split_ascii_whitespace()
-            .any(is_responsive_display_show);
-        let visibility_show = classes.split_ascii_whitespace().any(|class| {
-            class.split_once(':').is_some_and(|(variant, value)| {
-                is_responsive_breakpoint(variant) && value.eq_ignore_ascii_case("visible")
-            })
-        });
-        let accessibility_show = classes.split_ascii_whitespace().any(|class| {
-            class.split_once(':').is_some_and(|(variant, value)| {
-                is_responsive_breakpoint(variant) && value.eq_ignore_ascii_case("not-sr-only")
-            })
-        });
-        classes.split_ascii_whitespace().any(|class| {
-            if ["hidden", "d-none", "display-none", "u-hidden"]
-                .iter()
-                .any(|expected| class.eq_ignore_ascii_case(expected))
+        let mut display_show = false;
+        let mut visibility_show = false;
+        let mut accessibility_show = false;
+        let mut hidden = false;
+        let mut invisible = false;
+        let mut accessibility_hidden = false;
+        for class in classes.split_ascii_whitespace() {
+            display_show |= is_responsive_display_show(class);
+            if let Some((variant, value)) = class.split_once(':')
+                && is_responsive_breakpoint(variant)
             {
-                !display_show
-            } else if class.eq_ignore_ascii_case("invisible") {
-                !visibility_show
-            } else if class.eq_ignore_ascii_case("visually-hidden")
-                || class.eq_ignore_ascii_case("sr-only")
-            {
-                !accessibility_show
-            } else {
-                false
+                visibility_show |= value.eq_ignore_ascii_case("visible");
+                accessibility_show |= value.eq_ignore_ascii_case("not-sr-only");
             }
-        })
+            hidden |= matches_ascii_ci(class, &["hidden", "d-none", "display-none", "u-hidden"]);
+            invisible |= class.eq_ignore_ascii_case("invisible");
+            accessibility_hidden |= matches_ascii_ci(class, &["visually-hidden", "sr-only"]);
+        }
+        hidden && !display_show
+            || invisible && !visibility_show
+            || accessibility_hidden && !accessibility_show
     })
+}
+
+#[inline]
+fn matches_ascii_ci(value: &str, expected: &[&str]) -> bool {
+    expected
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 fn is_responsive_breakpoint(value: &str) -> bool {

@@ -6,6 +6,30 @@ pub(crate) enum DestinationKind {
     Resource,
 }
 
+/// Trims the characters rejected at the edges of a URI attribute.
+///
+/// HTML URLs are almost always ASCII. Keep that path byte-oriented and use
+/// the Unicode predicate only for the uncommon non-ASCII case.
+#[inline]
+pub(crate) fn trim_destination(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() && (bytes[start] <= b' ' || bytes[start] == 0x7f) {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && (bytes[end - 1] <= b' ' || bytes[end - 1] == 0x7f) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim_matches(|character: char| {
+            character.is_ascii_whitespace() || character.is_control()
+        })
+    }
+}
+
 /// Resolves a destination and applies the semantic URI policy.
 ///
 /// Relative destinations stay relative when no base URL is available.
@@ -14,8 +38,7 @@ pub(crate) fn safe_destination(
     base_url: Option<&Url>,
     kind: DestinationKind,
 ) -> Option<Box<str>> {
-    let value = value
-        .trim_matches(|character: char| character.is_ascii_whitespace() || character.is_control());
+    let value = trim_destination(value);
     if value.is_empty() || value.chars().any(char::is_control) {
         return None;
     }

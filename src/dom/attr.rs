@@ -146,7 +146,7 @@ impl AttrName {
         if self == Self::Other {
             Self::from_local(local) == Self::Other
         } else {
-            local.eq_ignore_ascii_case(self.as_str())
+            local == self.as_str() || local.eq_ignore_ascii_case(self.as_str())
         }
     }
     pub(crate) const fn as_str(self) -> &'static str {

@@ -21,6 +21,26 @@ struct CellFacts {
 
 const NO_SLOT: u32 = u32::MAX;
 
+#[inline]
+fn trim_text(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        while start < bytes.len()
+            && (bytes[start] == b' ' || (b'\t'..=b'\r').contains(&bytes[start]))
+        {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && (bytes[end - 1] == b' ' || (b'\t'..=b'\r').contains(&bytes[end - 1])) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct NodeSlots {
     table: u32,
@@ -324,8 +344,8 @@ fn analyze_cell(
     let nodes = dom.table_descendants(cell);
     for &node in &nodes {
         if let Some(text) = dom.text_node(node) {
-            facts.has_content |= !text.trim().is_empty();
-            facts.text_length += text.trim().chars().count();
+            facts.has_content |= !trim_text(text).is_empty();
+            facts.text_length += trim_text(text).chars().count();
             for character in text.chars() {
                 if character.is_whitespace() {
                     pending_whitespace |= !normalized_text.is_empty();
@@ -410,7 +430,7 @@ pub(crate) fn inner_text<'a>(dom: &Dom, root: NodeId, out: &'a mut String) -> &'
             }
         }
     }
-    out.trim()
+    trim_text(out)
 }
 
 pub(crate) fn has_content(dom: &Dom, root: NodeId) -> bool {
@@ -418,7 +438,7 @@ pub(crate) fn has_content(dom: &Dom, root: NodeId) -> bool {
         dom.tag(node) == Some(Tag::Table)
             || dom
                 .text_node(node)
-                .is_some_and(|text| !text.trim().is_empty())
+                .is_some_and(|text| !trim_text(text).is_empty())
     })
 }
 

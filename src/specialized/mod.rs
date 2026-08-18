@@ -56,15 +56,29 @@ fn extract_with_registry(
 
 pub(super) fn has_class(dom: &Dom, node: NodeId, expected: &str) -> bool {
     dom.attr(node, crate::dom::AttrName::Class)
-        .is_some_and(|classes| classes.split_whitespace().any(|class| class == expected))
+        .is_some_and(|classes| {
+            if classes.is_ascii() {
+                classes
+                    .split_ascii_whitespace()
+                    .any(|class| class == expected)
+            } else {
+                classes.split_whitespace().any(|class| class == expected)
+            }
+        })
 }
 
 pub(super) fn class_contains(dom: &Dom, node: NodeId, needle: &str) -> bool {
     dom.attr(node, crate::dom::AttrName::Class)
         .is_some_and(|classes| {
-            classes
-                .split_whitespace()
-                .any(|class| class.contains(needle))
+            if classes.is_ascii() {
+                classes
+                    .split_ascii_whitespace()
+                    .any(|class| class.contains(needle))
+            } else {
+                classes
+                    .split_whitespace()
+                    .any(|class| class.contains(needle))
+            }
         })
 }
 

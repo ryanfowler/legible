@@ -1,4 +1,4 @@
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeLink, Tag};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
@@ -398,18 +398,21 @@ fn element_nodes_with_depth(dom: &Dom, root: NodeId, nodes: &[NodeId]) -> Vec<(N
 }
 
 struct DefinitionIndex {
-    container: Vec<bool>,
-    inside_container: Vec<bool>,
-    nested_candidate: Vec<bool>,
-    definition_backlink: Vec<bool>,
-    first_descendant_id: Vec<Option<NodeId>>,
+    flags: Vec<u8>,
+    first_descendant_id: Vec<NodeLink>,
 }
 
+const OWN_CANDIDATE: u8 = 1 << 0;
+const NESTED_CANDIDATE: u8 = 1 << 1;
+const CONTAINER: u8 = 1 << 2;
+const INSIDE_CONTAINER: u8 = 1 << 3;
+const DEFINITION_BACKLINK: u8 = 1 << 4;
+
 impl DefinitionIndex {
-    fn analyze(dom: &Dom, _root: NodeId, nodes: &[NodeId], elements: &[(NodeId, u32)]) -> Self {
-        let mut own_candidate = vec![false; dom.len()];
-        for &node in nodes {
-            own_candidate[node.index()] = matches!(
+    fn analyze(dom: &Dom, _root: NodeId, _nodes: &[NodeId], elements: &[(NodeId, u32)]) -> Self {
+        let mut flags = vec![0_u8; dom.len()];
+        for &(node, _) in elements {
+            if matches!(
                 dom.tag(node),
                 Some(Tag::Div | Tag::Li | Tag::P | Tag::Aside)
             ) && dom
@@ -417,29 +420,44 @@ impl DefinitionIndex {
                 .is_some_and(looks_like_footnote_id)
                 && (has_role(dom, node, "doc-footnote")
                     || dom.attr_by_local_name(node, "data-footnote").is_some()
-                    || matches!(dom.tag(node), Some(Tag::Li | Tag::P | Tag::Aside)));
+                    || matches!(dom.tag(node), Some(Tag::Li | Tag::P | Tag::Aside)))
+            {
+                flags[node.index()] |= OWN_CANDIDATE;
+            }
         }
-        let mut nested_candidate = vec![false; dom.len()];
-        let mut first_descendant_id = vec![None; dom.len()];
-        for &node in nodes.iter().rev() {
-            nested_candidate[node.index()] = dom
-                .children(node)
-                .any(|child| own_candidate[child.index()] || nested_candidate[child.index()]);
-            first_descendant_id[node.index()] = dom.children(node).find_map(|child| {
-                dom.attr(child, AttrName::Id)
-                    .map(|_| child)
-                    .or(first_descendant_id[child.index()])
-            });
+        let mut first_descendant_id = vec![NodeLink::NONE; dom.len()];
+        for &(node, _) in elements.iter().rev() {
+            let mut nested = false;
+            let mut descendant_id = NodeLink::NONE;
+            for child in dom.children(node) {
+                nested |= flags[child.index()] & (OWN_CANDIDATE | NESTED_CANDIDATE) != 0;
+                if descendant_id.get().is_none() {
+                    descendant_id = if dom.attr(child, AttrName::Id).is_some() {
+                        NodeLink::from_option(Some(child))
+                    } else {
+                        first_descendant_id[child.index()]
+                    };
+                }
+            }
+            if nested {
+                flags[node.index()] |= NESTED_CANDIDATE;
+            }
+            first_descendant_id[node.index()] = descendant_id;
         }
-        let mut container = vec![false; dom.len()];
-        let mut inside_container = vec![false; dom.len()];
-        for &node in nodes {
-            container[node.index()] = is_footnote_container(dom, node)
-                || has_any_class(dom, node, &["references"]) && nested_candidate[node.index()];
-            inside_container[node.index()] = container[node.index()]
+        for &(node, _) in elements {
+            let is_container = is_footnote_container(dom, node)
+                || has_any_class(dom, node, &["references"])
+                    && flags[node.index()] & NESTED_CANDIDATE != 0;
+            if is_container {
+                flags[node.index()] |= CONTAINER;
+            }
+            if is_container
                 || dom
                     .parent(node)
-                    .is_some_and(|parent| inside_container[parent.index()]);
+                    .is_some_and(|parent| flags[parent.index()] & INSIDE_CONTAINER != 0)
+            {
+                flags[node.index()] |= INSIDE_CONTAINER;
+            }
         }
         let mut preorder = vec![usize::MAX; dom.len()];
         let mut subtree_end = vec![elements.len(); dom.len()];
@@ -466,33 +484,34 @@ impl DefinitionIndex {
                     .push(preorder[node.index()]);
             }
         }
-        let mut definition_backlink = vec![false; dom.len()];
         for &(node, _) in elements {
             let Some(id) = dom.attr(node, AttrName::Id) else {
                 continue;
             };
             let start = preorder[node.index()] + 1;
             let end = subtree_end[node.index()];
-            definition_backlink[node.index()] =
-                conventional_backlink_targets(id).iter().any(|target| {
-                    targets.get(target).is_some_and(|positions| {
-                        let index = positions.partition_point(|position| *position < start);
-                        positions.get(index).is_some_and(|position| *position < end)
-                    })
-                });
+            if conventional_backlink_targets(id).iter().any(|target| {
+                targets.get(target).is_some_and(|positions| {
+                    let index = positions.partition_point(|position| *position < start);
+                    positions.get(index).is_some_and(|position| *position < end)
+                })
+            }) {
+                flags[node.index()] |= DEFINITION_BACKLINK;
+            }
         }
         Self {
-            container,
-            inside_container,
-            nested_candidate,
-            definition_backlink,
+            flags,
             first_descendant_id,
         }
     }
 
+    fn contains(&self, node: NodeId, flag: u8) -> bool {
+        self.flags[node.index()] & flag != 0
+    }
+
     fn has_container_ancestor(&self, dom: &Dom, node: NodeId) -> bool {
         dom.parent(node)
-            .is_some_and(|parent| self.inside_container[parent.index()])
+            .is_some_and(|parent| self.contains(parent, INSIDE_CONTAINER))
     }
 }
 
@@ -558,17 +577,18 @@ fn detect_definitions_with_index(
                 .is_some_and(|value| value.eq_ignore_ascii_case("footnote"));
         let contained = (matches!(dom.tag(node), Some(Tag::Li | Tag::P | Tag::Aside))
             || dom.tag(node) == Some(Tag::Div)
-                && index.container[node.index()]
-                && !index.nested_candidate[node.index()])
+                && index.contains(node, CONTAINER)
+                && !index.contains(node, NESTED_CANDIDATE))
             && dom.attr(node, AttrName::Id).is_some_and(|id| {
                 looks_like_footnote_id(id) || potential_reference_targets.contains(id)
             })
-            && (index.container[node.index()] || index.has_container_ancestor(dom, node));
+            && (index.contains(node, CONTAINER) || index.has_container_ancestor(dom, node));
         let conventional_id = dom
             .attr(node, AttrName::Id)
             .is_some_and(looks_like_footnote_id)
-            && !index.nested_candidate[node.index()]
-            && (index.has_container_ancestor(dom, node) || index.definition_backlink[node.index()]);
+            && !index.contains(node, NESTED_CANDIDATE)
+            && (index.has_container_ancestor(dom, node)
+                || index.contains(node, DEFINITION_BACKLINK));
         let word_definition = word_definition_key(dom, node);
         if !inline && !structural && !contained && !conventional_id && word_definition.is_none() {
             continue;
@@ -592,6 +612,7 @@ fn detect_definitions_with_index(
                     structural
                         .then(|| {
                             index.first_descendant_id[node.index()]
+                                .get()
                                 .and_then(|descendant| dom.attr(descendant, AttrName::Id))
                                 .map(str::to_owned)
                         })
@@ -624,7 +645,7 @@ fn reserve_label(desired: String, used: &mut HashSet<String>) -> String {
 
 fn mark_container_chrome(dom: &Dom, root: NodeId, index: &DefinitionIndex, skipped: &mut [bool]) {
     for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
-        if !index.container[node.index()] {
+        if !index.contains(node, CONTAINER) {
             continue;
         }
         if let Some(heading) = dom.element_children(node).find(|&child| {
@@ -1016,14 +1037,33 @@ fn reference_convention(dom: &Dom, anchor: NodeId) -> bool {
 
 fn reference_label(dom: &Dom, node: NodeId) -> Option<String> {
     let text = dom.text(node);
-    let label = text
-        .trim()
-        .trim_matches(|character: char| {
+    let label = trim_reference_label(&text);
+    (!label.is_empty() && label.chars().count() <= 16).then(|| label.to_owned())
+}
+
+#[inline]
+fn trim_reference_label(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let is_edge = |byte: u8| {
+            byte.is_ascii_whitespace()
+                || matches!(byte, b'[' | b']' | b'(' | b')' | b':' | b'.' | b'*')
+        };
+        let mut start = 0;
+        while start < bytes.len() && is_edge(bytes[start]) {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && is_edge(bytes[end - 1]) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim_matches(|character: char| {
             character.is_whitespace()
                 || matches!(character, '[' | ']' | '(' | ')' | ':' | '.' | '†' | '*')
         })
-        .trim();
-    (!label.is_empty() && label.chars().count() <= 16).then(|| label.to_owned())
+    }
 }
 
 fn is_footnote_container(dom: &Dom, node: NodeId) -> bool {
@@ -1036,20 +1076,24 @@ fn is_footnote_container(dom: &Dom, node: NodeId) -> bool {
         || [AttrName::Class, AttrName::Id]
             .into_iter()
             .filter_map(|name| dom.attr(node, name))
-            .any(|value| {
-                value.split_whitespace().any(|part| {
-                    matches!(
-                        part.to_ascii_lowercase().as_str(),
-                        "footnotes"
-                            | "footnote-list"
-                            | "footnote-definitions"
-                            | "footnote-container"
-                            | "footnotes-container"
-                            | "wp-block-footnotes"
-                            | "endnotes"
-                    )
-                })
-            })
+            .any(|value| any_token(value, is_footnote_container_token))
+}
+
+fn is_footnote_container_token(part: &str) -> bool {
+    // Most class tokens are unrelated. Matching by length avoids comparing
+    // them with every known footnote spelling.
+    match part.len() {
+        8 => part.eq_ignore_ascii_case("endnotes"),
+        9 => part.eq_ignore_ascii_case("footnotes"),
+        13 => part.eq_ignore_ascii_case("footnote-list"),
+        18 => {
+            part.eq_ignore_ascii_case("footnote-container")
+                || part.eq_ignore_ascii_case("wp-block-footnotes")
+        }
+        20 => part.eq_ignore_ascii_case("footnote-definitions"),
+        19 => part.eq_ignore_ascii_case("footnotes-container"),
+        _ => false,
+    }
 }
 
 fn fragment_target(href: Option<&str>) -> Option<&str> {
@@ -1113,10 +1157,21 @@ fn numeric_suffix(value: &str) -> Option<&str> {
 
 fn has_any_class(dom: &Dom, node: NodeId, expected: &[&str]) -> bool {
     dom.attr(node, AttrName::Class).is_some_and(|classes| {
-        classes.split_whitespace().any(|class| {
-            expected
-                .iter()
-                .any(|value| class.eq_ignore_ascii_case(value))
+        any_token(classes, |class| {
+            let Some(first) = class.as_bytes().first().copied() else {
+                return false;
+            };
+            let first = first.to_ascii_lowercase();
+            expected.iter().any(|value| {
+                value
+                    .as_bytes()
+                    .first()
+                    .copied()
+                    .map(|byte| byte.to_ascii_lowercase())
+                    == Some(first)
+                    && class.len() == value.len()
+                    && class.eq_ignore_ascii_case(value)
+            })
         })
     })
 }
@@ -1127,9 +1182,16 @@ fn has_role(dom: &Dom, node: NodeId, role: &str) -> bool {
 }
 
 fn token(value: &str, expected: &str) -> bool {
-    value
-        .split_whitespace()
-        .any(|value| value.eq_ignore_ascii_case(expected))
+    any_token(value, |value| value.eq_ignore_ascii_case(expected))
+}
+
+#[inline]
+fn any_token(value: &str, mut predicate: impl FnMut(&str) -> bool) -> bool {
+    if value.is_ascii() {
+        value.split_ascii_whitespace().any(&mut predicate)
+    } else {
+        value.split_whitespace().any(predicate)
+    }
 }
 
 pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {
@@ -1139,33 +1201,46 @@ pub(crate) fn is_source_evidence(dom: &Dom, node: NodeId) -> bool {
         || dom.attr_by_local_name(node, "data-footnote").is_some()
         || dom.attr_by_local_name(node, "data-footnotes").is_some()
         || has_any_class(dom, node, &["fn"]) && dom.attr_by_local_name(node, "data-fn").is_some()
-        || has_any_class(
-            dom,
-            node,
-            &[
-                "footnote-reference",
-                "footnote-ref",
-                "footnoteref",
-                "fnref",
-                "footnote-definition",
-                "footdef",
-                "sidenote",
-                "side-note",
-                "marginnote",
-                "margin-note",
-                "footref",
-                "sidenote-number",
-                "footref-toggle",
-                "margin-toggle",
-                "footnotes",
-                "footnote-list",
-                "footnote-definitions",
-                "footnote-container",
-                "footnotes-container",
-                "wp-block-footnotes",
-                "endnotes",
-            ],
-        )
+        || has_source_evidence_class(dom, node)
+}
+
+fn has_source_evidence_class(dom: &Dom, node: NodeId) -> bool {
+    dom.attr(node, AttrName::Class)
+        .is_some_and(|classes| any_token(classes, is_source_evidence_class_token))
+}
+
+fn is_source_evidence_class_token(class: &str) -> bool {
+    let Some(first) = class.as_bytes().first().copied() else {
+        return false;
+    };
+    match first.to_ascii_lowercase() {
+        b'e' => class.eq_ignore_ascii_case("endnotes"),
+        b'f' => [
+            "footnote-reference",
+            "footnote-ref",
+            "footnoteref",
+            "fnref",
+            "footnote-definition",
+            "footdef",
+            "footref",
+            "footref-toggle",
+            "footnotes",
+            "footnote-list",
+            "footnote-definitions",
+            "footnote-container",
+            "footnotes-container",
+        ]
+        .iter()
+        .any(|expected| class.eq_ignore_ascii_case(expected)),
+        b'm' => ["marginnote", "margin-note", "margin-toggle"]
+            .iter()
+            .any(|expected| class.eq_ignore_ascii_case(expected)),
+        b's' => ["sidenote", "side-note", "sidenote-number"]
+            .iter()
+            .any(|expected| class.eq_ignore_ascii_case(expected)),
+        b'w' => class.eq_ignore_ascii_case("wp-block-footnotes"),
+        _ => false,
+    }
 }
 
 pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {

@@ -1247,7 +1247,14 @@ fn populate_heuristic_aggregates(
         has_two_images[node.index()] = image_count >= 2;
         if tag == Some(Tag::Other)
             && dom.attr_by_local_name(node, "action").is_some()
-            && node_name(dom, node).contains("newsletter-form")
+            && (dom.qual_name(node).is_some_and(|name| {
+                contains_ascii_case_insensitive(name.local.as_ref(), "newsletter-form")
+            }) || dom
+                .attr(node, AttrName::Class)
+                .is_some_and(|value| contains_ascii_case_insensitive(value, "newsletter-form"))
+                || dom
+                    .attr(node, AttrName::Id)
+                    .is_some_and(|value| contains_ascii_case_insensitive(value, "newsletter-form")))
         {
             has_forms[node.index()] = true;
         }
@@ -1347,7 +1354,6 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     };
     if changed {
         workspace.invalidate();
-        store.clear_stats();
         workspace.ensure_snapshot(dom, root);
         populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
@@ -1358,7 +1364,6 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     };
     if changed {
         workspace.invalidate();
-        store.clear_stats();
     }
     let changed = {
         workspace.ensure_snapshot(dom, root);
@@ -1367,7 +1372,6 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     };
     if changed {
         workspace.invalidate();
-        store.clear_stats();
         workspace.ensure_snapshot(dom, root);
         populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
@@ -1378,7 +1382,6 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     };
     if changed {
         workspace.invalidate();
-        store.clear_stats();
     }
     workspace.ensure_snapshot(dom, root);
     let snapshot = workspace.elements_with_depth();
@@ -1398,6 +1401,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         .iter()
         .any(|&(_, depth)| depth > 64)
         .then(|| protected_masks(dom, root, evidence, snapshot, &mut scratch.u32_values));
+    let mut name_buffer = String::new();
 
     // Keep only outermost candidates. A classifier can inspect the complete
     // subtree once instead of rescanning every nested wrapper.
@@ -1437,7 +1441,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         get_inner_text(dom, node, text_buffer);
         text_buffer.make_ascii_lowercase();
         let text = text_buffer.trim();
-        let name = node_name(dom, node);
+        append_node_name(dom, node, &mut name_buffer);
+        let name = name_buffer.as_str();
         let links = usize::from(link_counts[node.index()]);
         let controls = usize::from(has_controls[node.index()]);
         let images =
@@ -1464,7 +1469,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         };
         let has_form = has_forms[node.index()];
         let metrics = PeripheralMetrics {
-            name: &name,
+            name,
             text,
             stats,
             links,
@@ -1478,7 +1483,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         };
         let related = is_related_content(dom, node, &metrics);
 
-        let social_name = contains_any(&name, &["share", "social", "sharedaddy"]);
+        let social_name = contains_any(name, &["share", "social", "sharedaddy"]);
         let social_links = usize::from(has_social_links[node.index()]);
         let social = social_name && (social_links > 0 || links >= 2) && short;
 
@@ -1490,7 +1495,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 role.split_whitespace()
                     .any(|value| value.eq_ignore_ascii_case("navigation"))
             });
-        let menu_name = contains_any(&name, &["menu", "navigation", "breadcrumb"]);
+        let menu_name = contains_any(name, &["menu", "navigation", "breadcrumb"]);
         let documentation_toc = dom
             .attr_by_local_name(node, "aria-label")
             .is_some_and(|label| {
@@ -1500,7 +1505,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 )
             })
             || contains_any(
-                &name,
+                name,
                 &["table-of-contents", "table_of_contents", "docs-toc"],
             );
         let navigation = navigation_semantic
@@ -1510,7 +1515,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             && link_density >= 0.6
             && stats.text_length < 500;
 
-        let author_name = contains_any(&name, &["author-bio", "author_bio", "profile", "bio"]);
+        let author_name = contains_any(name, &["author-bio", "author_bio", "profile", "bio"]);
         let inside_article_toc = std::iter::once(node)
             .chain(dom.ancestors(node))
             .any(|ancestor| {
@@ -1528,14 +1533,13 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let job_profile = is_job_profile_content(dom, node, page_kind, &metrics);
         let collection_promotion = is_collection_promotion(dom, node, &metrics);
 
-        let advertisement =
-            strong_ad_name(&name) && short && (links > 0 || stats.text_length < 100);
+        let advertisement = strong_ad_name(name) && short && (links > 0 || stats.text_length < 100);
         let consent = contains_name_or_text(
-            &name,
+            name,
             text,
             &["cookie consent", "cookie-banner", "consent-banner"],
         ) && short;
-        let account = contains_any(&name, &["login", "sign-in", "signin"])
+        let account = contains_any(name, &["login", "sign-in", "signin"])
             && (controls > 0 || links > 0)
             && short;
         let comment_ui = name.contains("comment")
@@ -1558,7 +1562,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         .any(|label| text == *label || contains_followed_by_space(text, label));
         let action_url = has_action_urls[node.index()];
         let interaction_name = contains_any(
-            &name,
+            name,
             &[
                 "toolbar",
                 "article-actions",
@@ -1584,7 +1588,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 )
             })
             || contains_any(
-                &name,
+                name,
                 &[
                     "company-portals",
                     "company_portals",
@@ -1609,7 +1613,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             && (at_end || text.starts_with("comments") && text.contains("subscribe"));
         let print_citation = links >= 2
             && short
-            && contains_any(&name, &["print-citation", "story-footer"])
+            && contains_any(name, &["print-citation", "story-footer"])
             && text.contains("appears in print");
 
         if related
@@ -1688,7 +1692,6 @@ pub(crate) fn remove_global_chrome_in_workspace(
         return false;
     }
 
-    store.clear_stats();
     store.enable_link_lengths();
     get_or_compute_stats(dom, root, store);
 
@@ -1710,12 +1713,14 @@ pub(crate) fn remove_global_chrome_in_workspace(
     scratch.bits.fill(false);
     let remove = &mut scratch.bits[..dom.len()];
     let mut text_buffer = String::new();
+    let mut name_buffer = String::new();
     for &(node, _) in workspace.elements_with_depth() {
         if node == root || dom.parent(node).is_none() {
             continue;
         }
         let aggregate = aggregates[node.index()];
-        let name = node_name(dom, node);
+        append_node_name(dom, node, &mut name_buffer);
+        let name = name_buffer.as_str();
         let semantic_navigation = dom.tag(node) == Some(Tag::Nav)
             || dom.tag(node) == Some(Tag::Footer)
             || dom.tag(node) == Some(Tag::Header) && aggregate.link_count >= 3
@@ -1726,7 +1731,7 @@ pub(crate) fn remove_global_chrome_in_workspace(
                 })
             });
         let named_chrome = contains_any(
-            &name,
+            name,
             &[
                 "navigation",
                 "navbar",
@@ -1763,7 +1768,7 @@ pub(crate) fn remove_global_chrome_in_workspace(
         let text = text_buffer.trim();
 
         let metrics = ChromeMetrics {
-            name: &name,
+            name,
             text,
             stats,
             links,
@@ -3491,9 +3496,8 @@ fn remove_contextual_boilerplate_in_workspace(
         is_contextual_text_boundary(dom, node) && !has_nested_boundary[node.index()]
     }));
 
-    // Populate every current subtree statistic in one bottom-up traversal.
-    // The earlier structural pass can detach nodes, so do not reuse its cache.
-    store.clear_stats();
+    // Reuse unchanged subtree statistics. Detach helpers invalidate only the
+    // affected ancestor chain, so rebuilding the root keeps this pass local.
     get_or_compute_stats(dom, root, store);
 
     for &node in nodes.iter().rev() {
@@ -3849,6 +3853,24 @@ fn node_name<'a>(dom: &'a Dom, node: NodeId) -> Cow<'a, str> {
     }
     value.make_ascii_lowercase();
     Cow::Owned(value)
+}
+
+fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
+    output.clear();
+    let tag_name = (dom.tag(node) == Some(Tag::Other))
+        .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
+        .flatten();
+    let class = dom.attr(node, AttrName::Class);
+    let id = dom.attr(node, AttrName::Id);
+    let mut first = true;
+    for part in [tag_name, class, id].into_iter().flatten() {
+        if !first {
+            output.push(' ');
+        }
+        output.push_str(part);
+        first = false;
+    }
+    output.make_ascii_lowercase();
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {

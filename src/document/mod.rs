@@ -188,7 +188,7 @@ fn has_source_recognizer_gate(dom: &crate::dom::Dom, node: crate::dom::NodeId) -
 }
 
 pub(crate) use tables::repeated_listing_start;
-pub(crate) use uri::{DestinationKind, safe_destination};
+pub(crate) use uri::{DestinationKind, safe_destination, trim_destination};
 
 pub(crate) fn semantic_normalization_counts(
     dom: &crate::dom::Dom,
