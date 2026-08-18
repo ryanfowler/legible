@@ -86,11 +86,6 @@ pub struct ExtractionCounters {
     pub prepared_source_entries: u64,
     pub dom_clones: u64,
     pub fragment_copies: u64,
-    pub fast_root_probes: u64,
-    pub fast_root_accepted: u64,
-    pub fast_root_validation_failed: u64,
-    pub fast_root_fallbacks: u64,
-    pub fast_root_scoring_clones_avoided: u64,
     pub strategies_started: u64,
     pub unique_attempt_plans: u64,
     pub scoring_nodes: u64,
@@ -199,11 +194,6 @@ std::thread_local! {
             prepared_source_entries: 0,
             dom_clones: 0,
             fragment_copies: 0,
-            fast_root_probes: 0,
-            fast_root_accepted: 0,
-            fast_root_validation_failed: 0,
-            fast_root_fallbacks: 0,
-            fast_root_scoring_clones_avoided: 0,
             strategies_started: 0,
             unique_attempt_plans: 0,
             scoring_nodes: 0,
@@ -378,46 +368,6 @@ pub(crate) fn record_dom_clone(_bytes: usize) {
 pub(crate) fn record_fragment_copy() {
     #[cfg(feature = "bench-instrumentation")]
     add_counter(|counters| counters.fragment_copies = counters.fragment_copies.saturating_add(1));
-}
-
-#[inline(always)]
-pub(crate) fn record_fast_root_probe() {
-    #[cfg(feature = "bench-instrumentation")]
-    add_counter(|counters| counters.fast_root_probes = counters.fast_root_probes.saturating_add(1));
-}
-
-#[inline(always)]
-pub(crate) fn record_fast_root_accepted() {
-    #[cfg(feature = "bench-instrumentation")]
-    add_counter(|counters| {
-        counters.fast_root_accepted = counters.fast_root_accepted.saturating_add(1)
-    });
-}
-
-#[inline(always)]
-pub(crate) fn record_fast_root_validation_failed() {
-    #[cfg(feature = "bench-instrumentation")]
-    add_counter(|counters| {
-        counters.fast_root_validation_failed =
-            counters.fast_root_validation_failed.saturating_add(1)
-    });
-}
-
-#[inline(always)]
-pub(crate) fn record_fast_root_fallback() {
-    #[cfg(feature = "bench-instrumentation")]
-    add_counter(|counters| {
-        counters.fast_root_fallbacks = counters.fast_root_fallbacks.saturating_add(1)
-    });
-}
-
-#[inline(always)]
-pub(crate) fn record_fast_root_scoring_clone_avoided() {
-    #[cfg(feature = "bench-instrumentation")]
-    add_counter(|counters| {
-        counters.fast_root_scoring_clones_avoided =
-            counters.fast_root_scoring_clones_avoided.saturating_add(1)
-    });
 }
 
 #[inline(always)]
