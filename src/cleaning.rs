@@ -17,22 +17,43 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-/// Reusable traversal and scratch storage for one selected fragment.
+/// Stable source-order index and logical cleanup state for one selected fragment.
 ///
-/// A snapshot is valid only for the current mutation epoch and root. Cleanup
-/// phases must call `invalidate` after a structural mutation before they ask
-/// for another snapshot. This keeps snapshot reuse explicit and prevents a
-/// later phase from accidentally observing detached nodes.
+/// The index records fragment topology once. Cleanup passes can detach nodes,
+/// then call `record_mutation` to refresh compact retained-node projections from
+/// the index. The refresh reads direct node links into compact arrays. It does
+/// not rebuild the source-order topology snapshot.
 #[derive(Default)]
-pub(crate) struct FragmentWorkspace {
-    mutation_epoch: u32,
-    snapshot_epoch: Option<u32>,
-    snapshot_root: Option<NodeId>,
+pub(crate) struct FragmentIndex {
+    root: Option<NodeId>,
+    entries: Vec<FragmentEntry>,
+    position_by_node: Vec<u32>,
+    cleanup: CleanupPlan,
+    projection_dirty: bool,
+    projection_order_dirty: bool,
     preorder: Vec<NodeId>,
     elements_with_depth: Vec<(NodeId, u32)>,
     scratch_u32: Vec<u32>,
     scratch_bytes: Vec<u8>,
     scratch_bits: Vec<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct FragmentEntry {
+    node: NodeId,
+    parent_position: u32,
+    subtree_end: u32,
+    depth: u32,
+    tag: Option<Tag>,
+}
+
+const NO_FRAGMENT_POSITION: u32 = u32::MAX;
+
+#[derive(Default)]
+struct CleanupPlan {
+    dropped_subtrees: Vec<bool>,
+    first_child: Vec<u32>,
+    next_sibling: Vec<u32>,
 }
 
 pub(crate) struct FragmentScratch {
@@ -41,17 +62,29 @@ pub(crate) struct FragmentScratch {
     pub(crate) bits: Vec<bool>,
 }
 
-impl FragmentWorkspace {
-    /// Drops snapshot validity while retaining all allocated workspace storage.
-    pub(crate) fn invalidate(&mut self) {
-        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
-        self.snapshot_epoch = None;
-        self.snapshot_root = None;
+impl FragmentIndex {
+    /// Marks retained-node projections for a compact logical refresh.
+    pub(crate) fn record_mutation(&mut self) {
+        self.projection_dirty = true;
     }
 
-    /// Starts a new fragment epoch without releasing reusable buffers.
+    /// Marks a mutation that can reorder children without changing parents.
+    #[cfg(test)]
+    fn record_reordering_mutation(&mut self) {
+        self.projection_dirty = true;
+        self.projection_order_dirty = true;
+    }
+
+    /// Starts a new fragment while retaining allocated buffers.
     pub(crate) fn reset(&mut self) {
-        self.invalidate();
+        self.root = None;
+        self.entries.clear();
+        self.position_by_node.clear();
+        self.cleanup.dropped_subtrees.clear();
+        self.cleanup.first_child.clear();
+        self.cleanup.next_sibling.clear();
+        self.projection_dirty = false;
+        self.projection_order_dirty = false;
         self.preorder.clear();
         self.elements_with_depth.clear();
         self.scratch_u32.clear();
@@ -59,39 +92,208 @@ impl FragmentWorkspace {
         self.scratch_bits.clear();
     }
 
-    /// Returns one DOM-preorder snapshot for the current fragment version.
-    pub(crate) fn ensure_snapshot(&mut self, dom: &Dom, root: NodeId) {
-        if self.snapshot_epoch == Some(self.mutation_epoch) && self.snapshot_root == Some(root) {
+    /// Returns retained-node projections from one stable fragment index.
+    pub(crate) fn ensure_retained(&mut self, dom: &Dom, root: NodeId) {
+        if self.root != Some(root) || self.entries.is_empty() {
+            self.build(dom, root);
+            return;
+        }
+        if !self.projection_dirty {
             return;
         }
 
+        self.rebuild_projections(dom);
+        self.projection_dirty = false;
+        self.projection_order_dirty = false;
+    }
+
+    fn build(&mut self, dom: &Dom, root: NodeId) {
         crate::instrumentation::record_source_full_scan();
         crate::instrumentation::record_source_element_snapshot();
+        crate::instrumentation::record_fragment_index_build();
+        self.root = Some(root);
+        self.entries.clear();
+        self.position_by_node.clear();
+        self.position_by_node
+            .resize(dom.len(), NO_FRAGMENT_POSITION);
         self.preorder.clear();
         self.elements_with_depth.clear();
-        self.preorder.push(root);
-        let Some(first_child) = dom.first_child(root) else {
-            self.snapshot_epoch = Some(self.mutation_epoch);
-            self.snapshot_root = Some(root);
-            return;
-        };
-
         let mut pending = Vec::<(NodeId, u32)>::new();
-        pending.push((first_child, 1));
+        pending.push((root, 0));
         while let Some((node, depth)) = pending.pop() {
-            self.preorder.push(node);
-            if dom.is_element(node) {
-                self.elements_with_depth.push((node, depth));
-            }
+            let parent_position = dom.parent(node).map_or(NO_FRAGMENT_POSITION, |parent| {
+                self.position_by_node[parent.index()]
+            });
+            let position = self.entries.len() as u32;
+            self.position_by_node[node.index()] = position;
+            self.entries.push(FragmentEntry {
+                node,
+                parent_position,
+                subtree_end: position + 1,
+                depth,
+                tag: dom.tag(node),
+            });
             if let Some(sibling) = dom.next_sibling(node) {
-                pending.push((sibling, depth));
+                if node != root {
+                    pending.push((sibling, depth));
+                }
             }
             if let Some(child) = dom.first_child(node) {
                 pending.push((child, depth.saturating_add(1)));
             }
         }
-        self.snapshot_epoch = Some(self.mutation_epoch);
-        self.snapshot_root = Some(root);
+        let mut open = Vec::<usize>::new();
+        for position in 0..self.entries.len() {
+            let depth = self.entries[position].depth;
+            while open
+                .last()
+                .is_some_and(|&ancestor| self.entries[ancestor].depth >= depth)
+            {
+                let ancestor = open.pop().unwrap();
+                self.entries[ancestor].subtree_end = position as u32;
+            }
+            open.push(position);
+        }
+        while let Some(ancestor) = open.pop() {
+            self.entries[ancestor].subtree_end = self.entries.len() as u32;
+        }
+        self.cleanup.dropped_subtrees.clear();
+        self.cleanup
+            .dropped_subtrees
+            .resize(self.entries.len(), false);
+        self.cleanup
+            .first_child
+            .resize(self.entries.len(), NO_FRAGMENT_POSITION);
+        self.cleanup
+            .next_sibling
+            .resize(self.entries.len(), NO_FRAGMENT_POSITION);
+        self.rebuild_projections(dom);
+        self.projection_dirty = false;
+        self.projection_order_dirty = false;
+    }
+
+    fn refresh_original_plan(&mut self, dom: &Dom) -> bool {
+        self.cleanup.dropped_subtrees.fill(false);
+        self.cleanup.first_child.fill(NO_FRAGMENT_POSITION);
+        for position in 1..self.entries.len() {
+            let entry = self.entries[position];
+            let parent_position = dom.parent(entry.node).and_then(|parent| {
+                self.position_by_node
+                    .get(parent.index())
+                    .copied()
+                    .filter(|&parent_position| parent_position != NO_FRAGMENT_POSITION)
+            });
+            if parent_position.is_some_and(|parent| parent != entry.parent_position) {
+                return true;
+            }
+            if parent_position.is_none()
+                || self.cleanup.dropped_subtrees[entry.parent_position as usize]
+            {
+                self.cleanup.dropped_subtrees[position] = true;
+                continue;
+            }
+            if self.projection_order_dirty {
+                let expected_previous = self.cleanup.first_child[entry.parent_position as usize];
+                let actual_previous = self.indexed_retained_previous(dom, entry.node);
+                if actual_previous != expected_previous {
+                    return true;
+                }
+                self.cleanup.first_child[entry.parent_position as usize] = position as u32;
+            }
+        }
+        false
+    }
+
+    fn indexed_retained_previous(&self, dom: &Dom, node: NodeId) -> u32 {
+        let mut previous = dom.prev_sibling(node);
+        while let Some(current) = previous {
+            if let Some(position) = self.position_by_node.get(current.index()).copied()
+                && position != NO_FRAGMENT_POSITION
+                && !self.cleanup.dropped_subtrees[position as usize]
+            {
+                return position;
+            }
+            previous = dom.prev_sibling(current);
+        }
+        NO_FRAGMENT_POSITION
+    }
+
+    fn refresh_link_plan(&mut self, dom: &Dom) {
+        self.cleanup.first_child.fill(NO_FRAGMENT_POSITION);
+        self.cleanup.next_sibling.fill(NO_FRAGMENT_POSITION);
+        for position in 0..self.entries.len() {
+            let node = self.entries[position].node;
+            self.cleanup.first_child[position] =
+                self.indexed_link(dom.first_child(node), |node| dom.next_sibling(node));
+            self.cleanup.next_sibling[position] =
+                self.indexed_link(dom.next_sibling(node), |node| dom.next_sibling(node));
+        }
+    }
+
+    fn indexed_link(
+        &self,
+        mut node: Option<NodeId>,
+        advance: impl Fn(NodeId) -> Option<NodeId>,
+    ) -> u32 {
+        while let Some(current) = node {
+            if let Some(position) = self.position_by_node.get(current.index()).copied()
+                && position != NO_FRAGMENT_POSITION
+            {
+                return position;
+            }
+            node = advance(current);
+        }
+        NO_FRAGMENT_POSITION
+    }
+
+    fn rebuild_projections(&mut self, dom: &Dom) {
+        if !self.refresh_original_plan(dom) {
+            self.preorder.clear();
+            self.elements_with_depth.clear();
+            let mut position = 0;
+            while position < self.entries.len() {
+                let entry = self.entries[position];
+                if self.cleanup.dropped_subtrees[position] {
+                    position = entry.subtree_end as usize;
+                    continue;
+                }
+                self.preorder.push(entry.node);
+                if position != 0 && entry.tag.is_some() {
+                    self.elements_with_depth.push((entry.node, entry.depth));
+                }
+                position += 1;
+            }
+            return;
+        }
+
+        self.refresh_link_plan(dom);
+        self.cleanup.dropped_subtrees.fill(true);
+        self.preorder.clear();
+        self.elements_with_depth.clear();
+        let mut pending = Vec::<(u32, u32)>::new();
+        pending.push((0, 0));
+        while let Some((position, depth)) = pending.pop() {
+            let position = position as usize;
+            if position >= self.entries.len() || !self.cleanup.dropped_subtrees[position] {
+                continue;
+            }
+            self.cleanup.dropped_subtrees[position] = false;
+            let entry = self.entries[position];
+            debug_assert!(entry.subtree_end as usize > position);
+            debug_assert!(position == 0 || entry.parent_position < position as u32);
+            self.preorder.push(entry.node);
+            if position != 0 && entry.tag.is_some() {
+                self.elements_with_depth.push((entry.node, depth));
+            }
+            let sibling = self.cleanup.next_sibling[position];
+            if sibling != NO_FRAGMENT_POSITION && position != 0 {
+                pending.push((sibling, depth));
+            }
+            let child = self.cleanup.first_child[position];
+            if child != NO_FRAGMENT_POSITION {
+                pending.push((child, depth.saturating_add(1)));
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -280,7 +482,7 @@ pub(crate) fn clean_styles_with_semantic_gate(
     nodes: &mut Vec<NodeId>,
     semantic_gate: &mut crate::document::SemanticGate,
 ) {
-    let mut workspace = FragmentWorkspace::default();
+    let mut workspace = FragmentIndex::default();
     clean_styles_with_semantic_gate_in_workspace(dom, root, nodes, semantic_gate, &mut workspace);
 }
 
@@ -289,10 +491,10 @@ pub(crate) fn clean_styles_with_semantic_gate_in_workspace(
     root: NodeId,
     nodes: &mut Vec<NodeId>,
     semantic_gate: &mut crate::document::SemanticGate,
-    workspace: &mut FragmentWorkspace,
+    workspace: &mut FragmentIndex,
 ) {
     nodes.clear();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     nodes.push(root);
     nodes.extend(
         workspace
@@ -427,7 +629,7 @@ pub fn mark_data_tables(
     store: &mut crate::dom::NodeStateStore,
     nodes: &mut Vec<NodeId>,
 ) {
-    let mut workspace = FragmentWorkspace::default();
+    let mut workspace = FragmentIndex::default();
     mark_data_tables_in_workspace(dom, root, store, nodes, &mut workspace);
 }
 
@@ -436,9 +638,9 @@ pub(crate) fn mark_data_tables_in_workspace(
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
     nodes: &mut Vec<NodeId>,
-    workspace: &mut FragmentWorkspace,
+    workspace: &mut FragmentIndex,
 ) {
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     mark_data_tables_from_snapshot(dom, root, workspace.elements_with_depth(), store, nodes);
 }
 
@@ -1013,7 +1215,7 @@ pub(crate) fn hard_cleanup(
     evidence: &crate::document::SourceEvidence,
     nodes: &mut Vec<NodeId>,
 ) {
-    let mut workspace = FragmentWorkspace::default();
+    let mut workspace = FragmentIndex::default();
     hard_cleanup_in_workspace(
         dom,
         root,
@@ -1032,10 +1234,10 @@ pub(crate) fn hard_cleanup_in_workspace(
     relax_static_visibility: bool,
     evidence: &crate::document::SourceEvidence,
     nodes: &mut Vec<NodeId>,
-    workspace: &mut FragmentWorkspace,
+    workspace: &mut FragmentIndex,
 ) {
     nodes.clear();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     nodes.extend(
         workspace
             .elements_with_depth()
@@ -1157,7 +1359,7 @@ pub(crate) fn hard_cleanup_in_workspace(
             dom.detach(node);
         }
     }
-    workspace.invalidate();
+    workspace.record_mutation();
 }
 
 /// Removes clutter only when several independent signals agree.
@@ -1171,7 +1373,7 @@ pub(crate) fn heuristic_cleanup(
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
 ) {
-    let mut workspace = FragmentWorkspace::default();
+    let mut workspace = FragmentIndex::default();
     heuristic_cleanup_in_workspace(
         dom,
         root,
@@ -1270,10 +1472,10 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     evidence: &crate::document::SourceEvidence,
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
-    workspace: &mut FragmentWorkspace,
+    workspace: &mut FragmentIndex,
 ) {
     nodes.clear();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     let mut scratch = workspace.take_scratch();
     scratch.bytes.resize(dom.len(), 0);
     scratch.bytes.fill(0);
@@ -1353,37 +1555,37 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         remove_explicit_peripheral_sections(dom, root, snapshot, link_counts, store)
     };
     if changed {
-        workspace.invalidate();
-        workspace.ensure_snapshot(dom, root);
+        workspace.record_mutation();
+        workspace.ensure_retained(dom, root);
         populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
     let changed = {
-        workspace.ensure_snapshot(dom, root);
+        workspace.ensure_retained(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_terminal_taxonomy_before_footnotes(dom, root, snapshot, link_counts, store)
     };
     if changed {
-        workspace.invalidate();
+        workspace.record_mutation();
     }
     let changed = {
-        workspace.ensure_snapshot(dom, root);
+        workspace.ensure_retained(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_job_company_profiles(dom, root, page_kind, snapshot, store)
     };
     if changed {
-        workspace.invalidate();
-        workspace.ensure_snapshot(dom, root);
+        workspace.record_mutation();
+        workspace.ensure_retained(dom, root);
         populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
     let changed = {
-        workspace.ensure_snapshot(dom, root);
+        workspace.ensure_retained(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_direct_peripheral_siblings(dom, root, snapshot, link_counts, store, evidence)
     };
     if changed {
-        workspace.invalidate();
+        workspace.record_mutation();
     }
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     let snapshot = workspace.elements_with_depth();
     populate_heuristic_aggregates(
         dom,
@@ -1647,7 +1849,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         }
     }
 
-    workspace.invalidate();
+    workspace.record_mutation();
     remove_contextual_boilerplate_in_workspace(
         dom,
         root,
@@ -1676,7 +1878,7 @@ pub(crate) fn remove_global_chrome(
     store: &mut crate::dom::NodeStateStore,
     evidence: &crate::document::SourceEvidence,
 ) -> bool {
-    let mut workspace = FragmentWorkspace::default();
+    let mut workspace = FragmentIndex::default();
     remove_global_chrome_in_workspace(dom, root, store, evidence, &mut workspace)
 }
 
@@ -1685,9 +1887,9 @@ pub(crate) fn remove_global_chrome_in_workspace(
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
     evidence: &crate::document::SourceEvidence,
-    workspace: &mut FragmentWorkspace,
+    workspace: &mut FragmentIndex,
 ) -> bool {
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     if workspace.elements_with_depth().is_empty() {
         return false;
     }
@@ -1812,7 +2014,7 @@ pub(crate) fn remove_global_chrome_in_workspace(
         changed = true;
     }
     if changed {
-        workspace.invalidate();
+        workspace.record_mutation();
     }
     workspace.restore_scratch(scratch);
     changed
@@ -3479,9 +3681,9 @@ fn remove_contextual_boilerplate_in_workspace(
     evidence: &crate::document::SourceEvidence,
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
-    workspace: &mut FragmentWorkspace,
+    workspace: &mut FragmentIndex,
 ) {
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     let snapshot = workspace.elements_with_depth();
     let mut has_nested_boundary = vec![false; dom.len()];
     for &(node, _) in snapshot.iter().rev() {
@@ -3565,7 +3767,7 @@ fn remove_contextual_boilerplate_in_workspace(
             detach_and_invalidate_stats(dom, node, store);
         }
     }
-    workspace.invalidate();
+    workspace.record_mutation();
 }
 
 fn is_contextual_text_boundary(dom: &Dom, node: NodeId) -> bool {
@@ -3965,7 +4167,7 @@ mod tests {
     }
 
     #[test]
-    fn fragment_workspace_reuses_snapshot_until_invalidation() {
+    fn fragment_index_reuses_topology_and_projects_cleanup() {
         let mut dom = Dom::parse_fragment(
             "<section><p>first</p><div><p>second</p></div></section>",
             Tag::Div,
@@ -3974,18 +4176,22 @@ mod tests {
         let root = dom.root();
         let section = dom.first_descendant_by_tag(root, Tag::Section).unwrap();
         let paragraph = dom.first_descendant_by_tag(section, Tag::P).unwrap();
-        let mut workspace = FragmentWorkspace::default();
+        let mut workspace = FragmentIndex::default();
 
-        workspace.ensure_snapshot(&dom, section);
+        workspace.ensure_retained(&dom, section);
         assert_eq!(workspace.preorder()[0], section);
         assert_eq!(workspace.elements_with_depth().len(), 3);
-        let first_capacity = workspace.elements_with_depth().as_ptr();
-        workspace.ensure_snapshot(&dom, section);
-        assert_eq!(workspace.elements_with_depth().as_ptr(), first_capacity);
+        let entries = workspace.entries.as_ptr();
+        let positions = workspace.position_by_node.as_ptr();
+        workspace.ensure_retained(&dom, section);
+        assert_eq!(workspace.entries.as_ptr(), entries);
+        assert_eq!(workspace.position_by_node.as_ptr(), positions);
 
         dom.detach(paragraph);
-        workspace.invalidate();
-        workspace.ensure_snapshot(&dom, section);
+        workspace.record_mutation();
+        workspace.ensure_retained(&dom, section);
+        assert_eq!(workspace.entries.as_ptr(), entries);
+        assert_eq!(workspace.position_by_node.as_ptr(), positions);
         assert!(
             !workspace
                 .elements_with_depth()
@@ -3995,8 +4201,105 @@ mod tests {
     }
 
     #[test]
-    fn fragment_workspace_reuses_scratch_capacity() {
-        let mut workspace = FragmentWorkspace::default();
+    fn fragment_index_keeps_children_moved_out_of_dropped_subtrees() {
+        let mut dom = Dom::parse_fragment(
+            "<section><div><img src='diagram.png'><p>fallback</p></div><p>body</p></section>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let section = dom.first_descendant_by_tag(root, Tag::Section).unwrap();
+        let wrapper = dom.first_descendant_by_tag(section, Tag::Div).unwrap();
+        let image = dom.first_descendant_by_tag(wrapper, Tag::Img).unwrap();
+        let fallback = dom.first_descendant_by_tag(wrapper, Tag::P).unwrap();
+        let mut index = FragmentIndex::default();
+
+        index.ensure_retained(&dom, section);
+        dom.insert_before(wrapper, image);
+        dom.detach(wrapper);
+        index.record_mutation();
+        index.ensure_retained(&dom, section);
+
+        assert!(index.preorder().contains(&image));
+        assert!(!index.preorder().contains(&wrapper));
+        assert!(!index.preorder().contains(&fallback));
+        assert!(index.elements_with_depth().contains(&(image, 1)));
+    }
+
+    #[test]
+    fn fragment_index_projects_moves_under_later_parents_in_dom_order() {
+        let mut dom = Dom::parse_fragment(
+            "<section><div hidden><img src='diagram.png'></div><figure><figcaption>Chart</figcaption></figure></section>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let section = dom.first_descendant_by_tag(root, Tag::Section).unwrap();
+        let wrapper = dom.first_descendant_by_tag(section, Tag::Div).unwrap();
+        let image = dom.first_descendant_by_tag(wrapper, Tag::Img).unwrap();
+        let figure = dom.first_descendant_by_tag(section, Tag::Figure).unwrap();
+        let caption = dom
+            .first_descendant_by_tag(figure, Tag::Figcaption)
+            .unwrap();
+        let mut index = FragmentIndex::default();
+
+        index.ensure_retained(&dom, section);
+        dom.append_child(figure, image);
+        dom.detach(wrapper);
+        index.record_mutation();
+        index.ensure_retained(&dom, section);
+
+        let figure_position = index
+            .preorder()
+            .iter()
+            .position(|&node| node == figure)
+            .unwrap();
+        let caption_position = index
+            .preorder()
+            .iter()
+            .position(|&node| node == caption)
+            .unwrap();
+        let image_position = index
+            .preorder()
+            .iter()
+            .position(|&node| node == image)
+            .unwrap();
+        assert!(figure_position < caption_position);
+        assert!(caption_position < image_position);
+        assert!(index.elements_with_depth().contains(&(image, 2)));
+    }
+
+    #[test]
+    fn fragment_index_projects_same_parent_reordering() {
+        let mut dom = Dom::parse_fragment(
+            "<section><p>first</p><p>second</p><p>third</p></section>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let section = dom.first_descendant_by_tag(root, Tag::Section).unwrap();
+        let paragraphs: Vec<_> = dom
+            .descendants(section)
+            .filter(|&node| dom.tag(node) == Some(Tag::P))
+            .collect();
+        let mut index = FragmentIndex::default();
+
+        index.ensure_retained(&dom, section);
+        dom.append_child(section, paragraphs[0]);
+        index.record_reordering_mutation();
+        index.ensure_retained(&dom, section);
+
+        let retained: Vec<_> = index
+            .elements_with_depth()
+            .iter()
+            .map(|&(node, _)| node)
+            .collect();
+        assert_eq!(retained, vec![paragraphs[1], paragraphs[2], paragraphs[0]]);
+    }
+
+    #[test]
+    fn fragment_index_reuses_scratch_capacity() {
+        let mut workspace = FragmentIndex::default();
         let u32_ptr = workspace.scratch_u32(16).as_mut_ptr();
         let bytes_ptr = workspace.scratch_bytes(16).as_mut_ptr();
         let bits_ptr = workspace.scratch_bits(16).as_mut_ptr();
@@ -4332,7 +4635,7 @@ mod tests {
         let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
         let mut store = NodeStateStore::new();
         let mut tables = Vec::new();
-        let mut workspace = FragmentWorkspace::default();
+        let mut workspace = FragmentIndex::default();
         mark_data_tables_in_workspace(&dom, table, &mut store, &mut tables, &mut workspace);
 
         assert_eq!(tables, vec![table]);

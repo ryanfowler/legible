@@ -52,7 +52,7 @@ pub(crate) fn cleanup_selected_content(
     nodes: &mut Vec<NodeId>,
     flatten_javascript_links: bool,
 ) {
-    let mut workspace = crate::cleaning::FragmentWorkspace::default();
+    let mut workspace = crate::cleaning::FragmentIndex::default();
     cleanup_selected_content_in_workspace(
         dom,
         root,
@@ -67,24 +67,24 @@ pub(crate) fn cleanup_selected_content_in_workspace(
     root: NodeId,
     nodes: &mut Vec<NodeId>,
     flatten_javascript_links: bool,
-    workspace: &mut crate::cleaning::FragmentWorkspace,
+    workspace: &mut crate::cleaning::FragmentIndex,
 ) {
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     {
         let source_nodes = workspace.preorder();
         images::remove_duplicates_with_source_nodes(dom, root, source_nodes, nodes);
     }
-    workspace.invalidate();
-    workspace.ensure_snapshot(dom, root);
+    workspace.record_mutation();
+    workspace.ensure_retained(dom, root);
     {
         let source_nodes = workspace.preorder();
         let elements_with_depth = workspace.elements_with_depth();
         headings::remove_artifacts_with_snapshot(dom, root, elements_with_depth, source_nodes);
     }
-    workspace.invalidate();
+    workspace.record_mutation();
     if flatten_javascript_links {
         flatten_javascript_links_for_quality(dom, root);
-        workspace.invalidate();
+        workspace.record_mutation();
     }
 }
 
@@ -126,15 +126,15 @@ pub(crate) fn prepare_media_before_cleanup(dom: &mut Dom, root: NodeId) {
 pub(crate) fn prepare_media_before_cleanup_in_workspace(
     dom: &mut Dom,
     root: NodeId,
-    workspace: &mut crate::cleaning::FragmentWorkspace,
+    workspace: &mut crate::cleaning::FragmentIndex,
 ) {
     let mut scratch = workspace.take_scratch();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     {
         let source_nodes = workspace.preorder();
         media::prepare_with_source_nodes(dom, root, source_nodes, &mut scratch);
     }
-    workspace.invalidate();
+    workspace.record_mutation();
     workspace.restore_scratch(scratch);
 }
 
@@ -153,15 +153,15 @@ pub(crate) fn remove_decorative_media_before_cleanup(dom: &mut Dom, root: NodeId
 pub(crate) fn remove_decorative_media_before_cleanup_in_workspace(
     dom: &mut Dom,
     root: NodeId,
-    workspace: &mut crate::cleaning::FragmentWorkspace,
+    workspace: &mut crate::cleaning::FragmentIndex,
 ) {
     let mut scratch = workspace.take_scratch();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_retained(dom, root);
     {
         let snapshot = workspace.elements_with_depth();
         images::remove_decorative_media_with_snapshot(dom, root, snapshot, &mut scratch);
     }
-    workspace.invalidate();
+    workspace.record_mutation();
     workspace.restore_scratch(scratch);
 }
 

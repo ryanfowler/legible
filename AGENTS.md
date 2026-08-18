@@ -53,7 +53,7 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `scoring.rs::ScoringView` | Sparse scoring tag, parent, wrapper, and paragraph projections over the immutable source DOM |
-| `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
+| `cleaning.rs` | Pre-extraction preparation and conservative relevance cleanup with one stable fragment index and a compact logical cleanup plan |
 | `normalize.rs` / `normalize/` | Source preparation and relevance cleanup for SVG charts, media, duplicate images, and heading artifacts |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
@@ -95,6 +95,7 @@ These invariants are costly to violate:
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Do not clone the DOM for scoring.** Use `ScoringView` for scoring-only structure. Apply retained block projections only to the selected fragment.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
+- **Index selected cleanup once.** Build one stable source-order fragment index per physical attempt. Record detached subtrees in the cleanup plan. Refresh later cleanup views with compact array passes. Do not rebuild DOM topology snapshots after each mutation.
 - **Consume the winning fragment.** Move an accepted or deferred winning fragment into semantic compilation. Do not deep-copy the final cleaned DOM before compilation.
 - **Keep final DOM mutation focused on relevance.** Cleanup decides what to remove. The semantic compiler resolves URLs, drops source attributes, ignores comments, collapses transparent wrappers, and emits output semantics.
 - **Use static image evidence together.** Small dimensions are a signal. Protect described images, math, responsive sources, and captioned figures.

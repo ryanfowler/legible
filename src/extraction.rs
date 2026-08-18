@@ -747,7 +747,7 @@ impl<'a> ContentExtractor<'a> {
         );
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
-        let mut fragment_workspace = FragmentWorkspace::default();
+        let mut fragment_workspace = FragmentIndex::default();
         let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
         let base_candidates = prepared_source.candidates().clone();
         let content_hint_targets =
@@ -1170,8 +1170,7 @@ impl<'a> ContentExtractor<'a> {
             let (mut source_facts, mut retained_stream) =
                 self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
             crate::instrumentation::record_cleaned_nodes(self.dom.len());
-            fragment_workspace.invalidate();
-            self.capture_normalization_counts(content_id, &mut fragment_workspace);
+            self.capture_normalization_counts(content_id);
             #[cfg(feature = "bench-instrumentation")]
             drop(_cleanup_phase);
             if synthetic
@@ -2095,7 +2094,7 @@ impl<'a> ContentExtractor<'a> {
             self.source_uri.as_ref(),
         );
         let mut text_buffer = String::new();
-        let mut fragment_workspace = FragmentWorkspace::default();
+        let mut fragment_workspace = FragmentIndex::default();
         self.prepare_exact_fragment(
             &mut fragment,
             content_id,
@@ -2143,8 +2142,7 @@ impl<'a> ContentExtractor<'a> {
         let (mut source_facts, mut retained_stream) =
             self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
         crate::instrumentation::record_cleaned_nodes(self.dom.len());
-        fragment_workspace.invalidate();
-        self.capture_normalization_counts(content_id, &mut fragment_workspace);
+        self.capture_normalization_counts(content_id);
         #[cfg(feature = "bench-instrumentation")]
         drop(_cleanup_phase);
         if synthetic
@@ -3275,7 +3273,7 @@ impl<'a> ContentExtractor<'a> {
         video: &Regex,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
-        workspace: &mut FragmentWorkspace,
+        workspace: &mut FragmentIndex,
     ) -> (
         Option<SemanticStructureCounts>,
         crate::document::SourceEvidence,
@@ -3511,21 +3509,31 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
-    fn capture_normalization_counts(&mut self, root: NodeId, workspace: &mut FragmentWorkspace) {
+    fn capture_normalization_counts(&mut self, root: NodeId) {
         if self.diagnostic_attempts.is_none() {
             return;
         }
-        workspace.ensure_snapshot(&self.dom, root);
-        let source_nodes = workspace.preorder();
+        // Diagnostics run after the extraction boundary can add a wrapper.
+        // Keep that optional final scan outside the cleanup index. Production
+        // cleanup still builds the fragment index exactly once per attempt.
+        crate::instrumentation::record_source_full_scan();
+        crate::instrumentation::record_source_element_snapshot();
+        let source_nodes: Vec<_> = std::iter::once(root)
+            .chain(self.dom.descendants(root))
+            .collect();
         let (flattened_layout_tables, semantic_tables) =
-            crate::document::table_normalization_counts_for_nodes(&self.dom, root, source_nodes);
+            crate::document::table_normalization_counts_for_nodes(&self.dom, root, &source_nodes);
         let (footnote_references, footnote_definitions, math_expressions) =
-            crate::document::semantic_normalization_counts_for_nodes(&self.dom, root, source_nodes);
+            crate::document::semantic_normalization_counts_for_nodes(
+                &self.dom,
+                root,
+                &source_nodes,
+            );
         let mut counts = NormalizationCountsInfo {
             code_blocks: crate::document::source_code_block_count_for_nodes(
                 &self.dom,
                 root,
-                source_nodes,
+                &source_nodes,
             ),
             flattened_layout_tables,
             tables: semantic_tables,
@@ -4003,6 +4011,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(crate::instrumentation::snapshot().counters.dom_clones, 0);
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn cleanup_builds_one_fragment_index_per_physical_attempt() {
+        crate::instrumentation::reset();
+        crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(
+                r#"<body><main><h1>Stable cleanup index</h1><p>This article contains enough useful prose to produce a complete extraction result.</p><p><a href="javascript:void(0)">The retained link text stays useful after cleanup replaces its unsafe wrapper.</a></p></main></body>"#,
+                None,
+            )
+            .unwrap();
+        let counters = crate::instrumentation::snapshot().counters;
+
+        assert!(counters.physical_attempt_executions > 0);
+        assert_eq!(
+            counters.fragment_index_builds,
+            counters.physical_attempt_executions
+        );
     }
 
     #[test]

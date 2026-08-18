@@ -82,6 +82,7 @@ pub struct ExtractionCounters {
     pub parse_calls: u64,
     pub source_full_scans: u64,
     pub source_element_snapshots: u64,
+    pub fragment_index_builds: u64,
     pub prepared_source_builds: u64,
     pub prepared_source_entries: u64,
     pub dom_clones: u64,
@@ -193,6 +194,7 @@ std::thread_local! {
             parse_calls: 0,
             source_full_scans: 0,
             source_element_snapshots: 0,
+            fragment_index_builds: 0,
             prepared_source_builds: 0,
             prepared_source_entries: 0,
             dom_clones: 0,
@@ -305,6 +307,14 @@ pub(crate) fn record_source_element_snapshot() {
     #[cfg(feature = "bench-instrumentation")]
     add_counter(|counters| {
         counters.source_element_snapshots = counters.source_element_snapshots.saturating_add(1)
+    });
+}
+
+#[inline(always)]
+pub(crate) fn record_fragment_index_build() {
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.fragment_index_builds = counters.fragment_index_builds.saturating_add(1)
     });
 }
 
