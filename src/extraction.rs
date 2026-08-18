@@ -642,7 +642,12 @@ impl<'a> ContentExtractor<'a> {
                 prepared_source.anchors,
             );
         }
-        let footnote_definitions = exact_root.is_none().then(|| {
+        // External definitions can only be adopted when the source contains
+        // a reference target. Avoid the full-document definition scan for the
+        // common article path without footnote links.
+        let footnote_definitions = (exact_root.is_none()
+            && prepared_source.has_possible_footnote_reference())
+        .then(|| {
             crate::instrumentation::record_external_footnote_scan();
             collect_external_footnotes(&self.dom)
         });

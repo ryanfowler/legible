@@ -57,6 +57,7 @@ impl ContentMetrics {
         root: NodeId,
         relax_static_visibility: bool,
         include_semantic_counts: bool,
+        excluded: &mut Vec<bool>,
     ) -> Self {
         let Some(range) = source.subtree_range(root) else {
             return Self::default();
@@ -66,19 +67,23 @@ impl ContentMetrics {
             .iter()
             .filter(|entry| entry.node != root)
             .any(|entry| entry.is_element() && entry.flags.contains(SourceFlags::PRIMARY_REGION));
-        let mut in_primary_region = vec![false; dom.len()];
-        for entry in entries
-            .iter()
-            .filter(|entry| entry.node != root && entry.is_element())
-        {
-            let parent_is_primary = dom
-                .parent(entry.node)
-                .is_some_and(|parent| in_primary_region[parent.index()]);
-            in_primary_region[entry.node.index()] =
-                parent_is_primary || entry.flags.contains(SourceFlags::PRIMARY_REGION);
-        }
-        let mut excluded = vec![false; dom.len()];
+
+        // Keep only the exclusion mask dense. The old implementation also
+        // kept a DOM-sized primary-region mask. A depth stack gives the same
+        // parent state without an extra allocation and without a second
+        // ancestry lookup for every element.
+        excluded.resize(dom.len(), false);
+        excluded.fill(false);
+        let mut primary_path = Vec::<(u32, bool)>::new();
         for entry in entries.iter().filter(|entry| entry.is_element()) {
+            while primary_path
+                .last()
+                .is_some_and(|&(depth, _)| depth >= entry.depth)
+            {
+                primary_path.pop();
+            }
+            let in_primary_region = primary_path.last().is_some_and(|&(_, primary)| primary)
+                || entry.node != root && entry.flags.contains(SourceFlags::PRIMARY_REGION);
             let tag = entry.tag;
             let hidden = dom.attr(entry.node, AttrName::AriaHidden) == Some("true")
                 || !relax_static_visibility
@@ -114,12 +119,11 @@ impl ContentMetrics {
                         .any(|role| role.eq_ignore_ascii_case("complementary"))
                 });
             excluded[entry.node.index()] = hard_non_content
-                || document_chrome && !in_primary_region[entry.node.index()]
-                || contextual_sidebar
-                    && has_primary_region
-                    && !in_primary_region[entry.node.index()];
+                || document_chrome && !in_primary_region
+                || contextual_sidebar && has_primary_region && !in_primary_region;
+            primary_path.push((entry.depth, in_primary_region));
         }
-        Self::measure_filtered_prepared(dom, root, source, &excluded, include_semantic_counts)
+        Self::measure_filtered_prepared(dom, root, source, excluded, include_semantic_counts)
     }
 
     #[cfg(test)]

@@ -46,3 +46,34 @@ cargo run --release --bin extraction-report --features bench-instrumentation
 Wikipedia external footnote handling changed from 380 subtree copies to one
 lazy import source. This reduced its allocated bytes by 17.5% and peak live
 bytes by 4.1%.
+
+## Follow-up source and renderer optimization
+
+- Machine: Linux `dev`, x86_64, 16 logical CPUs
+- Rust: `rustc 1.97.1`
+- Command: `cargo bench --bench real_world -- --noplot --sample-size 10`
+- Baseline: `aff80a3`, measured before the follow-up changes
+- Values: Criterion median, milliseconds
+
+| Fixture | Markdown before | Markdown after | Change |
+|---|---:|---:|---:|
+| `medium-2` | 2.613 | 2.340 | -10.4% |
+| `ars-1` | 3.634 | 3.604 | -0.8% |
+| `heise` | 3.320 | 3.304 | -0.5% |
+| `nytimes-5` | 20.771 | 19.077 | -8.2% |
+| `wikipedia-2` | 127.429 | 126.556 | -0.7% |
+| `yahoo-2` | 27.482 | 27.684 | +0.7% |
+| `buzzfeed-1` | 13.753 | 12.869 | -6.4% |
+| `engadget` | 35.416 | 33.615 | -5.1% |
+| `guardian-1` | 21.463 | 16.702 | -22.2% |
+
+The sum of fixture medians improved by **4.0%** for raw HTML to Markdown in
+this final run. Extraction-only medians improved by **5.3%**. Repeated runs
+varied by about two percentage points on this shared machine. The largest
+gains came from allocation-free image-role token matching and shared
+source-order scans for footnote analysis. Markdown lookahead now scans forward
+only when trailing punctuation can form a cross-node Markdown construct.
+
+The instrumented report showed total allocated bytes falling from 102,787,493
+to 100,573,277 (**-2.2%**) across the nine fixtures. Peak live bytes stayed
+within measurement noise. The retained semantic representation did not grow.

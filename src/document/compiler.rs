@@ -468,6 +468,7 @@ fn analyze_complex_document(
         dom,
         root,
         &facts.inventory().footnotes,
+        facts.nodes(),
     );
     let math = super::math::MathAnalysis::analyze_with_inventory_and_evidence(
         dom,
