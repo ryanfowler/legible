@@ -14,12 +14,10 @@ fn is_hash_url(s: &str) -> bool {
     s.starts_with('#') && s.len() > 1
 }
 fn stats_for_text(text: &str) -> NodeStats {
-    let mut s = NodeStats {
-        has_text: !text.is_empty(),
-        starts_with_whitespace: text.starts_with(char::is_whitespace),
-        ends_with_whitespace: text.ends_with(char::is_whitespace),
-        ..Default::default()
-    };
+    let mut s = NodeStats::default();
+    s.set_has_text(!text.is_empty());
+    s.set_starts_with_whitespace(text.starts_with(char::is_whitespace));
+    s.set_ends_with_whitespace(text.ends_with(char::is_whitespace));
     let mut prev = true;
     let mut dot = false;
     let mut text_length = 0usize;
@@ -39,7 +37,7 @@ fn stats_for_text(text: &str) -> NodeStats {
         let mut alphabetic_chars = 0_usize;
         let mut digit_chars = 0_usize;
         for &byte in bytes {
-            s.has_alphanumeric |= byte.is_ascii_alphanumeric();
+            s.set_has_alphanumeric(s.has_alphanumeric() || byte.is_ascii_alphanumeric());
             alphabetic_chars += usize::from(byte.is_ascii_alphabetic());
             digit_chars += usize::from(byte.is_ascii_digit());
         }
@@ -56,14 +54,14 @@ fn stats_for_text(text: &str) -> NodeStats {
             for index in memchr::memchr_iter(b' ', bytes) {
                 spaces += 1;
                 if index > 0 && bytes[index - 1] != b' ' {
-                    s.has_sentence_break |= bytes[index - 1] == b'.';
+                    s.set_has_sentence_break(s.has_sentence_break() || bytes[index - 1] == b'.');
                 }
                 if index + 1 < bytes.len() && bytes[index + 1] != b' ' {
                     non_whitespace_runs += 1;
                 }
             }
-            s.has_non_whitespace = spaces != bytes.len();
-            if s.has_non_whitespace {
+            s.set_has_non_whitespace(spaces != bytes.len());
+            if s.has_non_whitespace() {
                 word_count = non_whitespace_runs + usize::from(bytes.first() != Some(&b' '));
                 text_length = bytes.len() - spaces + word_count.saturating_sub(1);
                 dot = bytes.last() == Some(&b'.');
@@ -73,14 +71,14 @@ fn stats_for_text(text: &str) -> NodeStats {
         } else {
             for &byte in bytes {
                 if byte.is_ascii_whitespace() {
-                    s.has_sentence_break |= dot;
+                    s.set_has_sentence_break(s.has_sentence_break() || dot);
                     dot = false;
                     if !prev {
                         text_length += 1;
                         prev = true
                     }
                 } else {
-                    s.has_non_whitespace = true;
+                    s.set_has_non_whitespace(true);
                     word_count += usize::from(prev);
                     dot = byte == b'.';
                     text_length += 1;
@@ -91,15 +89,15 @@ fn stats_for_text(text: &str) -> NodeStats {
     } else {
         for c in text.chars() {
             if c.is_whitespace() {
-                s.has_sentence_break |= dot;
+                s.set_has_sentence_break(s.has_sentence_break() || dot);
                 dot = false;
                 if !prev {
                     text_length += 1;
                     prev = true
                 }
             } else {
-                s.has_non_whitespace = true;
-                s.has_alphanumeric |= c.is_alphanumeric();
+                s.set_has_non_whitespace(true);
+                s.set_has_alphanumeric(s.has_alphanumeric() || c.is_alphanumeric());
                 s.alphabetic_chars = s
                     .alphabetic_chars
                     .saturating_add(u32::from(c.is_alphabetic()));
@@ -136,31 +134,35 @@ fn stats_for_text(text: &str) -> NodeStats {
     s.word_count = word_count.min(u32::MAX as usize) as u32;
     s.comma_count = comma_count.min(u32::MAX as usize) as u32;
     s.sentence_end_count = sentence_end_count.min(u32::MAX as usize) as u32;
-    s.ends_with_dot = dot;
-    s.has_sentence_end = s.has_sentence_break || dot;
+    s.set_ends_with_dot(dot);
+    s.set_has_sentence_end(s.has_sentence_break() || dot);
     s
 }
 fn append_stats(a: &mut NodeStats, b: &NodeStats) {
-    if !b.has_text {
+    if !b.has_text() {
         return;
     }
-    if !a.has_text {
+    if !a.has_text() {
         *a = *b;
         return;
     }
-    a.has_sentence_break |= b.has_sentence_break || (a.ends_with_dot && b.starts_with_whitespace);
-    if a.has_non_whitespace
-        && b.has_non_whitespace
-        && (a.ends_with_whitespace || b.starts_with_whitespace)
+    a.set_has_sentence_break(
+        a.has_sentence_break()
+            || b.has_sentence_break()
+            || (a.ends_with_dot() && b.starts_with_whitespace()),
+    );
+    if a.has_non_whitespace()
+        && b.has_non_whitespace()
+        && (a.ends_with_whitespace() || b.starts_with_whitespace())
     {
         a.text_length = a.text_length.saturating_add(1)
     }
     a.text_length = a.text_length.saturating_add(b.text_length);
     a.word_count = a.word_count.saturating_add(b.word_count);
-    if a.has_non_whitespace
-        && b.has_non_whitespace
-        && !a.ends_with_whitespace
-        && !b.starts_with_whitespace
+    if a.has_non_whitespace()
+        && b.has_non_whitespace()
+        && !a.ends_with_whitespace()
+        && !b.starts_with_whitespace()
     {
         a.word_count = a.word_count.saturating_sub(1);
     }
@@ -168,11 +170,11 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     a.sentence_end_count = a.sentence_end_count.saturating_add(b.sentence_end_count);
     a.alphabetic_chars = a.alphabetic_chars.saturating_add(b.alphabetic_chars);
     a.digit_chars = a.digit_chars.saturating_add(b.digit_chars);
-    a.has_non_whitespace |= b.has_non_whitespace;
-    a.has_alphanumeric |= b.has_alphanumeric;
-    a.ends_with_whitespace = b.ends_with_whitespace;
-    a.ends_with_dot = b.ends_with_dot;
-    a.has_sentence_end = a.has_sentence_break || a.ends_with_dot
+    a.set_has_non_whitespace(a.has_non_whitespace() || b.has_non_whitespace());
+    a.set_has_alphanumeric(a.has_alphanumeric() || b.has_alphanumeric());
+    a.set_ends_with_whitespace(b.ends_with_whitespace());
+    a.set_ends_with_dot(b.ends_with_dot());
+    a.set_has_sentence_end(a.has_sentence_break() || a.ends_with_dot());
 }
 pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
     get_or_compute_stats_excluding(dom, id, store, &[])
@@ -236,7 +238,7 @@ pub(crate) fn get_or_compute_stats_excluding(
             }
             store.set_link_length(n, link_length);
         }
-        s.has_sentence_end = s.has_sentence_break || s.ends_with_dot;
+        s.set_has_sentence_end(s.has_sentence_break() || s.ends_with_dot());
         store.set_stats(n, s)
     }
     store.get_stats(id).copied().unwrap_or_default()
@@ -1210,30 +1212,30 @@ mod tests {
         assert_eq!(ascii.word_count, 3);
         assert_eq!(ascii.comma_count, 1);
         assert_eq!(ascii.sentence_end_count, 1);
-        assert!(ascii.starts_with_whitespace);
-        assert!(ascii.ends_with_whitespace);
-        assert!(ascii.has_sentence_break);
-        assert!(ascii.has_sentence_end);
+        assert!(ascii.starts_with_whitespace());
+        assert!(ascii.ends_with_whitespace());
+        assert!(ascii.has_sentence_break());
+        assert!(ascii.has_sentence_end());
 
         let unicode = stats_for_text("\u{3000}甲， 乙.\u{a0}");
         assert_eq!(unicode.text_length, 5);
         assert_eq!(unicode.word_count, 2);
         assert_eq!(unicode.comma_count, 1);
         assert_eq!(unicode.sentence_end_count, 1);
-        assert!(unicode.starts_with_whitespace);
-        assert!(unicode.ends_with_whitespace);
-        assert!(unicode.has_sentence_end);
+        assert!(unicode.starts_with_whitespace());
+        assert!(unicode.ends_with_whitespace());
+        assert!(unicode.has_sentence_end());
 
         let spaces_only = stats_for_text("   ");
         assert_eq!(spaces_only.text_length, 0);
         assert_eq!(spaces_only.word_count, 0);
-        assert!(!spaces_only.has_non_whitespace);
+        assert!(!spaces_only.has_non_whitespace());
 
         let space_separated = stats_for_text("  Alpha  beta.  ");
         assert_eq!(space_separated.text_length, 11);
         assert_eq!(space_separated.word_count, 2);
-        assert!(space_separated.has_sentence_break);
-        assert!(!space_separated.ends_with_dot);
+        assert!(space_separated.has_sentence_break());
+        assert!(!space_separated.ends_with_dot());
     }
 
     #[test]

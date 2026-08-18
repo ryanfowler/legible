@@ -390,6 +390,7 @@ pub(crate) fn mark_data_tables_from_snapshot(
             );
         }
     }
+    store.finish_data_tables();
 }
 
 /// Returns true for a conservative, rank-based repeated-content table.
@@ -2400,7 +2401,7 @@ fn remove_direct_peripheral_children(
             let stats = get_or_compute_stats(dom, sibling, store);
             let sibling_links = link_counts[sibling.index()];
             if is_protected_content(dom, sibling, evidence)
-                || sibling_links == 0 && stats.has_non_whitespace
+                || sibling_links == 0 && stats.has_non_whitespace()
             {
                 break;
             }

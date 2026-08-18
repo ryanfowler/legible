@@ -376,7 +376,7 @@ impl CandidateSet {
                 && dom.parent(candidate.node).is_some()
                 && store
                     .get_stats(candidate.node)
-                    .is_some_and(|stats| stats.has_non_whitespace)
+                    .is_some_and(|stats| stats.has_non_whitespace())
             {
                 article_peer_count[parent] += 1;
                 article_peer_score[parent] += candidate.readability_score;
@@ -1620,7 +1620,7 @@ mod tests {
                 && dom.parent(candidate.node).is_some()
                 && store
                     .get_stats(candidate.node)
-                    .is_some_and(|stats| stats.has_non_whitespace)
+                    .is_some_and(|stats| stats.has_non_whitespace())
             {
                 article_peer_count[parent.index()] += 1;
                 article_peer_score[parent.index()] += candidate.readability_score;
