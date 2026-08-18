@@ -52,6 +52,7 @@ The extraction pipeline flows through these stages:
 | `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
 | `extraction.rs` | Strategy retries, candidate selection, content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
+| `scoring.rs::ScoringView` | Sparse scoring tag, parent, wrapper, and paragraph projections over the immutable source DOM |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
 | `normalize.rs` / `normalize/` | Source preparation and relevance cleanup for SVG charts, media, duplicate images, and heading artifacts |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
@@ -92,6 +93,7 @@ These invariants are costly to violate:
 - **Iterative traversal** for untrusted HTML depth.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove non-math scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage. Keep math source until semantic compilation.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
+- **Do not clone the DOM for scoring.** Use `ScoringView` for scoring-only structure. Apply retained block projections only to the selected fragment.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.
 - **Consume the winning fragment.** Move an accepted or deferred winning fragment into semantic compilation. Do not deep-copy the final cleaned DOM before compilation.
 - **Keep final DOM mutation focused on relevance.** Cleanup decides what to remove. The semantic compiler resolves URLs, drops source attributes, ignores comments, collapses transparent wrappers, and emits output semantics.
