@@ -200,19 +200,36 @@ fn bounded_subtree_text(dom: &Dom, nodes: &[NodeId]) -> Vec<Option<Box<str>>> {
 }
 
 fn append_normalized(output: &mut String, input: &str, limit: usize) {
-    for word in input.split_whitespace() {
-        if !output.is_empty() {
+    if input.is_ascii() {
+        for word in input.split_ascii_whitespace() {
+            if !output.is_empty() {
+                if output.len() == limit {
+                    break;
+                }
+                output.push(' ');
+            }
+            let remaining = limit.saturating_sub(output.len());
+            let end = word.len().min(remaining);
+            output.push_str(&word[..end]);
             if output.len() == limit {
                 break;
             }
-            output.push(' ');
         }
-        let remaining = limit.saturating_sub(output.len());
-        for character in word.chars().take(remaining) {
-            output.push(character);
-        }
-        if output.len() == limit {
-            break;
+    } else {
+        for word in input.split_whitespace() {
+            if !output.is_empty() {
+                if output.len() == limit {
+                    break;
+                }
+                output.push(' ');
+            }
+            let remaining = limit.saturating_sub(output.len());
+            for character in word.chars().take(remaining) {
+                output.push(character);
+            }
+            if output.len() == limit {
+                break;
+            }
         }
     }
 }

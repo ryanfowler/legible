@@ -85,12 +85,12 @@ impl ContentMetrics {
             let in_primary_region = primary_path.last().is_some_and(|&(_, primary)| primary)
                 || entry.node != root && entry.flags.contains(SourceFlags::PRIMARY_REGION);
             let tag = entry.tag;
-            let hidden = dom.attr(entry.node, AttrName::AriaHidden) == Some("true")
+            let hidden = entry.flags.contains(SourceFlags::ARIA_HIDDEN)
                 || !relax_static_visibility
                     && (entry.flags.contains(SourceFlags::STATIC_HIDDEN)
                         || entry.flags.contains(SourceFlags::UTILITY_HIDDEN))
                 || entry.flags.contains(SourceFlags::MODAL_DIALOG)
-                || dom.attr(entry.node, AttrName::AriaModal) == Some("true");
+                || entry.flags.contains(SourceFlags::ARIA_MODAL);
             let hard_non_content = hidden
                 || matches!(
                     tag,
@@ -770,7 +770,9 @@ pub(crate) fn is_access_barrier_prepared(dom: &Dom, source: &PreparedSource, roo
 fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&PreparedSource>) -> bool {
     crate::instrumentation::record_source_full_scan();
     let mut buffer = String::new();
-    let text = normalize_barrier_text(get_normalized_inner_text(dom, root, &mut buffer));
+    get_normalized_inner_text(dom, root, &mut buffer);
+    normalize_barrier_text_in_place(&mut buffer);
+    let text = buffer.as_str();
     if text.is_empty() {
         return false;
     }
@@ -792,7 +794,12 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&PreparedSourc
                         && dom.has_non_whitespace_text(node)
                 })
         })
-        .map(|node| normalize_barrier_text(get_normalized_inner_text(dom, node, &mut buffer)))
+        .map(|node| {
+            let mut heading = String::new();
+            get_normalized_inner_text(dom, node, &mut heading);
+            normalize_barrier_text_in_place(&mut heading);
+            heading
+        })
         .unwrap_or_default();
     let strong_denial_heading = matches!(
         heading.trim_matches(
@@ -908,10 +915,10 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&PreparedSourc
         || text.contains("your traffic has been identified as automated")
         || text.contains("votre trafic a ete identifie comme automatise");
     let explicit_machine_denial = (automated
-        && (strong_denial_heading || denial_permission_text(&text))
+        && (strong_denial_heading || denial_permission_text(text))
         && (request_identifier || action > 0))
         || direct_automation_notice && request_identifier && action > 0;
-    let denial_support = denial_permission_text(&text);
+    let denial_support = denial_permission_text(text);
     let offer = [" per month", "/month", "monthly", "annual", "free trial"]
         .iter()
         .filter(|term| text.contains(**term))
@@ -1006,11 +1013,13 @@ fn denial_permission_text(text: &str) -> bool {
     .any(|phrase| text.contains(phrase))
 }
 
-fn normalize_barrier_text(text: &str) -> String {
+fn normalize_barrier_text_in_place(text: &mut String) {
     if text.is_ascii() {
-        return text.to_ascii_lowercase();
+        text.make_ascii_lowercase();
+        return;
     }
-    text.chars()
+    *text = text
+        .chars()
         .flat_map(char::to_lowercase)
         .map(|character| match character {
             'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' => 'a',

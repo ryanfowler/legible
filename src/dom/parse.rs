@@ -167,6 +167,9 @@ impl DomSink {
         if self.is_poisoned() {
             return false;
         }
+        if self.budget.max_depth == 0 {
+            return true;
+        }
         let dom = self.dom.borrow();
         let parent_depth = self.depths.borrow()[parent.index()];
         let child_is_element = dom.is_element(child);
@@ -192,6 +195,9 @@ impl DomSink {
     }
 
     fn update_attachment_depths(&self, parent: NodeId, child: NodeId) {
+        if self.budget.max_depth == 0 {
+            return;
+        }
         let dom = self.dom.borrow();
         let parent_depth = self.depths.borrow()[parent.index()];
         let child_depth = parent_depth + if dom.is_element(child) { 1 } else { 0 };

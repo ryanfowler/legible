@@ -171,14 +171,14 @@ impl Dom {
     pub(crate) fn remove_attr(&mut self, node: NodeId, name: AttrName) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.attrs
-                .retain(|attribute| !name.matches_local(attribute.name.local.as_ref()))
+                .retain(|attribute| !name.matches_local(attribute.name.local.as_ref()));
         }
     }
     pub(crate) fn remove_attrs(&mut self, node: NodeId, names: &[AttrName]) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.attrs.retain(|attribute| {
                 !names.contains(&AttrName::from_local(attribute.name.local.as_ref()))
-            })
+            });
         }
     }
     #[cfg(test)]

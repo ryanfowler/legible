@@ -6,7 +6,7 @@ use super::compiler::{
 };
 use super::{
     BuildCapacityPlan, CodeBlock, Document, DocumentNodeId, Link, List, ListKind, RetainedStream,
-    SemanticKind, SemanticTapeBuilder,
+    SemanticKind, SemanticTapeBuilder, trim_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
@@ -862,9 +862,7 @@ pub(super) fn compile_with_retained_capacity_plan(
             Tag::Del => Some(SemanticKind::Strikethrough),
             Tag::Br => Some(SemanticKind::HardBreak),
             Tag::A if scope.link.is_none() => dom.attr(node, AttrName::Href).and_then(|value| {
-                let trimmed = value.trim_matches(|character: char| {
-                    character.is_ascii_whitespace() || character.is_control()
-                });
+                let trimmed = trim_destination(value);
                 let fragment_only = trimmed.starts_with('#') && trimmed.len() > 1;
                 context.link_destination(value).map(|destination| {
                     SemanticKind::Link(Link {

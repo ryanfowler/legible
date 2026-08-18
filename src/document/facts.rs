@@ -512,8 +512,8 @@ fn fragment_target(dom: &Dom, node: NodeId) -> Option<&str> {
         .tag(node)
         .is_some_and(|tag| tag == Tag::A)
         .then(|| dom.attr(node, AttrName::Href))
-        .flatten()?
-        .trim();
+        .flatten()?;
+    let href = trim_html_whitespace(href);
     let (prefix, target) = href.rsplit_once('#')?;
     let has_scheme = prefix.find(':').is_some_and(|colon| {
         colon > 0
@@ -527,6 +527,26 @@ fn fragment_target(dom: &Dom, node: NodeId) -> Option<&str> {
         return None;
     }
     Some(target)
+}
+
+#[inline]
+fn trim_html_whitespace(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        while start < bytes.len()
+            && (bytes[start] == b' ' || (b'\t'..=b'\r').contains(&bytes[start]))
+        {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && (bytes[end - 1] == b' ' || (b'\t'..=b'\r').contains(&bytes[end - 1])) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim()
+    }
 }
 
 fn may_have_math_evidence(dom: &Dom, node: NodeId) -> bool {
@@ -1031,71 +1051,84 @@ impl SemanticFacts {
 
         if let Some(source_facts) = source_facts {
             for &node in nodes.iter().rev() {
-                let mut first_visible = None;
-                let mut last_visible = None;
-                let mut has_visible_text = false;
-                let mut glyph_only = true;
                 let multiline = source_facts.multiline_content(node);
-                let mut meaningful = false;
-
                 if let Some(text) = dom.text_node(node) {
-                    first_visible = text.chars().find(|character| !character.is_whitespace());
-                    last_visible = text
+                    let first_visible = text.chars().find(|character| !character.is_whitespace());
+                    let last_visible = text
                         .chars()
                         .rev()
                         .find(|character| !character.is_whitespace());
-                    has_visible_text = first_visible.is_some();
-                    glyph_only = needs_permalink_glyphs
+                    let has_visible_text = first_visible.is_some();
+                    let glyph_only = needs_permalink_glyphs
                         && text
                             .chars()
                             .filter(|character| !character.is_whitespace())
                             .all(is_permalink_glyph);
-                    meaningful = has_visible_text;
-                } else {
-                    for child in dom.children(node) {
-                        let child_facts = facts[child.index()];
-                        first_visible = first_visible.or(child_facts.first_visible);
-                        if child_facts.last_visible.is_some() {
-                            last_visible = child_facts.last_visible;
-                        }
-                        if child_facts.has(HAS_VISIBLE_TEXT) {
-                            has_visible_text = true;
-                            glyph_only &= child_facts.has(IS_GLYPH_ONLY);
-                        }
-                        meaningful |= child_facts.has(HAS_MEANINGFUL_CONTENT);
-                    }
+                    let node_facts = &mut facts[node.index()];
+                    node_facts.first_visible = first_visible;
+                    node_facts.last_visible = last_visible;
+                    node_facts.set(HAS_VISIBLE_TEXT, has_visible_text);
+                    node_facts.set(IS_GLYPH_ONLY, has_visible_text && glyph_only);
+                    node_facts.set(HAS_MULTILINE_CONTENT, multiline);
+                    node_facts.set(HAS_MEANINGFUL_CONTENT, has_visible_text);
                 }
 
+                let node_facts = facts[node.index()];
                 let tag = dom.tag(node);
                 let code_block = source_facts.is_code_block(node);
-                let block_descendant = dom.children(node).any(|child| {
-                    let child_facts = facts[child.index()];
-                    child_facts.has(IS_CODE_BLOCK)
-                        || dom.tag(child).is_some_and(is_block_tag)
-                        || child_facts.has(HAS_BLOCK_DESCENDANT)
-                });
-                meaningful |= tag.is_some_and(|tag| {
-                    matches!(
-                        tag,
-                        Tag::Br
-                            | Tag::Code
-                            | Tag::Hr
-                            | Tag::Img
-                            | Tag::Iframe
-                            | Tag::Video
-                            | Tag::Audio
-                    )
-                });
+                let meaningful = node_facts.has(HAS_MEANINGFUL_CONTENT)
+                    || tag.is_some_and(|tag| {
+                        matches!(
+                            tag,
+                            Tag::Br
+                                | Tag::Code
+                                | Tag::Hr
+                                | Tag::Img
+                                | Tag::Iframe
+                                | Tag::Video
+                                | Tag::Audio
+                        )
+                    });
 
                 let node_facts = &mut facts[node.index()];
-                node_facts.first_visible = first_visible;
-                node_facts.last_visible = last_visible;
-                node_facts.set(HAS_VISIBLE_TEXT, has_visible_text);
-                node_facts.set(IS_GLYPH_ONLY, has_visible_text && glyph_only);
                 node_facts.set(HAS_MULTILINE_CONTENT, multiline);
                 node_facts.set(IS_CODE_BLOCK, code_block);
-                node_facts.set(HAS_BLOCK_DESCENDANT, block_descendant);
                 node_facts.set(HAS_MEANINGFUL_CONTENT, meaningful);
+
+                if let Some(parent) = dom.parent(node) {
+                    let child = *node_facts;
+                    let parent_facts = &mut facts[parent.index()];
+                    if child.first_visible.is_some() {
+                        parent_facts.first_visible = child.first_visible;
+                    }
+                    if parent_facts.last_visible.is_none() {
+                        parent_facts.last_visible = child.last_visible;
+                    }
+                    if child.has(HAS_VISIBLE_TEXT) {
+                        let parent_had_visible = parent_facts.has(HAS_VISIBLE_TEXT);
+                        parent_facts.set(HAS_VISIBLE_TEXT, true);
+                        parent_facts.set(
+                            IS_GLYPH_ONLY,
+                            if parent_had_visible {
+                                parent_facts.has(IS_GLYPH_ONLY) && child.has(IS_GLYPH_ONLY)
+                            } else {
+                                child.has(IS_GLYPH_ONLY)
+                            },
+                        );
+                    }
+                    parent_facts.set(
+                        HAS_BLOCK_DESCENDANT,
+                        parent_facts.has(HAS_BLOCK_DESCENDANT)
+                            || child.has(IS_CODE_BLOCK)
+                            || tag.is_some_and(is_block_tag)
+                            || child.has(HAS_BLOCK_DESCENDANT),
+                    );
+                    parent_facts.set(
+                        HAS_MEANINGFUL_CONTENT,
+                        parent_facts.has(HAS_MEANINGFUL_CONTENT)
+                            || child.has(HAS_MEANINGFUL_CONTENT),
+                    );
+                }
             }
         } else {
             propagate_without_source_facts(dom, &nodes, &mut facts, needs_permalink_glyphs);

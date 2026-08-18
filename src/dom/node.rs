@@ -62,7 +62,10 @@ impl ElementData {
     pub(crate) fn attr_local(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
-            .find(|a| a.name.local.as_ref().eq_ignore_ascii_case(name))
+            .find(|a| {
+                let local = a.name.local.as_ref();
+                local == name || local.eq_ignore_ascii_case(name)
+            })
             .map(|a| a.value.as_ref())
     }
 }

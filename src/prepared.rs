@@ -7,7 +7,7 @@
 use crate::document::{has_math_wrapper_class, is_math_root, is_tex_annotation};
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, Tag};
 use crate::quality::ContentMetrics;
-use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible};
+use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible, trim_text};
 use std::collections::HashSet;
 
 const NO_POSITION: u32 = u32::MAX;
@@ -26,6 +26,7 @@ impl SourceFlags {
     pub(crate) const LINK: Self = Self(1 << 6);
     pub(crate) const PRIMARY_HEADING: Self = Self(1 << 7);
     pub(crate) const HAS_NON_WHITESPACE_TEXT: Self = Self(1 << 9);
+    pub(crate) const ARIA_MODAL: Self = Self(1 << 10);
 
     fn insert(&mut self, flag: Self) {
         self.0 |= flag.0;
@@ -181,7 +182,7 @@ impl PreparedSource {
             let node = entries[position].node;
             if dom
                 .text_node(node)
-                .is_some_and(|text| !text.trim().is_empty())
+                .is_some_and(|text| !trim_text(text).is_empty())
             {
                 entries[position]
                     .flags
@@ -350,7 +351,7 @@ impl PreparedSource {
 }
 
 fn has_local_fragment_target(href: &str) -> bool {
-    let href = href.trim();
+    let href = trim_html_whitespace(href);
     let Some((prefix, target)) = href.rsplit_once('#') else {
         return false;
     };
@@ -362,6 +363,26 @@ fn has_local_fragment_target(href: &str) -> bool {
     });
     !target.is_empty()
         && (prefix.is_empty() || !has_scheme && !prefix.starts_with('/') && !prefix.contains('?'))
+}
+
+#[inline]
+fn trim_html_whitespace(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        while start < bytes.len()
+            && (bytes[start] == b' ' || (b'\t'..=b'\r').contains(&bytes[start]))
+        {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && (bytes[end - 1] == b' ' || (b'\t'..=b'\r').contains(&bytes[end - 1])) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim()
+    }
 }
 
 fn possible_footnote_reference(dom: &Dom, node: NodeId, tag: Option<Tag>) -> bool {
@@ -398,7 +419,11 @@ fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
     if dom.attr(node, AttrName::AriaHidden) == Some("true") {
         flags.insert(SourceFlags::ARIA_HIDDEN);
     }
-    if is_modal_or_dialog(dom, node, static_hidden, utility_hidden) {
+    let aria_modal = dom.attr(node, AttrName::AriaModal) == Some("true");
+    if aria_modal {
+        flags.insert(SourceFlags::ARIA_MODAL);
+    }
+    if is_modal_or_dialog(dom, node, static_hidden, utility_hidden, aria_modal) {
         flags.insert(SourceFlags::MODAL_DIALOG);
     }
     if matches!(tag, Tag::Header | Tag::Footer | Tag::Nav)
@@ -435,8 +460,14 @@ fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
     flags
 }
 
-fn is_modal_or_dialog(dom: &Dom, node: NodeId, static_hidden: bool, utility_hidden: bool) -> bool {
-    dom.attr(node, AttrName::AriaModal) == Some("true")
+fn is_modal_or_dialog(
+    dom: &Dom,
+    node: NodeId,
+    static_hidden: bool,
+    utility_hidden: bool,
+    aria_modal: bool,
+) -> bool {
+    aria_modal
         || dom.attr(node, AttrName::Role).is_some_and(|roles| {
             roles.split_whitespace().any(|role| {
                 role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
