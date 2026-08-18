@@ -58,10 +58,29 @@ pub(super) fn adjacent_lead_media(dom: &Dom, content_root: NodeId) -> Option<Nod
         })
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
-    let mut responsive_content = vec![false; dom.len()];
-    let mut svg_description_content = vec![false; dom.len()];
+    let mut scratch = crate::cleaning::FragmentScratch {
+        u32_values: Vec::new(),
+        bytes: Vec::new(),
+        bits: Vec::new(),
+    };
+    remove_decorative_media_with_snapshot(dom, root, &nodes, &mut scratch);
+}
+
+pub(super) fn remove_decorative_media_with_snapshot(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &[(NodeId, u32)],
+    scratch: &mut crate::cleaning::FragmentScratch,
+) {
+    scratch.bits.resize(dom.len().saturating_mul(4), false);
+    scratch.bits.fill(false);
+    let (responsive_content, rest) = scratch.bits.split_at_mut(dom.len());
+    let (svg_description_content, rest) = rest.split_at_mut(dom.len());
+    let (protected_context, responsive_picture_context) = rest.split_at_mut(dom.len());
     for &(node, _) in nodes.iter().rev() {
         responsive_content[node.index()] |= source_has_responsive_or_lazy_image(dom, node);
         svg_description_content[node.index()] |=
@@ -72,14 +91,12 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
         }
     }
 
-    let mut protected_context = vec![false; dom.len()];
-    let mut responsive_picture_context = vec![false; dom.len()];
     let mut contexts: Vec<(bool, bool)> = Vec::new();
     let root_context = (
         dom.attr(root, AttrName::DataMath).is_some(),
         dom.tag(root) == Some(Tag::Picture) && responsive_content[root.index()],
     );
-    for &(node, depth) in &nodes {
+    for &(node, depth) in nodes {
         while contexts.len() >= depth as usize {
             contexts.pop();
         }
@@ -95,13 +112,16 @@ pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
 
     let first_paragraph = nodes
         .iter()
-        .position(|&(node, _)| dom.tag(node) == Some(Tag::P));
-    let mut positions = vec![usize::MAX; dom.len()];
+        .position(|&(node, _)| dom.tag(node) == Some(Tag::P))
+        .map(|position| position as u32);
+    scratch.u32_values.resize(dom.len(), u32::MAX);
+    scratch.u32_values.fill(u32::MAX);
+    let positions = &mut scratch.u32_values[..dom.len()];
     for (position, &(node, _)) in nodes.iter().enumerate() {
-        positions[node.index()] = position;
+        positions[node.index()] = position as u32;
     }
     let mut repetitions: HashMap<String, u16> = HashMap::new();
-    for &(node, _) in &nodes {
+    for &(node, _) in nodes {
         if dom.tag(node) == Some(Tag::Img)
             && let Some(resource) = primary_image_resource(dom, node)
         {
@@ -761,9 +781,19 @@ fn decorative_image_name(dom: &Dom, node: NodeId) -> bool {
 ///
 /// Source selection is not performed here. The semantic compiler chooses one
 /// responsive or lazy resource and discards the implementation wrappers.
+#[cfg(test)]
 pub(super) fn remove_duplicates(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    let selected_sources = crate::document::selected_image_sources_for_cleanup(dom, &source_nodes);
+    remove_duplicates_with_source_nodes(dom, root, &source_nodes, nodes);
+}
+
+pub(super) fn remove_duplicates_with_source_nodes(
+    dom: &mut Dom,
+    root: NodeId,
+    source_nodes: &[NodeId],
+    nodes: &mut Vec<NodeId>,
+) {
+    let selected_sources = crate::document::selected_image_sources_for_cleanup(dom, source_nodes);
     nodes.clear();
     nodes.extend(
         dom.descendants(root)

@@ -171,6 +171,23 @@ pub(super) fn cleanup_evidence(dom: &Dom, nodes: &[NodeId]) -> (Vec<bool>, Vec<O
     (sources, fallbacks)
 }
 
+pub(super) fn cleanup_evidence_into(
+    dom: &Dom,
+    nodes: &[NodeId],
+    sources: &mut [bool],
+    fallbacks: &mut [u32],
+) {
+    sources.fill(false);
+    fallbacks.fill(u32::MAX);
+    let analysis = analyze(dom, nodes, None);
+    for (node, item) in analysis.items.iter() {
+        sources[node.index()] = true;
+        if let Some(fallback) = item.fallback {
+            fallbacks[node.index()] = fallback.0;
+        }
+    }
+}
+
 fn media_kind(tag: Option<Tag>) -> Option<MediaKind> {
     match tag {
         Some(Tag::Iframe) => Some(MediaKind::Embedded),

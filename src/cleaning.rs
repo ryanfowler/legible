@@ -16,6 +16,126 @@ use regex::Regex;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
+/// Reusable traversal and scratch storage for one selected fragment.
+///
+/// A snapshot is valid only for the current mutation epoch and root. Cleanup
+/// phases must call `invalidate` after a structural mutation before they ask
+/// for another snapshot. This keeps snapshot reuse explicit and prevents a
+/// later phase from accidentally observing detached nodes.
+#[derive(Default)]
+pub(crate) struct FragmentWorkspace {
+    mutation_epoch: u32,
+    snapshot_epoch: Option<u32>,
+    snapshot_root: Option<NodeId>,
+    preorder: Vec<NodeId>,
+    elements_with_depth: Vec<(NodeId, u32)>,
+    scratch_u32: Vec<u32>,
+    scratch_bytes: Vec<u8>,
+    scratch_bits: Vec<bool>,
+}
+
+pub(crate) struct FragmentScratch {
+    pub(crate) u32_values: Vec<u32>,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) bits: Vec<bool>,
+}
+
+impl FragmentWorkspace {
+    /// Drops snapshot validity while retaining all allocated workspace storage.
+    pub(crate) fn invalidate(&mut self) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        self.snapshot_epoch = None;
+        self.snapshot_root = None;
+    }
+
+    /// Starts a new fragment epoch without releasing reusable buffers.
+    pub(crate) fn reset(&mut self) {
+        self.invalidate();
+        self.preorder.clear();
+        self.elements_with_depth.clear();
+        self.scratch_u32.clear();
+        self.scratch_bytes.clear();
+        self.scratch_bits.clear();
+    }
+
+    /// Returns one DOM-preorder snapshot for the current fragment version.
+    pub(crate) fn ensure_snapshot(&mut self, dom: &Dom, root: NodeId) {
+        if self.snapshot_epoch == Some(self.mutation_epoch) && self.snapshot_root == Some(root) {
+            return;
+        }
+
+        crate::instrumentation::record_source_full_scan();
+        crate::instrumentation::record_source_element_snapshot();
+        self.preorder.clear();
+        self.elements_with_depth.clear();
+        self.preorder.push(root);
+        let Some(first_child) = dom.first_child(root) else {
+            self.snapshot_epoch = Some(self.mutation_epoch);
+            self.snapshot_root = Some(root);
+            return;
+        };
+
+        let mut pending = Vec::<(NodeId, u32)>::new();
+        pending.push((first_child, 1));
+        while let Some((node, depth)) = pending.pop() {
+            self.preorder.push(node);
+            if dom.is_element(node) {
+                self.elements_with_depth.push((node, depth));
+            }
+            if let Some(sibling) = dom.next_sibling(node) {
+                pending.push((sibling, depth));
+            }
+            if let Some(child) = dom.first_child(node) {
+                pending.push((child, depth.saturating_add(1)));
+            }
+        }
+        self.snapshot_epoch = Some(self.mutation_epoch);
+        self.snapshot_root = Some(root);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn preorder(&self) -> &[NodeId] {
+        &self.preorder
+    }
+
+    pub(crate) fn elements_with_depth(&self) -> &[(NodeId, u32)] {
+        &self.elements_with_depth
+    }
+
+    pub(crate) fn take_scratch(&mut self) -> FragmentScratch {
+        FragmentScratch {
+            u32_values: std::mem::take(&mut self.scratch_u32),
+            bytes: std::mem::take(&mut self.scratch_bytes),
+            bits: std::mem::take(&mut self.scratch_bits),
+        }
+    }
+
+    pub(crate) fn restore_scratch(&mut self, scratch: FragmentScratch) {
+        self.scratch_u32 = scratch.u32_values;
+        self.scratch_bytes = scratch.bytes;
+        self.scratch_bits = scratch.bits;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scratch_u32(&mut self, len: usize) -> &mut [u32] {
+        self.scratch_u32.resize(len, 0);
+        &mut self.scratch_u32[..len]
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scratch_bytes(&mut self, len: usize) -> &mut [u8] {
+        self.scratch_bytes.resize(len, 0);
+        &mut self.scratch_bytes[..len]
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scratch_bits(&mut self, len: usize) -> &mut [bool] {
+        self.scratch_bits.resize(len, false);
+        self.scratch_bits[..len].fill(false);
+        &mut self.scratch_bits[..len]
+    }
+}
+
 #[cfg(test)]
 pub fn prep_document(dom: &mut Dom) {
     let body = dom.body();
@@ -152,14 +272,33 @@ fn clean_styles(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
 /// Removes presentational source attributes while collecting the broad
 /// semantic gate during the same traversal. The bit collection is
 /// allocation-free; sparse candidate lists allocate only when evidence exists.
+#[cfg(test)]
 pub(crate) fn clean_styles_with_semantic_gate(
     dom: &mut Dom,
     root: NodeId,
     nodes: &mut Vec<NodeId>,
     semantic_gate: &mut crate::document::SemanticGate,
 ) {
+    let mut workspace = FragmentWorkspace::default();
+    clean_styles_with_semantic_gate_in_workspace(dom, root, nodes, semantic_gate, &mut workspace);
+}
+
+pub(crate) fn clean_styles_with_semantic_gate_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    nodes: &mut Vec<NodeId>,
+    semantic_gate: &mut crate::document::SemanticGate,
+    workspace: &mut FragmentWorkspace,
+) {
     nodes.clear();
-    nodes.extend(std::iter::once(root).chain(dom.descendants(root)));
+    workspace.ensure_snapshot(dom, root);
+    nodes.push(root);
+    nodes.extend(
+        workspace
+            .elements_with_depth()
+            .iter()
+            .map(|&(node, _)| node),
+    );
     for &id in nodes.iter() {
         semantic_gate.observe(dom, id);
         if !dom.is_element(id) || dom.tag(id) == Some(Tag::Svg) {
@@ -203,38 +342,44 @@ fn is_protected_content(dom: &Dom, id: NodeId, evidence: &crate::document::Sourc
         .any(|node| is_directly_protected(dom, node, evidence))
 }
 
-fn protected_masks(
+fn protected_masks<'a>(
     dom: &Dom,
     root: NodeId,
     evidence: &crate::document::SourceEvidence,
-) -> (Vec<bool>, Vec<bool>) {
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    let mut directly_protected = vec![false; dom.len()];
-    directly_protected[root.index()] = is_directly_protected(dom, root, evidence);
-    for &(node, _) in &snapshot {
+    snapshot: &[(NodeId, u32)],
+    scratch_u32: &'a mut Vec<u32>,
+) -> (&'a [u32], &'a [u32]) {
+    let node_count = dom.len();
+    scratch_u32.resize(node_count.saturating_mul(3), 0);
+    scratch_u32.fill(0);
+    let (directly_protected, remaining) = scratch_u32.split_at_mut(node_count);
+    let (contains_protected, protected_path) = remaining.split_at_mut(node_count);
+    directly_protected[root.index()] = u32::from(is_directly_protected(dom, root, evidence));
+    for &(node, _) in snapshot {
         directly_protected[node.index()] =
-            is_directly_protected(dom, node, evidence) || evidence.accessible_math(node);
+            u32::from(is_directly_protected(dom, node, evidence) || evidence.accessible_math(node));
     }
-    let mut contains_protected = vec![false; dom.len()];
     for &(node, _) in snapshot.iter().rev() {
-        let mut value = directly_protected[node.index()];
+        let mut value = directly_protected[node.index()] != 0;
         for child in dom.element_children(node) {
-            value |= contains_protected[child.index()];
+            value |= contains_protected[child.index()] != 0;
         }
-        contains_protected[node.index()] = value;
+        contains_protected[node.index()] = u32::from(value);
     }
 
     // Most callers need to know whether the candidate itself or one of its
     // ancestors is protected. Cache that path state too. Without this index,
     // deeply repaired markup makes the same ancestor walk once per candidate.
-    let mut protected_path = vec![false; dom.len()];
     let root_protected = directly_protected[root.index()];
-    for &(node, _) in &snapshot {
+    for &(node, _) in snapshot.iter() {
         let parent_protected = dom
             .parent(node)
             .filter(|&parent| parent != root)
-            .map_or(root_protected, |parent| protected_path[parent.index()]);
-        protected_path[node.index()] = parent_protected || directly_protected[node.index()];
+            .map_or(root_protected != 0, |parent| {
+                protected_path[parent.index()] != 0
+            });
+        protected_path[node.index()] =
+            u32::from(parent_protected || directly_protected[node.index()] != 0);
     }
     (contains_protected, protected_path)
 }
@@ -260,12 +405,12 @@ struct TableEvidence {
 
 fn finish_table_evidence(
     open: &mut Vec<(u32, NodeId, TableEvidence)>,
-    summaries: &mut [Option<TableEvidence>],
+    summaries: &mut Vec<(NodeId, TableEvidence)>,
 ) {
     let Some((_, table, evidence)) = open.pop() else {
         return;
     };
-    summaries[table.index()] = Some(evidence);
+    summaries.push((table, evidence));
     if let Some((_, _, parent)) = open.last_mut() {
         parent.has_nested_table = true;
         parent.has_data_structure |= evidence.has_data_structure;
@@ -274,23 +419,39 @@ fn finish_table_evidence(
     }
 }
 
+#[cfg(test)]
 pub fn mark_data_tables(
     dom: &Dom,
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
     nodes: &mut Vec<NodeId>,
 ) {
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    mark_data_tables_from_snapshot(dom, &snapshot, store, nodes);
+    let mut workspace = FragmentWorkspace::default();
+    mark_data_tables_in_workspace(dom, root, store, nodes, &mut workspace);
+}
+
+pub(crate) fn mark_data_tables_in_workspace(
+    dom: &Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    nodes: &mut Vec<NodeId>,
+    workspace: &mut FragmentWorkspace,
+) {
+    workspace.ensure_snapshot(dom, root);
+    mark_data_tables_from_snapshot(dom, root, workspace.elements_with_depth(), store, nodes);
 }
 
 pub(crate) fn mark_data_tables_from_snapshot(
     dom: &Dom,
+    root: NodeId,
     snapshot: &[(NodeId, u32)],
     store: &mut crate::dom::NodeStateStore,
     nodes: &mut Vec<NodeId>,
 ) {
     nodes.clear();
+    if dom.tag(root) == Some(Tag::Table) {
+        nodes.push(root);
+    }
     nodes.extend(
         snapshot
             .iter()
@@ -301,9 +462,10 @@ pub(crate) fn mark_data_tables_from_snapshot(
     // Aggregate each table's evidence while one preorder pass visits the
     // document. Closing a nested table merges its summary into its parent, so
     // a deeply nested chain does not rescan each inner subtree.
-    let mut summaries = vec![None; dom.len()];
+    let mut summaries = Vec::with_capacity(nodes.len());
     let mut open = Vec::new();
-    for &(node, depth) in snapshot {
+    let source_nodes = std::iter::once((root, 0)).chain(snapshot.iter().copied());
+    for (node, depth) in source_nodes {
         while open
             .last()
             .is_some_and(|(table_depth, _, _)| *table_depth >= depth)
@@ -357,6 +519,7 @@ pub(crate) fn mark_data_tables_from_snapshot(
     while !open.is_empty() {
         finish_table_evidence(&mut open, &mut summaries);
     }
+    summaries.sort_unstable_by_key(|&(table, _)| table.index());
 
     for &id in nodes.iter() {
         if dom.attr(id, AttrName::Role) == Some("presentation")
@@ -365,7 +528,11 @@ pub(crate) fn mark_data_tables_from_snapshot(
             store.set_data_table(id, crate::dom::DataTableState::Layout);
             continue;
         }
-        let Some(evidence) = summaries[id.index()] else {
+        let Some((_, evidence)) = summaries
+            .binary_search_by_key(&id.index(), |&(table, _)| table.index())
+            .ok()
+            .map(|index| summaries[index])
+        else {
             continue;
         };
         if evidence.has_data_structure {
@@ -836,6 +1003,7 @@ fn preserve_media_from_hidden_variant(dom: &mut Dom, hidden: NodeId) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn hard_cleanup(
     dom: &mut Dom,
     root: NodeId,
@@ -844,9 +1012,35 @@ pub(crate) fn hard_cleanup(
     evidence: &crate::document::SourceEvidence,
     nodes: &mut Vec<NodeId>,
 ) {
+    let mut workspace = FragmentWorkspace::default();
+    hard_cleanup_in_workspace(
+        dom,
+        root,
+        allowed_media,
+        relax_static_visibility,
+        evidence,
+        nodes,
+        &mut workspace,
+    );
+}
+
+pub(crate) fn hard_cleanup_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    allowed_media: &Regex,
+    relax_static_visibility: bool,
+    evidence: &crate::document::SourceEvidence,
+    nodes: &mut Vec<NodeId>,
+    workspace: &mut FragmentWorkspace,
+) {
     nodes.clear();
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    nodes.extend(snapshot.iter().map(|(node, _)| *node));
+    workspace.ensure_snapshot(dom, root);
+    nodes.extend(
+        workspace
+            .elements_with_depth()
+            .iter()
+            .map(|&(node, _)| node),
+    );
     let (media_sources, _) = crate::document::media_cleanup_evidence(dom, nodes);
     for &node in nodes.iter().rev() {
         if dom.parent(node).is_none() {
@@ -962,9 +1156,11 @@ pub(crate) fn hard_cleanup(
             dom.detach(node);
         }
     }
+    workspace.invalidate();
 }
 
 /// Removes clutter only when several independent signals agree.
+#[cfg(test)]
 pub(crate) fn heuristic_cleanup(
     dom: &mut Dom,
     root: NodeId,
@@ -974,90 +1170,145 @@ pub(crate) fn heuristic_cleanup(
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
 ) {
+    let mut workspace = FragmentWorkspace::default();
+    heuristic_cleanup_in_workspace(
+        dom,
+        root,
+        page_kind,
+        store,
+        evidence,
+        text_buffer,
+        nodes,
+        &mut workspace,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn heuristic_cleanup_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    page_kind: PageKind,
+    store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
+    text_buffer: &mut String,
+    nodes: &mut Vec<NodeId>,
+    workspace: &mut FragmentWorkspace,
+) {
     nodes.clear();
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    workspace.ensure_snapshot(dom, root);
+    let mut scratch = workspace.take_scratch();
+    scratch.bytes.resize(dom.len(), 0);
+    scratch.bytes.fill(0);
+    scratch.bits.resize(dom.len().saturating_mul(2), false);
+    scratch.bits.fill(false);
+    let (discovered_boundaries, inspected_subscription) = scratch.bits.split_at_mut(dom.len());
+    let link_counts = &mut scratch.bytes[..dom.len()];
     store.clear_stats();
     store.enable_link_lengths();
     get_or_compute_stats(dom, root, store);
 
     // Count links once. Discovery uses the capped index instead of rescanning
     // each related-content subtree for links.
-    let mut link_counts = vec![0_u8; dom.len()];
-    for &(node, _) in &snapshot {
-        link_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::A));
-    }
-    for &(node, _) in snapshot.iter().rev() {
-        if let Some(parent) = dom.parent(node) {
-            link_counts[parent.index()] = link_counts[parent.index()]
-                .saturating_add(link_counts[node.index()])
-                .min(3);
+    {
+        let snapshot = workspace.elements_with_depth();
+        for &(node, _) in snapshot {
+            link_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::A));
+        }
+        for &(node, _) in snapshot.iter().rev() {
+            if let Some(parent) = dom.parent(node) {
+                link_counts[parent.index()] = link_counts[parent.index()]
+                    .saturating_add(link_counts[node.index()])
+                    .min(3);
+            }
+        }
+        let mut table_depths = SmallVec::<[u32; 8]>::new();
+        for &(node, depth) in snapshot {
+            while table_depths
+                .last()
+                .is_some_and(|&table_depth| table_depth >= depth)
+            {
+                table_depths.pop();
+            }
+            let inside_table = !table_depths.is_empty();
+            if dom.tag(node) == Some(Tag::Table) {
+                table_depths.push(depth);
+            }
+            if related_heading_signal(dom, node) != RelatedHeadingSignal::None {
+                mark_related_heading_boundary(
+                    dom,
+                    node,
+                    root,
+                    link_counts,
+                    store,
+                    discovered_boundaries,
+                );
+            }
+            if dom.tag(node) == Some(Tag::Form) {
+                mark_subscription_boundary(
+                    dom,
+                    node,
+                    root,
+                    store,
+                    inspected_subscription,
+                    discovered_boundaries,
+                );
+            }
+            if is_structural_breadcrumb_candidate(dom, node, inside_table) {
+                discovered_boundaries[node.index()] = true;
+            }
+            if is_structural_peripheral_candidate(dom, node, page_kind, store) {
+                discovered_boundaries[node.index()] = true;
+            }
         }
     }
 
-    let mut discovered_boundaries = vec![false; dom.len()];
-    let mut inspected_subscription = vec![false; dom.len()];
-    let mut table_depths = SmallVec::<[u32; 8]>::new();
-    for &(node, depth) in &snapshot {
-        while table_depths
-            .last()
-            .is_some_and(|&table_depth| table_depth >= depth)
-        {
-            table_depths.pop();
-        }
-        let inside_table = !table_depths.is_empty();
-        if dom.tag(node) == Some(Tag::Table) {
-            table_depths.push(depth);
-        }
-        if related_heading_signal(dom, node) != RelatedHeadingSignal::None {
-            mark_related_heading_boundary(
-                dom,
-                node,
-                root,
-                &link_counts,
-                store,
-                &mut discovered_boundaries,
-            );
-        }
-        if dom.tag(node) == Some(Tag::Form) {
-            mark_subscription_boundary(
-                dom,
-                node,
-                root,
-                store,
-                &mut inspected_subscription,
-                &mut discovered_boundaries,
-            );
-        }
-        if is_structural_breadcrumb_candidate(dom, node, inside_table) {
-            discovered_boundaries[node.index()] = true;
-        }
-        if is_structural_peripheral_candidate(dom, node, page_kind, store) {
-            discovered_boundaries[node.index()] = true;
-        }
-    }
-
-    if remove_explicit_peripheral_sections(dom, root, &snapshot, &link_counts, store) {
+    let changed = {
+        let snapshot = workspace.elements_with_depth();
+        remove_explicit_peripheral_sections(dom, root, snapshot, link_counts, store)
+    };
+    if changed {
+        workspace.invalidate();
         store.clear_stats();
     }
-    if remove_terminal_taxonomy_before_footnotes(dom, root, &snapshot, &link_counts, store) {
+    let changed = {
+        workspace.ensure_snapshot(dom, root);
+        let snapshot = workspace.elements_with_depth();
+        remove_terminal_taxonomy_before_footnotes(dom, root, snapshot, link_counts, store)
+    };
+    if changed {
+        workspace.invalidate();
         store.clear_stats();
     }
-    if remove_job_company_profiles(dom, root, page_kind, &snapshot, store) {
+    let changed = {
+        workspace.ensure_snapshot(dom, root);
+        let snapshot = workspace.elements_with_depth();
+        remove_job_company_profiles(dom, root, page_kind, snapshot, store)
+    };
+    if changed {
+        workspace.invalidate();
         store.clear_stats();
     }
-    if remove_direct_peripheral_siblings(dom, root, &snapshot, &link_counts, store, evidence) {
+    let changed = {
+        workspace.ensure_snapshot(dom, root);
+        let snapshot = workspace.elements_with_depth();
+        remove_direct_peripheral_siblings(dom, root, snapshot, link_counts, store, evidence)
+    };
+    if changed {
+        workspace.invalidate();
         store.clear_stats();
     }
+    workspace.ensure_snapshot(dom, root);
+    let snapshot = workspace.elements_with_depth();
     let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
     let protected_masks = snapshot
         .iter()
         .any(|&(_, depth)| depth > 64)
-        .then(|| protected_masks(dom, root, evidence));
+        .then(|| protected_masks(dom, root, evidence, snapshot, &mut scratch.u32_values));
 
     // Keep only outermost candidates. A classifier can inspect the complete
     // subtree once instead of rescanning every nested wrapper.
     let mut boundary_depth = None;
-    for (node, depth) in snapshot {
+    for &(node, depth) in snapshot {
         if let Some(outer_depth) = boundary_depth {
             if depth > outer_depth && !discovered_boundaries[node.index()] {
                 continue;
@@ -1081,7 +1332,7 @@ pub(crate) fn heuristic_cleanup(
         if dom.parent(node).is_none()
             || protected_masks
                 .as_ref()
-                .is_some_and(|(_, path)| path[node.index()])
+                .is_some_and(|(_, path)| path[node.index()] != 0)
             || protected_masks.is_none()
                 && (is_protected_content(dom, node, evidence)
                     || has_protected_ancestor(dom, node, root, evidence))
@@ -1114,7 +1365,7 @@ pub(crate) fn heuristic_cleanup(
                 dom.descendants(node)
                     .any(|descendant| is_protected_content(dom, descendant, evidence))
             },
-            |(subtrees, _)| subtrees[node.index()],
+            |(subtrees, _)| subtrees[node.index()] != 0,
         );
         let link_density = get_link_density_cached(dom, node, stats.text_length, store);
         let short = stats.text_length < 350 || stats.text_length * 5 < root_length;
@@ -1333,7 +1584,17 @@ pub(crate) fn heuristic_cleanup(
         }
     }
 
-    remove_contextual_boilerplate(dom, root, store, evidence, text_buffer, nodes);
+    workspace.invalidate();
+    remove_contextual_boilerplate_in_workspace(
+        dom,
+        root,
+        store,
+        evidence,
+        text_buffer,
+        nodes,
+        workspace,
+    );
+    workspace.restore_scratch(scratch);
 }
 
 /// Removes document-level navigation and footer material that survives root
@@ -1344,14 +1605,27 @@ pub(crate) fn heuristic_cleanup(
 /// or leading position, link-heavy low-prose structure, and either semantic or
 /// repeated structural evidence. This keeps pricing cards, article dates, and
 /// short company content out of the global-chrome bucket.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn remove_global_chrome(
     dom: &mut Dom,
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
     evidence: &crate::document::SourceEvidence,
 ) -> bool {
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
-    if snapshot.is_empty() {
+    let mut workspace = FragmentWorkspace::default();
+    remove_global_chrome_in_workspace(dom, root, store, evidence, &mut workspace)
+}
+
+pub(crate) fn remove_global_chrome_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
+    workspace: &mut FragmentWorkspace,
+) -> bool {
+    workspace.ensure_snapshot(dom, root);
+    if workspace.elements_with_depth().is_empty() {
         return false;
     }
 
@@ -1359,9 +1633,12 @@ pub(crate) fn remove_global_chrome(
     store.enable_link_lengths();
     get_or_compute_stats(dom, root, store);
 
-    let aggregates = chrome_aggregates(dom, &snapshot);
+    let aggregates = {
+        let snapshot = workspace.elements_with_depth();
+        chrome_aggregates(dom, snapshot)
+    };
     let mut signatures = HashMap::<u64, u8>::new();
-    for &(node, _) in &snapshot {
+    for &(node, _) in workspace.elements_with_depth() {
         let aggregate = aggregates[node.index()];
         if aggregate.link_count >= 2 {
             let count = signatures.entry(aggregate.signature).or_default();
@@ -1369,9 +1646,12 @@ pub(crate) fn remove_global_chrome(
         }
     }
 
-    let mut remove = vec![false; dom.len()];
+    let mut scratch = workspace.take_scratch();
+    scratch.bits.resize(dom.len(), false);
+    scratch.bits.fill(false);
+    let remove = &mut scratch.bits[..dom.len()];
     let mut text_buffer = String::new();
-    for &(node, _) in &snapshot {
+    for &(node, _) in workspace.elements_with_depth() {
         if node == root || dom.parent(node).is_none() {
             continue;
         }
@@ -1443,7 +1723,7 @@ pub(crate) fn remove_global_chrome(
     }
 
     let mut changed = false;
-    for &(node, _) in &snapshot {
+    for &(node, _) in workspace.elements_with_depth() {
         if !remove[node.index()] || dom.parent(node).is_none() {
             continue;
         }
@@ -1465,6 +1745,10 @@ pub(crate) fn remove_global_chrome(
         detach_and_invalidate_stats(dom, node, store);
         changed = true;
     }
+    if changed {
+        workspace.invalidate();
+    }
+    workspace.restore_scratch(scratch);
     changed
 }
 
@@ -3128,15 +3412,17 @@ fn is_related_content(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) 
 /// Phrase matches are deliberately narrow. A match also needs document-boundary
 /// or control evidence, except for labels that are complete conventional UI
 /// phrases. This keeps the same words when they occur in normal prose.
-fn remove_contextual_boilerplate(
+fn remove_contextual_boilerplate_in_workspace(
     dom: &mut Dom,
     root: NodeId,
     store: &mut crate::dom::NodeStateStore,
     evidence: &crate::document::SourceEvidence,
     text_buffer: &mut String,
     nodes: &mut Vec<NodeId>,
+    workspace: &mut FragmentWorkspace,
 ) {
-    let snapshot = dom.element_descendants_snapshot_with_depth(root);
+    workspace.ensure_snapshot(dom, root);
+    let snapshot = workspace.elements_with_depth();
     let mut has_nested_boundary = vec![false; dom.len()];
     for &(node, _) in snapshot.iter().rev() {
         if (is_contextual_text_boundary(dom, node) || has_nested_boundary[node.index()])
@@ -3146,7 +3432,7 @@ fn remove_contextual_boilerplate(
         }
     }
     nodes.clear();
-    nodes.extend(snapshot.into_iter().map(|(node, _)| node).filter(|&node| {
+    nodes.extend(snapshot.iter().map(|&(node, _)| node).filter(|&node| {
         is_contextual_text_boundary(dom, node) && !has_nested_boundary[node.index()]
     }));
 
@@ -3219,6 +3505,7 @@ fn remove_contextual_boilerplate(
             detach_and_invalidate_stats(dom, node, store);
         }
     }
+    workspace.invalidate();
 }
 
 fn is_contextual_text_boundary(dom: &Dom, node: NodeId) -> bool {
@@ -3529,6 +3816,49 @@ mod tests {
         let span = dom.first_descendant_by_tag(body, Tag::Span).unwrap();
         assert_eq!(dom.parent(paragraph), dom.parent(span));
         assert!(!dom.descendants(paragraph).any(|id| id == span));
+    }
+
+    #[test]
+    fn fragment_workspace_reuses_snapshot_until_invalidation() {
+        let mut dom = Dom::parse_fragment(
+            "<section><p>first</p><div><p>second</p></div></section>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let section = dom.first_descendant_by_tag(root, Tag::Section).unwrap();
+        let paragraph = dom.first_descendant_by_tag(section, Tag::P).unwrap();
+        let mut workspace = FragmentWorkspace::default();
+
+        workspace.ensure_snapshot(&dom, section);
+        assert_eq!(workspace.preorder()[0], section);
+        assert_eq!(workspace.elements_with_depth().len(), 3);
+        let first_capacity = workspace.elements_with_depth().as_ptr();
+        workspace.ensure_snapshot(&dom, section);
+        assert_eq!(workspace.elements_with_depth().as_ptr(), first_capacity);
+
+        dom.detach(paragraph);
+        workspace.invalidate();
+        workspace.ensure_snapshot(&dom, section);
+        assert!(
+            !workspace
+                .elements_with_depth()
+                .iter()
+                .any(|&(node, _)| node == paragraph)
+        );
+    }
+
+    #[test]
+    fn fragment_workspace_reuses_scratch_capacity() {
+        let mut workspace = FragmentWorkspace::default();
+        let u32_ptr = workspace.scratch_u32(16).as_mut_ptr();
+        let bytes_ptr = workspace.scratch_bytes(16).as_mut_ptr();
+        let bits_ptr = workspace.scratch_bits(16).as_mut_ptr();
+
+        workspace.reset();
+        assert_eq!(workspace.scratch_u32(4).as_mut_ptr(), u32_ptr);
+        assert_eq!(workspace.scratch_bytes(4).as_mut_ptr(), bytes_ptr);
+        assert_eq!(workspace.scratch_bits(4).as_mut_ptr(), bits_ptr);
     }
 
     #[test]
@@ -3844,6 +4174,23 @@ mod tests {
         assert_eq!(table_ids.len(), 2);
         assert_eq!(store.is_data_table(table_ids[0]), Some(true));
         assert_eq!(store.is_data_table(table_ids[1]), Some(true));
+    }
+
+    #[test]
+    fn workspace_classifies_a_table_fragment_root() {
+        let dom = Dom::parse_fragment(
+            "<table><thead><tr><th>Field</th></tr></thead><tbody><tr><td>Value</td></tr></tbody></table>",
+            Tag::Div,
+        )
+        .unwrap();
+        let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+        let mut store = NodeStateStore::new();
+        let mut tables = Vec::new();
+        let mut workspace = FragmentWorkspace::default();
+        mark_data_tables_in_workspace(&dom, table, &mut store, &mut tables, &mut workspace);
+
+        assert_eq!(tables, vec![table]);
+        assert_eq!(store.is_data_table(table), Some(true));
     }
 
     #[test]

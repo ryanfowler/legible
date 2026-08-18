@@ -264,22 +264,31 @@ fn is_annotation_element(local: &str) -> bool {
 /// allocate semantic sets and a page with one equation does not build sets for
 /// every source element.
 pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> HashSet<NodeId> {
-    let annotations: Vec<_> = nodes
-        .iter()
-        .map(|&(node, _)| node)
+    let Some(&(root, _)) = nodes.first() else {
+        return HashSet::new();
+    };
+    accessible_math_nodes_with_root(dom, root, &nodes[1..])
+}
+
+pub(crate) fn accessible_math_nodes_with_root(
+    dom: &Dom,
+    root: NodeId,
+    elements_with_depth: &[(NodeId, u32)],
+) -> HashSet<NodeId> {
+    let annotations: Vec<_> = std::iter::once(root)
+        .chain(elements_with_depth.iter().map(|&(node, _)| node))
         .filter(|&node| is_tex_annotation(dom, node))
         .collect();
     if annotations.is_empty() {
         return HashSet::new();
     }
 
-    let root = nodes.first().map(|&(node, _)| node);
     let mut relevant = HashSet::new();
     for annotation in annotations {
         let mut node = Some(annotation);
         while let Some(current) = node {
             relevant.insert(current);
-            if Some(current) == root {
+            if current == root {
                 break;
             }
             node = dom.parent(current);
@@ -288,7 +297,7 @@ pub(crate) fn accessible_math_nodes(dom: &Dom, nodes: &[(NodeId, u32)]) -> HashS
 
     let mut inside_wrapper = HashSet::new();
     let mut accessible = HashSet::new();
-    for &(node, _) in nodes {
+    for node in std::iter::once(root).chain(elements_with_depth.iter().map(|&(node, _)| node)) {
         if !relevant.contains(&node) {
             continue;
         }
