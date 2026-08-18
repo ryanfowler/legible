@@ -25,6 +25,7 @@ impl SourceFlags {
     pub(crate) const PRIMARY_REGION: Self = Self(1 << 5);
     pub(crate) const LINK: Self = Self(1 << 6);
     pub(crate) const PRIMARY_HEADING: Self = Self(1 << 7);
+    pub(crate) const HAS_NON_WHITESPACE_TEXT: Self = Self(1 << 9);
 
     fn insert(&mut self, flag: Self) {
         self.0 |= flag.0;
@@ -113,7 +114,12 @@ impl DoubleEndedIterator for SourceElementsIter<'_> {
 }
 
 impl PreparedSource {
+    #[cfg(test)]
     pub(crate) fn build(dom: &Dom) -> Self {
+        Self::build_with_semantic_counts(dom, true)
+    }
+
+    pub(crate) fn build_with_semantic_counts(dom: &Dom, include_semantic_counts: bool) -> Self {
         crate::instrumentation::record_source_full_scan();
         crate::instrumentation::record_prepared_source_build();
 
@@ -165,6 +171,34 @@ impl PreparedSource {
             entries[position].subtree_end = end;
         }
 
+        // Cache subtree text presence while the source index is already in
+        // reverse preorder. Candidate discovery uses this to reject empty
+        // structural wrappers without rescanning each descendant subtree.
+        for position in (0..entries.len()).rev() {
+            let node = entries[position].node;
+            if dom
+                .text_node(node)
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                entries[position]
+                    .flags
+                    .insert(SourceFlags::HAS_NON_WHITESPACE_TEXT);
+            }
+            if entries[position]
+                .flags
+                .contains(SourceFlags::HAS_NON_WHITESPACE_TEXT)
+                && let Some(parent) = dom.parent(node)
+                && let Some(parent_position) = position_by_node
+                    .get(parent.index())
+                    .copied()
+                    .filter(|&position| position != NO_POSITION)
+            {
+                entries[parent_position as usize]
+                    .flags
+                    .insert(SourceFlags::HAS_NON_WHITESPACE_TEXT);
+            }
+        }
+
         let mut source = Self {
             entries,
             position_by_node,
@@ -174,11 +208,20 @@ impl PreparedSource {
             relaxed_metrics: None,
         };
         if let Some(body) = source.anchors.body {
-            source.source_metrics =
-                ContentMetrics::measure_source_prepared(dom, &source, body, false);
+            source.source_metrics = ContentMetrics::measure_source_prepared(
+                dom,
+                &source,
+                body,
+                false,
+                include_semantic_counts,
+            );
             if source.has_relaxable_hidden_content(body) {
                 source.relaxed_metrics = Some(ContentMetrics::measure_source_prepared(
-                    dom, &source, body, true,
+                    dom,
+                    &source,
+                    body,
+                    true,
+                    include_semantic_counts,
                 ));
             }
         }

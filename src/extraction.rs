@@ -611,7 +611,8 @@ impl<'a> ContentExtractor<'a> {
     }
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let _candidate_preflight_phase = PhaseGuard::new(Phase::CandidateDiscovery);
-        let prepared_source = PreparedSource::build(&self.dom);
+        let prepared_source =
+            PreparedSource::build_with_semantic_counts(&self.dom, self.options.diagnostics);
         let exact_root = if let Some(target) = &self.options.content_root {
             Some(
                 find_content_targets_from_prepared(&self.dom, &prepared_source, target)
@@ -1059,7 +1060,12 @@ impl<'a> ContentExtractor<'a> {
             #[cfg(feature = "bench-instrumentation")]
             drop(_root_selection_phase);
             if let Some(footnote_definitions) = footnote_definitions.as_ref() {
-                adopt_external_footnotes(footnote_definitions, &mut self.dom, content_id);
+                adopt_external_footnotes(
+                    footnote_definitions,
+                    &source_dom,
+                    &mut self.dom,
+                    content_id,
+                );
             }
             self.node_data.clear();
             self.node_data.enable_link_lengths();
@@ -2476,7 +2482,11 @@ impl<'a> ContentExtractor<'a> {
                     | Tag::H4
                     | Tag::H5
                     | Tag::H6
-            ) && is_element_without_content(&self.dom, id)
+            ) && !entry.flags.contains(SourceFlags::HAS_NON_WHITESPACE_TEXT)
+                && self
+                    .dom
+                    .element_children(id)
+                    .all(|child| matches!(self.dom.tag(child), Some(Tag::Br | Tag::Hr)))
             {
                 remove_after_scoring.push(id);
                 excluded_depth = Some(depth);

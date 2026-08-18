@@ -113,4 +113,4 @@ Use the same machine, Rust toolchain, and power mode for comparisons.
 - Extraction benchmarks print an `extraction-representation/...` line from opt-in diagnostics. It reports source DOM nodes, the actual selected and cleaned DOM nodes, semantic item counts, and estimated retained bytes for the same input.
 - A normalization change must not add a repeated full-document scan for each code block, equation, table, or image.
 
-Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline. The current baseline at revision `499e09f3bf2e53164321e991254b9ff124cccb59` is recorded in `benches/private-ir-baseline.md`.
+Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline. The current baseline at revision `499e09f3bf2e53164321e991254b9ff124cccb59` is recorded in `benches/private-ir-baseline.md`. The latest raw HTML to Markdown comparison is recorded in `benches/raw-html-markdown-optimization.md`.

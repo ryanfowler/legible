@@ -591,7 +591,7 @@ fn mark_sidenote_controls(dom: &Dom, root: NodeId, skipped: &mut [bool]) {
     }
 }
 
-pub(crate) struct Definitions(Vec<(String, Dom)>);
+pub(crate) struct Definitions(Vec<(String, NodeId)>);
 
 pub(crate) fn collect_external(dom: &Dom) -> Definitions {
     let detected = detect_definitions(dom, dom.root());
@@ -604,16 +604,17 @@ pub(crate) fn collect_external(dom: &Dom) -> Definitions {
                 !dom.ancestors(definition.node)
                     .any(|ancestor| definition_nodes.contains(&ancestor))
             })
-            .filter_map(|definition| {
-                dom.copy_subtree_as_fragment(definition.node)
-                    .ok()
-                    .map(|copy| (definition.key.clone(), copy))
-            })
+            .map(|definition| (definition.key.clone(), definition.node))
             .collect(),
     )
 }
 
-pub(crate) fn adopt_external(definitions: &Definitions, fragment: &mut Dom, fragment_root: NodeId) {
+pub(crate) fn adopt_external(
+    definitions: &Definitions,
+    source: &Dom,
+    fragment: &mut Dom,
+    fragment_root: NodeId,
+) {
     let known: HashSet<&str> = definitions.0.iter().map(|(key, _)| key.as_str()).collect();
     let referenced: Vec<String> = detect_references(fragment, fragment_root, &known)
         .into_iter()
@@ -629,7 +630,7 @@ pub(crate) fn adopt_external(definitions: &Definitions, fragment: &mut Dom, frag
         .into_iter()
         .map(|definition| definition.key)
         .collect();
-    let missing: Vec<(&str, &Dom)> = referenced
+    let missing: Vec<(&str, NodeId)> = referenced
         .into_iter()
         .filter(|key| !present.contains(key))
         .filter_map(|key| {
@@ -637,7 +638,7 @@ pub(crate) fn adopt_external(definitions: &Definitions, fragment: &mut Dom, frag
                 .0
                 .iter()
                 .find(|(defined, _)| defined == &key)
-                .map(|(defined, definition)| (defined.as_str(), definition))
+                .map(|(defined, definition)| (defined.as_str(), *definition))
         })
         .collect();
     if missing.is_empty() {
@@ -648,10 +649,7 @@ pub(crate) fn adopt_external(definitions: &Definitions, fragment: &mut Dom, frag
     };
     fragment.set_attr(section, AttrName::DataFootnotes, "");
     for (key, definition) in missing {
-        let Some(definition_root) = definition.first_child(definition.root()) else {
-            continue;
-        };
-        if let Ok(copy) = fragment.import_subtree(definition, definition_root) {
+        if let Ok(copy) = fragment.import_subtree(source, definition) {
             if fragment.tag(copy) == Some(Tag::Li) {
                 fragment.rename_html(copy, Tag::Div);
             }
