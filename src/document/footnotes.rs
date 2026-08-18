@@ -32,20 +32,29 @@ pub(crate) struct FootnoteAnalysis {
 
 impl FootnoteAnalysis {
     pub(crate) fn analyze(dom: &Dom, root: NodeId) -> Self {
+        crate::instrumentation::record_source_full_scan();
         if !std::iter::once(root)
             .chain(dom.descendants(root))
             .any(|node| has_possible_footnote_evidence(dom, node))
         {
             return Self::empty();
         }
-        Self::analyze_detected(dom, root)
+        let nodes = source_nodes(dom, root);
+        let elements = element_nodes_with_depth(dom, root, &nodes);
+        Self::analyze_detected(dom, root, &nodes, &elements)
     }
 
-    pub(crate) fn analyze_with_inventory(dom: &Dom, root: NodeId, candidates: &[NodeId]) -> Self {
+    pub(crate) fn analyze_with_inventory(
+        dom: &Dom,
+        root: NodeId,
+        candidates: &[NodeId],
+        nodes: &[NodeId],
+    ) -> Self {
         if candidates.is_empty() {
             Self::empty()
         } else {
-            Self::analyze_detected(dom, root)
+            let elements = element_nodes_with_depth(dom, root, nodes);
+            Self::analyze_detected(dom, root, nodes, &elements)
         }
     }
 
@@ -63,14 +72,20 @@ impl FootnoteAnalysis {
         }
     }
 
-    fn analyze_detected(dom: &Dom, root: NodeId) -> Self {
-        let definition_index = DefinitionIndex::analyze(dom, root);
-        let definitions = detect_definitions_with_index(dom, root, &definition_index);
+    fn analyze_detected(
+        dom: &Dom,
+        root: NodeId,
+        nodes: &[NodeId],
+        elements: &[(NodeId, u32)],
+    ) -> Self {
+        let definition_index = DefinitionIndex::analyze(dom, root, nodes, elements);
+        let definitions =
+            detect_definitions_with_index(dom, root, &definition_index, nodes, elements);
         let keys: HashSet<&str> = definitions
             .iter()
             .map(|definition| definition.key.as_str())
             .collect();
-        let references = detect_references(dom, root, &keys);
+        let references = detect_references(dom, root, &keys, nodes);
         let mut labels = HashMap::<String, String>::new();
         let mut used_labels = HashSet::<String>::new();
         let mut generated_label = 1usize;
@@ -285,9 +300,15 @@ pub(crate) fn has_possible_footnote_evidence(dom: &Dom, node: NodeId) -> bool {
             })
 }
 
-fn detect_references(dom: &Dom, root: NodeId, definitions: &HashSet<&str>) -> Vec<Reference> {
+fn detect_references(
+    dom: &Dom,
+    root: NodeId,
+    definitions: &HashSet<&str>,
+    nodes: &[NodeId],
+) -> Vec<Reference> {
     let mut references = Vec::new();
-    for node in dom.descendants(root) {
+    let starts_with_root = nodes.first() == Some(&root);
+    for &node in nodes.iter().skip(usize::from(starts_with_root)) {
         if let Some(label) = dom.attr(node, AttrName::DataFootnoteRef) {
             references.push(Reference {
                 node,
@@ -344,6 +365,38 @@ fn detect_references(dom: &Dom, root: NodeId, definitions: &HashSet<&str>) -> Ve
     references
 }
 
+fn source_nodes(dom: &Dom, root: NodeId) -> Vec<NodeId> {
+    crate::instrumentation::record_source_full_scan();
+    std::iter::once(root).chain(dom.descendants(root)).collect()
+}
+
+fn element_nodes_with_depth(dom: &Dom, root: NodeId, nodes: &[NodeId]) -> Vec<(NodeId, u32)> {
+    crate::instrumentation::record_source_full_scan();
+    crate::instrumentation::record_source_element_snapshot();
+    let mut elements = Vec::with_capacity(nodes.len() / 2);
+    let mut ancestors = Vec::<(NodeId, u32)>::new();
+    for &node in nodes {
+        let parent = dom.parent(node);
+        while ancestors
+            .last()
+            .is_some_and(|&(ancestor, _)| parent != Some(ancestor))
+        {
+            ancestors.pop();
+        }
+        let depth = ancestors
+            .last()
+            .map_or(0, |&(_, depth)| depth.saturating_add(1));
+        if dom.is_element(node) {
+            if node == root {
+                debug_assert_eq!(depth, 0);
+            }
+            elements.push((node, depth));
+        }
+        ancestors.push((node, depth));
+    }
+    elements
+}
+
 struct DefinitionIndex {
     container: Vec<bool>,
     inside_container: Vec<bool>,
@@ -353,12 +406,9 @@ struct DefinitionIndex {
 }
 
 impl DefinitionIndex {
-    fn analyze(dom: &Dom, root: NodeId) -> Self {
-        let nodes = std::iter::once(root)
-            .chain(dom.descendants(root))
-            .collect::<Vec<_>>();
+    fn analyze(dom: &Dom, _root: NodeId, nodes: &[NodeId], elements: &[(NodeId, u32)]) -> Self {
         let mut own_candidate = vec![false; dom.len()];
-        for &node in &nodes {
+        for &node in nodes {
             own_candidate[node.index()] = matches!(
                 dom.tag(node),
                 Some(Tag::Div | Tag::Li | Tag::P | Tag::Aside)
@@ -383,7 +433,7 @@ impl DefinitionIndex {
         }
         let mut container = vec![false; dom.len()];
         let mut inside_container = vec![false; dom.len()];
-        for &node in &nodes {
+        for &node in nodes {
             container[node.index()] = is_footnote_container(dom, node)
                 || has_any_class(dom, node, &["references"]) && nested_candidate[node.index()];
             inside_container[node.index()] = container[node.index()]
@@ -391,9 +441,6 @@ impl DefinitionIndex {
                     .parent(node)
                     .is_some_and(|parent| inside_container[parent.index()]);
         }
-        let elements = std::iter::once((root, 0))
-            .chain(dom.element_descendants_snapshot_with_depth(root))
-            .collect::<Vec<_>>();
         let mut preorder = vec![usize::MAX; dom.len()];
         let mut subtree_end = vec![elements.len(); dom.len()];
         let mut open = Vec::<(NodeId, u32)>::new();
@@ -409,7 +456,7 @@ impl DefinitionIndex {
             open.push((node, depth));
         }
         let mut targets = HashMap::<String, Vec<usize>>::new();
-        for &(node, _) in &elements {
+        for &(node, _) in elements {
             if dom.tag(node) == Some(Tag::A)
                 && let Some(target) = href_fragment(dom.attr(node, AttrName::Href))
             {
@@ -420,7 +467,7 @@ impl DefinitionIndex {
             }
         }
         let mut definition_backlink = vec![false; dom.len()];
-        for &(node, _) in &elements {
+        for &(node, _) in elements {
             let Some(id) = dom.attr(node, AttrName::Id) else {
                 continue;
             };
@@ -450,33 +497,43 @@ impl DefinitionIndex {
 }
 
 fn detect_definitions(dom: &Dom, root: NodeId) -> Vec<Definition> {
-    let index = DefinitionIndex::analyze(dom, root);
-    detect_definitions_with_index(dom, root, &index)
+    let nodes = source_nodes(dom, root);
+    let elements = element_nodes_with_depth(dom, root, &nodes);
+    let index = DefinitionIndex::analyze(dom, root, &nodes, &elements);
+    detect_definitions_with_index(dom, root, &index, &nodes, &elements)
 }
 
 fn detect_definitions_with_index(
     dom: &Dom,
     root: NodeId,
     index: &DefinitionIndex,
+    nodes: &[NodeId],
+    elements: &[(NodeId, u32)],
 ) -> Vec<Definition> {
-    let potential_reference_targets: HashSet<String> = dom
-        .descendants(root)
-        .filter(|&node| dom.tag(node) == Some(Tag::A))
-        .filter(|&node| is_explicit_reference(dom, node))
-        .filter_map(|node| fragment_target(dom.attr(node, AttrName::Href)).map(str::to_owned))
-        .collect();
-    let named_sidenote_targets: HashSet<String> = dom
-        .descendants(root)
-        .filter(|&node| dom.tag(node) == Some(Tag::A))
-        .filter(|&node| {
-            dom.parent(node)
-                .is_some_and(|parent| dom.tag(parent) == Some(Tag::Sup))
-        })
-        .filter_map(|node| fragment_target(dom.attr(node, AttrName::Href)).map(str::to_owned))
-        .collect();
+    let mut potential_reference_targets = HashSet::new();
+    let mut named_sidenote_targets = HashSet::new();
+    for &node in nodes.iter().skip(usize::from(nodes.first() == Some(&root))) {
+        if dom.tag(node) != Some(Tag::A) {
+            continue;
+        }
+        if is_explicit_reference(dom, node)
+            && let Some(target) = fragment_target(dom.attr(node, AttrName::Href))
+        {
+            potential_reference_targets.insert(target.to_owned());
+        }
+        if dom
+            .parent(node)
+            .is_some_and(|parent| dom.tag(parent) == Some(Tag::Sup))
+            && let Some(target) = fragment_target(dom.attr(node, AttrName::Href))
+        {
+            named_sidenote_targets.insert(target.to_owned());
+        }
+    }
     let mut definitions: Vec<Definition> = Vec::new();
     let mut nearest_definition: Vec<Option<usize>> = vec![None; dom.len()];
-    for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
+    for &(node, _) in elements.iter().skip(usize::from(
+        elements.first().is_some_and(|&(node, _)| node == root),
+    )) {
         nearest_definition[node.index()] = dom
             .parent(node)
             .and_then(|parent| nearest_definition[parent.index()]);
@@ -616,13 +673,15 @@ pub(crate) fn adopt_external(
     fragment_root: NodeId,
 ) {
     let known: HashSet<&str> = definitions.0.iter().map(|(key, _)| key.as_str()).collect();
-    let referenced: Vec<String> = detect_references(fragment, fragment_root, &known)
-        .into_iter()
-        .map(|reference| reference.key)
-        .scan(HashSet::new(), |seen, key| {
-            seen.insert(key.clone()).then_some(key)
-        })
-        .collect();
+    let fragment_nodes = source_nodes(fragment, fragment_root);
+    let referenced: Vec<String> =
+        detect_references(fragment, fragment_root, &known, &fragment_nodes)
+            .into_iter()
+            .map(|reference| reference.key)
+            .scan(HashSet::new(), |seen, key| {
+                seen.insert(key.clone()).then_some(key)
+            })
+            .collect();
     if referenced.is_empty() {
         return;
     }

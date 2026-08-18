@@ -137,7 +137,14 @@ impl<'a> MarkdownRenderer<'a> {
 
         match node {
             Item::Text(text) => {
-                self.out.text(text, self.next_text_char(index));
+                // Most text leaves end in ordinary prose characters. Only a
+                // small set of trailing punctuation can form a Markdown
+                // construct with the next semantic leaf, so avoid a forward
+                // tape scan for the common case.
+                let next = needs_next_text_char(text)
+                    .then(|| self.next_text_char(index))
+                    .flatten();
+                self.out.text(text, next);
             }
             Item::Heading { level } => {
                 if !self.visible(operation) {
@@ -936,6 +943,12 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 }
+fn needs_next_text_char(text: &str) -> bool {
+    text.chars()
+        .next_back()
+        .is_some_and(|character| matches!(character, '!' | '#' | '-' | '+' | '=' | '~' | '.' | ')'))
+}
+
 fn escape_math_source(source: &str) -> String {
     let mut escaped = String::with_capacity(source.len());
     for character in source.chars() {

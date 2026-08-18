@@ -224,6 +224,7 @@ struct ImageRoleEvidence {
     promotional_context: bool,
     media_control_context: bool,
     logo_or_icon_context: bool,
+    strong_logo_context: bool,
     card_grid_context: bool,
     repetitions: u16,
 }
@@ -246,6 +247,7 @@ impl ImageRoleEvidence {
             .is_some_and(|size| size >= 200);
         let names = image_context_name(dom, image);
         let structural_names = image_structural_context_name(dom, image);
+        let context = image_context_flags(&names, &structural_names);
         Self {
             descriptive: has_meaningful_image_description(dom, image),
             captioned: has_figure_caption(dom, image),
@@ -257,54 +259,15 @@ impl ImageRoleEvidence {
                 .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figure)),
             small_dimensions,
             tracking_dimensions,
-            profile_context: contains_role_token(
-                &names,
-                &[
-                    "avatar", "avatars", "author", "authors", "byline", "founder", "founders",
-                    "profile", "bio",
-                ],
-            ),
-            author_media_context: contains_role_token(
-                &names,
-                &["author", "authors", "byline", "profile", "bio"],
-            ) && contains_role_token(
-                &names,
-                &["avatar", "headshot", "image", "photo", "portrait"],
-            ),
-            avatar_context: contains_role_token(&names, &["avatar", "avatars"]),
-            related_context: contains_role_token(
-                &names,
-                &[
-                    "related",
-                    "recommend",
-                    "recirculation",
-                    "more-stories",
-                    "more_articles",
-                    "tout",
-                ],
-            ),
-            promotional_context: contains_role_token(
-                &structural_names,
-                &[
-                    "ad",
-                    "ads",
-                    "advert",
-                    "advertisement",
-                    "advertorial",
-                    "marketing",
-                    "promo",
-                    "promotion",
-                    "promotional",
-                    "sponsor",
-                    "sponsored",
-                ],
-            ),
-            media_control_context: has_media_control_context(dom, image),
-            logo_or_icon_context: contains_role_token(
-                &names,
-                &["favicon", "logo", "icon", "badge", "sprite", "integration"],
-            ),
-            card_grid_context: contains_role_token(&names, &["card", "cards", "grid", "tile"]),
+            profile_context: context.profile,
+            author_media_context: context.author_media,
+            avatar_context: context.avatar,
+            related_context: context.related,
+            promotional_context: context.promotional,
+            media_control_context: has_media_control_context(dom, image, context.media_control),
+            logo_or_icon_context: context.logo_or_icon,
+            strong_logo_context: context.strong_logo,
+            card_grid_context: context.card_grid,
             repetitions,
         }
     }
@@ -357,10 +320,7 @@ fn image_role_score(
     score.negative += i16::from(evidence.author_media_context) * 12;
     score.negative += i16::from(evidence.avatar_context) * 8;
     score.negative += i16::from(evidence.logo_or_icon_context) * 5;
-    score.negative += i16::from(contains_role_token(
-        &image_context_name(dom, image),
-        &["favicon", "logo", "integration"],
-    )) * 3;
+    score.negative += i16::from(evidence.strong_logo_context) * 3;
     score.negative += i16::from(evidence.related_context) * 24;
     score.negative += i16::from(evidence.promotional_context) * 24;
     score.negative += i16::from(evidence.media_control_context) * 24;
@@ -410,8 +370,89 @@ fn image_structural_context_name(dom: &Dom, image: NodeId) -> String {
     name.to_ascii_lowercase()
 }
 
-fn has_media_control_context(dom: &Dom, image: NodeId) -> bool {
-    let names = image_structural_context_name(dom, image);
+#[derive(Clone, Copy, Default)]
+struct ImageContextFlags {
+    profile: bool,
+    author_media: bool,
+    avatar: bool,
+    related: bool,
+    promotional: bool,
+    media_control: bool,
+    logo_or_icon: bool,
+    strong_logo: bool,
+    card_grid: bool,
+}
+
+fn image_context_flags(names: &str, structural_names: &str) -> ImageContextFlags {
+    let mut flags = ImageContextFlags::default();
+    let mut author = false;
+    let mut media = false;
+    for field in names.split_ascii_whitespace() {
+        for token in field.split(|character: char| !character.is_ascii_alphanumeric()) {
+            match token {
+                "avatar" | "avatars" => {
+                    flags.avatar = true;
+                    flags.profile = true;
+                    media = true;
+                }
+                "author" | "authors" | "byline" | "founder" | "founders" | "profile" | "bio" => {
+                    flags.profile = true;
+                    author = true;
+                }
+                "headshot" | "image" | "photo" | "portrait" => media = true,
+                "related" | "recommend" | "recirculation" | "tout" => flags.related = true,
+                "favicon" | "logo" | "icon" | "badge" | "sprite" | "integration" => {
+                    flags.logo_or_icon = true;
+                    flags.strong_logo |= matches!(token, "favicon" | "logo" | "integration");
+                }
+                "card" | "cards" | "grid" | "tile" => flags.card_grid = true,
+                _ => {}
+            }
+        }
+        if normalized_tokens_equal(field, "more-stories")
+            || normalized_tokens_equal(field, "more_articles")
+        {
+            flags.related = true;
+        }
+    }
+    for field in structural_names.split_ascii_whitespace() {
+        for token in field.split(|character: char| !character.is_ascii_alphanumeric()) {
+            if matches!(
+                token,
+                "ad" | "ads"
+                    | "advert"
+                    | "advertisement"
+                    | "advertorial"
+                    | "marketing"
+                    | "promo"
+                    | "promotion"
+                    | "promotional"
+                    | "sponsor"
+                    | "sponsored"
+            ) {
+                flags.promotional = true;
+            }
+            if matches!(
+                token,
+                "carousel"
+                    | "gallery"
+                    | "lightbox"
+                    | "slideshow"
+                    | "slider"
+                    | "swiper"
+                    | "thumb"
+                    | "thumbnail"
+                    | "zoom"
+            ) {
+                flags.media_control = true;
+            }
+        }
+    }
+    flags.author_media = author && media;
+    flags
+}
+
+fn has_media_control_context(dom: &Dom, image: NodeId, context_media_control: bool) -> bool {
     let list_context = dom
         .ancestors(image)
         .any(|ancestor| matches!(dom.tag(ancestor), Some(Tag::Li | Tag::Ol | Tag::Ul)));
@@ -433,21 +474,7 @@ fn has_media_control_context(dom: &Dom, image: NodeId) -> bool {
                         ))
                 })
             });
-    list_control_marker
-        || contains_role_token(
-            &names,
-            &[
-                "carousel",
-                "gallery",
-                "lightbox",
-                "slideshow",
-                "slider",
-                "swiper",
-                "thumb",
-                "thumbnail",
-                "zoom",
-            ],
-        )
+    list_control_marker || context_media_control
 }
 
 fn is_lead_position(dom: &Dom, image: NodeId, before_first_paragraph: bool) -> bool {
@@ -517,23 +544,26 @@ fn has_adjacent_lead_peripheral_role(dom: &Dom, image: NodeId) -> bool {
 }
 
 fn contains_role_token(value: &str, patterns: &[&str]) -> bool {
-    let normalize = |text: &str| {
-        text.split(|character: char| !character.is_ascii_alphanumeric())
-            .filter(|token| !token.is_empty())
-            .collect::<SmallVec<[&str; 8]>>()
-            .join(" ")
-    };
     patterns.iter().any(|pattern| {
-        let pattern = normalize(pattern);
-        if !pattern.contains(' ') {
+        if pattern.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
             return value
                 .split(|character: char| !character.is_ascii_alphanumeric())
-                .any(|token| token == pattern);
+                .any(|token| token == *pattern);
         }
         value
             .split_ascii_whitespace()
-            .any(|field| normalize(field) == pattern)
+            .any(|field| normalized_tokens_equal(field, pattern))
     })
+}
+
+fn normalized_tokens_equal(left: &str, right: &str) -> bool {
+    let left = left
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty());
+    let right = right
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty());
+    left.eq(right)
 }
 
 fn sole_descendant_image(dom: &Dom, root: NodeId) -> Option<NodeId> {
@@ -1436,7 +1466,11 @@ fn has_nearby_explanatory_text(dom: &Dom, image: NodeId) -> bool {
     if dom.tag(image) != Some(Tag::Img)
         || !has_usable_image_source(dom, image)
         || has_strong_peripheral_role(dom, image)
-        || has_media_control_context(dom, image)
+        || has_media_control_context(
+            dom,
+            image,
+            image_context_flags(&names, &image_structural_context_name(dom, image)).media_control,
+        )
         || contains_role_token(&names, &["badge", "favicon", "logo", "sprite"])
         || contains_role_token(&names, &["icon"])
             && !contains_role_token(

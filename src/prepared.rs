@@ -59,6 +59,7 @@ pub(crate) struct PreparedSource {
     position_by_node: Vec<u32>,
     pub(crate) anchors: DocumentAnchors,
     pub(crate) element_count: usize,
+    has_possible_footnote_reference: bool,
     pub(crate) source_metrics: ContentMetrics,
     pub(crate) relaxed_metrics: Option<ContentMetrics>,
 }
@@ -128,6 +129,7 @@ impl PreparedSource {
         let mut open: Vec<usize> = Vec::new();
         let mut anchors = DocumentAnchors::new(dom.root());
         let mut element_count = 0;
+        let mut has_possible_footnote_reference = false;
 
         for node in std::iter::once(dom.root()).chain(dom.descendants(dom.root())) {
             dom.record_document_anchor(node, &mut anchors);
@@ -151,6 +153,7 @@ impl PreparedSource {
             }
 
             let flags = source_flags(dom, node, tag);
+            has_possible_footnote_reference |= possible_footnote_reference(dom, node, tag);
             if flags.contains(SourceFlags::ELEMENT) {
                 element_count += 1;
             }
@@ -204,16 +207,22 @@ impl PreparedSource {
             position_by_node,
             anchors,
             element_count,
+            has_possible_footnote_reference,
             source_metrics: ContentMetrics::default(),
             relaxed_metrics: None,
         };
         if let Some(body) = source.anchors.body {
+            // Reuse the exclusion mask when a relaxed visibility view is
+            // needed. The metric pass owns the mask only for the duration of
+            // source preparation, so it adds no retained source state.
+            let mut excluded = Vec::new();
             source.source_metrics = ContentMetrics::measure_source_prepared(
                 dom,
                 &source,
                 body,
                 false,
                 include_semantic_counts,
+                &mut excluded,
             );
             if source.has_relaxable_hidden_content(body) {
                 source.relaxed_metrics = Some(ContentMetrics::measure_source_prepared(
@@ -222,6 +231,7 @@ impl PreparedSource {
                     body,
                     true,
                     include_semantic_counts,
+                    &mut excluded,
                 ));
             }
         }
@@ -281,6 +291,10 @@ impl PreparedSource {
         self.entries[range].iter()
     }
 
+    pub(crate) fn has_possible_footnote_reference(&self) -> bool {
+        self.has_possible_footnote_reference
+    }
+
     pub(crate) fn has_relaxable_hidden_content(&self, root: NodeId) -> bool {
         self.elements_in(root).any(|entry| {
             matches!(
@@ -333,6 +347,38 @@ impl PreparedSource {
         }
         accessible
     }
+}
+
+fn has_local_fragment_target(href: &str) -> bool {
+    let href = href.trim();
+    let Some((prefix, target)) = href.rsplit_once('#') else {
+        return false;
+    };
+    let has_scheme = prefix.find(':').is_some_and(|colon| {
+        colon > 0
+            && prefix[..colon]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    });
+    !target.is_empty()
+        && (prefix.is_empty() || !has_scheme && !prefix.starts_with('/') && !prefix.contains('?'))
+}
+
+fn possible_footnote_reference(dom: &Dom, node: NodeId, tag: Option<Tag>) -> bool {
+    (tag == Some(Tag::A)
+        && dom
+            .attr(node, AttrName::Href)
+            .is_some_and(has_local_fragment_target))
+        || tag == Some(Tag::Label)
+            && dom.attr(node, AttrName::Class).is_some_and(|classes| {
+                classes.split_whitespace().any(|class| {
+                    class.eq_ignore_ascii_case("footref")
+                        || class.eq_ignore_ascii_case("sidenote-number")
+                })
+            })
+            && dom.attr_by_local_name(node, "for").is_some()
+        || dom.attr(node, AttrName::DataFootnoteRef).is_some()
+        || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
 }
 
 fn source_flags(dom: &Dom, node: NodeId, tag: Option<Tag>) -> SourceFlags {
@@ -473,6 +519,23 @@ mod tests {
                 .any(|entry| entry.flags.contains(SourceFlags::LINK))
         );
         assert_eq!(source.element_count, source.elements().count());
+        assert!(!source.has_possible_footnote_reference());
+    }
+
+    #[test]
+    fn source_index_detects_reference_targets_without_a_second_scan() {
+        let dom = Dom::parse_document(
+            "<body><main><p><a href='#note'>1</a></p><p data-footnote-ref='note'>2</p><label class='footref' for='note'>3</label></main></body>",
+        )
+        .unwrap();
+        let source = PreparedSource::build(&dom);
+        assert!(source.has_possible_footnote_reference());
+
+        let external = Dom::parse_document(
+            "<body><main><p><a href='https://example.test/page#section'>section</a></p></main></body>",
+        )
+        .unwrap();
+        assert!(!PreparedSource::build(&external).has_possible_footnote_reference());
     }
 
     #[test]
