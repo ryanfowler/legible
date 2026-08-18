@@ -7,6 +7,7 @@ use crate::candidate::{
 use crate::cleaning::*;
 use crate::constants::{
     is_alter_to_div_exception, is_default_tag_to_score, is_phrasing_elem, regexps,
+    split_word_tokens,
 };
 use crate::diagnostics::{
     AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
@@ -445,6 +446,244 @@ fn find_content_targets_from_prepared(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HighConfidenceRoot {
+    node: NodeId,
+}
+
+struct HighConfidenceProbeContext<'a> {
+    page_kind: PageKind,
+    structured_root: Option<NodeId>,
+    content_hint_targets: &'a [NodeId],
+    title_plan: &'a TitleHeadingPlan,
+    substantial_hidden_gain: bool,
+}
+
+fn has_any_role(dom: &Dom, node: NodeId, expected: &[&str]) -> bool {
+    dom.attr(node, AttrName::Role).is_some_and(|roles| {
+        roles.split_whitespace().any(|role| {
+            expected
+                .iter()
+                .any(|expected| role.eq_ignore_ascii_case(expected))
+        })
+    })
+}
+
+fn has_name_token(dom: &Dom, node: NodeId, expected: &[&str]) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(split_word_tokens)
+    .any(|token| {
+        expected
+            .iter()
+            .any(|expected| token.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn probe_high_confidence_root(
+    dom: &Dom,
+    source: &PreparedSource,
+    body: NodeId,
+    context: HighConfidenceProbeContext<'_>,
+) -> Option<HighConfidenceRoot> {
+    crate::instrumentation::record_fast_root_probe();
+    if context.page_kind != PageKind::Unknown
+        || context.substantial_hidden_gain
+        || has_any_role(dom, body, &["feed", "listbox"])
+        || has_name_token(
+            dom,
+            body,
+            &[
+                "archive", "catalog", "category", "feed", "listing", "results", "search",
+            ],
+        )
+    {
+        return None;
+    }
+
+    let mut authoritative = None;
+    let mut excluded_depth = None;
+    for entry in source.elements_in(body) {
+        if excluded_depth.is_some_and(|depth| entry.depth <= depth) {
+            excluded_depth = None;
+        }
+        if excluded_depth.is_some() {
+            continue;
+        }
+        if entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+            || entry.flags.contains(SourceFlags::UTILITY_HIDDEN)
+            || entry.flags.contains(SourceFlags::ARIA_HIDDEN)
+            || entry.flags.contains(SourceFlags::MODAL_DIALOG)
+            || entry.flags.contains(SourceFlags::ARIA_MODAL)
+            || entry.flags.contains(SourceFlags::DOCUMENT_CHROME)
+        {
+            excluded_depth = Some(entry.depth);
+            continue;
+        }
+        if entry.flags.contains(SourceFlags::PRIMARY_REGION) {
+            if authoritative.is_some_and(|ancestor| !source.contains(ancestor, entry.node)) {
+                return None;
+            }
+            authoritative = Some(entry.node);
+        }
+    }
+    let root = authoritative?;
+    if source.entry(root).is_none_or(|entry| {
+        entry.flags.contains(SourceFlags::DOCUMENT_CHROME)
+            || entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+            || entry.flags.contains(SourceFlags::UTILITY_HIDDEN)
+            || entry.flags.contains(SourceFlags::ARIA_HIDDEN)
+            || entry.flags.contains(SourceFlags::MODAL_DIALOG)
+            || entry.flags.contains(SourceFlags::ARIA_MODAL)
+    }) {
+        return None;
+    }
+
+    let agrees_with_root =
+        |other| other == root || source.contains(root, other) || source.contains(other, root);
+    if context
+        .structured_root
+        .is_some_and(|node| !agrees_with_root(node))
+        || context
+            .content_hint_targets
+            .iter()
+            .any(|&node| !agrees_with_root(node))
+        || context
+            .title_plan
+            .preferred
+            .is_some_and(|heading| !source.contains(root, heading))
+        || !context.title_plan.brand_headings.is_empty()
+    {
+        return None;
+    }
+    if std::iter::once(root)
+        .chain(dom.ancestors(root))
+        .take_while(|&node| node != body)
+        .any(|node| {
+            dom.attr(node, AttrName::Dir).is_some()
+                || has_any_role(dom, node, &["feed", "listbox"])
+                || has_name_token(
+                    dom,
+                    node,
+                    &[
+                        "archive", "catalog", "category", "feed", "listing", "results", "search",
+                    ],
+                )
+        })
+    {
+        return None;
+    }
+    for entry in source.elements_in(root) {
+        if entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+            || entry.flags.contains(SourceFlags::UTILITY_HIDDEN)
+            || entry.flags.contains(SourceFlags::ARIA_HIDDEN)
+            || entry.flags.contains(SourceFlags::MODAL_DIALOG)
+            || entry.flags.contains(SourceFlags::ARIA_MODAL)
+            || entry.tag == Some(Tag::Br)
+            || matches!(entry.tag, Some(Tag::Ol | Tag::Ul))
+            || entry.tag == Some(Tag::Div)
+                && dom.children(entry.node).any(|child| {
+                    dom.text_node(child)
+                        .is_some_and(|text| !trim_text(text).is_empty())
+                })
+            || has_any_role(dom, entry.node, &["feed", "listbox", "search"])
+            || has_name_token(
+                dom,
+                entry.node,
+                &[
+                    "archive",
+                    "author",
+                    "byline",
+                    "catalog",
+                    "category",
+                    "comment",
+                    "comments",
+                    "dateline",
+                    "discussion",
+                    "feed",
+                    "listing",
+                    "replies",
+                    "results",
+                    "responses",
+                    "search",
+                ],
+            )
+            || dom
+                .attr(entry.node, AttrName::ItemProp)
+                .is_some_and(|value| {
+                    split_word_tokens(value).any(|token| token.eq_ignore_ascii_case("author"))
+                })
+            || dom.attr(entry.node, AttrName::Rel).is_some_and(|value| {
+                value
+                    .split_whitespace()
+                    .any(|token| token.eq_ignore_ascii_case("author"))
+            })
+        {
+            return None;
+        }
+    }
+    let mut excluded = Vec::new();
+    let metrics =
+        ContentMetrics::measure_source_prepared(dom, source, root, false, false, &mut excluded);
+    if metrics.word_count < 50
+        || metrics.text_chars < 400
+        || metrics.paragraph_count < 2
+        || metrics.link_density > 0.25
+        || metrics.text_chars.saturating_mul(100)
+            < source.source_metrics.text_chars.saturating_mul(70)
+    {
+        return None;
+    }
+
+    // A sole main region can still be a dashboard or a set of unrelated
+    // panels. Reject substantial structural peers even when one neutral
+    // wrapper contains them.
+    if matches!(dom.tag(root), Some(Tag::Main)) || has_any_role(dom, root, &["main"]) {
+        const MAX_PANEL_METRIC_SCANS: usize = 16;
+        let mut panel_metric_scans = 0;
+        for parent in source.elements_in(root).map(|entry| entry.node) {
+            let structural_children: SmallVec<[NodeId; 4]> = dom
+                .element_children(parent)
+                .filter(|&node| {
+                    matches!(dom.tag(node), Some(Tag::Article | Tag::Div | Tag::Section))
+                })
+                .collect();
+            if structural_children.len() < 2 {
+                continue;
+            }
+            let mut substantial_panels = 0_u8;
+            for child in structural_children {
+                if panel_metric_scans == MAX_PANEL_METRIC_SCANS {
+                    return None;
+                }
+                panel_metric_scans += 1;
+                let child_metrics = ContentMetrics::measure_source_prepared(
+                    dom,
+                    source,
+                    child,
+                    false,
+                    false,
+                    &mut excluded,
+                );
+                if child_metrics.text_chars.saturating_mul(100)
+                    >= metrics.text_chars.saturating_mul(20)
+                {
+                    substantial_panels = substantial_panels.saturating_add(1);
+                    if substantial_panels > 1 {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    Some(HighConfidenceRoot { node: root })
+}
+
 impl<'a> ContentExtractor<'a> {
     pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let source_dom_nodes = dom.len();
@@ -704,6 +943,21 @@ impl<'a> ContentExtractor<'a> {
             self.metadata.site_name.as_deref(),
             self.source_uri.as_ref(),
         );
+        let high_confidence_root = probe_high_confidence_root(
+            &self.dom,
+            &prepared_source,
+            body,
+            HighConfidenceProbeContext {
+                page_kind: self.page_kind,
+                structured_root,
+                content_hint_targets: &content_hint_targets,
+                title_plan: &title_plan,
+                substantial_hidden_gain,
+            },
+        );
+        if high_confidence_root.is_none() {
+            crate::instrumentation::record_fast_root_fallback();
+        }
         #[cfg(feature = "bench-instrumentation")]
         drop(_candidate_preflight_phase);
         if let Some(html) = source_anchors.html {
@@ -718,7 +972,13 @@ impl<'a> ContentExtractor<'a> {
             crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref());
         let mut analysis_cache = AnalysisCache::default();
         let mut discovery_cache: Vec<(VisibilityVariant, CandidateDiscovery)> = Vec::new();
-        for strategy in ExtractionStrategy::ORDER {
+        let fast_attempt = high_confidence_root
+            .map(|root| (ExtractionStrategy::Normal, Some(root)))
+            .into_iter();
+        let generic_attempts = ExtractionStrategy::ORDER
+            .into_iter()
+            .map(|strategy| (strategy, None));
+        for (strategy, fast_root) in fast_attempt.chain(generic_attempts) {
             if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
                 continue;
             }
@@ -735,64 +995,93 @@ impl<'a> ContentExtractor<'a> {
             self.diagnostic_cleanup_actions.clear();
             self.diagnostic_normalization = NormalizationCountsInfo::default();
             let visibility = strategy.visibility_variant();
-            let analysis_index = if let Some(index) = analysis_cache.find(visibility) {
-                index
-            } else {
-                #[cfg(test)]
-                record_generic_scoring_call();
-                let analysis = self.build_scoring_analysis(
-                    visibility,
-                    &mut text_buffer,
-                    &prepared_source,
-                    &accessible_math,
-                    &title_plan,
-                    &base_candidates,
-                    &content_hint_targets,
-                    structured_root,
-                    source_anchors,
-                    &mut discovery_cache,
-                )?;
-                crate::instrumentation::record_unique_attempt_plan(visibility as u8);
-                analysis_cache.variants.push((visibility, analysis));
-                analysis_cache.variants.len() - 1
-            };
-            if !strategy.weight_classes() {
-                let analysis = &mut analysis_cache.variants[analysis_index].1;
-                if analysis.unweighted.is_none() {
-                    self.prepare_unweighted_scoring(
-                        analysis,
-                        &content_hint_targets,
+            let mut fast_ranked = SmallVec::<[RankedCandidate; 64]>::new();
+            let fast_selection;
+            let (working_dom, candidates, ranked, body, mut selection) =
+                if let Some(fast_root) = fast_root {
+                    self.node_data.clear();
+                    initialize_node(&self.dom, fast_root.node, &mut self.node_data, true);
+                    fast_ranked.push(RankedCandidate {
+                        node: fast_root.node,
+                        score: 1.0,
+                        order: prepared_source
+                            .position(fast_root.node)
+                            .unwrap_or(usize::MAX),
+                    });
+                    fast_selection = RootSelection {
+                        node: fast_root.node,
+                        reason: RootSelectionReason::SpecificChild,
+                        branches: SmallVec::new(),
+                    };
+                    (
+                        &self.dom,
+                        &base_candidates,
+                        fast_ranked.as_slice(),
+                        body,
+                        fast_selection.clone(),
+                    )
+                } else {
+                    let analysis_index = if let Some(index) = analysis_cache.find(visibility) {
+                        index
+                    } else {
+                        #[cfg(test)]
+                        record_generic_scoring_call();
+                        let analysis = self.build_scoring_analysis(
+                            visibility,
+                            &mut text_buffer,
+                            &prepared_source,
+                            &accessible_math,
+                            &title_plan,
+                            &base_candidates,
+                            &content_hint_targets,
+                            structured_root,
+                            source_anchors,
+                            &mut discovery_cache,
+                        )?;
+                        crate::instrumentation::record_unique_attempt_plan(visibility as u8);
+                        analysis_cache.variants.push((visibility, analysis));
+                        analysis_cache.variants.len() - 1
+                    };
+                    if !strategy.weight_classes() {
+                        let analysis = &mut analysis_cache.variants[analysis_index].1;
+                        if analysis.unweighted.is_none() {
+                            self.prepare_unweighted_scoring(
+                                analysis,
+                                &content_hint_targets,
+                                structured_root,
+                            );
+                        }
+                    }
+                    let analysis = &analysis_cache.variants[analysis_index].1;
+                    let variant = analysis
+                        .variant(strategy.weight_classes())
+                        .ok_or(Error::NoContent)?;
+                    self.page_byline = variant.discovery.byline.clone();
+                    self.node_data = variant.node_data.clone();
+                    let selection = select_content_root(
+                        &analysis.dom,
+                        &variant.candidates,
+                        &variant.ranked,
+                        analysis.body,
+                        self.structured_data
+                            .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+                    );
+                    let selection = self.selection_for_strategy(
+                        strategy,
+                        &analysis.dom,
+                        analysis.body,
+                        selection,
                         structured_root,
                     );
-                }
-            }
-            let analysis = &analysis_cache.variants[analysis_index].1;
-            let variant = analysis
-                .variant(strategy.weight_classes())
-                .ok_or(Error::NoContent)?;
-            let discovery = &variant.discovery;
-            let candidates = &variant.candidates;
-            let ranked = &variant.ranked;
-            let body = analysis.body;
-            self.page_byline = discovery.byline.clone();
-            self.node_data = variant.node_data.clone();
-            let working_dom = &analysis.dom;
+                    (
+                        &analysis.dom,
+                        &variant.candidates,
+                        variant.ranked.as_slice(),
+                        analysis.body,
+                        selection,
+                    )
+                };
             let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
-            let mut selection = select_content_root(
-                working_dom,
-                candidates,
-                ranked,
-                body,
-                self.structured_data
-                    .primary_texts(&self.structured_title, self.source_uri.as_ref()),
-            );
-            selection = self.selection_for_strategy(
-                strategy,
-                working_dom,
-                body,
-                selection,
-                structured_root,
-            );
             if strategy == ExtractionStrategy::RelaxedVisibility
                 && short_source_access_barrier
                 && let Some(hidden) = ranked
@@ -1055,6 +1344,26 @@ impl<'a> ContentExtractor<'a> {
                 self.metadata.site_name.as_deref(),
                 self.source_uri.as_ref(),
             );
+            if fast_root.is_some() {
+                let heading_limit = heading_text_limit(&self.page_title, &self.structured_title);
+                for &(heading, _) in &fragment_title_snapshot {
+                    if has_primary_heading_semantics(&self.dom, heading) {
+                        let heading_text = get_inner_text_limited(
+                            &self.dom,
+                            heading,
+                            &mut text_buffer,
+                            heading_limit,
+                        );
+                        if heading_matches_page_title(&self.page_title, heading_text)
+                            && (!self.metadata.title_from_content_heading
+                                || heading_matches_page_title(&self.structured_title, heading_text))
+                        {
+                            self.dom.detach(heading);
+                            break;
+                        }
+                    }
+                }
+            }
             remove_title_brand_headings(&mut self.dom, content_id, &fragment_title_plan);
 
             self.page_direction = source_direction;
@@ -1228,6 +1537,10 @@ impl<'a> ContentExtractor<'a> {
                         && !deferred_for_visibility
                         && (quality.is_good() || schema_match));
             if accepted {
+                if fast_root.is_some() {
+                    crate::instrumentation::record_fast_root_accepted();
+                    crate::instrumentation::record_fast_root_scoring_clone_avoided();
+                }
                 let excerpt = self.content_excerpt_if_needed(result_root);
                 self.record_attempt(
                     strategy,
@@ -1277,7 +1590,12 @@ impl<'a> ContentExtractor<'a> {
                 false,
                 Some(rejection),
             );
+            if fast_root.is_some() {
+                crate::instrumentation::record_fast_root_validation_failed();
+                crate::instrumentation::record_fast_root_fallback();
+            }
             if valid_result
+                && fast_root.is_none()
                 && visibility_improves
                 && self.best_attempt.as_ref().is_none_or(|best| {
                     quality.best_attempt_score() > best.quality.best_attempt_score()
@@ -1892,16 +2210,17 @@ impl<'a> ContentExtractor<'a> {
                 excluded_depth = Some(depth);
                 continue;
             }
-            if self.page_byline.is_none() && !self.metadata.has_source_author {
-                if is_valid_byline(dom, node, text_buffer) {
-                    self.page_byline = Some(
-                        metadata::byline_name(dom, node)
-                            .unwrap_or_else(|| get_inner_text(dom, node, text_buffer).to_owned()),
-                    );
-                    dom.detach(node);
-                    excluded_depth = Some(depth);
-                    continue;
-                }
+            if self.page_byline.is_none()
+                && !self.metadata.has_source_author
+                && is_valid_byline(dom, node, text_buffer)
+            {
+                self.page_byline = Some(
+                    metadata::byline_name(dom, node)
+                        .unwrap_or_else(|| get_inner_text(dom, node, text_buffer).to_owned()),
+                );
+                dom.detach(node);
+                excluded_depth = Some(depth);
+                continue;
             }
             let duplicates_title = if has_primary_heading_semantics(dom, node) {
                 let heading = get_inner_text_limited(dom, node, text_buffer, heading_limit);
@@ -3555,6 +3874,113 @@ mod tests {
 
         assert!(page.markdown().contains("semantic compiler consumes"));
         assert_eq!(Dom::fragment_copy_count(), 1);
+    }
+
+    #[test]
+    fn obvious_semantic_articles_skip_generic_scoring() {
+        for (case, html) in [
+            r#"<body><header>Site navigation</header><main><article><h1>Clear article</h1><p>This article contains a complete opening paragraph with enough useful prose to establish one clear semantic content boundary for the extraction pipeline.</p><p>The second paragraph adds detailed explanation about configuration, validation, compatibility, deployment, maintenance, and predictable behavior for readers.</p><p>A final paragraph confirms that navigation and footer text remain outside the authoritative article.</p></article></main><aside>Short sidebar.</aside><footer>Site footer</footer></body>"#,
+            r#"<body><nav>Documentation links</nav><main class='documentation'><h1>Configuration guide</h1><p>This guide explains the complete configuration process with enough practical detail to identify the sole main region as useful prose for operators and maintainers.</p><p>It covers validation, compatibility, deployment, maintenance, diagnostics, safe recovery, error handling, and predictable production behavior in a second substantive paragraph.</p><p>The final notes describe expected behavior, common operational checks, upgrade planning, and verification steps for readers who manage the system.</p></main><footer>Documentation footer</footer></body>"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reset_generic_scoring_calls();
+            let page = crate::extract(html, None).unwrap();
+            assert!(page.markdown().contains("paragraph"));
+            assert_eq!(generic_scoring_calls(), 0, "obvious case {case}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_semantic_pages_use_generic_scoring() {
+        let long = "This panel contains substantial prose about configuration, validation, compatibility, deployment, diagnostics, maintenance, recovery, and predictable system behavior for readers. ";
+        let cases = [
+            format!(
+                "<body><main><article><p>{long}{long}</p><p>{long}</p></article><article><p>{long}{long}</p><p>{long}</p></article></main></body>"
+            ),
+            format!(
+                "<body><main id='search-results'><div><p>{long}{long}</p><p>{long}</p></div><div><p>{long}{long}</p><p>{long}</p></div></main></body>"
+            ),
+            format!(
+                "<body><main id='search-results'><article><p>{long}{long}</p><p>{long}</p></article></main></body>"
+            ),
+            format!("<body><main role='search'><p>{long}{long}</p><p>{long}</p></main></body>"),
+            format!(
+                "<body><main><div class='search-results'><p>{long}{long}</p><p>{long}</p></div></main></body>"
+            ),
+            format!(
+                "<body><main><ul><li><p>{long}{long}</p></li><li><p>{long}{long}</p></li></ul></main></body>"
+            ),
+            format!(
+                "<body><main><div><p>{long}{long}</p><p>{long}</p></div><section><p>{long}{long}</p><p>{long}</p></section></main></body>"
+            ),
+            format!(
+                "<body><main><div class='dashboard'><section><p>{long}{long}</p><p>{long}</p></section><section><p>{long}{long}</p><p>{long}</p></section></div></main></body>"
+            ),
+            format!(
+                "<body><article><p>{long}{long}</p><p>{long}</p><section class='comments'><p>{long}{long}{long}</p></section></article></body>"
+            ),
+            format!(
+                "<body><article><p>A tiny article.</p></article><section><p>{long}{long}{long}</p><p>{long}{long}</p></section></body>"
+            ),
+            format!(
+                "<body><main><article><p>{long}{long}</p><p>{long}</p></article><article hidden><p>{long}{long}{long}{long}{long}</p><p>{long}{long}{long}</p></article></main></body>"
+            ),
+            format!(
+                "<body><main><section class='login'><h1>Sign in</h1><p>Sign in to continue.</p></section><article hidden><p>{long}{long}{long}{long}</p><p>{long}{long}{long}</p></article></main></body>"
+            ),
+        ];
+        for html in cases {
+            reset_generic_scoring_calls();
+            let _ = crate::extract(&html, None);
+            assert!(generic_scoring_calls() > 0, "unexpected fast-path hit");
+        }
+    }
+
+    #[test]
+    fn fast_root_title_cleanup_matches_generic_scoring() {
+        let prose = "This article contains substantial prose about configuration, validation, compatibility, deployment, diagnostics, maintenance, recovery, and predictable behavior for readers.";
+        let fast_html = format!(
+            "<title>Clear guide</title><body><main><article><h2>Clear guide</h2><h1>Clear guide</h1><p>{prose} {prose}</p><p>{prose} {prose}</p></article></main></body>"
+        );
+        let generic_html = format!(
+            "<title>Clear guide</title><body><main><article dir='ltr'><h2>Clear guide</h2><h1>Clear guide</h1><p>{prose} {prose}</p><p>{prose} {prose}</p></article></main></body>"
+        );
+
+        reset_generic_scoring_calls();
+        let fast = crate::extract(&fast_html, None)
+            .unwrap()
+            .markdown()
+            .to_owned();
+        assert_eq!(generic_scoring_calls(), 0);
+        reset_generic_scoring_calls();
+        let generic = crate::extract(&generic_html, None)
+            .unwrap()
+            .markdown()
+            .to_owned();
+        assert!(generic_scoring_calls() > 0);
+
+        assert_eq!(fast, generic);
+        assert!(fast.starts_with("# Clear guide"));
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn accepted_fast_root_records_clone_avoidance() {
+        let html = r#"<body><header>Site header</header><main><article><h1>Fast extraction</h1><p>This article contains enough useful prose to establish one clear semantic content boundary without generic scoring or a cloned source tree.</p><p>The second paragraph explains configuration, validation, compatibility, deployment, maintenance, diagnostics, recovery, and predictable production behavior.</p><p>A third paragraph confirms that the normal cleanup and semantic compilation pipeline still handles the selected article.</p></article></main><footer>Site footer</footer></body>"#;
+        crate::instrumentation::reset();
+
+        let page = crate::extract(html, None).unwrap();
+        let counters = crate::instrumentation::snapshot().counters;
+
+        assert!(page.markdown().contains("normal cleanup"));
+        assert_eq!(counters.fast_root_probes, 1);
+        assert_eq!(counters.fast_root_accepted, 1);
+        assert_eq!(counters.fast_root_validation_failed, 0);
+        assert_eq!(counters.fast_root_fallbacks, 0);
+        assert_eq!(counters.fast_root_scoring_clones_avoided, 1);
+        assert_eq!(counters.dom_clones, 0);
     }
 
     #[test]

@@ -414,7 +414,7 @@ fn report(
     let counters = snapshot.counters;
     let deferred = legible::instrumentation::deferred_work_snapshot();
     println!(
-        "counters/{group}/{name}: parse_calls={}, source_full_scans={}, source_element_snapshots={}, prepared_source_builds={}, prepared_source_entries={}, content_hint_scans={}, content_excerpt_scans={}, final_dom_node_scans={}, external_footnote_scans={}, dom_clones={}, dom_clone_bytes={}, fragment_copies={}, strategies_started={}, unique_attempt_plans={}, scoring_nodes={}, cleaned_nodes={}, semantic_source_nodes={}, semantic_operations={}, allocations={}, allocated_bytes={}, deallocations={}, deallocated_bytes={}, peak_live_bytes={}, final_live_bytes={}, final_retained_bytes={}, builder_requested_capacity_bytes={}, builder_final_capacity_bytes={}, builder_peak_capacity_bytes={}, builder_reallocations={}, builder_max_open_depth={}, builder_shrink_bytes={}, builder_ops_capacity={}, builder_ends_capacity={}, builder_open_capacity={}, builder_text_capacity={}, builder_payload_capacity={}, builder_footnotes_capacity={}, builder_footnote_index_capacity={}, json_ld_bytes={}, json_ld_parsed_bytes={}, json_ld_retained_bytes={}",
+        "counters/{group}/{name}: parse_calls={}, source_full_scans={}, source_element_snapshots={}, prepared_source_builds={}, prepared_source_entries={}, content_hint_scans={}, content_excerpt_scans={}, final_dom_node_scans={}, external_footnote_scans={}, dom_clones={}, dom_clone_bytes={}, fragment_copies={}, fast_root_probes={}, fast_root_accepted={}, fast_root_validation_failed={}, fast_root_fallbacks={}, fast_root_scoring_clones_avoided={}, strategies_started={}, unique_attempt_plans={}, scoring_nodes={}, cleaned_nodes={}, semantic_source_nodes={}, semantic_operations={}, allocations={}, allocated_bytes={}, deallocations={}, deallocated_bytes={}, peak_live_bytes={}, final_live_bytes={}, final_retained_bytes={}, builder_requested_capacity_bytes={}, builder_final_capacity_bytes={}, builder_peak_capacity_bytes={}, builder_reallocations={}, builder_max_open_depth={}, builder_shrink_bytes={}, builder_ops_capacity={}, builder_ends_capacity={}, builder_open_capacity={}, builder_text_capacity={}, builder_payload_capacity={}, builder_footnotes_capacity={}, builder_footnote_index_capacity={}, json_ld_bytes={}, json_ld_parsed_bytes={}, json_ld_retained_bytes={}",
         counters.parse_calls,
         counters.source_full_scans,
         counters.source_element_snapshots,
@@ -427,6 +427,11 @@ fn report(
         counters.dom_clones,
         counters.dom_clone_bytes,
         counters.fragment_copies,
+        counters.fast_root_probes,
+        counters.fast_root_accepted,
+        counters.fast_root_validation_failed,
+        counters.fast_root_fallbacks,
+        counters.fast_root_scoring_clones_avoided,
         counters.strategies_started,
         counters.unique_attempt_plans,
         counters.scoring_nodes,
