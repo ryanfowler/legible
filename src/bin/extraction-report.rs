@@ -63,6 +63,7 @@ fn main() {
             &html,
             legible::Extractor::builder().diagnostics(true).build(),
             None,
+            None,
         );
     }
     let html = generated_page("json-ld", 250_000);
@@ -75,7 +76,81 @@ fn main() {
             .retain_structured_data(true)
             .build(),
         None,
+        None,
     );
+    // Keep the normal phase and allocation report free of diagnostics. Run a
+    // second pass when strategy and winner details are needed.
+    for (name, html, url) in real_world_fixtures() {
+        report(
+            "real-world",
+            name,
+            html,
+            legible::Extractor::default(),
+            None,
+            Some(url),
+        );
+    }
+    for (name, html, url) in real_world_fixtures() {
+        report(
+            "real-world-diagnostics",
+            name,
+            html,
+            legible::Extractor::builder().diagnostics(true).build(),
+            None,
+            Some(url),
+        );
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn real_world_fixtures() -> [(&'static str, &'static str, &'static str); 9] {
+    [
+        (
+            "medium-2",
+            include_str!("../../benches/fixtures/readability-js/medium-2/source.html"),
+            "https://medium.com/@ckirchoff/on-behalf-of-literally-429fab868ca8",
+        ),
+        (
+            "ars-1",
+            include_str!("../../benches/fixtures/readability-js/ars-1/source.html"),
+            "https://arstechnica.com/information-technology/2015/04/just-released-minecraft-exploit-makes-it-easy-to-crash-game-servers/",
+        ),
+        (
+            "heise",
+            include_str!("../../benches/fixtures/readability-js/heise/source.html"),
+            "http://www.heise.de/mac-and-i/meldung/1Password-fuer-Mac-generiert-Einmal-Passwoerter-2596987.html",
+        ),
+        (
+            "nytimes-5",
+            include_str!("../../benches/fixtures/readability-js/nytimes-5/source.html"),
+            "https://www.nytimes.com/es/",
+        ),
+        (
+            "wikipedia-2",
+            include_str!("../../benches/fixtures/readability-js/wikipedia-2/source.html"),
+            "https://en.wikipedia.org/wiki/New_Zealand",
+        ),
+        (
+            "yahoo-2",
+            include_str!("../../benches/fixtures/readability-js/yahoo-2/source.html"),
+            "https://us.yahoo.com/news/",
+        ),
+        (
+            "buzzfeed-1",
+            include_str!("../../benches/fixtures/readability-js/buzzfeed-1/source.html"),
+            "http://www.buzzfeed.com/markdistefano/diet-pills-burns-up",
+        ),
+        (
+            "engadget",
+            include_str!("../../benches/fixtures/readability-js/engadget/source.html"),
+            "https://www.engadget.com/2017/11/03/xbox-one-x-review/",
+        ),
+        (
+            "guardian-1",
+            include_str!("../../benches/fixtures/readability-js/guardian-1/source.html"),
+            "https://www.theguardian.com/environment/2019/jan/03/what-is-the-sea-telling-us-maori-tribes-fearful-over-whale-strandings",
+        ),
+    ]
 }
 
 #[cfg(feature = "bench-instrumentation")]
@@ -207,6 +282,7 @@ fn report_fixture(fixture: Fixture) {
         fixture.html,
         fixture.extractor,
         Some(fixture.expected),
+        None,
     );
 }
 
@@ -217,18 +293,27 @@ fn report(
     html: &str,
     extractor: legible::Extractor,
     expected: Option<ExpectedFixture>,
+    url: Option<&str>,
 ) {
     legible::instrumentation::reset();
-    let result = extractor.extract(html, Some("https://example.com/articles/measure"));
+    let result = extractor.extract(html, url.or(Some("https://example.com/articles/measure")));
     let rendered_bytes = result.as_ref().map_or(0, |page| {
         page.html().len() + page.markdown().len() + page.text().len()
     });
     let snapshot = legible::instrumentation::snapshot();
-    let (winner, attempts, attempt_names) = result
+    let (mut winner, attempts, attempt_names) = result
         .as_ref()
         .ok()
         .and_then(|page| page.diagnostics())
-        .map_or(("error", 0, String::new()), |diagnostics| {
+        .map_or_else(
+            || {
+                if result.is_ok() {
+                    ("ok", 0, "not-collected".to_owned())
+                } else {
+                    ("error", 0, String::new())
+                }
+            },
+            |diagnostics| {
             let winner = match diagnostics.selected_strategy {
                 legible::ExtractionStrategyInfo::Normal => "normal",
                 legible::ExtractionStrategyInfo::RelaxedCleanup => "relaxed-cleanup",
@@ -286,8 +371,12 @@ fn report(
                     "unexpected specialized extractor for {name}"
                 );
             }
-            (winner, diagnostics.attempts.len(), attempts)
-        });
+                (winner, diagnostics.attempts.len(), attempts)
+            },
+        );
+    if winner == "error" && result.is_ok() {
+        winner = "ok";
+    }
     if let Some(expected) = expected {
         if let Err(error) = &result {
             panic!("fixture {name} failed: {error:?}");

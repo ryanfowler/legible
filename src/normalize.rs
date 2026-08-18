@@ -150,10 +150,11 @@ pub(crate) fn adjacent_lead_media(dom: &Dom, root: NodeId) -> Option<NodeId> {
 
 pub(crate) fn adopt_external_footnotes(
     definitions: &crate::document::ExternalFootnoteDefinitions,
+    source: &Dom,
     fragment: &mut Dom,
     fragment_root: NodeId,
 ) {
-    crate::document::adopt_external_footnotes(definitions, fragment, fragment_root);
+    crate::document::adopt_external_footnotes(definitions, source, fragment, fragment_root);
 }
 
 pub(crate) fn collect_external_footnotes(

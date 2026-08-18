@@ -6,9 +6,11 @@ use crate::diagnostics::{
 use crate::document::{Document, OperationKind, SemanticItemView as Item};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::prepared::{PreparedSource, SourceFlags};
+#[cfg(test)]
+use crate::scoring::get_or_compute_stats_excluding;
 use crate::scoring::{
     get_link_density_cached, get_normalized_inner_text, get_or_compute_stats,
-    get_or_compute_stats_excluding,
+    stats_from_prepared_entries,
 };
 #[cfg(test)]
 use crate::scoring::{has_hidden_utility_class_for_discovery, has_static_hidden_marker};
@@ -54,6 +56,7 @@ impl ContentMetrics {
         source: &PreparedSource,
         root: NodeId,
         relax_static_visibility: bool,
+        include_semantic_counts: bool,
     ) -> Self {
         let Some(range) = source.subtree_range(root) else {
             return Self::default();
@@ -116,7 +119,7 @@ impl ContentMetrics {
                     && has_primary_region
                     && !in_primary_region[entry.node.index()];
         }
-        Self::measure_filtered_prepared(dom, root, source, &excluded)
+        Self::measure_filtered_prepared(dom, root, source, &excluded, include_semantic_counts)
     }
 
     #[cfg(test)]
@@ -324,19 +327,27 @@ impl ContentMetrics {
         root: NodeId,
         source: &PreparedSource,
         excluded: &[bool],
+        include_semantic_counts: bool,
     ) -> Self {
-        let mut store = NodeStateStore::new();
-        store.enable_link_lengths();
-        let text = get_or_compute_stats_excluding(dom, root, &mut store, excluded);
-        let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
-        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
         let Some(range) = source.subtree_range(root) else {
-            return metrics;
+            return Self::default();
         };
         let entries = &source.entries[range];
-        let mut included_nodes = Vec::with_capacity(source.element_count.min(entries.len()) + 1);
-        if !excluded.get(root.index()).copied().unwrap_or(false) {
-            included_nodes.push(root);
+        let (text, weighted_link_chars, link_text_chars) =
+            stats_from_prepared_entries(dom, entries, root, excluded);
+        let link_density = if text.text_length == 0 {
+            0.0
+        } else {
+            (weighted_link_chars / f64::from(text.text_length)).clamp(0.0, 1.0)
+        };
+        let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
+        metrics.link_text_chars = link_text_chars;
+        let mut included_nodes = include_semantic_counts
+            .then(|| Vec::with_capacity(source.element_count.min(entries.len()) + 1));
+        if !excluded.get(root.index()).copied().unwrap_or(false)
+            && let Some(nodes) = &mut included_nodes
+        {
+            nodes.push(root);
         }
         let mut excluded_depth = None;
         for entry in entries.iter().filter(|entry| entry.is_element()) {
@@ -353,20 +364,22 @@ impl ContentMetrics {
                 excluded_depth = Some(entry.depth);
                 continue;
             }
-            included_nodes.push(entry.node);
-            metrics.count_structure(entry.tag);
-            if entry.tag == Some(Tag::A) {
-                metrics.link_text_chars = metrics.link_text_chars.saturating_add(
-                    get_or_compute_stats_excluding(dom, entry.node, &mut store, excluded)
-                        .text_length as usize,
-                );
+            if let Some(nodes) = &mut included_nodes {
+                nodes.push(entry.node);
             }
+            metrics.count_structure(entry.tag);
         }
-        let (references, definitions, expressions) =
-            crate::document::semantic_normalization_counts_for_nodes(dom, root, &included_nodes);
-        metrics.footnote_reference_count = references;
-        metrics.footnote_definition_count = definitions;
-        metrics.math_count = expressions;
+        if let Some(included_nodes) = included_nodes {
+            let (references, definitions, expressions) =
+                crate::document::semantic_normalization_counts_for_nodes(
+                    dom,
+                    root,
+                    &included_nodes,
+                );
+            metrics.footnote_reference_count = references;
+            metrics.footnote_definition_count = definitions;
+            metrics.math_count = expressions;
+        }
         metrics
     }
 

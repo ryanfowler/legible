@@ -14,6 +14,7 @@ use crate::scoring::{
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Reusable traversal and scratch storage for one selected fragment.
@@ -779,7 +780,7 @@ fn is_tracking_image(dom: &Dom, id: NodeId) -> bool {
 
 fn is_placeholder_image(dom: &Dom, id: NodeId) -> bool {
     dom.attr(id, AttrName::Src).is_some_and(|src| {
-        src.to_ascii_lowercase().contains("placeholder")
+        contains_ascii_case_insensitive(src, "placeholder")
             || parse_b64_data_url(src).is_some_and(|(end, _)| src.len().saturating_sub(end) < 133)
     })
 }
@@ -1058,7 +1059,7 @@ pub(crate) fn hard_cleanup_in_workspace(
             && dom.attr(node, AttrName::Class).is_some_and(|classes| {
                 classes.split_ascii_whitespace().any(|class| {
                     class.eq_ignore_ascii_case("skip-link")
-                        || class.to_ascii_lowercase().starts_with("skip-to-")
+                        || starts_ascii_case_insensitive(class, "skip-to-")
                 })
             });
         let utility_visibility = has_hidden_utility_class(dom, node) && !accessible_skip_link;
@@ -1183,6 +1184,76 @@ pub(crate) fn heuristic_cleanup(
     );
 }
 
+fn populate_heuristic_link_counts(dom: &Dom, snapshot: &[(NodeId, u32)], link_counts: &mut [u8]) {
+    for &(node, _) in snapshot.iter().rev() {
+        link_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::A));
+        for child in dom.element_children(node) {
+            link_counts[node.index()] =
+                link_counts[node.index()].saturating_add(link_counts[child.index()]);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_heuristic_aggregates(
+    dom: &Dom,
+    snapshot: &[(NodeId, u32)],
+    link_counts: &mut [u8],
+    has_controls: &mut [bool],
+    has_images: &mut [bool],
+    has_two_images: &mut [bool],
+    has_forms: &mut [bool],
+    has_social_links: &mut [bool],
+    has_action_urls: &mut [bool],
+) {
+    for &(node, _) in snapshot.iter().rev() {
+        let tag = dom.tag(node);
+        link_counts[node.index()] = u8::from(tag == Some(Tag::A));
+        has_controls[node.index()] = matches!(
+            tag,
+            Some(Tag::Input | Tag::Textarea | Tag::Select | Tag::Button)
+        );
+        has_images[node.index()] = tag == Some(Tag::Img);
+        has_two_images[node.index()] = false;
+        has_forms[node.index()] = tag == Some(Tag::Form);
+        has_social_links[node.index()] = tag == Some(Tag::A)
+            && dom.attr(node, AttrName::Href).is_some_and(|href| {
+                ["facebook.", "twitter.", "x.com/", "linkedin.", "reddit."]
+                    .iter()
+                    .any(|needle| contains_ascii_case_insensitive(href, needle))
+            });
+        has_action_urls[node.index()] = tag == Some(Tag::A)
+            && dom.attr(node, AttrName::Href).is_some_and(|href| {
+                contains_ascii_case_insensitive(href, "/comments")
+                    || contains_ascii_case_insensitive(href, "action=share")
+                    || contains_ascii_case_insensitive(href, "/reply")
+                    || contains_ascii_case_insensitive(href, "dialog=")
+            });
+        let mut image_count = usize::from(has_images[node.index()]);
+        for child in dom.element_children(node) {
+            link_counts[node.index()] =
+                link_counts[node.index()].saturating_add(link_counts[child.index()]);
+            has_controls[node.index()] |= has_controls[child.index()];
+            image_count = image_count.saturating_add(if has_two_images[child.index()] {
+                2
+            } else {
+                usize::from(has_images[child.index()])
+            });
+            has_forms[node.index()] |= has_forms[child.index()];
+            has_social_links[node.index()] |= has_social_links[child.index()];
+            has_action_urls[node.index()] |= has_action_urls[child.index()];
+        }
+        has_images[node.index()] = image_count > 0;
+        has_two_images[node.index()] = image_count >= 2;
+        if tag == Some(Tag::Other)
+            && dom.attr_by_local_name(node, "action").is_some()
+            && node_name(dom, node).contains("newsletter-form")
+        {
+            has_forms[node.index()] = true;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn heuristic_cleanup_in_workspace(
     dom: &mut Dom,
@@ -1199,28 +1270,36 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     let mut scratch = workspace.take_scratch();
     scratch.bytes.resize(dom.len(), 0);
     scratch.bytes.fill(0);
-    scratch.bits.resize(dom.len().saturating_mul(2), false);
+    scratch.bits.resize(dom.len().saturating_mul(9), false);
     scratch.bits.fill(false);
-    let (discovered_boundaries, inspected_subscription) = scratch.bits.split_at_mut(dom.len());
+    let (discovered_boundaries, bits) = scratch.bits.split_at_mut(dom.len());
+    let (inspected_subscription, bits) = bits.split_at_mut(dom.len());
+    let (has_controls, bits) = bits.split_at_mut(dom.len());
+    let (has_images, bits) = bits.split_at_mut(dom.len());
+    let (has_two_images, bits) = bits.split_at_mut(dom.len());
+    let (has_forms, bits) = bits.split_at_mut(dom.len());
+    let (has_social_links, has_action_urls) = bits.split_at_mut(dom.len());
     let link_counts = &mut scratch.bytes[..dom.len()];
     store.clear_stats();
     store.enable_link_lengths();
     get_or_compute_stats(dom, root, store);
 
-    // Count links once. Discovery uses the capped index instead of rescanning
-    // each related-content subtree for links.
+    // Count links once. The byte index saturates at 255. All cleanup
+    // classifiers use threshold checks, and the main classifier gets a useful
+    // count instead of the old per-subtree rescans.
     {
         let snapshot = workspace.elements_with_depth();
-        for &(node, _) in snapshot {
-            link_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::A));
-        }
-        for &(node, _) in snapshot.iter().rev() {
-            if let Some(parent) = dom.parent(node) {
-                link_counts[parent.index()] = link_counts[parent.index()]
-                    .saturating_add(link_counts[node.index()])
-                    .min(3);
-            }
-        }
+        populate_heuristic_aggregates(
+            dom,
+            snapshot,
+            link_counts,
+            has_controls,
+            has_images,
+            has_two_images,
+            has_forms,
+            has_social_links,
+            has_action_urls,
+        );
         let mut table_depths = SmallVec::<[u32; 8]>::new();
         for &(node, depth) in snapshot {
             while table_depths
@@ -1269,6 +1348,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     if changed {
         workspace.invalidate();
         store.clear_stats();
+        workspace.ensure_snapshot(dom, root);
+        populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
     let changed = {
         workspace.ensure_snapshot(dom, root);
@@ -1287,6 +1368,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     if changed {
         workspace.invalidate();
         store.clear_stats();
+        workspace.ensure_snapshot(dom, root);
+        populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
     let changed = {
         workspace.ensure_snapshot(dom, root);
@@ -1299,6 +1382,17 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     }
     workspace.ensure_snapshot(dom, root);
     let snapshot = workspace.elements_with_depth();
+    populate_heuristic_aggregates(
+        dom,
+        snapshot,
+        link_counts,
+        has_controls,
+        has_images,
+        has_two_images,
+        has_forms,
+        has_social_links,
+        has_action_urls,
+    );
     let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
     let protected_masks = snapshot
         .iter()
@@ -1340,26 +1434,14 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             continue;
         }
         let stats = get_or_compute_stats(dom, node, store);
-        let text = get_inner_text(dom, node, text_buffer).to_ascii_lowercase();
+        get_inner_text(dom, node, text_buffer);
+        text_buffer.make_ascii_lowercase();
+        let text = text_buffer.trim();
         let name = node_name(dom, node);
-        let links = dom
-            .descendants(node)
-            .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
-            .count();
-        let controls = dom
-            .descendants(node)
-            .filter(|&descendant| {
-                matches!(
-                    dom.tag(descendant),
-                    Some(Tag::Input | Tag::Textarea | Tag::Select | Tag::Button)
-                )
-            })
-            .count();
-        let images = dom
-            .descendants(node)
-            .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
-            .take(4)
-            .count();
+        let links = usize::from(link_counts[node.index()]);
+        let controls = usize::from(has_controls[node.index()]);
+        let images =
+            usize::from(has_images[node.index()]) + usize::from(has_two_images[node.index()]);
         let protected = protected_masks.as_ref().map_or_else(
             || {
                 dom.descendants(node)
@@ -1380,16 +1462,10 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 near_content_end(dom, node, root, store),
             )
         };
-        let has_form = dom.tag(node) == Some(Tag::Form)
-            || dom.descendants(node).any(|descendant| {
-                dom.tag(descendant) == Some(Tag::Form)
-                    || dom.tag(descendant) == Some(Tag::Other)
-                        && dom.attr_by_local_name(descendant, "action").is_some()
-                        && node_name(dom, descendant).contains("newsletter-form")
-            });
+        let has_form = has_forms[node.index()];
         let metrics = PeripheralMetrics {
             name: &name,
-            text: &text,
+            text,
             stats,
             links,
             controls,
@@ -1403,18 +1479,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let related = is_related_content(dom, node, &metrics);
 
         let social_name = contains_any(&name, &["share", "social", "sharedaddy"]);
-        let social_links = dom
-            .descendants(node)
-            .filter(|&descendant| {
-                dom.tag(descendant) == Some(Tag::A)
-                    && dom.attr(descendant, AttrName::Href).is_some_and(|href| {
-                        contains_any(
-                            &href.to_ascii_lowercase(),
-                            &["facebook.", "twitter.", "x.com/", "linkedin.", "reddit."],
-                        )
-                    })
-            })
-            .count();
+        let social_links = usize::from(has_social_links[node.index()]);
         let social = social_name && (social_links > 0 || links >= 2) && short;
 
         let signup = is_newsletter_cta(&metrics);
@@ -1429,8 +1494,10 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let documentation_toc = dom
             .attr_by_local_name(node, "aria-label")
             .is_some_and(|label| {
-                let label = label.trim().to_ascii_lowercase();
-                label == "on this page" || label == "table of contents" || label == "contents"
+                equals_any_ascii_case_insensitive(
+                    label.trim(),
+                    &["on this page", "table of contents", "contents"],
+                )
             })
             || contains_any(
                 &name,
@@ -1463,8 +1530,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
 
         let advertisement =
             strong_ad_name(&name) && short && (links > 0 || stats.text_length < 100);
-        let consent = contains_any(
-            &format!("{name} {text}"),
+        let consent = contains_name_or_text(
+            &name,
+            text,
             &["cookie consent", "cookie-banner", "consent-banner"],
         ) && short;
         let account = contains_any(&name, &["login", "sign-in", "signin"])
@@ -1487,17 +1555,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             "answer this",
         ]
         .iter()
-        .any(|label| text.trim() == *label || text.contains(&format!("{label} ")));
-        let action_url = dom.descendants(node).any(|descendant| {
-            dom.tag(descendant) == Some(Tag::A)
-                && dom.attr(descendant, AttrName::Href).is_some_and(|href| {
-                    let href = href.to_ascii_lowercase();
-                    href.contains("/comments")
-                        || href.contains("action=share")
-                        || href.contains("/reply")
-                        || href.contains("dialog=")
-                })
-        });
+        .any(|label| text == *label || contains_followed_by_space(text, label));
+        let action_url = has_action_urls[node.index()];
         let interaction_name = contains_any(
             &name,
             &[
@@ -1699,11 +1758,13 @@ pub(crate) fn remove_global_chrome_in_workspace(
         let at_start = near_content_start(dom, node, root, store);
         let at_end = near_content_end(dom, node, root, store);
         let adjacent_content = has_substantive_content_sibling(dom, node, store);
-        let text = get_normalized_inner_text(dom, node, &mut text_buffer).to_ascii_lowercase();
+        get_normalized_inner_text(dom, node, &mut text_buffer);
+        text_buffer.make_ascii_lowercase();
+        let text = text_buffer.trim();
 
         let metrics = ChromeMetrics {
             name: &name,
-            text: &text,
+            text,
             stats,
             links,
             link_density,
@@ -1807,10 +1868,9 @@ fn own_meaningful_media(dom: &Dom, node: NodeId) -> bool {
         && dom.attr_by_local_name(node, "alt").is_some_and(|alt| {
             let alt = alt.trim();
             alt.chars().count() >= 12
-                && !contains_any(
-                    &alt.to_ascii_lowercase(),
-                    &["logo", "icon", "avatar", "placeholder"],
-                )
+                && !["logo", "icon", "avatar", "placeholder"]
+                    .iter()
+                    .any(|needle| contains_ascii_case_insensitive(alt, needle))
         })
 }
 
@@ -1827,9 +1887,16 @@ fn is_brand_identity_link(dom: &Dom, link: NodeId) -> bool {
         .filter_map(|attribute| dom.attr(link, attribute))
         .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
         .any(|token| {
-            matches!(
-                token.to_ascii_lowercase().as_str(),
-                "brand" | "branding" | "logo" | "masthead" | "wordmark" | "sitetitle"
+            equals_any_ascii_case_insensitive(
+                token,
+                &[
+                    "brand",
+                    "branding",
+                    "logo",
+                    "masthead",
+                    "wordmark",
+                    "sitetitle",
+                ],
             )
         });
     if named {
@@ -1845,9 +1912,9 @@ fn is_brand_identity_link(dom: &Dom, link: NodeId) -> bool {
     let mut text_buffer = String::new();
     let text = get_normalized_inner_text(dom, link, &mut text_buffer);
     (2..=80).contains(&text.chars().count())
-        && !matches!(
-            text.trim().to_ascii_lowercase().as_str(),
-            "home" | "menu" | "menu button" | "skip to content"
+        && !equals_any_ascii_case_insensitive(
+            text.trim(),
+            &["home", "menu", "menu button", "skip to content"],
         )
 }
 
@@ -1921,9 +1988,9 @@ fn has_meaningful_heading(dom: &Dom, node: NodeId) -> bool {
         ) && {
             let mut heading = String::new();
             dom.append_normalized_text_limited(descendant, &mut heading, 256);
-            !matches!(
-                heading.trim().to_ascii_lowercase().as_str(),
-                "menu" | "navigation" | "sections" | "contents" | "on this page"
+            !equals_any_ascii_case_insensitive(
+                heading.trim(),
+                &["menu", "navigation", "sections", "contents", "on this page"],
             )
         }
     })
@@ -2076,9 +2143,9 @@ fn is_content_relative_navigation(dom: &Dom, node: NodeId) -> bool {
 
 fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
     let labelled = dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
-        matches!(
-            label.trim().to_ascii_lowercase().as_str(),
-            "on this page" | "table of contents" | "contents" | "toc"
+        equals_any_ascii_case_insensitive(
+            label.trim(),
+            &["on this page", "table of contents", "contents", "toc"],
         )
     });
     let named = contains_any(
@@ -2092,10 +2159,7 @@ fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
         ) && {
             let mut text = String::new();
             dom.append_normalized_text_limited(descendant, &mut text, 128);
-            matches!(
-                text.trim().to_ascii_lowercase().as_str(),
-                "contents" | "on this page"
-            )
+            equals_any_ascii_case_insensitive(text.trim(), &["contents", "on this page"])
         }
     });
     let links: Vec<_> = dom
@@ -2118,12 +2182,10 @@ fn has_pricing_heading(dom: &Dom, node: NodeId) -> bool {
         ) && {
             let mut heading = String::new();
             dom.append_normalized_text_limited(descendant, &mut heading, 256);
-            let heading = heading.trim().to_ascii_lowercase();
-            heading == "pricing"
-                || heading == "plans"
-                || heading == "pricing plans"
-                || heading.ends_with(" plans")
-                || heading.contains("pricing")
+            let heading = heading.trim();
+            equals_any_ascii_case_insensitive(heading, &["pricing", "plans", "pricing plans"])
+                || ends_ascii_case_insensitive(heading, " plans")
+                || contains_ascii_case_insensitive(heading, "pricing")
         }
     })
 }
@@ -2161,12 +2223,12 @@ fn is_within_pricing_region(dom: &Dom, node: NodeId) -> bool {
                     ) && {
                         let mut heading = String::new();
                         dom.append_normalized_text_limited(child, &mut heading, 256);
-                        let heading = heading.trim().to_ascii_lowercase();
-                        heading == "pricing"
-                            || heading == "plans"
-                            || heading == "pricing plans"
-                            || heading.ends_with(" plans")
-                            || heading.contains("pricing")
+                        let heading = heading.trim();
+                        equals_any_ascii_case_insensitive(
+                            heading,
+                            &["pricing", "plans", "pricing plans"],
+                        ) || ends_ascii_case_insensitive(heading, " plans")
+                            || contains_ascii_case_insensitive(heading, "pricing")
                     }
                 })
         })
@@ -2238,41 +2300,41 @@ fn is_footer_identity_node(dom: &Dom, node: NodeId) -> bool {
 
 fn is_footer_identity_text(text: &str) -> bool {
     let text = text.trim();
-    let lower = text.to_ascii_lowercase();
-    let ui_label = matches!(
-        lower.as_str(),
-        "home"
-            | "privacy"
-            | "privacy policy"
-            | "terms"
-            | "terms of service"
-            | "contact"
-            | "contact us"
-            | "copyright"
-            | "cookie policy"
-            | "sitemap"
-            | "imprint"
-            | "presskit"
-            | "faq"
-            | "rss"
-            | "jobs"
-            | "subscribe"
-            | "newsletter"
-            | "follow us"
-            | "learn more"
-            | "read more"
-            | "view details"
-            | "more"
-    );
-    let boilerplate = contains_any(
-        &lower,
+    let ui_label = equals_any_ascii_case_insensitive(
+        text,
         &[
-            "all rights reserved",
+            "home",
+            "privacy",
             "privacy policy",
+            "terms",
             "terms of service",
+            "contact",
+            "contact us",
+            "copyright",
             "cookie policy",
+            "sitemap",
+            "imprint",
+            "presskit",
+            "faq",
+            "rss",
+            "jobs",
+            "subscribe",
+            "newsletter",
+            "follow us",
+            "learn more",
+            "read more",
+            "view details",
+            "more",
         ],
     );
+    let boilerplate = [
+        "all rights reserved",
+        "privacy policy",
+        "terms of service",
+        "cookie policy",
+    ]
+    .iter()
+    .any(|needle| contains_ascii_case_insensitive(text, needle));
     (2..=100).contains(&text.chars().count())
         && !ui_label
         && !boilerplate
@@ -2332,7 +2394,8 @@ fn remove_explicit_peripheral_sections(
         let stats = get_or_compute_stats(dom, node, store);
         let mut text = String::new();
         append_bounded_text(dom, node, 256, &mut text);
-        let text = text.trim().to_ascii_lowercase();
+        text.make_ascii_lowercase();
+        let text = text.trim();
         let action_link = dom.descendants(node).any(|descendant| {
             dom.attr(descendant, AttrName::Href)
                 .is_some_and(|href| !href.trim().is_empty())
@@ -2355,7 +2418,7 @@ fn remove_explicit_peripheral_sections(
             && image
             && text.contains("the latest from ")
             && text.contains("monthly")
-            && contains_any(&text, &["news", "updates", "newsletter"]);
+            && contains_any(text, &["news", "updates", "newsletter"]);
         let collection = stats.text_length < 800
             && name.contains("related-content-tout")
             && action_link
@@ -2369,7 +2432,7 @@ fn remove_explicit_peripheral_sections(
             && stats.text_length < 500
             && (audio || action_link)
             && contains_any(
-                &text,
+                text,
                 &[
                     "listen to article",
                     "listen to this article",
@@ -2377,7 +2440,7 @@ fn remove_explicit_peripheral_sections(
                 ],
             );
         let meta_artifact =
-            article_meta && stats.text_length < 100 && text.contains('|') && looks_like_date(&text);
+            article_meta && stats.text_length < 100 && text.contains('|') && looks_like_date(text);
         let share = share_controls
             && stats.text_length < 500
             && text.starts_with("share")
@@ -2727,7 +2790,8 @@ fn remove_direct_peripheral_children(
             text.push(' ');
         }
         let name = node_name(dom, child);
-        if has_newsletter_evidence(&name, &text.to_ascii_lowercase()) {
+        text.make_ascii_lowercase();
+        if has_newsletter_evidence(&name, text.as_str()) {
             remove[start..=index].fill(true);
         }
     }
@@ -2781,31 +2845,32 @@ fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
     }
     let mut text = String::new();
     dom.append_normalized_text_limited(node, &mut text, 128);
-    let text = text.trim().to_ascii_lowercase();
-    if matches!(
-        text.as_str(),
-        "related articles"
-            | "related content"
-            | "related posts"
-            | "related stories"
-            | "recommended"
-            | "recommended reading"
-            | "read next"
-            | "next steps"
-            | "more stories"
-            | "more articles"
-            | "more posts"
-            | "you may also like"
-            | "you might also like"
-            | "collection"
-    ) || text
-        .strip_prefix("more from ")
-        .is_some_and(|suffix| !suffix.is_empty() && suffix.split_whitespace().count() <= 6)
+    let text = text.trim();
+    if equals_any_ascii_case_insensitive(
+        text,
+        &[
+            "related articles",
+            "related content",
+            "related posts",
+            "related stories",
+            "recommended",
+            "recommended reading",
+            "read next",
+            "next steps",
+            "more stories",
+            "more articles",
+            "more posts",
+            "you may also like",
+            "you might also like",
+            "collection",
+        ],
+    ) || starts_ascii_case_insensitive(text, "more from ")
+        && text["more from ".len()..].split_whitespace().count() <= 6
     {
         RelatedHeadingSignal::Strong
-    } else if matches!(
-        text.as_str(),
-        "related" | "further reading" | "see also" | "read more"
+    } else if equals_any_ascii_case_insensitive(
+        text,
+        &["related", "further reading", "see also", "read more"],
     ) {
         RelatedHeadingSignal::Ambiguous
     } else {
@@ -2895,7 +2960,7 @@ fn mark_subscription_boundary(
         let name = node_name(dom, candidate);
         let mut text = String::new();
         append_bounded_text(dom, candidate, 128, &mut text);
-        let text = text.to_ascii_lowercase();
+        text.make_ascii_lowercase();
         if !has_newsletter_evidence(&name, &text) {
             continue;
         }
@@ -2906,7 +2971,8 @@ fn mark_subscription_boundary(
             ) && {
                 let mut child_text = String::new();
                 dom.append_normalized_text(child, &mut child_text);
-                has_newsletter_cta_text(&child_text.to_ascii_lowercase())
+                child_text.make_ascii_lowercase();
+                has_newsletter_cta_text(&child_text)
             }
         });
         if has_explicit_newsletter_name(&name) || has_direct_copy {
@@ -2924,10 +2990,7 @@ fn is_structural_breadcrumb_candidate(dom: &Dom, node: NodeId, inside_table: boo
                 .any(|role| role.eq_ignore_ascii_case("navigation"))
         });
     if dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
-        matches!(
-            label.trim().to_ascii_lowercase().as_str(),
-            "breadcrumb" | "breadcrumbs"
-        )
+        equals_any_ascii_case_insensitive(label.trim(), &["breadcrumb", "breadcrumbs"])
     }) {
         return true;
     }
@@ -3018,11 +3081,9 @@ fn is_structural_peripheral_candidate(
         }
         let mut text = String::new();
         dom.append_normalized_text_limited(descendant, &mut text, 256);
-        let text = text.trim().to_ascii_lowercase();
-        text == "collection"
-            || text == "company profile"
-            || text == "founders"
-            || text.starts_with("the latest from ")
+        let text = text.trim();
+        equals_any_ascii_case_insensitive(text, &["collection", "company profile", "founders"])
+            || starts_ascii_case_insensitive(text, "the latest from ")
     });
 
     structural_name || job_name || promotional_heading
@@ -3032,10 +3093,7 @@ fn has_breadcrumb_name(dom: &Dom, node: NodeId, name: &str) -> bool {
     name.split(|character: char| !character.is_ascii_alphanumeric())
         .any(|token| matches!(token, "breadcrumb" | "breadcrumbs"))
         || dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
-            matches!(
-                label.trim().to_ascii_lowercase().as_str(),
-                "breadcrumb" | "breadcrumbs"
-            )
+            equals_any_ascii_case_insensitive(label.trim(), &["breadcrumb", "breadcrumbs"])
         })
 }
 
@@ -3194,10 +3252,7 @@ fn is_profile_field_label(dom: &Dom, node: NodeId) -> bool {
     let mut text = String::new();
     dom.append_normalized_text_limited(node, &mut text, 128);
     let text = text.trim().trim_end_matches(':').trim();
-    matches!(
-        text.to_ascii_lowercase().as_str(),
-        "founded" | "batch" | "team size" | "status"
-    )
+    equals_any_ascii_case_insensitive(text, &["founded", "batch", "team size", "status"])
 }
 
 fn is_job_profile_content(
@@ -3451,8 +3506,9 @@ fn remove_contextual_boilerplate_in_workspace(
         {
             continue;
         }
-        let text = get_inner_text(dom, node, text_buffer);
-        let text = text.trim().to_ascii_lowercase();
+        get_inner_text(dom, node, text_buffer);
+        text_buffer.make_ascii_lowercase();
+        let text = text_buffer.trim();
         if text.is_empty() {
             continue;
         }
@@ -3467,7 +3523,7 @@ fn remove_contextual_boilerplate_in_workspace(
         let at_start = near_content_start(dom, node, root, store);
         let at_end = near_content_end(dom, node, root, store);
 
-        let reading_time = is_reading_time_label(&text)
+        let reading_time = is_reading_time_label(text)
             && (at_start
                 || contains_any(
                     &name,
@@ -3480,11 +3536,11 @@ fn remove_contextual_boilerplate_in_workspace(
                     ],
                 ));
         let advertisement = matches!(
-            text.as_str(),
+            text,
             "advertisement" | "advertisement continues below" | "sponsored" | "sponsored content"
         ) && (at_start || at_end || strong_ad_name(&name));
         let action = matches!(
-            text.as_str(),
+            text,
             "share"
                 | "share this"
                 | "share this article"
@@ -3761,27 +3817,95 @@ fn near_content_start(
     }
 }
 
-fn node_name(dom: &Dom, node: NodeId) -> String {
-    let mut value = String::new();
-    if dom.tag(node) == Some(Tag::Other)
-        && let Some(name) = dom.qual_name(node)
-    {
-        value.push_str(name.local.as_ref());
+fn node_name<'a>(dom: &'a Dom, node: NodeId) -> Cow<'a, str> {
+    let tag_name = (dom.tag(node) == Some(Tag::Other))
+        .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
+        .flatten();
+    let class = dom.attr(node, AttrName::Class);
+    let id = dom.attr(node, AttrName::Id);
+    let mut count = 0;
+    let mut single = None;
+    for part in [tag_name, class, id].into_iter().flatten() {
+        count += 1;
+        single = Some(part);
     }
-    for name in [AttrName::Class, AttrName::Id] {
-        if let Some(part) = dom.attr(node, name) {
-            if !value.is_empty() {
-                value.push(' ');
-            }
-            value.push_str(part);
+    if count == 0 {
+        return Cow::Borrowed("");
+    }
+    if count == 1
+        && let Some(part) = single
+        && part.is_ascii()
+        && part.bytes().all(|byte| !byte.is_ascii_uppercase())
+    {
+        return Cow::Borrowed(part);
+    }
+
+    let mut value = String::new();
+    for (index, part) in [tag_name, class, id].into_iter().flatten().enumerate() {
+        if index > 0 {
+            value.push(' ');
         }
+        value.push_str(part);
     }
     value.make_ascii_lowercase();
-    value
+    Cow::Owned(value)
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
+}
+
+fn contains_name_or_text(name: &str, text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| {
+        text.contains(needle)
+            || name.contains(needle)
+            || needle.split_once(' ').is_some_and(|(first, rest)| {
+                let Some(prefix) = name.strip_suffix(first) else {
+                    return false;
+                };
+                prefix
+                    .chars()
+                    .next_back()
+                    .is_none_or(|character| !character.is_ascii_alphanumeric())
+                    && text.starts_with(rest)
+            })
+    })
+}
+
+fn contains_followed_by_space(text: &str, needle: &str) -> bool {
+    text.match_indices(needle)
+        .any(|(index, _)| text[index + needle.len()..].starts_with(' '))
+}
+
+fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && value.as_bytes().windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(&left, &right)| left.eq_ignore_ascii_case(&right))
+        })
+}
+
+fn starts_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn ends_ascii_case_insensitive(value: &str, suffix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix.as_bytes()))
+}
+
+fn equals_any_ascii_case_insensitive(value: &str, values: &[&str]) -> bool {
+    values
+        .iter()
+        .any(|expected| value.eq_ignore_ascii_case(expected))
 }
 
 fn starts_with_any(value: &str, needles: &[&str]) -> bool {

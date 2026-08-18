@@ -2,6 +2,7 @@
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
 use crate::constants::{has_byline, is_div_to_p_elem, is_phrasing_elem, is_unlikely_role, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
+use crate::prepared::SourceEntry;
 use smallvec::SmallVec;
 
 /// A Readability-derived score for a possible content root.
@@ -197,6 +198,81 @@ fn append_stats(a: &mut NodeStats, b: &NodeStats) {
 }
 pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
     get_or_compute_stats_excluding(dom, id, store, &[])
+}
+
+/// Computes source statistics from an existing preorder index.
+///
+/// Source quality measurement runs before candidate scoring and does not need
+/// the general cache. Combining direct children from the prepared index avoids
+/// the stack frames and dense cache epoch checks used by the general-purpose
+/// subtree query.
+pub(crate) fn stats_from_prepared_entries(
+    dom: &Dom,
+    entries: &[SourceEntry],
+    root: NodeId,
+    excluded: &[bool],
+) -> (NodeStats, f64, usize) {
+    let storage_len = entries
+        .iter()
+        .map(|entry| entry.node.index().saturating_add(1))
+        .max()
+        .unwrap_or_else(|| root.index().saturating_add(1));
+    let mut stats = vec![NodeStats::default(); storage_len];
+    let mut link_lengths = vec![0.0_f64; storage_len];
+    let mut link_text_lengths = vec![0_u32; storage_len];
+    let mut skipped = vec![false; entries.len()];
+    let mut excluded_depth = None;
+    for (position, entry) in entries.iter().enumerate() {
+        if excluded_depth.is_some_and(|depth| entry.depth > depth) {
+            skipped[position] = true;
+            continue;
+        }
+        excluded_depth = None;
+        if excluded.get(entry.node.index()).copied().unwrap_or(false) {
+            skipped[position] = true;
+            excluded_depth = Some(entry.depth);
+        }
+    }
+    let mut position = entries.len();
+    while position > 0 {
+        position -= 1;
+        let entry = &entries[position];
+        let node = entry.node;
+        if skipped[position] {
+            continue;
+        }
+        let mut value = dom
+            .text_node(node)
+            .map_or_else(NodeStats::default, stats_for_text);
+        let mut link_length = 0.0;
+        let mut link_text_length = 0_u32;
+        for child in dom.children(node) {
+            if excluded.get(child.index()).copied().unwrap_or(false) {
+                continue;
+            }
+            append_stats(&mut value, &stats[child.index()]);
+            link_length += link_lengths[child.index()];
+            link_text_length = link_text_length.saturating_add(link_text_lengths[child.index()]);
+        }
+        value.set_has_sentence_end(value.has_sentence_break() || value.ends_with_dot());
+        if dom.tag(node) == Some(Tag::A) {
+            link_text_length = value.text_length;
+            link_length = value.text_length as f64
+                * if dom.attr(node, AttrName::Href).is_some_and(is_hash_url) {
+                    0.3
+                } else {
+                    1.0
+                };
+        }
+        stats[node.index()] = value;
+        link_lengths[node.index()] = link_length;
+        link_text_lengths[node.index()] = link_text_length;
+    }
+    (
+        stats[root.index()],
+        link_lengths[root.index()],
+        link_text_lengths[root.index()] as usize,
+    )
 }
 
 /// Computes text statistics while omitting the roots marked in `excluded`.
@@ -964,20 +1040,14 @@ pub(crate) fn has_hidden_utility_class(dom: &Dom, id: NodeId) -> bool {
             .split_ascii_whitespace()
             .any(is_responsive_display_show);
         let visibility_show = classes.split_ascii_whitespace().any(|class| {
-            class
-                .to_ascii_lowercase()
-                .split_once(':')
-                .is_some_and(|(variant, value)| {
-                    is_responsive_breakpoint(variant) && value == "visible"
-                })
+            class.split_once(':').is_some_and(|(variant, value)| {
+                is_responsive_breakpoint(variant) && value.eq_ignore_ascii_case("visible")
+            })
         });
         let accessibility_show = classes.split_ascii_whitespace().any(|class| {
-            class
-                .to_ascii_lowercase()
-                .split_once(':')
-                .is_some_and(|(variant, value)| {
-                    is_responsive_breakpoint(variant) && value == "not-sr-only"
-                })
+            class.split_once(':').is_some_and(|(variant, value)| {
+                is_responsive_breakpoint(variant) && value.eq_ignore_ascii_case("not-sr-only")
+            })
         });
         classes.split_ascii_whitespace().any(|class| {
             if ["hidden", "d-none", "display-none", "u-hidden"]
@@ -999,17 +1069,19 @@ pub(crate) fn has_hidden_utility_class(dom: &Dom, id: NodeId) -> bool {
 }
 
 fn is_responsive_breakpoint(value: &str) -> bool {
-    matches!(value, "sm" | "md" | "lg" | "xl" | "xxl" | "2xl")
+    ["sm", "md", "lg", "xl", "xxl", "2xl"]
+        .iter()
+        .any(|expected| value.eq_ignore_ascii_case(expected))
 }
 
 fn is_responsive_display_show(class: &str) -> bool {
-    let class = class.to_ascii_lowercase();
     let tailwind = class.split_once(':').is_some_and(|(variant, display)| {
         is_responsive_breakpoint(variant) && is_visible_display_utility(display)
     });
     let bootstrap = class
-        .strip_prefix("d-")
-        .and_then(|class| class.split_once('-'))
+        .split_once('-')
+        .filter(|(prefix, _)| prefix.eq_ignore_ascii_case("d"))
+        .and_then(|(_, class)| class.split_once('-'))
         .is_some_and(|(breakpoint, display)| {
             is_responsive_breakpoint(breakpoint) && is_visible_display_utility(display)
         });
@@ -1017,18 +1089,19 @@ fn is_responsive_display_show(class: &str) -> bool {
 }
 
 fn is_visible_display_utility(value: &str) -> bool {
-    matches!(
-        value,
-        "block"
-            | "inline"
-            | "inline-block"
-            | "flex"
-            | "inline-flex"
-            | "grid"
-            | "inline-grid"
-            | "table"
-            | "contents"
-    )
+    [
+        "block",
+        "inline",
+        "inline-block",
+        "flex",
+        "inline-flex",
+        "grid",
+        "inline-grid",
+        "table",
+        "contents",
+    ]
+    .iter()
+    .any(|expected| value.eq_ignore_ascii_case(expected))
 }
 
 pub(crate) fn has_hidden_utility_class_for_discovery(dom: &Dom, id: NodeId) -> bool {
@@ -1110,45 +1183,45 @@ fn has_hidden_style(style: &str) -> bool {
 }
 
 fn valid_display_visibility(value: &str) -> Option<bool> {
-    let value = value.to_ascii_lowercase();
-    if value == "none" {
+    if value.eq_ignore_ascii_case("none") {
         return Some(true);
     }
-    matches!(
-        value.as_str(),
-        "initial"
-            | "inherit"
-            | "unset"
-            | "revert"
-            | "revert-layer"
-            | "block"
-            | "inline"
-            | "inline-block"
-            | "flow-root"
-            | "run-in"
-            | "list-item"
-            | "flex"
-            | "inline-flex"
-            | "grid"
-            | "inline-grid"
-            | "table"
-            | "inline-table"
-            | "table-row"
-            | "table-cell"
-            | "table-caption"
-            | "table-row-group"
-            | "table-header-group"
-            | "table-footer-group"
-            | "table-column"
-            | "table-column-group"
-            | "contents"
-            | "ruby"
-            | "ruby-base"
-            | "ruby-text"
-            | "ruby-base-container"
-            | "ruby-text-container"
-            | "-webkit-box"
-    )
+    [
+        "initial",
+        "inherit",
+        "unset",
+        "revert",
+        "revert-layer",
+        "block",
+        "inline",
+        "inline-block",
+        "flow-root",
+        "run-in",
+        "list-item",
+        "flex",
+        "inline-flex",
+        "grid",
+        "inline-grid",
+        "table",
+        "inline-table",
+        "table-row",
+        "table-cell",
+        "table-caption",
+        "table-row-group",
+        "table-header-group",
+        "table-footer-group",
+        "table-column",
+        "table-column-group",
+        "contents",
+        "ruby",
+        "ruby-base",
+        "ruby-text",
+        "ruby-base-container",
+        "ruby-text-container",
+        "-webkit-box",
+    ]
+    .iter()
+    .any(|expected| value.eq_ignore_ascii_case(expected))
     .then_some(false)
 }
 
