@@ -751,6 +751,22 @@ fn lower_complex_document(
                 text
             };
             let whitespace_only = text.chars().all(char::is_whitespace);
+            if whitespace_only {
+                let structural_parent = scope.parent.is_some_and(|parent| {
+                    Some(parent) == scope.list
+                        || Some(parent) == scope.table
+                        || Some(parent) == scope.row
+                        || Some(parent) == scope.definition_list
+                });
+                let preserve = !structural_parent
+                    && builder.previous_child_is_inline(scope.parent)
+                    && (scope.preserve_isolated_whitespace
+                        || meaningful_inline_separator(dom, node, &facts));
+                if !preserve {
+                    continue;
+                }
+            }
+            let text = if whitespace_only { " " } else { text };
             if !whitespace_only
                 && !text.chars().next().is_some_and(char::is_whitespace)
                 && (inline_word_boundary_before(dom, node, &facts)
@@ -758,26 +774,14 @@ fn lower_complex_document(
             {
                 builder.append_normalized_prose(scope.parent, " ")?;
             }
-            let structural_parent = scope.parent.is_some_and(|parent| {
-                Some(parent) == scope.list
-                    || Some(parent) == scope.table
-                    || Some(parent) == scope.row
-                    || Some(parent) == scope.definition_list
-            });
-            if !(whitespace_only
-                && (structural_parent
-                    || (!scope.preserve_isolated_whitespace
-                        && !meaningful_inline_separator(dom, node, &facts))))
-            {
-                let list_item = if scope.parent.is_some() && scope.parent == scope.list {
-                    Some(builder.emit(scope.parent, SemanticKind::ListItem)?)
-                } else {
-                    None
-                };
-                builder.append_prose(list_item.or(scope.parent), text)?;
-                if let Some(list_item) = list_item {
-                    builder.close(list_item)?;
-                }
+            let list_item = if scope.parent.is_some() && scope.parent == scope.list {
+                Some(builder.emit(scope.parent, SemanticKind::ListItem)?)
+            } else {
+                None
+            };
+            builder.append_prose(list_item.or(scope.parent), text)?;
+            if let Some(list_item) = list_item {
+                builder.close(list_item)?;
             }
             continue;
         }

@@ -934,7 +934,6 @@ impl<'a> ContentExtractor<'a> {
                 let selected_link_only_semantic_root = exact_root.is_none()
                     && strategy != ExtractionStrategy::RelaxedVisibility
                     && visibility_root_semantic
-                    && semantic_root_complete_candidate
                     && is_link_only_semantic_root(result_metrics);
                 let link_only_semantic_root = selected_link_only_semantic_root
                     || strategy == ExtractionStrategy::BodyFallback
@@ -1302,7 +1301,6 @@ impl<'a> ContentExtractor<'a> {
             let selected_link_only_semantic_root = exact_root.is_none()
                 && strategy != ExtractionStrategy::RelaxedVisibility
                 && visibility_root_semantic
-                && semantic_root_complete_candidate
                 && is_link_only_semantic_root(result_metrics);
             let link_only_semantic_root = selected_link_only_semantic_root
                 || strategy == ExtractionStrategy::BodyFallback
@@ -3053,7 +3051,7 @@ impl<'a> ContentExtractor<'a> {
         } else {
             let mut table_nodes = Vec::new();
             mark_data_tables_from_snapshot(dom, dom.root(), snapshot, store, &mut table_nodes);
-            CandidateFeatureIndex::new(dom, store, snapshot, candidates, scoring_view)
+            CandidateFeatureIndex::new(dom, store, source, snapshot, candidates, scoring_view)
         };
         feature_index.prepare_text_cache(store);
         if let Some(scoring_view) = scoring_view {
@@ -4081,13 +4079,14 @@ fn semantic_root_is_complete(metrics: ContentMetrics) -> bool {
     const MIN_TEXT_CHARS: usize = 500;
     const MIN_WORDS: usize = 30;
 
+    let structured_content = (metrics.code_block_count > 0 && metrics.code_bytes >= 64)
+        || (metrics.table_count > 0 && metrics.non_empty_table_cell_count >= 2);
     let coherent_document = metrics.paragraph_count >= 2
         || metrics.heading_count >= 2
-        || metrics.code_block_count > 0
-        || metrics.table_count > 0
+        || structured_content
         || metrics.figure_count > 0;
     metrics.text_chars >= MIN_TEXT_CHARS
-        && metrics.word_count >= MIN_WORDS
+        && (metrics.word_count >= MIN_WORDS || structured_content && metrics.word_count >= 10)
         && coherent_document
         && metrics.link_density <= 0.45
         && metrics.link_text_chars < metrics.text_chars
@@ -4840,6 +4839,63 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 );
             }
         }
+    }
+
+    #[test]
+    fn itemprop_article_body_is_promoted_even_when_nested_content_ranks_higher() {
+        let prose = "The article explains the patent history, the technical scope, and the practical effect for Linux users with verified detail. ".repeat(8);
+        let shell = "Navigation account recommendations newsletter settings ".repeat(80);
+        let html = format!(
+            "<body><header>{shell}</header><main><article><h1>Patent history</h1><section id='article-body' itemprop='articleBody'><p>{prose}</p><h2>Background</h2><p>{prose}</p></section></article></main></body>"
+        );
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        let attempt = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+
+        assert_eq!(attempt.selected_root.id.as_deref(), Some("article-body"));
+        assert_eq!(
+            attempt.selected_root.selection_reason,
+            crate::RootSelectionReasonInfo::ArticleBody
+        );
+        assert!(page.text().contains("patent history"));
+        assert!(!page.text().contains("Navigation account recommendations"));
+    }
+
+    #[test]
+    fn semantic_root_completeness_keeps_code_and_table_documents() {
+        let shell = "Dashboard navigation recommendations account settings ".repeat(140);
+        let code = "df = df.filter(pl.col(\"value\") > 10).select([\"name\", \"value\"])\n";
+        let html = format!(
+            "<body><aside>{shell}</aside><main><article><h1>DataFrame reference</h1><p>This reference explains the complete workflow for loading, transforming, and validating a DataFrame.</p><h2>Filtering</h2><p>Use the following expression to keep rows that match the required value threshold.</p><pre><code>{}{}</code></pre><h2>Options</h2><table><thead><tr><th>Name</th><th>Description</th></tr></thead><tbody><tr><td>value</td><td>Numeric filter value</td></tr><tr><td>name</td><td>Output column name</td></tr></tbody></table></article></main></body>",
+            code,
+            code.repeat(3)
+        );
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        let attempt = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+
+        assert_eq!(attempt.selected_root.tag.as_deref(), Some("article"));
+        assert!(attempt.result.code_block_count > 0);
+        assert!(attempt.result.table_count > 0);
+        assert!(page.text().contains("complete workflow"));
+        assert!(page.text().contains("Numeric filter value"));
+        assert!(!page.text().contains("Dashboard navigation recommendations"));
     }
 
     #[test]

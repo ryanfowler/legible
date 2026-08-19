@@ -26,7 +26,9 @@ pub(crate) struct ContentMetrics {
     pub(crate) heading_count: usize,
     pub(crate) list_item_count: usize,
     pub(crate) code_block_count: usize,
+    pub(crate) code_bytes: usize,
     pub(crate) table_count: usize,
+    pub(crate) non_empty_table_cell_count: usize,
     pub(crate) figure_count: usize,
     pub(crate) image_count: usize,
     pub(crate) footnote_reference_count: usize,
@@ -38,6 +40,13 @@ pub(crate) struct ContentMetrics {
     alphabetic_chars: usize,
     digit_chars: usize,
     contextual_structure: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SourceStructure {
+    tag: Option<Tag>,
+    code_bytes: usize,
+    non_empty_table_cell: bool,
 }
 
 impl ContentMetrics {
@@ -137,9 +146,15 @@ impl ContentMetrics {
             .then(|| Vec::with_capacity(semantic_capacity));
         let mut normal_excluded_depth = None;
         let mut relaxed_excluded_depth = None;
-        for entry in entries.iter().filter(|entry| entry.is_element()) {
+        let element_entries: Vec<_> = entries.iter().filter(|entry| entry.is_element()).collect();
+        let structures: Vec<_> = element_entries
+            .iter()
+            .map(|entry| Self::source_structure_from_entry(entry))
+            .collect();
+        for (entry, structure) in element_entries.into_iter().zip(structures) {
             Self::observe_source_structure(
                 entry,
+                structure,
                 &normal_excluded,
                 &mut normal_excluded_depth,
                 &mut normal,
@@ -149,6 +164,7 @@ impl ContentMetrics {
             {
                 Self::observe_source_structure(
                     entry,
+                    structure,
                     excluded,
                     &mut relaxed_excluded_depth,
                     metrics,
@@ -180,6 +196,7 @@ impl ContentMetrics {
 
     fn observe_source_structure(
         entry: &crate::prepared::SourceEntry,
+        structure: SourceStructure,
         excluded: &[bool],
         excluded_depth: &mut Option<u32>,
         metrics: &mut Self,
@@ -193,7 +210,7 @@ impl ContentMetrics {
             *excluded_depth = Some(entry.depth);
             return;
         }
-        metrics.count_structure(entry.tag);
+        metrics.count_structure(structure);
         if let Some(nodes) = &mut included_nodes {
             nodes.push(entry.node);
         }
@@ -300,7 +317,9 @@ impl ContentMetrics {
             heading_count: stats.heading_count,
             list_item_count: stats.list_item_count,
             code_block_count: stats.code_block_count,
+            code_bytes: stats.raw_code_bytes,
             table_count: stats.table_count,
+            non_empty_table_cell_count: stats.non_empty_table_cell_count,
             figure_count: stats.figure_count,
             image_count: stats.image_count,
             footnote_reference_count: stats.footnote_reference_count,
@@ -352,7 +371,7 @@ impl ContentMetrics {
         let link_density = get_link_density_cached(dom, root, text.text_length, &mut store);
         let mut metrics = Self::from_text_stats(text, link_density, text.has_alphanumeric());
         for node in std::iter::once(root).chain(dom.descendants(root)) {
-            metrics.count_structure(dom.tag(node));
+            metrics.count_structure(Self::source_structure(dom, node));
             if dom.tag(node) == Some(Tag::A) {
                 metrics.link_text_chars = metrics.link_text_chars.saturating_add(
                     get_or_compute_stats(dom, node, &mut store).text_length as usize,
@@ -391,7 +410,7 @@ impl ContentMetrics {
                 continue;
             }
             included_nodes.push(node);
-            metrics.count_structure(dom.tag(node));
+            metrics.count_structure(Self::source_structure(dom, node));
             if dom.tag(node) == Some(Tag::A) {
                 metrics.link_text_chars = metrics.link_text_chars.saturating_add(
                     get_or_compute_stats_excluding(dom, node, &mut store, excluded).text_length
@@ -424,15 +443,52 @@ impl ContentMetrics {
         }
     }
 
-    fn count_structure(&mut self, tag: Option<Tag>) {
+    fn source_structure(dom: &Dom, node: NodeId) -> SourceStructure {
+        let tag = dom.tag(node);
+        SourceStructure {
+            tag,
+            code_bytes: if tag == Some(Tag::Pre) {
+                dom.text(node).len()
+            } else {
+                0
+            },
+            non_empty_table_cell: matches!(tag, Some(Tag::Td | Tag::Th))
+                && dom
+                    .text(node)
+                    .chars()
+                    .any(|character| !character.is_whitespace()),
+        }
+    }
+
+    fn source_structure_from_entry(entry: &crate::prepared::SourceEntry) -> SourceStructure {
+        SourceStructure {
+            tag: entry.tag,
+            code_bytes: if entry.tag == Some(Tag::Pre) {
+                entry.subtree_text_bytes as usize
+            } else {
+                0
+            },
+            non_empty_table_cell: matches!(entry.tag, Some(Tag::Td | Tag::Th))
+                && entry.flags.contains(SourceFlags::HAS_NON_WHITESPACE_TEXT),
+        }
+    }
+
+    fn count_structure(&mut self, structure: SourceStructure) {
+        let tag = structure.tag;
         match tag {
             Some(Tag::P) => self.paragraph_count += 1,
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
                 self.heading_count += 1
             }
             Some(Tag::Li) => self.list_item_count += 1,
-            Some(Tag::Pre) => self.code_block_count += 1,
+            Some(Tag::Pre) => {
+                self.code_block_count += 1;
+                self.code_bytes = self.code_bytes.saturating_add(structure.code_bytes);
+            }
             Some(Tag::Table) => self.table_count += 1,
+            Some(Tag::Td | Tag::Th) if structure.non_empty_table_cell => {
+                self.non_empty_table_cell_count += 1;
+            }
             Some(Tag::Figure) => self.figure_count += 1,
             Some(Tag::Img) => self.image_count += 1,
             Some(Tag::Math) => self.math_count += 1,

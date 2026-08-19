@@ -66,7 +66,9 @@ pub(crate) struct CandidateFeatures {
     pub(crate) heading_count: u32,
     pub(crate) list_item_count: u32,
     pub(crate) code_block_count: u32,
+    pub(crate) code_bytes: u32,
     pub(crate) table_count: u32,
+    pub(crate) non_empty_table_cell_count: u32,
     pub(crate) figure_count: u32,
     pub(crate) image_count: u32,
     pub(crate) link_text_chars: f64,
@@ -608,7 +610,7 @@ pub(crate) fn has_article_body_itemprop(dom: &Dom, node: NodeId) -> bool {
 pub(crate) fn semantic_root_has_complete_candidate(
     dom: &Dom,
     candidates: &CandidateSet,
-    ranked: &[RankedCandidate],
+    _ranked: &[RankedCandidate],
     selected: NodeId,
     body: NodeId,
 ) -> bool {
@@ -618,10 +620,30 @@ pub(crate) fn semantic_root_has_complete_candidate(
     let Some(root_features) = candidates.get(selected).map(|candidate| candidate.features) else {
         return false;
     };
-    let covered_strongest = ranked
+    let structured_content = (root_features.code_block_count > 0 && root_features.code_bytes >= 64)
+        || (root_features.table_count > 0 && root_features.non_empty_table_cell_count >= 2);
+    let coherent_document = root_features.paragraph_count >= 2
+        || root_features.heading_count >= 2
+        || structured_content;
+    if root_features.text_chars < 500
+        || root_features.word_count < 30
+        || !coherent_document
+        || root_features.link_density > 0.45
+        || root_features.link_text_chars >= f64::from(root_features.text_chars)
+    {
+        return false;
+    }
+    // Compare the root with its strongest contained candidate. A page-level
+    // readability winner can be unrelated chrome, so it must not make a
+    // complete semantic root look incomplete.
+    let covered_strongest = candidates
         .iter()
-        .filter(|candidate| candidate.node != body)
-        .find_map(|candidate| candidates.get(candidate.node))
+        .filter(|candidate| {
+            candidate.node != selected
+                && candidate.node != body
+                && is_descendant_of(dom, candidate.node, selected)
+        })
+        .max_by_key(|candidate| candidate.features.text_chars)
         .is_none_or(|candidate| {
             u64::from(root_features.text_chars).saturating_mul(100)
                 >= u64::from(candidate.features.text_chars).saturating_mul(80)
@@ -862,24 +884,24 @@ fn competitive_score(score: f64, top_score: f64) -> bool {
 fn preferred_article_body_root(
     dom: &Dom,
     candidates: &CandidateSet,
-    ranked: &[RankedCandidate],
+    _ranked: &[RankedCandidate],
     selected: NodeId,
     body: NodeId,
 ) -> Option<NodeId> {
     let selected_chars = candidates
         .get(selected)
         .map_or(0, |candidate| candidate.features.text_chars);
-    ranked
+    candidates
         .iter()
         .filter(|candidate| {
-            candidate.score.is_finite()
-                && candidates
-                    .get(candidate.node)
-                    .is_some_and(|candidate| has_article_body_itemprop(dom, candidate.node))
-                && (selected == body || is_descendant_of(dom, candidate.node, selected))
+            has_article_body_itemprop(dom, candidate.node)
+                && (selected == body
+                    || candidate.node == selected
+                    || is_descendant_of(dom, selected, candidate.node)
+                    || is_descendant_of(dom, candidate.node, selected))
         })
         .filter_map(|candidate| {
-            let features = candidates.get(candidate.node)?.features;
+            let features = candidate.features;
             let coherent = features.text_chars >= 120
                 && (features.sentence_end_count > 0 || features.structured_block_count() > 0)
                 && features.link_density <= 0.4;
