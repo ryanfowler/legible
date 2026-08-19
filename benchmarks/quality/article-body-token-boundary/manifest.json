@@ -1,0 +1,12 @@
+{
+  "id": "article-body-token-boundary",
+  "category": "news-article",
+  "source_url": "https://example.test/article-body-token-boundary",
+  "page_shape": "article",
+  "must_include": [
+    "complete measured result",
+    "every device in the controlled test group"
+  ],
+  "must_exclude": ["unrelated metadata"],
+  "notes": "The articleBody itemprop must be matched as a token and not as a substring of notArticleBody."
+}

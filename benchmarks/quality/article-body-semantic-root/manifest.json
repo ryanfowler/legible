@@ -1,0 +1,12 @@
+{
+  "id": "article-body-semantic-root",
+  "category": "news-article",
+  "source_url": "https://example.test/article-body-semantic-root",
+  "page_shape": "article",
+  "must_include": [
+    "A quiet laptop fan reduces noise",
+    "six hours of repeated builds"
+  ],
+  "must_exclude": ["Recommended laptops", "Subscribe to our newsletter"],
+  "notes": "A section with itemprop=articleBody contains the complete article while the enclosing shell contains recommendation chrome."
+}

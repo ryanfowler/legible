@@ -1,0 +1,11 @@
+{
+  "id": "empty-application-shell",
+  "category": "application-markup",
+  "source_url": "https://example.test/empty-application-shell",
+  "page_shape": "application",
+  "must_include": [],
+  "must_exclude": ["Enable JavaScript to continue"],
+  "expected_failure": true,
+  "expected_error": "NoContent",
+  "notes": "An empty client-rendered application shell must remain a NoContent result."
+}
