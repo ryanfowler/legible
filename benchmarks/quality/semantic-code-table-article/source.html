@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <body>
+    <header><nav>Docs API Blog Community Search</nav></header>
+    <main>
+      <article>
+        <h1>Working with grouped data</h1>
+        <p>Grouped data lets a report compare several measurements without copying the source rows.</p>
+        <p>The examples below use the same input table and preserve the original column names.</p>
+
+        <div class="section-wrapper">
+          <h2>Create a grouped result</h2>
+          <div class="example-wrapper">
+            <pre><code>result = frame.group_by("team").agg(
+    total=pl.col("value").sum(),
+    average=pl.col("value").mean(),
+)</code></pre>
+          </div>
+          <p>The grouped result contains one row for each team and keeps the aggregate values numeric.</p>
+        </div>
+
+        <div class="section-wrapper">
+          <h2>Result columns</h2>
+          <table>
+            <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td>team</td><td>The grouping key from the source data.</td></tr>
+              <tr><td>total</td><td>The sum of values in the group.</td></tr>
+              <tr><td>average</td><td>The arithmetic mean of values in the group.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="section-wrapper">
+          <h2>Filter the result</h2>
+          <div class="example-wrapper">
+            <pre><code>filtered = result.filter(pl.col("total") &gt; 10)</code></pre>
+          </div>
+          <p>Filtering after aggregation keeps the operation readable and avoids changing the input frame.</p>
+        </div>
+      </article>
+    </main>
+    <footer>Related tutorials Pricing Terms</footer>
+  </body>
+</html>

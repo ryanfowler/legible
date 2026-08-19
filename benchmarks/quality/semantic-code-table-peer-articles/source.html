@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+  <body>
+    <header><nav>Docs API Blog Community Search</nav></header>
+    <main>
+      <article>
+        <h1>Primary API reference</h1>
+        <p>The grouped query keeps values numeric while it combines rows by team.</p>
+        <h2>Build the grouped result</h2>
+        <pre><code>result = frame.group_by("team").agg(
+    total=pl.col("value").sum(),
+    average=pl.col("value").mean(),
+)</code></pre>
+        <h2>Result columns</h2>
+        <table>
+          <tr><th>Column</th><th>Meaning</th></tr>
+          <tr><td>team</td><td>The grouping key.</td></tr>
+          <tr><td>total</td><td>The sum of values.</td></tr>
+        </table>
+        <pre><code>filtered = result.filter(pl.col("total") &gt; 10)</code></pre>
+      </article>
+      <article>
+        <h2>Related API reference</h2>
+        <p>The related reference describes a separate operation and remains a peer document.</p>
+      </article>
+    </main>
+    <footer>Pricing Terms Subscribe for updates</footer>
+  </body>
+</html>

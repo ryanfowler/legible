@@ -1,0 +1,18 @@
+{
+  "id": "semantic-code-table-article",
+  "category": "code-heavy",
+  "source_url": "https://example.test/semantic-code-table-article",
+  "page_shape": "document",
+  "must_include": [
+    "Grouped data lets a report compare",
+    "Filtering after aggregation",
+    "Column",
+    "Meaning"
+  ],
+  "must_exclude": ["Related tutorials", "Pricing Terms"],
+  "expected": {
+    "code_blocks_min": 2,
+    "tables_min": 1
+  },
+  "notes": "A semantic article must remain complete when code blocks and a data table form the primary document structure."
+}

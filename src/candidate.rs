@@ -738,6 +738,18 @@ pub(crate) fn select_content_root<'a>(
             && !candidates
                 .get(selected)
                 .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
+            && let Some(boundary) =
+                complete_semantic_boundary(dom, candidates, ranked, selected, body)
+        {
+            selected = boundary;
+            branches.clear();
+            reason = RootSelectionReason::CompleteAncestor;
+        }
+
+        if branches.is_empty()
+            && !candidates
+                .get(selected)
+                .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
             && let Some(boundary) = balanced_semantic_boundary(dom, candidates, selected)
         {
             reason = if is_descendant_of(dom, boundary, selected) {
@@ -988,6 +1000,113 @@ fn more_specific_candidate(
         })
         .min_by_key(|(_, chars)| *chars)
         .map(|(node, _)| node)
+}
+
+/// Returns a semantic boundary that contains a complete document even when
+/// ranking promoted one of its code, table, or prose descendants. The
+/// predicate uses the candidate features already calculated for this attempt.
+/// It does not scan or serialize the source DOM.
+fn complete_semantic_boundary(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    selected: NodeId,
+    body: NodeId,
+) -> Option<NodeId> {
+    if is_article_semantic_node(dom, selected) {
+        return None;
+    }
+    let body_text_chars = candidates
+        .get(body)
+        .map_or(0, |candidate| candidate.features.text_chars);
+    let roots: SmallVec<[NodeId; 8]> = dom
+        .ancestors(selected)
+        .take(8)
+        .filter(|&root| candidates.is_authoritative_semantic(dom, root))
+        .filter(|&root| {
+            candidates.get(root).is_some_and(|candidate| {
+                let features = candidate.features;
+                features.code_block_count >= 2 || features.table_count >= 1
+            })
+        })
+        .collect();
+    if roots.is_empty() {
+        return None;
+    }
+
+    let independent_article_counts: SmallVec<[usize; 8]> = roots
+        .iter()
+        .map(|&root| {
+            if is_main_semantic_root(dom, root) {
+                article_branch_count(dom, root)
+            } else {
+                0
+            }
+        })
+        .collect();
+
+    roots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(root_index, root)| {
+            let features = candidates.get(root)?.features;
+            let structural_content = features.code_block_count >= 2 || features.table_count >= 1;
+            let coherent_document = features.heading_count >= 2
+                && (features.paragraph_count >= 2 || structural_content)
+                || structural_content && features.heading_count >= 1;
+            let meaningful_text = features.text_chars >= 500 && features.word_count >= 30;
+            let page_coverage = body_text_chars == 0
+                || u64::from(features.text_chars).saturating_mul(100)
+                    >= u64::from(body_text_chars).saturating_mul(35);
+            let link_share_is_reasonable =
+                features.link_density <= 0.45 || structural_content && features.link_density <= 0.6;
+            let strongest_candidate_is_covered = ranked
+                .first()
+                .and_then(|candidate| candidates.get(candidate.node))
+                .is_none_or(|candidate| {
+                    u64::from(features.text_chars).saturating_mul(100)
+                        >= u64::from(candidate.features.text_chars).saturating_mul(80)
+                });
+            let main_has_article_structure =
+                !is_main_semantic_root(dom, root) || independent_article_counts[root_index] > 0;
+            (meaningful_text
+                && coherent_document
+                && page_coverage
+                && link_share_is_reasonable
+                && strongest_candidate_is_covered
+                && main_has_article_structure
+                && independent_article_counts[root_index] < 2)
+                .then_some(root)
+        })
+        .next()
+}
+
+fn is_main_semantic_root(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::Main)
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| matches_role(roles, "main"))
+}
+
+fn is_article_semantic_node(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::Article)
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| matches_role(roles, "article"))
+}
+
+/// Counts independent article branches under a main-like root. Counting the
+/// direct branches, instead of every nested article node, protects listings
+/// while allowing an article to contain embedded article-shaped markup.
+fn article_branch_count(dom: &Dom, root: NodeId) -> usize {
+    dom.element_children(root)
+        .filter(|&branch| {
+            std::iter::once(branch)
+                .chain(dom.descendants(branch))
+                .any(|node| is_article_semantic_node(dom, node))
+        })
+        .take(2)
+        .count()
 }
 
 /// Corrects local ranking when a semantic boundary has clear completeness or
@@ -2200,6 +2319,262 @@ mod tests {
     }
 
     #[test]
+    fn completeness_keeps_a_large_technical_root_with_linked_structure() {
+        let dom = Dom::parse_document(
+            r#"<body><article id="complete"><div id="focused"><h2>Focused API</h2><p>Generated reference details.</p><pre>example()</pre></div></article></body>"#,
+        )
+        .unwrap();
+        let complete = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("complete"))
+            .unwrap();
+        let focused = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("focused"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(focused, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == body)
+            .unwrap()
+            .features
+            .text_chars = 3_000;
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == complete)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 2_000,
+            word_count: 500,
+            paragraph_count: 4,
+            heading_count: 3,
+            code_block_count: 2,
+            link_density: 0.55,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == focused)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            word_count: 60,
+            paragraph_count: 1,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: focused,
+                score: 100.0,
+                order: 0,
+            }],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, complete);
+        assert_eq!(selected.reason, RootSelectionReason::CompleteAncestor);
+    }
+
+    #[test]
+    fn completeness_does_not_merge_peer_articles() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="listing"><div id="focused"><h2>Focused reference</h2><p>Generated reference details.</p><pre>example()</pre></div><article><h2>First card</h2><p>First article summary.</p></article><article><h2>Second card</h2><p>Second article summary.</p></article></main></body>"#,
+        )
+        .unwrap();
+        let listing = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("listing"))
+            .unwrap();
+        let focused = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("focused"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(focused, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == body)
+            .unwrap()
+            .features
+            .text_chars = 3_000;
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == listing)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 2_000,
+            word_count: 500,
+            paragraph_count: 4,
+            heading_count: 3,
+            code_block_count: 2,
+            link_density: 0.1,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == focused)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            word_count: 60,
+            paragraph_count: 1,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: focused,
+                score: 100.0,
+                order: 0,
+            }],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, focused);
+    }
+
+    #[test]
+    fn completeness_does_not_merge_two_article_cards_when_one_wins() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="listing"><article id="first"><h2>First card</h2><p>First article summary.</p><pre>example()</pre></article><article id="second"><h2>Second card</h2><p>Second article summary.</p></article></main></body>"#,
+        )
+        .unwrap();
+        let listing = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("listing"))
+            .unwrap();
+        let first = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("first"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(first, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == body)
+            .unwrap()
+            .features
+            .text_chars = 3_000;
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == listing)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 2_000,
+            word_count: 500,
+            paragraph_count: 4,
+            heading_count: 3,
+            code_block_count: 2,
+            link_density: 0.1,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == first)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            word_count: 60,
+            paragraph_count: 1,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: first,
+                score: 100.0,
+                order: 0,
+            }],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, first);
+    }
+
+    #[test]
+    fn completeness_does_not_promote_a_chrome_only_main_root() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="chrome"><p>From Wikipedia, the free encyclopedia.</p><div id="focused"><h2>Focused reference</h2><p>Generated reference details.</p><pre>example()</pre></div><section><h2>Data</h2><table><tr><th>Value</th></tr></table></section></main></body>"#,
+        )
+        .unwrap();
+        let chrome = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("chrome"))
+            .unwrap();
+        let focused = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("focused"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(focused, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == body)
+            .unwrap()
+            .features
+            .text_chars = 3_000;
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == chrome)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 2_000,
+            word_count: 500,
+            paragraph_count: 4,
+            heading_count: 3,
+            code_block_count: 2,
+            table_count: 1,
+            link_density: 0.1,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == focused)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            word_count: 60,
+            paragraph_count: 1,
+            heading_count: 1,
+            code_block_count: 2,
+            table_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: focused,
+                score: 100.0,
+                order: 0,
+            }],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, focused);
+    }
+
+    #[test]
     fn root_selection_narrows_a_chrome_wrapper_to_its_article() {
         let dom = Dom::parse_document(
             r#"<body><main id="docs"><nav>Collection</nav><article id="answer"><p>Complete documented answer.</p></article><footer class="feedback">Was this useful?</footer></main></body>"#,
@@ -2338,6 +2713,50 @@ mod tests {
             select_test_root(html, &[("reference", 100.0), ("prose", 98.0)], [],),
             "reference"
         );
+    }
+
+    #[test]
+    fn code_and_table_heavy_semantic_root_remains_complete() {
+        let html = r#"<!doctype html>
+            <html><body>
+                <header><nav>Docs API Blog Community Search</nav></header>
+                <main><article>
+                    <h1>Working with grouped data</h1>
+                    <p>Grouped data lets a report compare several measurements without copying the source rows.</p>
+                    <p>The examples below use the same input table and preserve the original column names.</p>
+                    <h2>Create a grouped result</h2>
+                    <pre><code>result = frame.group_by("team").agg(
+    total=pl.col("value").sum(),
+    average=pl.col("value").mean(),
+)</code></pre>
+                    <p>The grouped result contains one row for each team and keeps the aggregate values numeric.</p>
+                    <h2>Result columns</h2>
+                    <table><thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+                        <tbody><tr><td>team</td><td>The grouping key from the source data.</td></tr>
+                        <tr><td>total</td><td>The sum of values in the group.</td></tr>
+                        <tr><td>average</td><td>The arithmetic mean of values in the group.</td></tr></tbody>
+                    </table>
+                    <h2>Filter the result</h2>
+                    <pre><code>filtered = result.filter(pl.col("total") &gt; 10)</code></pre>
+                    <p>Filtering after aggregation keeps the operation readable and avoids changing the input frame.</p>
+                </article></main>
+                <footer>Related tutorials Pricing Terms</footer>
+            </body></html>"#;
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+        assert!(
+            markdown.contains("Grouped data lets a report compare"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("Filtering after aggregation"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Column"), "{markdown}");
+        assert!(markdown.contains("Meaning"), "{markdown}");
+        assert_eq!(markdown.matches("```").count(), 4, "{markdown}");
+        assert!(!markdown.contains("Related tutorials"), "{markdown}");
+        assert!(!markdown.contains("Pricing Terms"), "{markdown}");
     }
 
     #[test]
