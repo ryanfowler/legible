@@ -947,7 +947,9 @@ struct StructuralCounts {
     headings: u32,
     list_items: u8,
     code_blocks: u32,
+    code_bytes: u32,
     tables: u32,
+    non_empty_table_cells: u32,
     figures: u32,
     images: u8,
     protected_blocks: u8,
@@ -960,7 +962,11 @@ impl StructuralCounts {
         // Eight list items reach the ranking bonus cap.
         self.list_items = self.list_items.saturating_add(other.list_items).min(8);
         self.code_blocks = self.code_blocks.saturating_add(other.code_blocks);
+        self.code_bytes = self.code_bytes.saturating_add(other.code_bytes);
         self.tables = self.tables.saturating_add(other.tables);
+        self.non_empty_table_cells = self
+            .non_empty_table_cells
+            .saturating_add(other.non_empty_table_cells);
         self.figures = self.figures.saturating_add(other.figures);
         self.images = self.images.saturating_add(other.images);
         self.protected_blocks = self.protected_blocks.saturating_add(other.protected_blocks);
@@ -970,7 +976,8 @@ impl StructuralCounts {
 impl CandidateFeatureIndex {
     pub(crate) fn new(
         dom: &Dom,
-        store: &NodeStateStore,
+        store: &mut NodeStateStore,
+        source: Option<&SourceAnalysis>,
         nodes: &[(NodeId, u32)],
         candidates: &CandidateSet,
         scoring_view: Option<&ScoringView>,
@@ -1041,8 +1048,19 @@ impl CandidateFeatureIndex {
                 Tag::P => own.paragraphs = 1,
                 Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => own.headings = 1,
                 Tag::Li => own.list_items = 1,
-                Tag::Pre => own.code_blocks = 1,
+                Tag::Pre => {
+                    own.code_blocks = 1;
+                    own.code_bytes = source.and_then(|source| source.entry(node)).map_or_else(
+                        || u32::try_from(dom.text(node).len()).unwrap_or(u32::MAX),
+                        |entry| entry.subtree_text_bytes,
+                    );
+                }
                 Tag::Table if store.is_data_table(node) == Some(true) => own.tables = 1,
+                Tag::Td | Tag::Th
+                    if get_or_compute_stats(dom, node, store).has_non_whitespace() =>
+                {
+                    own.non_empty_table_cells = 1;
+                }
                 Tag::Figure => own.figures = 1,
                 Tag::Img => own.images = 1,
                 Tag::Blockquote | Tag::Details | Tag::Dl | Tag::Math | Tag::Picture => {
@@ -1136,7 +1154,9 @@ impl CandidateFeatureIndex {
             heading_count: counts.headings,
             list_item_count: u32::from(counts.list_items),
             code_block_count: counts.code_blocks,
+            code_bytes: counts.code_bytes,
             table_count: counts.tables,
+            non_empty_table_cell_count: counts.non_empty_table_cells,
             figure_count: counts.figures,
             image_count: u32::from(counts.images),
             link_text_chars,
@@ -2163,7 +2183,8 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates, None);
+        let index =
+            CandidateFeatureIndex::new(&dom, &mut store, None, &snapshot, &candidates, None);
         index.prepare_text_cache(&mut store);
         let features = index.features(
             &dom,
@@ -2233,7 +2254,8 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates, None);
+        let index =
+            CandidateFeatureIndex::new(&dom, &mut store, None, &snapshot, &candidates, None);
         let features = index.features(
             &dom,
             None,
@@ -2276,7 +2298,8 @@ mod tests {
             &mut store,
             &mut table_nodes,
         );
-        let index = CandidateFeatureIndex::new(&dom, &store, &snapshot, &candidates, None);
+        let index =
+            CandidateFeatureIndex::new(&dom, &mut store, None, &snapshot, &candidates, None);
 
         assert_eq!(index.counts.len(), candidates.iter().count());
         let outer_features = index.features(

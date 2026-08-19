@@ -13,6 +13,7 @@ pub(crate) struct CompileStats {
     pub list_item_count: usize,
     pub code_block_count: usize,
     pub table_count: usize,
+    pub non_empty_table_cell_count: usize,
     pub figure_count: usize,
     pub image_count: usize,
     pub footnote_reference_count: usize,
@@ -115,6 +116,8 @@ pub(crate) struct DocumentStats {
     pub code_block_count: usize,
     /// Number of semantic data tables.
     pub table_count: usize,
+    /// Number of semantic table cells with visible text.
+    pub non_empty_table_cell_count: usize,
     /// Number of semantic figures.
     pub figure_count: usize,
     /// Number of semantic images.
@@ -135,6 +138,8 @@ pub(crate) struct DocumentStats {
     pub digit_chars: usize,
     /// Whether the result contains table-header, code, or math context.
     pub has_contextual_structure: bool,
+    /// Number of bytes in retained raw code blocks.
+    pub raw_code_bytes: usize,
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -627,6 +632,7 @@ pub(crate) fn combine(compile: CompileStats, text: TextStats) -> DocumentStats {
         list_item_count: compile.list_item_count,
         code_block_count: compile.code_block_count,
         table_count: compile.table_count,
+        non_empty_table_cell_count: compile.non_empty_table_cell_count,
         figure_count: compile.figure_count,
         image_count: compile.image_count,
         footnote_reference_count: compile.footnote_reference_count,
@@ -637,6 +643,7 @@ pub(crate) fn combine(compile: CompileStats, text: TextStats) -> DocumentStats {
         alphabetic_chars: text.alphabetic_chars,
         digit_chars: text.digit_chars,
         has_contextual_structure: compile.has_contextual_structure,
+        raw_code_bytes: compile.raw_code_bytes,
     }
 }
 
@@ -712,6 +719,7 @@ mod tests {
                 }),
             )
             .unwrap();
+        builder.append_prose(Some(cell), "Name").unwrap();
         builder.close(cell).unwrap();
         builder.close(row).unwrap();
         builder.close(table).unwrap();
@@ -763,13 +771,14 @@ mod tests {
         let document = builder.finish().unwrap();
         let stats = document.stats();
         assert_eq!(stats.text_length, document.text().chars().count());
-        assert_eq!(stats.word_count, 11);
+        assert_eq!(stats.word_count, 12);
         assert_eq!(stats.link_text_length, 5);
         assert_eq!(stats.paragraph_count, 1);
         assert_eq!(stats.heading_count, 1);
         assert_eq!(stats.list_item_count, 2);
         assert_eq!(stats.code_block_count, 1);
         assert_eq!(stats.table_count, 1);
+        assert_eq!(stats.non_empty_table_cell_count, 1);
         assert_eq!(stats.figure_count, 1);
         assert_eq!(stats.image_count, 1);
         assert_eq!(stats.footnote_reference_count, 1);

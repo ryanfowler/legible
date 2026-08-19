@@ -59,6 +59,7 @@ pub(crate) struct SourceEntry {
     pub(crate) flags: SourceFlags,
     class_weight: i8,
     text_stats_index: u32,
+    pub(crate) subtree_text_bytes: u32,
 }
 
 impl SourceEntry {
@@ -194,6 +195,9 @@ impl SourceAnalysis {
                 flags,
                 class_weight,
                 text_stats_index,
+                subtree_text_bytes: dom
+                    .text_node(node)
+                    .map_or(0, |text| u32::try_from(text.len()).unwrap_or(u32::MAX)),
             });
             candidate_builder.observe(dom, &entries[position]);
             if let Some(slot) = position_by_node.get_mut(node.index()) {
@@ -231,6 +235,18 @@ impl SourceAnalysis {
                 entries[parent_position as usize]
                     .flags
                     .insert(SourceFlags::HAS_NON_WHITESPACE_TEXT);
+            }
+            if let Some(parent) = dom.parent(node)
+                && let Some(parent_position) = position_by_node
+                    .get(parent.index())
+                    .copied()
+                    .filter(|&position| position != NO_POSITION)
+            {
+                let bytes = entries[position].subtree_text_bytes;
+                entries[parent_position as usize].subtree_text_bytes = entries
+                    [parent_position as usize]
+                    .subtree_text_bytes
+                    .saturating_add(bytes);
             }
         }
 

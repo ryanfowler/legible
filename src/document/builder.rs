@@ -285,6 +285,9 @@ impl SemanticTapeBuilder {
         let close = u32::try_from(self.ops.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let frame = self.open.pop().ok_or(BuildError::InvalidParent)?;
         let flags = frame.flags;
+        if operation.kind() == OperationKind::TableCell && flags & super::HAS_VISIBLE_TEXT != 0 {
+            self.compile_stats.non_empty_table_cell_count += 1;
+        }
         self.ops[node.index()].flags = flags;
         push_tracked(
             &mut self.ops,
@@ -734,6 +737,26 @@ impl SemanticTapeBuilder {
                 .and_then(|frame| frame.last_child),
             None => self.last_root_child,
         }
+    }
+
+    pub(crate) fn previous_child_is_inline(&self, parent: Option<DocumentNodeId>) -> bool {
+        let Some(previous) = self.previous_child(parent) else {
+            return false;
+        };
+        matches!(
+            self.ops[previous.index()].kind(),
+            OperationKind::Text
+                | OperationKind::Emphasis
+                | OperationKind::Strong
+                | OperationKind::Strikethrough
+                | OperationKind::InlineCode
+                | OperationKind::Link
+                | OperationKind::Image
+                | OperationKind::HardBreak
+                | OperationKind::FootnoteReference
+                | OperationKind::InlineMath
+                | OperationKind::Media
+        )
     }
 
     fn take_pending_space(&mut self, parent: Option<DocumentNodeId>) -> bool {
