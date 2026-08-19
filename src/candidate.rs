@@ -1067,11 +1067,14 @@ fn complete_semantic_boundary(
                     u64::from(features.text_chars).saturating_mul(100)
                         >= u64::from(candidate.features.text_chars).saturating_mul(80)
                 });
+            let main_has_article_structure =
+                !is_main_semantic_root(dom, root) || independent_article_counts[root_index] > 0;
             (meaningful_text
                 && coherent_document
                 && page_coverage
                 && link_share_is_reasonable
                 && strongest_candidate_is_covered
+                && main_has_article_structure
                 && independent_article_counts[root_index] < 2)
                 .then_some(root)
         })
@@ -2503,6 +2506,72 @@ mod tests {
             [],
         );
         assert_eq!(selected.node, first);
+    }
+
+    #[test]
+    fn completeness_does_not_promote_a_chrome_only_main_root() {
+        let dom = Dom::parse_document(
+            r#"<body><main id="chrome"><p>From Wikipedia, the free encyclopedia.</p><div id="focused"><h2>Focused reference</h2><p>Generated reference details.</p><pre>example()</pre></div><section><h2>Data</h2><table><tr><th>Value</th></tr></table></section></main></body>"#,
+        )
+        .unwrap();
+        let chrome = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("chrome"))
+            .unwrap();
+        let focused = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("focused"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(focused, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == body)
+            .unwrap()
+            .features
+            .text_chars = 3_000;
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == chrome)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 2_000,
+            word_count: 500,
+            paragraph_count: 4,
+            heading_count: 3,
+            code_block_count: 2,
+            table_count: 1,
+            link_density: 0.1,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == focused)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            word_count: 60,
+            paragraph_count: 1,
+            heading_count: 1,
+            code_block_count: 2,
+            table_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: focused,
+                score: 100.0,
+                order: 0,
+            }],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, focused);
     }
 
     #[test]
