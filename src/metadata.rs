@@ -152,6 +152,36 @@ impl StructuredData {
             .flat_map(article_text_values)
     }
 
+    /// Counts structured items that can describe a document or application.
+    /// This is broader than `primary_texts`: an application description is
+    /// useful root evidence even when it is not an article-body hint.
+    pub(crate) fn document_evidence_count(
+        &self,
+        document_title: &str,
+        source_url: Option<&Url>,
+    ) -> usize {
+        self.items
+            .iter()
+            .filter(|item| {
+                let typed = item.get("@type").is_some_and(|kind| {
+                    json_types(kind).any(|kind| {
+                        is_article_type(kind)
+                            || is_general_content_type(kind)
+                            || ["Dataset", "Product", "SoftwareApplication"]
+                                .iter()
+                                .any(|expected| schema_type(kind, expected))
+                    })
+                });
+                let described = ["description", "headline", "name"].iter().any(|field| {
+                    item.get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                });
+                typed && described && structured_item_score(item, document_title, source_url) >= 45
+            })
+            .count()
+    }
+
     fn has_article_item(&self) -> bool {
         self.items.iter().any(|item| {
             item.get("@type")
@@ -3307,6 +3337,23 @@ mod tests {
         let resolved = discover(&dom, &data, "", None, None);
         assert!(resolved.description.is_none());
         assert!(resolved.authors.is_empty());
+    }
+
+    #[test]
+    fn structured_document_evidence_ignores_unrelated_products() {
+        let dom = Dom::parse_document(
+            r#"<script type="application/ld+json">[
+                {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Reference model","description":"Provider and pricing reference."},
+                {"@context":"https://schema.org","@type":"Product","name":"Unrelated recommendation","description":"A recommended product card."}
+            ]</script>"#,
+        )
+        .unwrap();
+        let data = StructuredData::parse(&dom, &ParseBudget::default()).unwrap();
+        let url = Url::parse("https://example.test/reference/model").unwrap();
+        assert_eq!(
+            data.document_evidence_count("Reference model", Some(&url)),
+            1
+        );
     }
 
     #[test]

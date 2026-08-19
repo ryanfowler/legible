@@ -1161,6 +1161,7 @@ impl CandidateFeatureIndex {
             image_count: u32::from(counts.images),
             link_text_chars,
             link_density,
+            digit_chars: text.digit_chars,
             sentence_end_count: text.sentence_end_count,
             comma_count: text.comma_count,
             protected_block_count: u32::from(counts.protected_blocks),
@@ -1218,6 +1219,30 @@ impl CandidateFeatures {
         };
         let name_evidence = self.positive_name_score * 0.001 - negative_name_penalty;
 
+        // Dashboard charts and metric cards often expose every value as a
+        // paragraph-like wrapper. They can outscore a complete document on
+        // readability even though they have no prose or section structure.
+        // Treat this shape as weak document evidence. A real document with
+        // headings, sentences, or tables remains unaffected.
+        let numeric_metric_shape = self.digit_chars >= self.word_count / 5;
+        let repeated_metric_shape = self.sentence_end_count
+            >= self
+                .paragraph_count
+                .saturating_add(self.paragraph_count / 2);
+        let repeated_metric_penalty = if self.paragraph_count >= 40
+            && self.heading_count == 0
+            && self.comma_count <= 2
+            && self.word_count <= self.paragraph_count.saturating_mul(4)
+            && self.digit_chars > 0
+            && (numeric_metric_shape || repeated_metric_shape)
+            && self.table_count == 0
+            && self.code_block_count == 0
+        {
+            (f64::from(self.paragraph_count) * 2.0).min(160.0)
+        } else {
+            0.0
+        };
+
         self.readability_score
             + self.semantic_prior
             + text_evidence
@@ -1226,6 +1251,7 @@ impl CandidateFeatures {
             + link_volume_evidence
             + name_evidence
             - link_penalty
+            - repeated_metric_penalty
     }
 }
 
@@ -2345,6 +2371,27 @@ mod tests {
         };
 
         assert!(sparse.ranking_score() - linked.ranking_score() <= 4.0);
+    }
+
+    #[test]
+    fn repeated_metric_shape_does_not_penalize_long_prose() {
+        let prose = crate::candidate::CandidateFeatures {
+            text_chars: 1_200,
+            word_count: 400,
+            paragraph_count: 40,
+            comma_count: 18,
+            sentence_end_count: 20,
+            ..Default::default()
+        };
+        let metrics = crate::candidate::CandidateFeatures {
+            text_chars: 400,
+            word_count: 80,
+            paragraph_count: 40,
+            digit_chars: 24,
+            ..Default::default()
+        };
+
+        assert!(metrics.ranking_score() + 20.0 < prose.ranking_score());
     }
 
     #[test]
