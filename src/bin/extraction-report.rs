@@ -321,6 +321,7 @@ fn report(
                 legible::ExtractionStrategyInfo::StructuredDataHint => "structured-data-hint",
                 legible::ExtractionStrategyInfo::RelaxedVisibility => "relaxed-visibility",
                 legible::ExtractionStrategyInfo::BodyFallback => "body-fallback",
+                legible::ExtractionStrategyInfo::MetadataFallback => "metadata-fallback",
                 _ => "unknown",
             };
             let attempts = diagnostics
@@ -333,6 +334,7 @@ fn report(
                     legible::ExtractionStrategyInfo::StructuredDataHint => "structured-data-hint",
                     legible::ExtractionStrategyInfo::RelaxedVisibility => "relaxed-visibility",
                     legible::ExtractionStrategyInfo::BodyFallback => "body-fallback",
+                    legible::ExtractionStrategyInfo::MetadataFallback => "metadata-fallback",
                     _ => "unknown",
                 })
                 .collect::<Vec<_>>()

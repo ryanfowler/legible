@@ -16,6 +16,8 @@ pub enum ExtractionStrategyInfo {
     RelaxedVisibility,
     /// Extraction from the document body.
     BodyFallback,
+    /// Extraction from validated article metadata when the source body is an application shell.
+    MetadataFallback,
 }
 
 /// The reason for the selected content boundary.
@@ -36,6 +38,8 @@ pub enum RootSelectionReasonInfo {
     ArticleBody,
     /// The strategy selected the document body.
     BodyFallback,
+    /// Validated article metadata supplied the document body.
+    MetadataFallback,
 }
 
 /// One source of evidence for a selected root.

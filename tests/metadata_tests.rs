@@ -1,4 +1,4 @@
-use legible::{Extractor, extract};
+use legible::{ExtractionStrategyInfo, Extractor, extract};
 
 const CONTENT: &str = "This page has enough meaningful content for extraction. It explains the subject with clear details and useful context for every reader.";
 
@@ -179,6 +179,84 @@ fn filters_template_metadata_before_applying_source_precedence() {
     assert!(diagnostics.title.selected.is_none());
     assert!(diagnostics.authors.selected.is_empty());
     assert!(diagnostics.direction.selected.is_none());
+}
+
+#[test]
+fn recovers_static_article_text_from_agreeing_metadata() {
+    let html = r#"<html><head>
+        <title>Static post</title>
+        <meta property="og:type" content="article">
+        <meta property="og:url" content="https://social.example/posts/42">
+        <meta property="article:published_time" content="2026-08-19T12:00:00Z">
+        <meta property="article:author" content="Ada Lovelace">
+        <meta property="og:description" content="I found a practical way to make this old printer work from a modern laptop without replacing the original hardware.">
+        <link rel="canonical" href="https://social.example/posts/42">
+    </head><body><main><div role="application"><button></button><button></button></div></main></body></html>"#;
+
+    let page = Extractor::builder()
+        .diagnostics(true)
+        .build()
+        .extract(html, Some("https://social.example/posts/42"))
+        .unwrap();
+
+    assert_eq!(
+        page.text(),
+        "I found a practical way to make this old printer work from a modern laptop without replacing the original hardware."
+    );
+    assert!(!page.text().contains("Loading application shell"));
+    let diagnostics = page.diagnostics().unwrap();
+    assert_eq!(
+        diagnostics.selected_strategy,
+        ExtractionStrategyInfo::MetadataFallback
+    );
+    assert!(
+        diagnostics.attempts.iter().any(|attempt| attempt.accepted
+            && attempt.strategy == ExtractionStrategyInfo::MetadataFallback)
+    );
+}
+
+#[test]
+fn prefers_json_ld_article_body_over_a_meta_description() {
+    let html = r#"<html><head>
+        <title>Structured post</title>
+        <meta property="og:type" content="article">
+        <meta property="og:url" content="https://example.test/posts/structured">
+        <meta property="og:description" content="This short metadata summary must not replace the structured body text.">
+        <link rel="canonical" href="https://example.test/posts/structured">
+        <script type="application/ld+json">{
+          "@context":"https://schema.org",
+          "@type":"Article",
+          "headline":"Structured post",
+          "author":{"name":"Ada Lovelace"},
+          "datePublished":"2026-08-19",
+          "articleBody":"The JSON-LD body contains the complete post with enough specific detail to be useful, and it must be selected before the shorter metadata summary."
+        }</script>
+    </head><body><main><div role="application"><button></button><button></button></div></main></body></html>"#;
+
+    let page = extract(html, Some("https://example.test/posts/structured")).unwrap();
+
+    assert!(
+        page.text()
+            .contains("The JSON-LD body contains the complete post")
+    );
+    assert!(!page.text().contains("short metadata summary"));
+}
+
+#[test]
+fn rejects_generic_metadata_descriptions_as_content() {
+    let html = r#"<html><head>
+        <title>JavaScript application</title>
+        <meta property="og:type" content="article">
+        <meta property="og:url" content="https://example.test/posts/empty">
+        <meta property="article:published_time" content="2026-08-19T12:00:00Z">
+        <meta property="og:description" content="Please enable JavaScript to continue using this website and view the page.">
+        <link rel="canonical" href="https://example.test/posts/empty">
+    </head><body><main><div role="application"><button></button><button></button></div></main></body></html>"#;
+
+    assert!(matches!(
+        extract(html, Some("https://example.test/posts/empty")),
+        Err(legible::Error::NoContent)
+    ));
 }
 
 #[test]
