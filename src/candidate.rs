@@ -73,6 +73,7 @@ pub(crate) struct CandidateFeatures {
     pub(crate) image_count: u32,
     pub(crate) link_text_chars: f64,
     pub(crate) link_density: f64,
+    pub(crate) digit_chars: u32,
     pub(crate) sentence_end_count: u32,
     pub(crate) comma_count: u32,
     pub(crate) protected_block_count: u32,
@@ -80,6 +81,42 @@ pub(crate) struct CandidateFeatures {
     pub(crate) semantic_prior: f64,
     pub(crate) positive_name_score: f64,
     pub(crate) negative_name_score: f64,
+}
+
+/// Page-level evidence used to distinguish a complete streamed document from
+/// one of its data-heavy child regions.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DocumentEvidence {
+    pub(crate) title_chars: u16,
+    pub(crate) description_chars: u16,
+    pub(crate) structured_items: u8,
+    pub(crate) has_hidden_content: bool,
+}
+
+impl DocumentEvidence {
+    pub(crate) fn complete_root_bonus(self, features: CandidateFeatures) -> f64 {
+        if !self.has_hidden_content
+            || self.title_chars < 8
+            || self.description_chars < 80
+            || features.word_count < 80
+            || features.paragraph_count < 6
+            || features.heading_count < 3
+        {
+            return 0.0;
+        }
+
+        let prose = f64::from(features.word_count.min(800)) / 80.0
+            + f64::from(features.paragraph_count.min(20)) / 2.0;
+        let headings = f64::from(features.heading_count.min(12)) * 1.5;
+        let structured = f64::from(features.table_count.min(3)) * 3.0
+            + f64::from(features.code_block_count.min(3)) * 3.0
+            + f64::from(features.figure_count.min(3)) * 2.0
+            + f64::from(features.list_item_count.min(8)) * 0.5;
+        let metadata = 2.0
+            + f64::from(self.description_chars.min(400)) / 80.0
+            + f64::from(self.structured_items.min(4)) * 4.0;
+        20.0 + prose + headings + structured + metadata
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,6 +151,7 @@ pub(crate) struct CandidateSet {
     /// so the map does not double the size of the node index on 64-bit hosts.
     positions: Vec<u32>,
     has_article_body: bool,
+    document_evidence: DocumentEvidence,
 }
 
 pub(crate) struct SourceCandidateBuilder {
@@ -233,6 +271,7 @@ impl CandidateSet {
             candidates: Vec::new(),
             positions: vec![NO_CANDIDATE; source_node_count],
             has_article_body: false,
+            document_evidence: DocumentEvidence::default(),
         }
     }
 
@@ -259,6 +298,7 @@ impl CandidateSet {
             candidates: Vec::new(),
             positions: vec![NO_CANDIDATE; dom.len()],
             has_article_body: false,
+            document_evidence: DocumentEvidence::default(),
         };
 
         if let Some(body) = body {
@@ -346,6 +386,14 @@ impl CandidateSet {
 
     pub(crate) fn has_article_body(&self) -> bool {
         self.has_article_body
+    }
+
+    pub(crate) fn set_document_evidence(&mut self, evidence: DocumentEvidence) {
+        self.document_evidence = evidence;
+    }
+
+    pub(crate) fn document_evidence(&self) -> DocumentEvidence {
+        self.document_evidence
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Candidate> {

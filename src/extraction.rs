@@ -1,8 +1,9 @@
 //! General content extraction and strategy-based retry orchestration.
 #![allow(clippy::collapsible_if)]
 use crate::candidate::{
-    CandidateSet, CandidateSource, RankedCandidate, RootSelection, RootSelectionReason,
-    locate_structured_content, select_content_root, semantic_root_has_complete_candidate,
+    CandidateSet, CandidateSource, DocumentEvidence, RankedCandidate, RootSelection,
+    RootSelectionReason, locate_structured_content, select_content_root,
+    semantic_root_has_complete_candidate,
 };
 use crate::cleaning::*;
 use crate::constants::{
@@ -862,12 +863,36 @@ impl<'a> ContentExtractor<'a> {
                 || substantial_hidden_gain)
             && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_mul(2)
             && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(100);
+        let structured_texts: Vec<_> = self
+            .structured_data
+            .primary_texts(&self.structured_title, self.source_uri.as_ref())
+            .map(|text| text.chars().take(4_096).collect::<String>())
+            .collect();
+        let structured_text_refs: Vec<_> = structured_texts.iter().map(String::as_str).collect();
         let structured_root = locate_structured_content(
             &self.dom,
             &prepared_source,
-            self.structured_data
-                .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+            structured_text_refs.iter().copied(),
         );
+        let document_evidence = DocumentEvidence {
+            title_chars: u16::try_from(self.page_title.chars().count().min(usize::from(u16::MAX)))
+                .unwrap_or(u16::MAX),
+            description_chars: self
+                .metadata
+                .description
+                .as_deref()
+                .map_or(0, |description| {
+                    u16::try_from(description.chars().count().min(usize::from(u16::MAX)))
+                        .unwrap_or(u16::MAX)
+                }),
+            structured_items: u8::try_from(
+                self.structured_data
+                    .document_evidence_count(&self.structured_title, self.source_uri.as_ref())
+                    .min(usize::from(u8::MAX)),
+            )
+            .unwrap_or(u8::MAX),
+            has_hidden_content: has_relaxable_hidden_content,
+        };
         let mut text_buffer = String::new();
         let mut cleaning_nodes = Vec::new();
         let mut fragment_workspace = FragmentWorkspace::default();
@@ -939,6 +964,8 @@ impl<'a> ContentExtractor<'a> {
                 &base_candidates,
                 &content_hint_targets,
                 source_anchors,
+                document_evidence,
+                &structured_text_refs,
                 &mut text_buffer,
                 &mut analysis_cache,
                 &mut discovery_cache,
@@ -965,6 +992,8 @@ impl<'a> ContentExtractor<'a> {
                         &base_candidates,
                         &content_hint_targets,
                         source_anchors,
+                        document_evidence,
+                        &structured_text_refs,
                         &mut text_buffer,
                         &mut analysis_cache,
                         &mut discovery_cache,
@@ -989,6 +1018,8 @@ impl<'a> ContentExtractor<'a> {
                     &base_candidates,
                     &content_hint_targets,
                     source_anchors,
+                    document_evidence,
+                    &structured_text_refs,
                     &mut text_buffer,
                     &mut analysis_cache,
                     &mut discovery_cache,
@@ -1642,6 +1673,8 @@ impl<'a> ContentExtractor<'a> {
         base_candidates: &CandidateSet,
         content_hint_targets: &[NodeId],
         source_anchors: DocumentAnchors,
+        document_evidence: DocumentEvidence,
+        structured_texts: &[&str],
         text_buffer: &mut String,
         analysis_cache: &mut AnalysisCache,
         discovery_cache: &mut Vec<(VisibilityVariant, CandidateDiscovery)>,
@@ -1662,6 +1695,7 @@ impl<'a> ContentExtractor<'a> {
                 content_hint_targets,
                 structured_root,
                 source_anchors,
+                document_evidence,
                 discovery_cache,
             )?;
             crate::instrumentation::record_unique_attempt_plan(visibility as u8);
@@ -1695,8 +1729,7 @@ impl<'a> ContentExtractor<'a> {
             candidates,
             ranked,
             body,
-            self.structured_data
-                .primary_texts(&self.structured_title, self.source_uri.as_ref()),
+            structured_texts.iter().copied(),
         );
         selection =
             self.selection_for_strategy(strategy, working_dom, body, selection, structured_root);
@@ -1964,6 +1997,7 @@ impl<'a> ContentExtractor<'a> {
         );
 
         let mut candidates = discovery.candidates.clone();
+        candidates.set_document_evidence(analysis.weighted.candidates.document_evidence());
         for &node in content_hint_targets {
             let attached = node == working_root
                 || working_dom
@@ -2017,6 +2051,7 @@ impl<'a> ContentExtractor<'a> {
         content_hint_targets: &[NodeId],
         structured_root: Option<NodeId>,
         source_anchors: DocumentAnchors,
+        document_evidence: DocumentEvidence,
         discovery_cache: &mut Vec<(VisibilityVariant, CandidateDiscovery)>,
     ) -> Result<ScoringAnalysis> {
         // Discovery is source-only and therefore shared by every strategy with
@@ -2106,6 +2141,7 @@ impl<'a> ContentExtractor<'a> {
                     .collect();
 
                 let mut candidates = discovery.candidates.clone();
+                candidates.set_document_evidence(document_evidence);
                 for &node in content_hint_targets {
                     let attached = node == working_root
                         || working_dom
@@ -3191,7 +3227,11 @@ impl<'a> ContentExtractor<'a> {
                 excluded,
             );
         }
-
+        let has_substantial_authoritative_root = candidates.iter().any(|candidate| {
+            candidate.node != body
+                && candidates.is_authoritative_semantic(dom, candidate.node)
+                && candidate.features.word_count >= 20
+        });
         let context = candidates.ranking_context(dom, store, snapshot);
         let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
             .iter()
@@ -3284,10 +3324,33 @@ impl<'a> ContentExtractor<'a> {
                     } else {
                         0.0
                     };
+                let is_hidden_semantic_root = is_authoritative
+                    && std::iter::once(candidate.node)
+                        .chain(dom.ancestors(candidate.node))
+                        .any(|ancestor| {
+                            has_static_hidden_marker(dom, ancestor)
+                                || has_hidden_utility_class(dom, ancestor)
+                        });
+                let complete_root_bonus = if candidate.node == body {
+                    if has_substantial_authoritative_root {
+                        0.0
+                    } else {
+                        candidates
+                            .document_evidence()
+                            .complete_root_bonus(candidate.features)
+                    }
+                } else if is_authoritative && is_hidden_semantic_root {
+                    candidates
+                        .document_evidence()
+                        .complete_root_bonus(candidate.features)
+                } else {
+                    0.0
+                };
                 let final_score = candidate.features.ranking_score()
                     + short_semantic_bonus
                     + sibling_content_bonus
-                    + generic_boundary_bonus;
+                    + generic_boundary_bonus
+                    + complete_root_bonus;
                 store.set_score(candidate.node, final_score);
                 Some(RankedCandidate {
                     node: candidate.node,
@@ -5256,6 +5319,105 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
                 .candidate_sources
                 .contains(&crate::diagnostics::CandidateSourceInfo::CallerHint)
         );
+    }
+
+    #[test]
+    fn streamed_dashboard_prefers_the_complete_document_root() {
+        let html = r#"
+            <html>
+              <head>
+                <title>Server-rendered model dashboard | Example</title>
+                <meta name="description" content="A model dashboard with provider pricing, performance, uptime, benchmarks, and an API description for the selected model." />
+                <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Example Model","description":"A model dashboard with provider pricing and performance details."}</script>
+              </head>
+              <body>
+                <nav><a href="/models">Models</a><a href="/docs">Docs</a></nav>
+                <div hidden id="stream-title">
+                  <h1>Example Model</h1>
+                  <p>The selected model supports long-context reasoning, coding, and agent workflows.</p>
+                  <p>It accepts text and images and returns reliable text output for production systems.</p>
+                </div>
+                <div hidden id="stream-sections">
+                  <section id="providers"><h2>Providers</h2><p>Several providers host this model and provide automatic failover when an endpoint is unavailable.</p><table><tr><th>Provider</th><th>Latency</th><th>Uptime</th></tr><tr><td>Primary</td><td>3.08s</td><td>99.40%</td></tr></table></section>
+                  <section id="pricing"><h2>Pricing</h2><p>Customers pay a lower effective price when caching and discounts apply to their requests.</p><p>Input tokens cost $2.50 per million and output tokens cost $15 per million.</p></section>
+                  <section id="performance"><h2>Performance</h2><p>Throughput measures how fast the model writes tokens, while latency measures the full round trip.</p><p>Independent evaluations measure reasoning and tool use across several tasks.</p></section>
+                  <section id="uptime"><h2>Uptime</h2><p>The service monitors provider responses and routes requests to a healthy endpoint when needed.</p><div class="chart"><p>Availability 99.90%.</p><p>Availability 99.97%.</p><p>Availability 99.95%.</p><p>Availability 99.80%.</p><p>Availability 99.89%.</p><p>Availability 99.77%.</p><p>Availability 99.88%.</p><p>Availability 99.93%.</p><p>Availability 99.65%.</p><p>Availability 99.54%.</p><p>Availability 99.75%.</p><p>Availability 99.30%.</p></div></section>
+                </div>
+              </body>
+            </html>
+        "#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .structured_data(true)
+            .build()
+            .extract(html, Some("https://example.test/models/example"))
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        let accepted = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        assert_eq!(
+            diagnostics.selected_strategy,
+            ExtractionStrategyInfo::RelaxedVisibility
+        );
+        assert_eq!(accepted.selected_root.tag.as_deref(), Some("body"));
+        assert!(page.text().contains("Several providers host this model"));
+        assert!(page.text().contains("Input tokens cost $2.50"));
+        assert!(page.text().contains("Independent evaluations measure"));
+        assert!(
+            page.text()
+                .contains("The service monitors provider responses")
+        );
+        assert!(
+            !page
+                .markdown()
+                .contains("Server-rendered model dashboard | Example")
+        );
+    }
+
+    #[test]
+    fn complete_semantic_root_competes_with_data_heavy_siblings() {
+        let html = r#"
+            <html>
+              <head>
+                <title>Model reference</title>
+                <meta name="description" content="A complete reference with provider, pricing, performance, and usage information for this model." />
+                <script type="application/ld+json">{"@type":"SoftwareApplication","name":"Reference model","description":"Provider and pricing reference."}</script>
+              </head>
+              <body>
+                <main hidden id="complete-document">
+                  <h1>Reference model</h1>
+                  <section><h2>Providers</h2><p>Several providers serve this model with failover and regional capacity.</p><p>Provider status and latency are monitored throughout the day.</p></section>
+                  <section><h2>Pricing</h2><p>Input and output token prices depend on the selected provider and cache policy.</p><p>Customers can compare current rates before sending production requests.</p></section>
+                  <section><h2>Performance</h2><p>Performance tests measure throughput, latency, reasoning, and tool use.</p><p>The reference records results across representative workloads.</p></section>
+                  <section><h2>Usage</h2><p>The API accepts text and images and returns structured text for applications.</p><p>Request limits and response formats are documented for each provider.</p></section>
+                </main>
+                <div hidden class="metric-chart">
+                  <p>Availability 99.90%</p><p>Availability 99.91%</p><p>Availability 99.92%</p><p>Availability 99.93%</p><p>Availability 99.94%</p><p>Availability 99.95%</p><p>Availability 99.96%</p><p>Availability 99.97%</p><p>Availability 99.98%</p><p>Availability 99.99%</p><p>Availability 99.89%</p><p>Availability 99.88%</p><p>Availability 99.87%</p><p>Availability 99.86%</p><p>Availability 99.85%</p><p>Availability 99.84%</p><p>Availability 99.83%</p><p>Availability 99.82%</p><p>Availability 99.81%</p><p>Availability 99.80%</p>
+                </div>
+              </body>
+            </html>
+        "#;
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .structured_data(true)
+            .build()
+            .extract(html, Some("https://example.test/reference/model"))
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        let accepted = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+        assert_eq!(
+            accepted.selected_root.id.as_deref(),
+            Some("complete-document")
+        );
+        assert!(page.text().contains("Several providers serve this model"));
+        assert!(page.text().contains("The API accepts text and images"));
     }
 
     #[test]
