@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <article>
+        <section class="resource-hero">
+          <a href="/software/one">Featured One</a>
+          <a href="/software/two">Featured Two</a>
+          <a href="/language/rust">Rust</a>
+          <p>Quick reference material from the software catalog.</p>
+        </section>
+        <div class="post-content">
+          <p>This reference explains how to process records in a stable pipeline. Each stage uses an explicit input and produces a verified output.</p>
+          <p>The examples keep parsing, validation, and storage separate. This structure makes failures easy to diagnose.</p>
+          <h2>Validate each record</h2>
+          <pre><code>let valid = records.filter(validate);</code></pre>
+          <p>Validation reports the rejected row. It keeps the original source available for inspection.</p>
+          <h2>Store the result</h2>
+          <table>
+            <tr><th>Stage</th><th>Output</th></tr>
+            <tr><td>Parse</td><td>Record</td></tr>
+            <tr><td>Validate</td><td>Verified record</td></tr>
+          </table>
+          <p>The storage stage writes only verified records. It records the final count in the operation log.</p>
+        </div>
+        <aside class="blog-toc">
+          <a href="#validate">Validate each record</a>
+          <a href="#store">Store the result</a>
+        </aside>
+        <section class="recommendations">
+          <h2>Featured software</h2>
+          <a href="/other"><img src="other.png" alt="Other software package">Other package</a>
+        </section>
+      </article>
+    </main>
+  </body>
+</html>
