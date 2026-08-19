@@ -39,6 +39,7 @@ impl SourceFlags {
     pub(crate) const NEGATIVE_NAME: Self = Self(1 << 17);
     pub(crate) const FALLBACK_IMAGE: Self = Self(1 << 18);
     pub(crate) const GENERIC_CLUTTER_ROLE: Self = Self(1 << 19);
+    pub(crate) const ARTICLE_BODY: Self = Self(1 << 20);
 
     fn insert(&mut self, flag: Self) {
         self.0 |= flag.0;
@@ -495,7 +496,11 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     if main_role {
         flags.insert(SourceFlags::MAIN_ROLE);
     }
-    if matches!(tag, Tag::Article | Tag::Main) || article_role || main_role {
+    let article_body = crate::candidate::has_article_body_itemprop(dom, node);
+    if article_body {
+        flags.insert(SourceFlags::ARTICLE_BODY);
+    }
+    if matches!(tag, Tag::Article | Tag::Main) || article_role || main_role || article_body {
         flags.insert(SourceFlags::PRIMARY_REGION);
     }
     if role.is_some_and(|roles| {

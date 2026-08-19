@@ -391,6 +391,7 @@ impl From<RootSelectionReason> for RootSelectionReasonInfo {
             RootSelectionReason::SharedParent => Self::SharedParent,
             RootSelectionReason::CompleteAncestor => Self::CompleteAncestor,
             RootSelectionReason::StructuredData => Self::StructuredData,
+            RootSelectionReason::ArticleBody => Self::ArticleBody,
             RootSelectionReason::BodyFallback => Self::BodyFallback,
         }
     }
@@ -1538,12 +1539,8 @@ impl<'a> ContentExtractor<'a> {
                 branches: SmallVec::new(),
             };
         }
-        let visibility_root_semantic = matches!(
-            working_dom.tag(selection.node),
-            Some(Tag::Article | Tag::Main)
-        ) || working_dom
-            .attr(selection.node, AttrName::Role)
-            .is_some_and(Self::has_primary_role);
+        let visibility_root_semantic =
+            candidates.is_authoritative_semantic(working_dom, selection.node);
         let root_info = self.root_info(
             working_dom,
             candidates,
