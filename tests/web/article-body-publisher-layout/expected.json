@@ -1,0 +1,14 @@
+{
+  "word_count_min": 120,
+  "must_contain": [
+    "Early nutrition can influence health",
+    "Why the finding matters",
+    "Research methods explained."
+  ],
+  "must_not_contain": [
+    "Lead image attribution.",
+    "Publisher navigation",
+    "Newsletter signup"
+  ],
+  "headings_min": 1
+}
