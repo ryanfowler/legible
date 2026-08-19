@@ -1855,7 +1855,9 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let synthetic = !selection.branches.is_empty() || selection.node == body;
-        let lead_media = (!synthetic && exact_root.is_none())
+        let lead_media = (!synthetic
+            && exact_root.is_none()
+            && selection.reason != RootSelectionReason::ArticleBody)
             .then(|| adjacent_lead_media(working_dom, top_id))
             .flatten();
         let direction_root = selection
