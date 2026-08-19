@@ -1,0 +1,11 @@
+{
+  "id": "access-barrier-main",
+  "category": "news-article",
+  "source_url": "https://example.test/access-barrier-main",
+  "page_shape": "article",
+  "must_include": [],
+  "must_exclude": ["Subscribe to continue reading this article"],
+  "expected_failure": true,
+  "expected_error": "NoContent",
+  "notes": "A paywall inside a semantic main must not be accepted as article content."
+}

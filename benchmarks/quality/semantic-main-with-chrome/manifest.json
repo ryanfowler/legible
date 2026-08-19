@@ -1,0 +1,12 @@
+{
+  "id": "semantic-main-with-chrome",
+  "category": "news-article",
+  "source_url": "https://example.test/semantic-main-with-chrome",
+  "page_shape": "article",
+  "must_include": [
+    "The north plot produced more beans",
+    "six weeks"
+  ],
+  "must_exclude": ["Garden supply deals", "Popular topics"],
+  "notes": "A semantic article must remain selected when larger header, aside, and footer chrome surrounds it."
+}

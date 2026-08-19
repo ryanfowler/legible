@@ -1,0 +1,17 @@
+{
+  "id": "main-with-article-peers",
+  "category": "link-index",
+  "source_url": "https://example.test/main-with-article-peers",
+  "page_shape": "listing",
+  "must_include": [
+    "Summary for report A",
+    "Summary for report B",
+    "Summary for report C"
+  ],
+  "must_exclude": [],
+  "expected": {
+    "headings_min": 3,
+    "links_min": 3
+  },
+  "notes": "A main containing peer article cards is a listing and must not silently reduce to one article."
+}

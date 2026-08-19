@@ -1,0 +1,12 @@
+{
+  "id": "semantic-root-valid-with-heavy-shell",
+  "category": "technical-documentation",
+  "source_url": "https://example.test/semantic-root-valid-with-heavy-shell",
+  "page_shape": "document",
+  "must_include": [
+    "Batch processing is reliable",
+    "bounded exponential backoff"
+  ],
+  "must_exclude": ["Try the new dashboard", "More resources"],
+  "notes": "A complete main should remain eligible when a large surrounding shell lowers whole-page coverage."
+}
