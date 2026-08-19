@@ -152,6 +152,34 @@ impl StructuredData {
             .flat_map(article_text_values)
     }
 
+    fn has_article_item(&self) -> bool {
+        self.items.iter().any(|item| {
+            item.get("@type")
+                .is_some_and(|kind| json_types(kind).any(is_article_type))
+        })
+    }
+
+    fn primary_item_matches(&self, document_title: &str, source_url: Option<&Url>) -> bool {
+        let Some(item) = primary_hint_item(self, document_title, source_url) else {
+            return false;
+        };
+        let title_matches = item
+            .get("headline")
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .is_some_and(|title| {
+                !document_title.is_empty() && text_similarity(title, document_title) >= 0.6
+            });
+        let url_matches = json_url(item)
+            .and_then(|value| Url::parse(value).ok())
+            .zip(source_url)
+            .is_some_and(|(candidate, source)| {
+                candidate.host() == source.host()
+                    && candidate.path().trim_end_matches('/') == source.path().trim_end_matches('/')
+            });
+        title_matches || url_matches
+    }
+
     fn article_items(&self) -> impl Iterator<Item = &Value> {
         self.items.iter().filter(|item| {
             item.get("@type")
@@ -572,6 +600,176 @@ pub(crate) fn discover_with_diagnostics(
     }
 
     resolve_candidates(candidates, base_url, retain_diagnostics)
+}
+
+/// Finds content that is present in reliable page metadata but absent from the
+/// visible source tree, as happens on static application shells.
+#[cold]
+#[inline(never)]
+pub(crate) fn metadata_backed_content(
+    dom: &Dom,
+    structured: &StructuredData,
+    metadata: &Metadata,
+    document_title: &str,
+    base_url: Option<&Url>,
+    source_url: Option<&Url>,
+) -> Option<String> {
+    let has_article_signal =
+        source_has_meta_value(dom, "og:type", "article") || structured.has_article_item();
+    let has_canonical_signal = source_has_canonical_url(dom, base_url, source_url);
+    let has_author_or_publication =
+        !metadata.authors.is_empty() || metadata.published_time.is_some();
+    if !has_article_signal || !has_canonical_signal || !has_author_or_publication {
+        return None;
+    }
+
+    // Prefer an articleBody/text value from the selected JSON-LD item. A page
+    // description is only a fallback after structured content is unavailable
+    // or too generic to use.
+    let structured_body = structured
+        .primary_item_matches(document_title, source_url)
+        .then(|| {
+            structured
+                .primary_texts(document_title, source_url)
+                .filter_map(|value| normalize_metadata_body(value, 20, 3))
+                .next()
+        })
+        .flatten();
+    if let Some(body) = structured_body {
+        return Some(body);
+    }
+    if !source_has_application_shell(dom) {
+        return None;
+    }
+    metadata_description(dom, metadata)
+}
+
+fn source_has_meta_value(dom: &Dom, key: &str, expected: &str) -> bool {
+    dom.descendants(dom.root()).any(|node| {
+        dom.tag(node) == Some(Tag::Meta)
+            && dom
+                .attr(node, AttrName::Property)
+                .or_else(|| dom.attr(node, AttrName::Name))
+                .is_some_and(|value| value.eq_ignore_ascii_case(key))
+            && dom
+                .attr(node, AttrName::Content)
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+    })
+}
+
+fn source_has_canonical_url(dom: &Dom, base_url: Option<&Url>, source_url: Option<&Url>) -> bool {
+    dom.descendants(dom.root()).any(|node| {
+        if dom.tag(node) == Some(Tag::Link) {
+            return dom.attr(node, AttrName::Rel).is_some_and(|rel| {
+                rel.split_ascii_whitespace()
+                    .any(|part| part.eq_ignore_ascii_case("canonical"))
+            }) && dom
+                .attr(node, AttrName::Href)
+                .is_some_and(|href| canonical_matches_source(href, base_url, source_url));
+        }
+        dom.tag(node) == Some(Tag::Meta)
+            && dom
+                .attr(node, AttrName::Property)
+                .or_else(|| dom.attr(node, AttrName::Name))
+                .is_some_and(|key| key.eq_ignore_ascii_case("og:url"))
+            && dom
+                .attr(node, AttrName::Content)
+                .is_some_and(|value| canonical_matches_source(value, base_url, source_url))
+    })
+}
+
+fn canonical_matches_source(value: &str, base_url: Option<&Url>, source_url: Option<&Url>) -> bool {
+    let resolved = Url::parse(value)
+        .ok()
+        .or_else(|| base_url.and_then(|base| base.join(value).ok()));
+    let Some(resolved) = resolved else {
+        return false;
+    };
+    if !matches!(resolved.scheme(), "http" | "https") {
+        return false;
+    }
+    source_url.is_none_or(|source| {
+        resolved.host() == source.host()
+            && resolved.path().trim_end_matches('/') == source.path().trim_end_matches('/')
+    })
+}
+
+fn source_has_application_shell(dom: &Dom) -> bool {
+    let mut controls = 0;
+    let mut has_data_structure = false;
+    for node in dom.descendants(dom.root()) {
+        if matches!(
+            dom.tag(node),
+            Some(Tag::Button | Tag::Input | Tag::Select | Tag::Textarea | Tag::Form)
+        ) {
+            controls += 1;
+        }
+        if matches!(dom.tag(node), Some(Tag::Table | Tag::Pre | Tag::Dl)) {
+            has_data_structure = true;
+        }
+    }
+    controls >= 2 && !has_data_structure
+}
+
+fn metadata_description(dom: &Dom, metadata: &Metadata) -> Option<String> {
+    if let Some(description) = metadata
+        .description
+        .as_deref()
+        .and_then(|value| normalize_metadata_body(value, 40, 5))
+    {
+        return Some(description);
+    }
+    [
+        "og:description",
+        "twitter:description",
+        "description",
+        "dc:description",
+        "dcterm:description",
+        "dcterms:description",
+    ]
+    .into_iter()
+    .flat_map(|expected| {
+        dom.descendants(dom.root()).filter(move |&node| {
+            dom.tag(node) == Some(Tag::Meta)
+                && dom
+                    .attr(node, AttrName::Property)
+                    .or_else(|| dom.attr(node, AttrName::Name))
+                    .is_some_and(|key| key.eq_ignore_ascii_case(expected))
+        })
+    })
+    .filter_map(|node| dom.attr(node, AttrName::Content))
+    .find_map(|value| normalize_metadata_body(value, 40, 5))
+}
+
+fn normalize_metadata_body(value: &str, min_chars: usize, min_words: usize) -> Option<String> {
+    let value = normalize_text(value)?;
+    let lower = value.to_ascii_lowercase();
+    let generic = [
+        "welcome to our website",
+        "welcome to our site",
+        "enable javascript",
+        "please enable javascript",
+        "javascript is required",
+        "you need to enable javascript",
+        "please turn on javascript",
+        "sign in to continue",
+        "log in to continue",
+    ];
+    if value.chars().count() < min_chars
+        || value.split_whitespace().count() < min_words
+        || generic.iter().any(|prefix| {
+            lower == *prefix
+                || lower.strip_prefix(prefix).is_some_and(|rest| {
+                    rest.chars().next().is_some_and(|character| {
+                        character.is_whitespace() || ".!?".contains(character)
+                    })
+                })
+        })
+    {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 #[cfg(test)]

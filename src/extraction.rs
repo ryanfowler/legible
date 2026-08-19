@@ -67,6 +67,9 @@ pub(crate) struct ContentExtractor<'a> {
     specialized_root: Option<NodeId>,
     specialized_identity: Option<&'static str>,
     page_kind: PageKind,
+    metadata_fallback_text: Option<String>,
+    metadata_fallback_source_metrics: Option<ContentMetrics>,
+    metadata_fallback_source_barrier: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -335,6 +338,7 @@ enum ExtractionStrategy {
     StructuredDataHint,
     RelaxedVisibility,
     BodyFallback,
+    MetadataFallback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -382,6 +386,7 @@ impl From<ExtractionStrategy> for ExtractionStrategyInfo {
             ExtractionStrategy::StructuredDataHint => Self::StructuredDataHint,
             ExtractionStrategy::RelaxedVisibility => Self::RelaxedVisibility,
             ExtractionStrategy::BodyFallback => Self::BodyFallback,
+            ExtractionStrategy::MetadataFallback => Self::MetadataFallback,
         }
     }
 }
@@ -551,6 +556,9 @@ impl<'a> ContentExtractor<'a> {
             specialized_root: None,
             specialized_identity: None,
             page_kind: PageKind::Unknown,
+            metadata_fallback_text: None,
+            metadata_fallback_source_metrics: None,
+            metadata_fallback_source_barrier: None,
         }
     }
     pub(crate) fn extract(mut self) -> Result<ExtractedPage> {
@@ -597,6 +605,19 @@ impl<'a> ContentExtractor<'a> {
             self.source_uri.as_ref(),
             self.options.metadata_diagnostics,
         );
+        if self.options.diagnostics {
+            self.metadata_fallback_text = metadata::metadata_backed_content(
+                &self.dom,
+                &self.structured_data,
+                &self.metadata,
+                &self.structured_title,
+                self.base_uri.as_ref(),
+                self.source_uri.as_ref(),
+            );
+            self.metadata_fallback_source_barrier = preparation_anchors
+                .body
+                .map(|body| is_access_barrier(&self.dom, body));
+        }
         if self
             .structured_data
             .primary_texts(&self.structured_title, self.source_uri.as_ref())
@@ -635,7 +656,18 @@ impl<'a> ContentExtractor<'a> {
             .take()
             .or_else(|| metadata::normalize_title(&title))
             .unwrap_or_default();
-        let content = self.extract_content()?;
+        let content = match self.extract_content() {
+            Ok(content) => content,
+            Err(Error::NoContent)
+                if self.options.content_root.is_none() && self.specialized_root.is_none() =>
+            {
+                self.extract_metadata_fallback()?
+            }
+            Err(Error::NoContent) => {
+                return Err(Error::NoContent);
+            }
+            Err(error) => return Err(error),
+        };
         self.metadata.title = (!self.page_title.is_empty()).then_some(self.page_title);
         if self.metadata.authors.is_empty()
             && let Some(byline) = self
@@ -681,6 +713,90 @@ impl<'a> ContentExtractor<'a> {
             retained_structured_data,
         ))
     }
+
+    #[cold]
+    #[inline(never)]
+    fn extract_metadata_fallback(&mut self) -> Result<ExtractedContent> {
+        let text = self
+            .metadata_fallback_text
+            .take()
+            .or_else(|| {
+                metadata::metadata_backed_content(
+                    &self.dom,
+                    &self.structured_data,
+                    &self.metadata,
+                    &self.structured_title,
+                    self.base_uri.as_ref(),
+                    self.source_uri.as_ref(),
+                )
+            })
+            .ok_or(Error::NoContent)?;
+        let source_barrier = self.metadata_fallback_source_barrier.unwrap_or_else(|| {
+            self.dom
+                .body()
+                .is_some_and(|body| is_access_barrier(&self.dom, body))
+        });
+        if source_barrier {
+            return Err(Error::NoContent);
+        }
+
+        let (mut dom, root) = specialized::new_output().ok_or(Error::NoContent)?;
+        let paragraph =
+            specialized::create_element(&mut dom, root, Tag::P).ok_or(Error::NoContent)?;
+        if !specialized::append_text(&mut dom, paragraph, &text) {
+            return Err(Error::NoContent);
+        }
+        let final_dom_nodes = dom.len();
+        let source_evidence = crate::document::SourceEvidence::default();
+        let compile_context =
+            crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref());
+        self.strategy = ExtractionStrategy::MetadataFallback;
+        crate::instrumentation::record_strategy(ExtractionStrategy::MetadataFallback as u8);
+        let document = crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+            dom,
+            root,
+            &compile_context,
+            None,
+            &source_evidence,
+            None,
+        )
+        .map_err(|_| Error::NoContent)?;
+        if self.diagnostic_attempts.is_some() {
+            let result_metrics = ContentMetrics::measure_document(&document);
+            let source_metrics = self
+                .metadata_fallback_source_metrics
+                .unwrap_or(result_metrics);
+            let quality = ExtractionQuality::new(source_metrics, result_metrics, false);
+            self.record_attempt(
+                ExtractionStrategy::MetadataFallback,
+                Some(RootInfo {
+                    tag: Some("main".to_owned()),
+                    id: None,
+                    classes: Vec::new(),
+                    selection_reason: RootSelectionReasonInfo::MetadataFallback,
+                    candidate_sources: Vec::new(),
+                }),
+                source_metrics,
+                result_metrics,
+                quality,
+                None,
+                Some(RepresentationMetricsInfo {
+                    source_dom_nodes: self.source_dom_nodes,
+                    final_dom_nodes,
+                    document_nodes: document.len(),
+                    estimated_document_bytes: document.retained_bytes_estimate(),
+                }),
+                true,
+                false,
+                None,
+            );
+        }
+        Ok(ExtractedContent {
+            excerpt: None,
+            document,
+        })
+    }
+
     fn extract_content(&mut self) -> Result<ExtractedContent> {
         let _candidate_preflight_phase = PhaseGuard::new(Phase::CandidateDiscovery);
         let prepared_source =
@@ -726,6 +842,9 @@ impl<'a> ContentExtractor<'a> {
         let source_anchors = prepared_source.anchors;
         let body = source_anchors.body.ok_or(Error::NoBody)?;
         let source_metrics = prepared_source.source_metrics;
+        if self.options.diagnostics {
+            self.metadata_fallback_source_metrics = Some(source_metrics);
+        }
         let has_relaxable_hidden_content = prepared_source.has_relaxable_hidden_content(body);
         let relaxed_source_metrics = prepared_source.relaxed_metrics.unwrap_or(source_metrics);
         if !source_metrics.has_meaningful_text() && !relaxed_source_metrics.has_meaningful_text() {
@@ -2728,11 +2847,13 @@ impl<'a> ContentExtractor<'a> {
                     branches: SmallVec::new(),
                 }
             }
-            ExtractionStrategy::BodyFallback => RootSelection {
-                node: body,
-                reason: RootSelectionReason::BodyFallback,
-                branches: SmallVec::new(),
-            },
+            ExtractionStrategy::BodyFallback | ExtractionStrategy::MetadataFallback => {
+                RootSelection {
+                    node: body,
+                    reason: RootSelectionReason::BodyFallback,
+                    branches: SmallVec::new(),
+                }
+            }
         }
     }
 
