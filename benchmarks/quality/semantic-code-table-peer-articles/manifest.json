@@ -1,0 +1,16 @@
+{
+  "id": "semantic-code-table-peer-articles",
+  "category": "code-heavy",
+  "source_url": "https://example.test/semantic-code-table-peer-articles",
+  "page_shape": "document",
+  "must_include": [
+    "The grouped query keeps values numeric",
+    "Related API reference"
+  ],
+  "must_exclude": ["Pricing Terms", "Subscribe for updates"],
+  "expected": {
+    "code_blocks_min": 2,
+    "tables_min": 1
+  },
+  "notes": "A main with peer article branches must not collapse into one code-heavy card or absorb page chrome."
+}
