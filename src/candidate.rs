@@ -11,6 +11,7 @@ const STRONG_IDS: &[&str] = &["post", "content", "article-content"];
 const ARTICLE_TAG_PRIOR: f64 = 0.003;
 const MAIN_TAG_PRIOR: f64 = 0.0025;
 const ARTICLE_ROLE_PRIOR: f64 = 0.00275;
+const ARTICLE_BODY_PRIOR: f64 = 0.0035;
 const OTHER_SEMANTIC_PRIOR: f64 = 0.0025;
 const ADDITIONAL_SIGNAL_BONUS: f64 = 0.0005;
 const MAX_SEMANTIC_PRIOR: f64 = 0.004;
@@ -110,6 +111,7 @@ pub(crate) struct CandidateSet {
     /// because callers already have stable node IDs, but use a u32 sentinel
     /// so the map does not double the size of the node index on 64-bit hosts.
     positions: Vec<u32>,
+    has_article_body: bool,
 }
 
 pub(crate) struct SourceCandidateBuilder {
@@ -162,6 +164,9 @@ impl SourceCandidateBuilder {
         if entry.flags.contains(SourceFlags::MAIN_ROLE) {
             self.candidates
                 .add(node, CandidateSource::Semantic, OTHER_SEMANTIC_PRIOR);
+        }
+        if entry.flags.contains(SourceFlags::ARTICLE_BODY) {
+            self.candidates.add_article_body(node);
         }
         if entry.flags.contains(SourceFlags::STRONG_CONTENT_ID)
             || entry.flags.contains(SourceFlags::STRONG_CONTENT_CLASS)
@@ -225,6 +230,7 @@ impl CandidateSet {
         Self {
             candidates: Vec::new(),
             positions: vec![NO_CANDIDATE; source_node_count],
+            has_article_body: false,
         }
     }
 
@@ -250,6 +256,7 @@ impl CandidateSet {
         let mut candidates = Self {
             candidates: Vec::new(),
             positions: vec![NO_CANDIDATE; dom.len()],
+            has_article_body: false,
         };
 
         if let Some(body) = body {
@@ -292,6 +299,10 @@ impl CandidateSet {
                 }
             }
 
+            if has_article_body_itemprop(dom, node) {
+                candidates.add_article_body(node);
+            }
+
             if dom.attr(node, AttrName::Id).is_some_and(|id| {
                 STRONG_IDS
                     .iter()
@@ -331,6 +342,10 @@ impl CandidateSet {
             .is_some_and(|candidate| candidate.has_source(CandidateSource::Semantic))
     }
 
+    pub(crate) fn has_article_body(&self) -> bool {
+        self.has_article_body
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Candidate> {
         self.candidates.iter()
     }
@@ -344,6 +359,7 @@ impl CandidateSet {
             || dom
                 .attr(node, AttrName::Role)
                 .is_some_and(|roles| matches_role(roles, "article") || matches_role(roles, "main"))
+            || has_article_body_itemprop(dom, node)
     }
 
     pub(crate) fn ranking_context(
@@ -527,6 +543,11 @@ impl CandidateSet {
         }
     }
 
+    fn add_article_body(&mut self, node: NodeId) {
+        self.has_article_body = true;
+        self.add(node, CandidateSource::Semantic, ARTICLE_BODY_PRIOR);
+    }
+
     fn candidate_index(&self, node: NodeId) -> Option<usize> {
         self.positions
             .get(node.index())
@@ -577,6 +598,14 @@ fn matches_role(roles: &str, expected: &str) -> bool {
         .any(|role| role.eq_ignore_ascii_case(expected))
 }
 
+pub(crate) fn has_article_body_itemprop(dom: &Dom, node: NodeId) -> bool {
+    dom.attr(node, AttrName::ItemProp).is_some_and(|value| {
+        value
+            .split_ascii_whitespace()
+            .any(|item| item.eq_ignore_ascii_case("articleBody"))
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RootSelectionReason {
     Ranked,
@@ -584,6 +613,7 @@ pub(crate) enum RootSelectionReason {
     SharedParent,
     CompleteAncestor,
     StructuredData,
+    ArticleBody,
     BodyFallback,
 }
 
@@ -643,6 +673,15 @@ pub(crate) fn select_content_root<'a>(
             selected = node;
             reason = RootSelectionReason::StructuredData;
         }
+    }
+
+    if reason != RootSelectionReason::StructuredData
+        && candidates.has_article_body()
+        && let Some(article_body) =
+            preferred_article_body_root(dom, candidates, ranked, selected, body)
+    {
+        selected = article_body;
+        reason = RootSelectionReason::ArticleBody;
     }
 
     // A semantic parent is the correct boundary when several strong branches
@@ -753,6 +792,10 @@ pub(crate) fn select_content_root<'a>(
         reason = RootSelectionReason::CompleteAncestor;
     }
 
+    if has_article_body_itemprop(dom, selected) {
+        reason = RootSelectionReason::ArticleBody;
+    }
+
     RootSelection {
         node: selected,
         reason,
@@ -762,6 +805,39 @@ pub(crate) fn select_content_root<'a>(
 
 fn competitive_score(score: f64, top_score: f64) -> bool {
     score >= top_score - (top_score.abs() * 0.25).max(5.0)
+}
+
+fn preferred_article_body_root(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    selected: NodeId,
+    body: NodeId,
+) -> Option<NodeId> {
+    let selected_chars = candidates
+        .get(selected)
+        .map_or(0, |candidate| candidate.features.text_chars);
+    ranked
+        .iter()
+        .filter(|candidate| {
+            candidate.score.is_finite()
+                && candidates
+                    .get(candidate.node)
+                    .is_some_and(|candidate| has_article_body_itemprop(dom, candidate.node))
+                && (selected == body || is_descendant_of(dom, candidate.node, selected))
+        })
+        .filter_map(|candidate| {
+            let features = candidates.get(candidate.node)?.features;
+            let coherent = features.text_chars >= 120
+                && (features.sentence_end_count > 0 || features.structured_block_count() > 0)
+                && features.link_density <= 0.4;
+            let complete_enough = selected_chars == 0
+                || u64::from(features.text_chars).saturating_mul(100)
+                    >= u64::from(selected_chars).saturating_mul(50);
+            (coherent && complete_enough).then_some((candidate.node, features.text_chars))
+        })
+        .min_by_key(|(_, text_chars)| *text_chars)
+        .map(|(node, _)| node)
 }
 
 fn structured_tie_score(score: f64, top_score: f64) -> bool {
@@ -924,21 +1000,13 @@ fn balanced_semantic_boundary(
     selected: NodeId,
 ) -> Option<NodeId> {
     let selected_features = candidates.get(selected)?.features;
-    if dom.attr(selected, AttrName::ItemProp).is_some_and(|value| {
-        value
-            .split_whitespace()
-            .any(|item| item.eq_ignore_ascii_case("articleBody"))
-    }) {
+    if has_article_body_itemprop(dom, selected) {
         return None;
     }
 
     for ancestor in dom.ancestors(selected).take(4) {
         if !candidates.is_authoritative_semantic(dom, ancestor)
-            || dom.attr(ancestor, AttrName::ItemProp).is_some_and(|value| {
-                value
-                    .split_whitespace()
-                    .any(|item| item.eq_ignore_ascii_case("articleBody"))
-            })
+            || has_article_body_itemprop(dom, ancestor)
         {
             continue;
         }
@@ -1782,6 +1850,56 @@ mod tests {
             assert!(markdown.contains("Chosen semantic content"), "{opening}");
             assert!(!markdown.contains("Outside clutter"), "{opening}");
         }
+    }
+
+    #[test]
+    fn article_body_itemprop_is_a_token_aware_semantic_root() {
+        let html = r#"<body>
+            <header><nav>News Reviews Deals Forums</nav></header>
+            <main class="content-shell">
+                <article>
+                    <h1>How to choose a quiet laptop fan</h1>
+                    <p class="byline">By Example Writer</p>
+                    <section itemprop="author articleBody">
+                        <p>A quiet laptop fan reduces noise during long compilation jobs.</p>
+                        <p>We tested three fan profiles with the same processor, memory, and room temperature.</p>
+                        <h2>What we measured</h2>
+                        <p>The balanced profile lowered the measured noise without reducing sustained performance.</p>
+                        <p>The result remained consistent after six hours of repeated builds.</p>
+                    </section>
+                </article>
+                <div itemprop="notArticleBody"><p>Unrelated metadata must not become the article.</p></div>
+                <aside>Recommended laptops Buying guides Subscribe to our newsletter</aside>
+            </main>
+            <footer>Privacy Terms Contact</footer>
+        </body></html>"#;
+        let dom = Dom::parse_document(html).unwrap();
+        let body = dom.body().unwrap();
+        let article_body = dom
+            .descendants(body)
+            .find(|&node| dom.attr(node, AttrName::ItemProp) == Some("author articleBody"))
+            .unwrap();
+        let unrelated = dom
+            .descendants(body)
+            .find(|&node| dom.attr(node, AttrName::ItemProp) == Some("notArticleBody"))
+            .unwrap();
+        let candidates = CandidateSet::discover_semantic(&dom);
+
+        assert!(candidates.is_semantic(article_body));
+        assert!(candidates.is_authoritative_semantic(&dom, article_body));
+        assert!(!candidates.is_semantic(unrelated));
+
+        let markdown = crate::extract(html, None).unwrap().markdown();
+        assert!(
+            markdown.contains("A quiet laptop fan reduces noise"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("six hours of repeated builds"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Unrelated metadata"), "{markdown}");
+        assert!(!markdown.contains("Recommended laptops"), "{markdown}");
     }
 
     #[test]

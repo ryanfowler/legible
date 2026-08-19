@@ -32,6 +32,8 @@ pub enum RootSelectionReasonInfo {
     CompleteAncestor,
     /// Structured page data identified the root.
     StructuredData,
+    /// The Schema.org `articleBody` property identified the root.
+    ArticleBody,
     /// The strategy selected the document body.
     BodyFallback,
 }

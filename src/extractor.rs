@@ -346,6 +346,33 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_identify_article_body_root_selection() {
+        let page = Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(
+                r#"<body><main><article><h1>Quiet laptop fans</h1><section itemprop="articleBody"><p>A quiet laptop fan reduces noise during long compilation jobs.</p><p>The measured result remained consistent after six hours of repeated builds.</p></section></article><div itemprop="notArticleBody">Unrelated metadata.</div></main></body>"#,
+                None,
+            )
+            .unwrap();
+        let attempt = page
+            .diagnostics()
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+
+        assert_eq!(
+            attempt.selected_root.selection_reason,
+            RootSelectionReasonInfo::ArticleBody
+        );
+        assert_eq!(attempt.selected_root.tag.as_deref(), Some("section"));
+        assert!(page.text().contains("six hours of repeated builds"));
+        assert!(!page.text().contains("Unrelated metadata"));
+    }
+
+    #[test]
     fn exact_content_root_rejects_a_root_without_meaningful_text() {
         let error = Extractor::builder()
             .content_root(ContentHint::Id("empty".into()))
