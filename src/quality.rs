@@ -944,13 +944,15 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
         .filter(|term| text.contains(**term))
         .count()
         + usize::from(text.contains('$') || text.contains('€') || text.contains('£'));
+    let direct_subscription_action = text.contains("subscribe to continue reading")
+        || text.contains("subscribe to unlock this article");
 
     machine_denial && strong_denial_heading
         || explicit_machine_denial
         || strong_denial_heading && denial_support
         || exact_gate_heading && action > 0
         || heading_gate && structural_gate
-        || structural_gate && action > 0 && offer >= 2
+        || structural_gate && action > 0 && (offer >= 2 || direct_subscription_action)
 }
 
 /// Evidence for a control-dominated application shell.
@@ -1002,6 +1004,45 @@ pub(crate) fn is_interactive_shell(
         return false;
     }
     evidence.controls >= 2 && !evidence.data_structure
+}
+
+/// Detects the short static notices emitted by an empty client application.
+/// This scan is only needed for already-short results, so it stays outside
+/// the structural evidence pass used for normal candidates.
+pub(crate) fn is_application_shell_notice(
+    dom: &Dom,
+    root: NodeId,
+    metrics: ContentMetrics,
+) -> bool {
+    if metrics.word_count > 20 || metrics.paragraph_count > 1 || metrics.text_chars > 200 {
+        return false;
+    }
+    let mut text = String::new();
+    get_normalized_inner_text(dom, root, &mut text);
+    text.make_ascii_lowercase();
+    [
+        "enable javascript to continue",
+        "please enable javascript",
+        "javascript is required to continue",
+        "javascript must be enabled",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
+
+/// Rejects semantic roots whose visible content is only a repeated link list.
+/// Keep this narrow so ordinary article summaries and supported listing pages
+/// remain eligible for their existing extraction paths.
+pub(crate) fn is_link_only_semantic_root(metrics: ContentMetrics) -> bool {
+    metrics.text_chars >= 60
+        && metrics.link_text_chars.saturating_mul(100) >= metrics.text_chars.saturating_mul(75)
+        && metrics.link_density >= 0.75
+        && metrics.paragraph_count == 0
+        && metrics.code_block_count == 0
+        && metrics.table_count == 0
+        && metrics.figure_count == 0
+        && metrics.heading_count <= 1
+        && metrics.list_item_count < 3
 }
 
 /// Rejects only very short fragments that contain values but no lexical or
