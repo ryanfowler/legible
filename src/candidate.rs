@@ -355,11 +355,7 @@ impl CandidateSet {
     }
 
     pub(crate) fn is_authoritative_semantic(&self, dom: &Dom, node: NodeId) -> bool {
-        matches!(dom.tag(node), Some(Tag::Article | Tag::Main))
-            || dom
-                .attr(node, AttrName::Role)
-                .is_some_and(|roles| matches_role(roles, "article") || matches_role(roles, "main"))
-            || has_article_body_itemprop(dom, node)
+        is_authoritative_semantic_node(dom, node)
     }
 
     pub(crate) fn ranking_context(
@@ -604,6 +600,50 @@ pub(crate) fn has_article_body_itemprop(dom: &Dom, node: NodeId) -> bool {
             .split_ascii_whitespace()
             .any(|item| item.eq_ignore_ascii_case("articleBody"))
     })
+}
+
+/// Checks source-relative completeness that remains valid after the selected
+/// fragment is cleaned. The final metrics provide the local content floor;
+/// this check preserves the strongest-candidate and article-peer safeguards.
+pub(crate) fn semantic_root_has_complete_candidate(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    ranked: &[RankedCandidate],
+    selected: NodeId,
+    body: NodeId,
+) -> bool {
+    if !candidates.is_authoritative_semantic(dom, selected) {
+        return false;
+    }
+    let Some(root_features) = candidates.get(selected).map(|candidate| candidate.features) else {
+        return false;
+    };
+    let covered_strongest = ranked
+        .iter()
+        .filter(|candidate| candidate.node != body)
+        .find_map(|candidate| candidates.get(candidate.node))
+        .is_none_or(|candidate| {
+            u64::from(root_features.text_chars).saturating_mul(100)
+                >= u64::from(candidate.features.text_chars).saturating_mul(80)
+        });
+    let main = if is_main_semantic_root(dom, selected) {
+        Some(selected)
+    } else {
+        dom.ancestors(selected).find(|&ancestor| {
+            candidates.is_authoritative_semantic(dom, ancestor)
+                && is_main_semantic_root(dom, ancestor)
+        })
+    };
+    let has_article_peers = main.is_some_and(|main| article_branch_count(dom, main) >= 2);
+    covered_strongest && !has_article_peers
+}
+
+pub(crate) fn is_authoritative_semantic_node(dom: &Dom, node: NodeId) -> bool {
+    matches!(dom.tag(node), Some(Tag::Article | Tag::Main))
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| matches_role(roles, "article") || matches_role(roles, "main"))
+        || has_article_body_itemprop(dom, node)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

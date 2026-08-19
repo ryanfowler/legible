@@ -2,17 +2,17 @@
 #![allow(clippy::collapsible_if)]
 use crate::candidate::{
     CandidateSet, CandidateSource, RankedCandidate, RootSelection, RootSelectionReason,
-    locate_structured_content, select_content_root,
+    locate_structured_content, select_content_root, semantic_root_has_complete_candidate,
 };
 use crate::cleaning::*;
 use crate::constants::{
     is_alter_to_div_exception, is_default_tag_to_score, is_phrasing_elem, regexps,
 };
 use crate::diagnostics::{
-    AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
-    ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
-    NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo, RootInfo,
-    RootSelectionReasonInfo,
+    AcceptanceExceptionInfo, AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo,
+    CleanupActionKind, ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics,
+    ExtractionStrategyInfo, NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo,
+    RootInfo, RootSelectionReasonInfo,
 };
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, Tag};
 use crate::error::{Error, Result};
@@ -265,6 +265,8 @@ struct AttemptPlan {
     root_info: Option<RootInfo>,
     root_in_document_chrome: bool,
     visibility_root_semantic: bool,
+    semantic_root_complete_candidate: bool,
+    semantic_root_boilerplate: bool,
     byline: Option<String>,
     key: AttemptKey,
 }
@@ -900,6 +902,8 @@ impl<'a> ContentExtractor<'a> {
             let root_info = plan.root_info.clone();
             let root_in_document_chrome = plan.root_in_document_chrome;
             let visibility_root_semantic = plan.visibility_root_semantic;
+            let semantic_root_complete_candidate = plan.semantic_root_complete_candidate;
+            let semantic_root_boilerplate = plan.semantic_root_boilerplate;
             let key = plan.key.clone();
             let cached_attempt = (strategy == ExtractionStrategy::StructuredDataHint)
                 .then(|| physical_cache.remove(&key))
@@ -943,11 +947,24 @@ impl<'a> ContentExtractor<'a> {
                         }));
                 let deferred_for_visibility =
                     visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
+                let acceptance_exception = exact_root.is_none()
+                    && !quality.is_good()
+                    && !schema_match
+                    && valid_result
+                    && visibility_improves
+                    && !deferred_for_visibility
+                    && !semantic_root_boilerplate
+                    && Self::trusted_semantic_root(
+                        visibility_root_semantic,
+                        semantic_root_complete_candidate,
+                        result_metrics,
+                        valid_result,
+                    );
                 let accepted = valid_result
                     && (exact_root.is_some()
                         || visibility_improves
                             && !deferred_for_visibility
-                            && (quality.is_good() || schema_match));
+                            && (quality.is_good() || schema_match || acceptance_exception));
                 if accepted {
                     let excerpt = cached.excerpt.take();
                     self.page_direction = source_direction.clone();
@@ -960,6 +977,7 @@ impl<'a> ContentExtractor<'a> {
                         cached.semantic_coverage.clone(),
                         cached.representation,
                         true,
+                        acceptance_exception,
                         None,
                     );
                     let content = cached.content.take().ok_or(Error::NoContent)?;
@@ -998,6 +1016,7 @@ impl<'a> ContentExtractor<'a> {
                     quality,
                     cached.semantic_coverage.clone(),
                     cached.representation,
+                    false,
                     false,
                     Some(rejection),
                 );
@@ -1285,11 +1304,24 @@ impl<'a> ContentExtractor<'a> {
                     }));
             let deferred_for_visibility =
                 visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
+            let acceptance_exception = exact_root.is_none()
+                && !quality.is_good()
+                && !schema_match
+                && valid_result
+                && visibility_improves
+                && !deferred_for_visibility
+                && !semantic_root_boilerplate
+                && Self::trusted_semantic_root(
+                    visibility_root_semantic,
+                    semantic_root_complete_candidate,
+                    result_metrics,
+                    valid_result,
+                );
             let accepted = valid_result
                 && (exact_root.is_some()
                     || visibility_improves
                         && !deferred_for_visibility
-                        && (quality.is_good() || schema_match));
+                        && (quality.is_good() || schema_match || acceptance_exception));
             if accepted {
                 let excerpt = self.content_excerpt_if_needed(result_root);
                 self.record_attempt(
@@ -1301,6 +1333,7 @@ impl<'a> ContentExtractor<'a> {
                     semantic_coverage,
                     representation,
                     true,
+                    acceptance_exception,
                     None,
                 );
                 let content = std::mem::replace(&mut self.dom, source_dom);
@@ -1337,6 +1370,7 @@ impl<'a> ContentExtractor<'a> {
                 quality,
                 semantic_coverage.clone(),
                 representation,
+                false,
                 false,
                 Some(rejection),
             );
@@ -1541,6 +1575,14 @@ impl<'a> ContentExtractor<'a> {
         }
         let visibility_root_semantic =
             candidates.is_authoritative_semantic(working_dom, selection.node);
+        let semantic_root_complete_candidate = semantic_root_has_complete_candidate(
+            working_dom,
+            candidates,
+            ranked,
+            selection.node,
+            body,
+        );
+        let semantic_root_boilerplate = is_boilerplate_root_node(working_dom, selection.node);
         let root_info = self.root_info(
             working_dom,
             candidates,
@@ -1735,6 +1777,8 @@ impl<'a> ContentExtractor<'a> {
             root_info,
             root_in_document_chrome,
             visibility_root_semantic,
+            semantic_root_complete_candidate,
+            semantic_root_boilerplate,
             byline: discovery.byline.clone(),
             key,
         })
@@ -2215,6 +2259,7 @@ impl<'a> ContentExtractor<'a> {
                 semantic_coverage,
                 representation,
                 false,
+                false,
                 Some(Self::attempt_rejection_reason(
                     root_in_document_chrome,
                     access_barrier,
@@ -2238,6 +2283,7 @@ impl<'a> ContentExtractor<'a> {
             semantic_coverage,
             representation,
             true,
+            false,
             None,
         );
         let document = if let Some(document) = result_document {
@@ -2440,6 +2486,7 @@ impl<'a> ContentExtractor<'a> {
         semantic_coverage: Option<crate::diagnostics::SemanticCoverageInfo>,
         representation: Option<RepresentationMetricsInfo>,
         accepted: bool,
+        acceptance_exception: bool,
         rejection_reason: Option<AttemptRejectionReason>,
     ) -> Option<usize> {
         let attempts = self.diagnostic_attempts.as_mut()?;
@@ -2461,6 +2508,8 @@ impl<'a> ContentExtractor<'a> {
             representation: representation
                 .expect("representation metrics are built when diagnostics are enabled"),
             accepted,
+            acceptance_exception: acceptance_exception
+                .then_some(AcceptanceExceptionInfo::TrustedSemanticRoot),
             rejection_reason,
         });
         Some(index)
@@ -2512,6 +2561,19 @@ impl<'a> ContentExtractor<'a> {
         } else {
             AttemptRejectionReason::LowQuality
         }
+    }
+
+    fn trusted_semantic_root(
+        semantic_root: bool,
+        complete_candidate: bool,
+        result: ContentMetrics,
+        valid_result: bool,
+    ) -> bool {
+        semantic_root
+            && complete_candidate
+            && valid_result
+            && result.has_meaningful_text()
+            && semantic_root_is_complete(result)
     }
 
     fn prune_body_fallback_chrome(dom: &mut Dom, body: NodeId) {
@@ -3978,6 +4040,56 @@ fn heading_matches_page_title(page_title: &str, heading: &str) -> bool {
         })
 }
 
+/// Returns true when a cleaned semantic root contains enough independent
+/// document structure to stand on its own when page-level coverage is low.
+fn semantic_root_is_complete(metrics: ContentMetrics) -> bool {
+    const MIN_TEXT_CHARS: usize = 500;
+    const MIN_WORDS: usize = 30;
+
+    let coherent_document = metrics.paragraph_count >= 2
+        || metrics.heading_count >= 2
+        || metrics.code_block_count > 0
+        || metrics.table_count > 0
+        || metrics.figure_count > 0;
+    metrics.text_chars >= MIN_TEXT_CHARS
+        && metrics.word_count >= MIN_WORDS
+        && coherent_document
+        && metrics.link_density <= 0.45
+        && metrics.link_text_chars < metrics.text_chars
+}
+
+fn is_boilerplate_root_node(dom: &Dom, node: NodeId) -> bool {
+    const BOILERPLATE_NAMES: &[&str] = &[
+        "accessdenied",
+        "applicationshell",
+        "captcha",
+        "consent",
+        "cookie",
+        "forbidden",
+        "login",
+        "maintenance",
+        "newsletter",
+        "notfound",
+        "paywall",
+        "signin",
+        "subscribe",
+        "subscription",
+        "verify",
+        "verification",
+    ];
+    [AttrName::Id, AttrName::Class]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .map(|value| {
+            value
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .any(|value| BOILERPLATE_NAMES.iter().any(|name| value == *name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4627,6 +4739,92 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             ["docs", "content"]
         );
         assert!(diagnostics.attempts[0].semantic_coverage.is_none());
+    }
+
+    #[test]
+    fn trusted_semantic_root_can_accept_complete_low_coverage_content() {
+        let shell = "Dashboard toolbar workspace settings notifications ".repeat(240);
+        let html = format!(
+            "<body><main><aside class='shell'>{shell}</aside><article><h1>Reliable batch processing</h1><p>Batch processing is reliable when each job records its input, output, and retry state for later diagnosis.</p><p>This guide describes the worker boundary and the retry policy needed to diagnose a failed run across several independent stages.</p><p>Each retry records the failure category, preserves the original input, and reports the final outcome so operators can recover a failed nightly report without guessing.</p><p>Operators can compare duration, retry count, output rows, and the age of the oldest pending job to find the correct recovery action quickly.</p></article></main></body>"
+        );
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(&html, None)
+            .unwrap();
+        let diagnostics = page.diagnostics().unwrap();
+        let attempt = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.accepted)
+            .unwrap();
+
+        assert_eq!(attempt.selected_root.tag.as_deref(), Some("article"));
+        assert_eq!(
+            attempt.acceptance_exception,
+            Some(AcceptanceExceptionInfo::TrustedSemanticRoot)
+        );
+        assert!(!attempt.quality.good);
+        assert!(page.text().contains("retry policy"));
+        assert!(!page.text().contains("Dashboard toolbar"));
+    }
+
+    #[test]
+    fn trusted_semantic_root_does_not_bypass_safety_gates() {
+        let shell = "Dashboard toolbar workspace settings notifications ".repeat(240);
+        for html in [
+            "<body><main><h1>Access denied</h1><p>You do not have permission to access this resource.</p></main></body>",
+            "<body><div id='root'></div><script src='/assets/application.js'></script></body>",
+        ] {
+            assert!(
+                crate::Extractor::builder()
+                    .build()
+                    .extract(html, None)
+                    .is_err(),
+                "{html}"
+            );
+        }
+        let paywall = format!(
+            "<body><main><aside>{shell}</aside><article class='paywall'><h1>Subscription required</h1><p>Subscribe to unlock this article. The complete report is available after the account subscription is confirmed by the service.</p><p>Members can review the full investigation, supporting evidence, and recovery details after the subscription is confirmed for the account.</p><p>The report explains the measured result, the background conditions, and the evidence collected during the investigation for authorized readers.</p><p>Readers can compare the documented findings and follow the recovery procedure after access has been granted by the account service.</p></article></main></body>"
+        );
+        let application = format!(
+            "<body><main><aside>{shell}</aside><article class='application-shell'><h1>Dashboard application</h1><p>Enable JavaScript to continue. This application shell is not a document and provides no static report content for the reader.</p><p>Use the controls below to open the workspace, continue the setup process, and configure notifications for the account.</p><p>The client application loads the remaining screen after the browser initializes the required interactive modules.</p><p>These controls are placeholders for a client-rendered workspace and do not contain a complete article or reference.</p><button>Open dashboard</button><button>Continue</button><button>Configure notifications</button></article></main></body>"
+        );
+        for html in [paywall, application] {
+            let result = crate::Extractor::builder()
+                .diagnostics(true)
+                .build()
+                .extract(&html, None);
+            if let Ok(page) = result {
+                assert!(
+                    page.diagnostics().is_some_and(|diagnostics| diagnostics
+                        .attempts
+                        .iter()
+                        .all(|attempt| attempt.acceptance_exception.is_none())),
+                    "{html}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_root_completeness_rejects_link_only_content() {
+        let complete_text = "Complete document content has enough words and meaningful detail for the measured result and the reason the procedure matters. ".repeat(8);
+        let complete_dom = Dom::parse_fragment(
+            &format!("<div><p>{complete_text}</p><p>{complete_text}</p></div>"),
+            Tag::Div,
+        )
+        .unwrap();
+        let complete = ContentMetrics::measure(&complete_dom, complete_dom.root());
+        assert!(semantic_root_is_complete(complete));
+
+        let linked_text = "linked words ".repeat(60);
+        let links_html = format!(
+            "<div><p><a href='/one'>{linked_text}</a></p><p><a href='/two'>{linked_text}</a></p></div>"
+        );
+        let links_dom = Dom::parse_fragment(&links_html, Tag::Div).unwrap();
+        let links = ContentMetrics::measure(&links_dom, links_dom.root());
+        assert!(!semantic_root_is_complete(links));
     }
 
     #[test]
