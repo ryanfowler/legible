@@ -3456,6 +3456,16 @@ impl<'a> ContentExtractor<'a> {
                 workspace,
             );
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
+            let before = self.diagnostic_element_count(root);
+            remove_repeated_and_discussion_content_in_workspace(
+                &mut self.dom,
+                root,
+                self.page_kind,
+                &mut self.node_data,
+                &source_evidence,
+                workspace,
+            );
+            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
         }
 
         // Remove duplicate media and named placeholders. Keep all output

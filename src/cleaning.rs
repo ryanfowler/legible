@@ -16,6 +16,7 @@ use regex::Regex;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// Reusable traversal and scratch storage for one selected fragment.
 ///
@@ -1816,6 +1817,683 @@ pub(crate) fn remove_global_chrome_in_workspace(
     }
     workspace.restore_scratch(scratch);
     changed
+}
+
+/// Removes non-discussion comment threads and repeated content blocks from a
+/// selected article fragment.
+///
+/// Comment widgets can be descendants of an article element, so the global
+/// chrome pass cannot reliably remove them. The duplicate pass uses a compact
+/// normalized-text fingerprint built while walking the fragment once. It
+/// keeps the first occurrence in the primary article region and removes later
+/// copies, which also handles responsive or duplicated documentation blocks.
+pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    page_kind: PageKind,
+    store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
+    workspace: &mut FragmentWorkspace,
+) -> bool {
+    workspace.ensure_snapshot(dom, root);
+    let snapshot = workspace.elements_with_depth();
+    if snapshot.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+    if page_kind != PageKind::Discussion {
+        let snapshot = workspace.elements_with_depth();
+        let comment_aggregates = comment_aggregates(dom, snapshot);
+        let mut remove = vec![false; dom.len()];
+        for &(node, _) in snapshot {
+            if node == root
+                || dom.parent(node).is_none()
+                || is_protected_content(dom, node, evidence)
+            {
+                continue;
+            }
+            if is_comment_region(dom, node, root, store, comment_aggregates[node.index()]) {
+                remove[node.index()] = true;
+            }
+        }
+        for &(node, _) in snapshot {
+            if node == root || dom.parent(node).is_none() || remove[node.index()] {
+                continue;
+            }
+            if is_comment_control(dom, node, root, store) {
+                remove[node.index()] = true;
+            }
+        }
+        for &(node, _) in snapshot {
+            if !remove[node.index()] || dom.parent(node).is_none() {
+                continue;
+            }
+            if dom.ancestors(node).any(|ancestor| remove[ancestor.index()]) {
+                continue;
+            }
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
+        if changed {
+            workspace.invalidate();
+            workspace.ensure_snapshot(dom, root);
+        }
+    }
+
+    let snapshot = workspace.elements_with_depth();
+    if page_kind != PageKind::Discussion {
+        let aggregates = chrome_aggregates(dom, snapshot);
+        let mut remove = vec![false; dom.len()];
+        for &(node, _) in snapshot {
+            if node == root
+                || dom.parent(node).is_none()
+                || is_protected_content(dom, node, evidence)
+            {
+                continue;
+            }
+            let stats = get_or_compute_stats(dom, node, store);
+            if stats.text_length == 0 || stats.text_length >= 900 {
+                continue;
+            }
+            let mut text = String::new();
+            append_bounded_text(dom, node, 96, &mut text);
+            text.make_ascii_lowercase();
+            if is_terminal_peripheral_region(
+                dom,
+                node,
+                root,
+                store,
+                TerminalRegionSignals {
+                    stats,
+                    links: aggregates[node.index()].link_count,
+                    name: node_name(dom, node).as_ref(),
+                    text: text.trim(),
+                },
+            ) {
+                remove[node.index()] = true;
+            }
+        }
+        for &(node, _) in snapshot {
+            if !remove[node.index()] || dom.parent(node).is_none() {
+                continue;
+            }
+            if dom.ancestors(node).any(|ancestor| remove[ancestor.index()]) {
+                continue;
+            }
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
+        if changed {
+            workspace.invalidate();
+            workspace.ensure_snapshot(dom, root);
+        }
+    }
+
+    let snapshot = workspace.elements_with_depth();
+    if page_kind != PageKind::Discussion {
+        let mut repeated_links = HashMap::<(String, String), Vec<NodeId>>::new();
+        let mut text = String::new();
+        for &(node, _) in snapshot {
+            if dom.tag(node) != Some(Tag::A)
+                || dom.ancestors(node).any(|ancestor| {
+                    matches!(
+                        dom.tag(ancestor),
+                        Some(
+                            Tag::Li
+                                | Tag::Ol
+                                | Tag::Table
+                                | Tag::Tbody
+                                | Tag::Td
+                                | Tag::Th
+                                | Tag::Tr
+                                | Tag::Ul
+                        )
+                    )
+                })
+            {
+                continue;
+            }
+            text.clear();
+            get_normalized_inner_text(dom, node, &mut text);
+            let label = text.trim();
+            if label.is_empty() || label.chars().count() > 48 {
+                continue;
+            }
+            let href = dom.attr(node, AttrName::Href).unwrap_or_default().trim();
+            if href.is_empty() || href.starts_with('#') {
+                continue;
+            }
+            repeated_links
+                .entry((label.to_ascii_lowercase(), href.to_ascii_lowercase()))
+                .or_default()
+                .push(node);
+        }
+        let mut remove = vec![false; dom.len()];
+        for nodes in repeated_links.into_values().filter(|nodes| nodes.len() > 1) {
+            for &node in nodes.iter().skip(1) {
+                if near_content_start(dom, node, root, store)
+                    || near_content_end(dom, node, root, store)
+                {
+                    remove[node.index()] = true;
+                }
+            }
+        }
+        for &(node, _) in snapshot {
+            if !remove[node.index()] || dom.parent(node).is_none() {
+                continue;
+            }
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
+        if changed {
+            workspace.invalidate();
+            workspace.ensure_snapshot(dom, root);
+        }
+    }
+
+    let snapshot = workspace.elements_with_depth();
+    if has_repeated_block_hint(dom, snapshot) {
+        let fingerprints = normalized_fingerprints(dom, root, snapshot);
+        let mut positions = vec![usize::MAX; dom.len()];
+        positions[root.index()] = 0;
+        for (position, &(node, _)) in snapshot.iter().enumerate() {
+            positions[node.index()] = position.saturating_add(1);
+        }
+        let mut groups = HashMap::<(u64, u64, u64, u32, u16, u8, usize), Vec<NodeId>>::new();
+        for node in std::iter::once(root).chain(snapshot.iter().map(|&(node, _)| node)) {
+            let fingerprint = fingerprints[node.index()];
+            if fingerprint.text_chars >= 48 && fingerprint.block_count > 0 {
+                let hash = if fingerprint.normalized_hash != 0 {
+                    fingerprint.normalized_hash
+                } else {
+                    fingerprint.hash
+                };
+                let parent = dom.parent(node).map_or(node.index(), NodeId::index);
+                groups
+                    .entry((
+                        hash,
+                        fingerprint.first_leaf_hash,
+                        fingerprint.last_leaf_hash,
+                        fingerprint.text_chars,
+                        fingerprint.block_count,
+                        fingerprint.role,
+                        parent,
+                    ))
+                    .or_default()
+                    .push(node);
+            }
+        }
+
+        let mut remove = vec![false; dom.len()];
+        for nodes in groups.into_values().filter(|nodes| nodes.len() > 1) {
+            let retained = nodes
+                .iter()
+                .copied()
+                .min_by_key(|&node| {
+                    (
+                        !is_primary_article_region(dom, node, root),
+                        positions[node.index()],
+                    )
+                })
+                .unwrap_or(nodes[0]);
+            for node in nodes {
+                if node == retained
+                    || node == root
+                    || !is_duplicate_region_candidate(dom, node)
+                    || dom.parent(node).is_none()
+                    || is_protected_content(dom, node, evidence)
+                    || dom.ancestors(retained).any(|ancestor| ancestor == node)
+                {
+                    continue;
+                }
+                remove[node.index()] = true;
+            }
+        }
+
+        for &(node, _) in snapshot {
+            if !remove[node.index()] || dom.parent(node).is_none() {
+                continue;
+            }
+            if dom.ancestors(node).any(|ancestor| remove[ancestor.index()]) {
+                continue;
+            }
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
+    }
+    if changed {
+        workspace.invalidate();
+    }
+    changed
+}
+
+#[derive(Clone, Copy, Default)]
+struct NormalizedFingerprint {
+    hash: u64,
+    normalized_hash: u64,
+    first_leaf_hash: u64,
+    last_leaf_hash: u64,
+    leaf_count: u16,
+    text_chars: u32,
+    block_count: u16,
+    role: u8,
+}
+
+fn has_repeated_block_hint(dom: &Dom, snapshot: &[(NodeId, u32)]) -> bool {
+    let mut fingerprints = HashMap::<(u64, usize), u8>::new();
+    let mut text = String::new();
+    for &(node, _) in snapshot {
+        if !matches!(
+            dom.tag(node),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P)
+        ) {
+            continue;
+        }
+        text.clear();
+        dom.append_normalized_text_limited(node, &mut text, 512);
+        let text = text.trim();
+        if text.chars().count() < 24 {
+            continue;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.to_ascii_lowercase().hash(&mut hasher);
+        let key = (hasher.finish(), text.len());
+        let count = fingerprints.entry(key).or_default();
+        *count = count.saturating_add(1);
+        if *count >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalized_fingerprints(
+    dom: &Dom,
+    root: NodeId,
+    snapshot: &[(NodeId, u32)],
+) -> Vec<NormalizedFingerprint> {
+    const HASH_OFFSET: u64 = 14_695_981_039_346_656_037;
+    let mut fingerprints = vec![NormalizedFingerprint::default(); dom.len()];
+    for node in std::iter::once(root)
+        .chain(snapshot.iter().map(|&(node, _)| node))
+        .rev()
+    {
+        let mut hash = HASH_OFFSET;
+        let mut normalized_hash = 0_u64;
+        let mut first_leaf_hash = 0_u64;
+        let mut last_leaf_hash = 0_u64;
+        let mut leaf_count = 0_u16;
+        let mut text_chars = 0_u32;
+        let mut block_count = u16::from(is_fingerprint_block(dom, node));
+        for child in dom.children(node) {
+            if let Some(text) = dom.text_node(child) {
+                let (leaf_hash, leaf_chars) =
+                    hash_normalized_text(text, &mut hash, &mut text_chars);
+                if leaf_chars > 0 {
+                    normalized_hash = normalized_hash.wrapping_add(leaf_hash);
+                    if leaf_count == 0 {
+                        first_leaf_hash = leaf_hash;
+                    }
+                    last_leaf_hash = leaf_hash;
+                    leaf_count = leaf_count.saturating_add(1);
+                }
+            } else if dom.is_element(child) {
+                let child_fingerprint = fingerprints[child.index()];
+                mix_fingerprint_boundary(&mut hash);
+                mix_hash(&mut hash, child_fingerprint.hash);
+                normalized_hash = normalized_hash.wrapping_add(child_fingerprint.normalized_hash);
+                if child_fingerprint.leaf_count > 0 {
+                    if leaf_count == 0 {
+                        first_leaf_hash = child_fingerprint.first_leaf_hash;
+                    }
+                    last_leaf_hash = child_fingerprint.last_leaf_hash;
+                    leaf_count = leaf_count.saturating_add(child_fingerprint.leaf_count);
+                }
+                text_chars = text_chars.saturating_add(child_fingerprint.text_chars);
+                block_count = block_count.saturating_add(child_fingerprint.block_count);
+            }
+        }
+        fingerprints[node.index()] = NormalizedFingerprint {
+            hash,
+            normalized_hash,
+            first_leaf_hash,
+            last_leaf_hash,
+            leaf_count,
+            text_chars,
+            block_count,
+            role: fingerprint_role(dom, node),
+        };
+    }
+    fingerprints
+}
+
+fn is_duplicate_region_candidate(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::Article | Tag::Aside | Tag::Div | Tag::Main | Tag::Section)
+    ) && dom
+        .element_children(node)
+        .any(|child| is_fingerprint_block(dom, child))
+}
+
+fn fingerprint_role(dom: &Dom, node: NodeId) -> u8 {
+    match dom.tag(node) {
+        Some(Tag::Article) => 1,
+        Some(Tag::Aside) => 2,
+        Some(Tag::Div) => 3,
+        Some(Tag::Main) => 4,
+        Some(Tag::Section) => 5,
+        _ => 0,
+    }
+}
+
+fn hash_normalized_text(text: &str, hash: &mut u64, text_chars: &mut u32) -> (u64, u32) {
+    const HASH_OFFSET: u64 = 14_695_981_039_346_656_037;
+    let mut leaf_hash = HASH_OFFSET;
+    let mut leaf_chars = 0_u32;
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && *text_chars > 0 {
+            mix_byte(hash, b' ');
+            *text_chars = (*text_chars).saturating_add(1);
+        }
+        if pending_space && leaf_chars > 0 {
+            mix_byte(&mut leaf_hash, b' ');
+            leaf_chars = leaf_chars.saturating_add(1);
+        }
+        pending_space = false;
+        for lowercase in character.to_lowercase() {
+            mix_u32(hash, lowercase as u32);
+            mix_u32(&mut leaf_hash, lowercase as u32);
+        }
+        *text_chars = (*text_chars).saturating_add(1);
+        leaf_chars = leaf_chars.saturating_add(1);
+    }
+    (leaf_hash, leaf_chars)
+}
+
+fn mix_fingerprint_boundary(hash: &mut u64) {
+    mix_byte(hash, 0x1f);
+}
+
+fn mix_hash(hash: &mut u64, value: u64) {
+    for byte in value.to_le_bytes() {
+        mix_byte(hash, byte);
+    }
+}
+
+fn mix_u32(hash: &mut u64, value: u32) {
+    for byte in value.to_le_bytes() {
+        mix_byte(hash, byte);
+    }
+}
+
+fn mix_byte(hash: &mut u64, byte: u8) {
+    *hash = hash
+        .wrapping_mul(1_099_511_628_211)
+        .wrapping_add(u64::from(byte));
+}
+
+fn is_fingerprint_block(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(
+            Tag::Article
+                | Tag::Blockquote
+                | Tag::Figure
+                | Tag::H1
+                | Tag::H2
+                | Tag::H3
+                | Tag::H4
+                | Tag::H5
+                | Tag::H6
+                | Tag::Li
+                | Tag::P
+                | Tag::Pre
+                | Tag::Section
+                | Tag::Table
+        )
+    )
+}
+
+fn is_primary_article_region(dom: &Dom, node: NodeId, root: NodeId) -> bool {
+    for ancestor in std::iter::once(node).chain(dom.ancestors(node)) {
+        if is_primary_article_element(dom, ancestor) {
+            return true;
+        }
+        if ancestor == root {
+            break;
+        }
+    }
+    false
+}
+
+fn is_primary_article_element(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::Article)
+        || dom.attr(node, AttrName::ItemProp).is_some_and(|value| {
+            value.split_ascii_whitespace().any(|item| {
+                item.eq_ignore_ascii_case("articleBody") || item.eq_ignore_ascii_case("text")
+            })
+        })
+        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
+            roles
+                .split_whitespace()
+                .any(|role| role.eq_ignore_ascii_case("article"))
+        })
+}
+
+#[derive(Clone, Copy, Default)]
+struct CommentAggregate {
+    comment_items: u8,
+    reply_links: u8,
+}
+
+fn comment_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<CommentAggregate> {
+    let mut aggregates = vec![CommentAggregate::default(); dom.len()];
+    for &(node, _) in snapshot.iter().rev() {
+        let name = node_name(dom, node);
+        let mut comment_items = u8::from(has_comment_token(&name));
+        let mut reply_links = u8::from(is_reply_link(dom, node));
+        for child in dom.element_children(node) {
+            let child_aggregate = aggregates[child.index()];
+            comment_items = comment_items
+                .saturating_add(child_aggregate.comment_items)
+                .min(3);
+            reply_links = reply_links
+                .saturating_add(child_aggregate.reply_links)
+                .min(3);
+        }
+        aggregates[node.index()] = CommentAggregate {
+            comment_items,
+            reply_links,
+        };
+    }
+    aggregates
+}
+
+fn has_comment_token(name: &str) -> bool {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| matches!(token, "comment" | "comments" | "discussion" | "replies"))
+}
+
+fn is_reply_link(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::A)
+        && (get_normalized_inner_text(dom, node, &mut String::new()).eq_ignore_ascii_case("reply")
+            || dom
+                .attr(node, AttrName::Href)
+                .is_some_and(|href| contains_ascii_case_insensitive(href, "reply")))
+}
+
+fn is_comment_region(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    aggregate: CommentAggregate,
+) -> bool {
+    let name = node_name(dom, node);
+    let named = has_comment_token(&name);
+    let semantic = dom.attr(node, AttrName::Role).is_some_and(|roles| {
+        roles
+            .split_whitespace()
+            .any(|role| matches!(role.to_ascii_lowercase().as_str(), "comment" | "discussion"))
+    });
+    if !(named || semantic) || matches!(dom.tag(node), Some(Tag::P | Tag::A | Tag::Span)) {
+        return false;
+    }
+    let terminal = near_content_end(dom, node, root, store)
+        || near_terminal_peripheral_end(dom, node, root, store);
+    semantic
+        || aggregate.comment_items >= 2
+        || aggregate.reply_links >= 2
+        || dom
+            .attr(node, AttrName::Id)
+            .is_some_and(|id| id.eq_ignore_ascii_case("comments"))
+        || name.contains("comment-thread")
+        || named && terminal
+}
+
+fn is_comment_control(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    if dom.tag(node) != Some(Tag::A) {
+        return false;
+    }
+    let href = dom.attr(node, AttrName::Href).unwrap_or_default();
+    if !contains_ascii_case_insensitive(href, "comment") {
+        return false;
+    }
+    if dom.ancestors(node).any(|ancestor| {
+        matches!(
+            dom.tag(ancestor),
+            Some(
+                Tag::Li | Tag::Ol | Tag::Table | Tag::Tbody | Tag::Td | Tag::Th | Tag::Tr | Tag::Ul
+            )
+        )
+    }) {
+        return false;
+    }
+    let mut text = String::new();
+    get_normalized_inner_text(dom, node, &mut text);
+    let text = text.trim();
+    let comment_label = contains_ascii_case_insensitive(text, "comment")
+        || text.bytes().all(|byte| byte.is_ascii_digit());
+    comment_label
+        && (near_content_start(dom, node, root, store) || near_content_end(dom, node, root, store))
+}
+
+struct TerminalRegionSignals<'a> {
+    stats: NodeStats,
+    links: u8,
+    name: &'a str,
+    text: &'a str,
+}
+
+fn is_terminal_peripheral_region(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    signals: TerminalRegionSignals<'_>,
+) -> bool {
+    let TerminalRegionSignals {
+        stats,
+        links,
+        name,
+        text,
+    } = signals;
+    let link_density = get_link_density_cached(dom, node, stats.text_length, store);
+    let named = contains_any(
+        name,
+        &[
+            "article-footer",
+            "comments",
+            "comment-thread",
+            "more-stories",
+            "newsletter",
+            "post-footer",
+            "previous-post",
+            "read-more",
+            "related",
+            "story-footer",
+            "subscribe",
+        ],
+    );
+    let labelled = starts_with_any(
+        text,
+        &[
+            "next post",
+            "previous post",
+            "read more",
+            "related topics",
+            "monthly newsletter",
+            "more from ",
+            "you may also like",
+        ],
+    );
+    let footer = matches!(dom.tag(node), Some(Tag::Footer));
+    if !(named || labelled || footer) {
+        return false;
+    }
+    if !labelled && !name.contains("newsletter") && has_meaningful_heading(dom, node) {
+        return false;
+    }
+    let at_end = near_content_end(dom, node, root, store)
+        || near_terminal_peripheral_end(dom, node, root, store);
+    let at_start = near_content_start(dom, node, root, store);
+    let low_prose = stats.sentence_end_count <= 8 && stats.text_length < 900;
+    let link_cluster = links > 0 && link_density >= 0.15;
+    if links == 0
+        && stats.sentence_end_count > 0
+        && !name.contains("newsletter")
+        && !name.contains("comments")
+    {
+        return false;
+    }
+    low_prose
+        && ((at_end
+            && (named || labelled || footer)
+            && (link_cluster || !has_substantive_prose(dom, node)))
+            || at_start && labelled && link_cluster)
+}
+
+fn near_terminal_peripheral_end(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let mut current = node;
+    let mut trailing_chars = 0_usize;
+    loop {
+        let mut sibling = dom.next_sibling(current);
+        while let Some(next) = sibling {
+            let stats = get_or_compute_stats(dom, next, store);
+            if stats.text_length >= 360 || stats.sentence_end_count > 2 {
+                return false;
+            }
+            trailing_chars = trailing_chars.saturating_add(stats.text_length as usize);
+            if trailing_chars > 700 {
+                return false;
+            }
+            sibling = dom.next_sibling(next);
+        }
+        if current == root {
+            return true;
+        }
+        let Some(parent) = dom.parent(current) else {
+            return true;
+        };
+        current = parent;
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -4286,6 +4964,14 @@ mod tests {
             &mut text,
             &mut nodes,
         );
+        remove_repeated_and_discussion_content_in_workspace(
+            &mut dom,
+            root,
+            PageKind::Unknown,
+            &mut store,
+            &evidence,
+            &mut FragmentWorkspace::default(),
+        );
         dom.text(root)
     }
 
@@ -4520,6 +5206,57 @@ mod tests {
         assert!(text.contains("advertisement changed television"), "{text}");
         assert!(text.contains("read more carefully"), "{text}");
         assert!(text.contains("share this article in class"), "{text}");
+    }
+
+    #[test]
+    fn removes_repeated_blocks_and_comment_regions() {
+        let text = clean_fragment(
+            r#"<article><p>Primary content remains useful and complete.</p>
+            <section class="faq"><h2>FAQ</h2><p>The same answer explains the stable behavior in enough detail for readers.</p></section>
+            <section class="faq"><h2>FAQ</h2><p>The same answer explains the stable behavior in enough detail for readers.</p></section>
+            <section id="comments"><h2>Comments</h2><p>A reader reply with useful-looking text.</p><a href="/reply">Reply</a><a href="/reply-two">Reply</a></section></article>"#,
+        );
+        assert!(text.contains("Primary content remains"), "{text}");
+        assert_eq!(
+            text.matches("The same answer explains").count(),
+            1,
+            "{text}"
+        );
+        assert!(!text.contains("reader reply"), "{text}");
+    }
+
+    #[test]
+    fn preserves_repeated_standalone_prose() {
+        let text = clean_fragment(
+            r#"<article><p>The same wording can be valid when it appears in two separate paragraphs with different context.</p><p>The same wording can be valid when it appears in two separate paragraphs with different context.</p></article>"#,
+        );
+        assert_eq!(
+            text.matches("The same wording can be valid").count(),
+            2,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn preserves_comment_regions_for_discussion_pages() {
+        let mut dom = Dom::parse_fragment(
+            r#"<main><article><p>Primary post.</p><section id="comments"><p>Reply body.</p><a href="/reply">Reply</a><a href="/reply-two">Reply</a></section></article></main>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let mut store = NodeStateStore::new();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &store);
+        let mut workspace = FragmentWorkspace::default();
+        remove_repeated_and_discussion_content_in_workspace(
+            &mut dom,
+            root,
+            PageKind::Discussion,
+            &mut store,
+            &evidence,
+            &mut workspace,
+        );
+        assert!(dom.text(root).contains("Reply body"));
     }
 
     #[test]
