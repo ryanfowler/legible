@@ -83,10 +83,10 @@ mod specialized;
 
 pub use budget::ParseBudget;
 pub use diagnostics::{
-    AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo, CleanupActionKind,
-    ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics, ExtractionStrategyInfo,
-    NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo, RootInfo,
-    RootSelectionReasonInfo, SemanticCategoryCoverageInfo, SemanticCoverageCategory,
+    AcceptanceExceptionInfo, AttemptRejectionReason, CandidateSourceInfo, CleanupActionInfo,
+    CleanupActionKind, ContentMetricsInfo, ExtractionAttempt, ExtractionDiagnostics,
+    ExtractionStrategyInfo, NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo,
+    RootInfo, RootSelectionReasonInfo, SemanticCategoryCoverageInfo, SemanticCoverageCategory,
     SemanticCoverageInfo,
 };
 pub use error::{Error, Result};

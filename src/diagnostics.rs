@@ -169,6 +169,14 @@ pub enum AttemptRejectionReason {
     Superseded,
 }
 
+/// A positive exception that allowed an automatic attempt to be accepted.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcceptanceExceptionInfo {
+    /// A complete, safe semantic root met the dedicated acceptance floor.
+    TrustedSemanticRoot,
+}
+
 /// A major cleanup stage that removed retained content elements.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,6 +249,8 @@ pub struct ExtractionAttempt {
     /// Source, final DOM, and retained semantic representation sizes.
     pub representation: RepresentationMetricsInfo,
     pub accepted: bool,
+    /// The positive exception used when normal quality was insufficient.
+    pub acceptance_exception: Option<AcceptanceExceptionInfo>,
     pub rejection_reason: Option<AttemptRejectionReason>,
 }
 
