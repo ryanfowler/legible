@@ -157,6 +157,8 @@ pub enum AttemptRejectionReason {
     SourceAccessBarrier,
     /// The result was an interactive application shell.
     InteractiveShell,
+    /// The semantic root contained only a repeated list of links.
+    LinkOnlySemanticRoot,
     /// The result was too short and lacked coherent context.
     IncoherentShortResult,
     /// The quality did not meet the acceptance threshold.

@@ -32,8 +32,9 @@ use crate::page_kind::PageKind;
 use crate::prepared::{SourceAnalysis, SourceElements, SourceEntry, SourceFlags};
 use crate::quality::{
     ContentMetrics, ExtractionQuality, SemanticStructureCounts, interactive_shell_evidence,
-    is_access_barrier, is_access_barrier_prepared, is_incoherent_short_result,
-    is_interactive_shell, semantic_coverage,
+    is_access_barrier, is_access_barrier_prepared, is_application_shell_notice,
+    is_incoherent_short_result, is_interactive_shell, is_link_only_semantic_root,
+    semantic_coverage,
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
@@ -829,6 +830,7 @@ impl<'a> ContentExtractor<'a> {
         let mut plan_index = 0;
         let mut broad_planned = false;
         let mut body_planned = false;
+        let mut rejected_link_only_semantic_root = false;
         while plan_index < plans.len() || !body_planned {
             if plan_index == 2 && !broad_planned {
                 broad_planned = true;
@@ -929,11 +931,23 @@ impl<'a> ContentExtractor<'a> {
                 let ignores_visible_source_barrier = strategy
                     == ExtractionStrategy::RelaxedVisibility
                     && has_relaxable_hidden_content;
+                let selected_link_only_semantic_root = exact_root.is_none()
+                    && strategy != ExtractionStrategy::RelaxedVisibility
+                    && visibility_root_semantic
+                    && semantic_root_complete_candidate
+                    && is_link_only_semantic_root(result_metrics);
+                let link_only_semantic_root = selected_link_only_semantic_root
+                    || strategy == ExtractionStrategy::BodyFallback
+                        && rejected_link_only_semantic_root
+                        && is_link_only_semantic_root(result_metrics);
+                rejected_link_only_semantic_root |= selected_link_only_semantic_root;
                 let valid_result = !root_in_document_chrome
+                    && result_metrics.has_meaningful_text()
                     && !cached.access_barrier
                     && !(short_source_access_barrier && !ignores_visible_source_barrier)
                     && !cached.interactive_shell
-                    && !cached.incoherent_short;
+                    && !cached.incoherent_short
+                    && !link_only_semantic_root;
                 let visibility_candidate_coherent = strategy
                     != ExtractionStrategy::RelaxedVisibility
                     || result_metrics.paragraph_count >= 2
@@ -1003,6 +1017,7 @@ impl<'a> ContentExtractor<'a> {
                     root_in_document_chrome,
                     cached.access_barrier,
                     short_source_access_barrier && !ignores_visible_source_barrier,
+                    link_only_semantic_root,
                     cached.interactive_shell,
                     cached.incoherent_short,
                     visibility_improves,
@@ -1257,7 +1272,8 @@ impl<'a> ContentExtractor<'a> {
                     .as_ref()
                     .and_then(|result| semantic_coverage(source, result))
             });
-            let interactive_shell = is_interactive_shell(result_metrics, shell_evidence);
+            let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
+                || is_application_shell_notice(&self.dom, result_root, result_metrics);
             let incoherent_short = is_incoherent_short_result(result_metrics);
             let attempt_source_metrics = if strategy == ExtractionStrategy::RelaxedVisibility {
                 relaxed_source_metrics
@@ -1283,14 +1299,26 @@ impl<'a> ContentExtractor<'a> {
                 && (quality.coverage >= 0.2 || quality.text_chars >= 500);
             let ignores_visible_source_barrier =
                 strategy == ExtractionStrategy::RelaxedVisibility && has_relaxable_hidden_content;
+            let selected_link_only_semantic_root = exact_root.is_none()
+                && strategy != ExtractionStrategy::RelaxedVisibility
+                && visibility_root_semantic
+                && semantic_root_complete_candidate
+                && is_link_only_semantic_root(result_metrics);
+            let link_only_semantic_root = selected_link_only_semantic_root
+                || strategy == ExtractionStrategy::BodyFallback
+                    && rejected_link_only_semantic_root
+                    && is_link_only_semantic_root(result_metrics);
+            rejected_link_only_semantic_root |= selected_link_only_semantic_root;
             let valid_result = if exact_root.is_some() {
                 result_metrics.has_meaningful_text()
             } else {
                 !root_in_document_chrome
+                    && result_metrics.has_meaningful_text()
                     && !access_barrier
                     && !(short_source_access_barrier && !ignores_visible_source_barrier)
                     && !interactive_shell
                     && !incoherent_short
+                    && !link_only_semantic_root
             };
             let visibility_candidate_coherent = strategy != ExtractionStrategy::RelaxedVisibility
                 || result_metrics.paragraph_count >= 2
@@ -1357,6 +1385,7 @@ impl<'a> ContentExtractor<'a> {
                 root_in_document_chrome,
                 access_barrier,
                 short_source_access_barrier && !ignores_visible_source_barrier,
+                link_only_semantic_root,
                 interactive_shell,
                 incoherent_short,
                 visibility_improves,
@@ -2246,7 +2275,8 @@ impl<'a> ContentExtractor<'a> {
         });
         let quality = ExtractionQuality::new(source_metrics, result_metrics, root != body);
         let root_in_document_chrome = false;
-        let interactive_shell = is_interactive_shell(result_metrics, shell_evidence);
+        let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
+            || is_application_shell_notice(&self.dom, result_root, result_metrics);
         let incoherent_short = is_incoherent_short_result(result_metrics);
         let valid_result = result_metrics.has_meaningful_text();
         if !valid_result {
@@ -2263,6 +2293,7 @@ impl<'a> ContentExtractor<'a> {
                 Some(Self::attempt_rejection_reason(
                     root_in_document_chrome,
                     access_barrier,
+                    false,
                     false,
                     interactive_shell,
                     incoherent_short,
@@ -2535,10 +2566,12 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn attempt_rejection_reason(
         document_chrome: bool,
         access_barrier: bool,
         source_access_barrier: bool,
+        link_only_semantic_root: bool,
         interactive_shell: bool,
         incoherent_short: bool,
         visibility_improves: bool,
@@ -2550,6 +2583,8 @@ impl<'a> ContentExtractor<'a> {
             AttemptRejectionReason::AccessBarrier
         } else if source_access_barrier {
             AttemptRejectionReason::SourceAccessBarrier
+        } else if link_only_semantic_root {
+            AttemptRejectionReason::LinkOnlySemanticRoot
         } else if interactive_shell {
             AttemptRejectionReason::InteractiveShell
         } else if incoherent_short {
