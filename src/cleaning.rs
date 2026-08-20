@@ -1715,14 +1715,16 @@ pub(crate) fn remove_global_chrome_in_workspace(
     let remove = &mut scratch.bits[..dom.len()];
     let mut text_buffer = String::new();
     let mut name_buffer = String::new();
-    for &(node, _) in workspace.elements_with_depth() {
+    let mut parent_content = vec![None; dom.len()];
+    let mut substantive_children = vec![None; dom.len()];
+    for &(node, depth) in workspace.elements_with_depth() {
         if node == root || dom.parent(node).is_none() {
             continue;
         }
         let aggregate = aggregates[node.index()];
         append_node_name(dom, node, &mut name_buffer);
         let name = name_buffer.as_str();
-        let semantic_navigation = dom.tag(node) == Some(Tag::Nav)
+        let semantic_navigation = matches!(dom.tag(node), Some(Tag::Aside | Tag::Nav))
             || dom.tag(node) == Some(Tag::Footer)
             || dom.tag(node) == Some(Tag::Header) && aggregate.link_count >= 3
             || dom.attr(node, AttrName::Role).is_some_and(|roles| {
@@ -1737,9 +1739,17 @@ pub(crate) fn remove_global_chrome_in_workspace(
                 "navigation",
                 "navbar",
                 "menu",
+                "breadcrumb",
+                "breadcrumbs",
                 "footer",
                 "contact",
                 "legal",
+                "newsletter",
+                "recommendation",
+                "recommendations",
+                "recommended",
+                "related-links",
+                "related_links",
                 "site-links",
                 "site_links",
             ],
@@ -1748,7 +1758,20 @@ pub(crate) fn remove_global_chrome_in_workspace(
             && signatures
                 .get(&aggregate.signature)
                 .is_some_and(|count| *count >= 2);
-        if !semantic_navigation && !named_chrome && !repeated {
+        let metadata_candidate = has_metadata_name(name)
+            || matches!(dom.tag(node), Some(Tag::Address | Tag::Time))
+            || aggregate.has_time && aggregate.link_count >= 1
+            || aggregate.link_count == 1
+                && dom
+                    .parent(node)
+                    .is_some_and(|parent| dom.tag(parent) == Some(Tag::Header));
+        let leading_frame_candidate = depth <= 3 && aggregate.link_count >= 3;
+        if !semantic_navigation
+            && !named_chrome
+            && !repeated
+            && !metadata_candidate
+            && !leading_frame_candidate
+        {
             continue;
         }
         if evidence.contains_semantic(node) {
@@ -1763,7 +1786,14 @@ pub(crate) fn remove_global_chrome_in_workspace(
         let non_link_chars = f64::from(stats.text_length) * (1.0 - link_density);
         let at_start = near_content_start(dom, node, root, store);
         let at_end = near_content_end(dom, node, root, store);
-        let adjacent_content = has_substantive_content_sibling(dom, node, store);
+        let adjacent_content =
+            has_substantive_content_sibling(dom, node, store, &mut substantive_children);
+        let dominant_content_sibling = leading_frame_candidate
+            && stats.text_length <= 800
+            && has_dominant_content_sibling(dom, node, stats, store, &mut parent_content);
+        let leading_frame_position = at_start
+            || leading_frame_candidate
+                && has_only_header_or_empty_siblings_before(dom, node, store);
         get_normalized_inner_text(dom, node, &mut text_buffer);
         text_buffer.make_ascii_lowercase();
         let text = text_buffer.trim();
@@ -1782,8 +1812,19 @@ pub(crate) fn remove_global_chrome_in_workspace(
             at_end,
             adjacent_content,
         };
-        if is_global_navigation(dom, node, root, &metrics)
-            || is_global_footer(dom, node, root, &metrics)
+        let leading_metadata = is_leading_metadata(dom, node, &metrics, dominant_content_sibling);
+        let leading_frame = is_leading_page_frame(
+            dom,
+            node,
+            &metrics,
+            dominant_content_sibling,
+            leading_frame_position,
+        );
+        if (semantic_navigation || named_chrome || repeated || leading_metadata || leading_frame)
+            && (is_global_navigation(dom, node, root, &metrics)
+                || is_global_footer(dom, node, root, &metrics)
+                || leading_metadata
+                || leading_frame)
         {
             remove[node.index()] = true;
         }
@@ -2443,6 +2484,9 @@ fn is_terminal_peripheral_region(
     if !(named || labelled || footer) {
         return false;
     }
+    if is_inside_article_container(dom, node) && has_meaningful_region_content(dom, node) {
+        return false;
+    }
     if !labelled && !name.contains("newsletter") && has_meaningful_heading(dom, node) {
         return false;
     }
@@ -2502,6 +2546,7 @@ struct ChromeAggregate {
     signature: u64,
     has_meaningful_media: bool,
     has_content_structure: bool,
+    has_time: bool,
 }
 
 fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggregate> {
@@ -2518,6 +2563,7 @@ fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggrega
             dom.tag(node),
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P)
         );
+        let mut has_time = dom.tag(node) == Some(Tag::Time);
         for child in dom.element_children(node) {
             let child_aggregate = aggregates[child.index()];
             link_count = link_count
@@ -2525,6 +2571,7 @@ fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggrega
                 .min(32);
             has_meaningful_media |= child_aggregate.has_meaningful_media;
             has_content_structure |= child_aggregate.has_content_structure;
+            has_time |= child_aggregate.has_time;
             signature = signature
                 .wrapping_mul(1_099_511_628_211)
                 .wrapping_add(child_aggregate.signature);
@@ -2534,6 +2581,7 @@ fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggrega
             signature,
             has_meaningful_media,
             has_content_structure,
+            has_time,
         };
     }
     aggregates
@@ -2615,37 +2663,111 @@ fn has_substantive_content_sibling(
     dom: &Dom,
     node: NodeId,
     store: &mut crate::dom::NodeStateStore,
+    substantive_children: &mut [Option<u16>],
 ) -> bool {
     let Some(parent) = dom.parent(node) else {
         return false;
     };
-    dom.element_children(parent).any(|sibling| {
-        sibling != node
-            && !matches!(
+    let count = if let Some(count) = substantive_children[parent.index()] {
+        count
+    } else {
+        let count = dom
+            .element_children(parent)
+            .filter(|&child| is_substantive_content_child(dom, child, store))
+            .count()
+            .min(usize::from(u16::MAX)) as u16;
+        substantive_children[parent.index()] = Some(count);
+        count
+    };
+    count > u16::from(is_substantive_content_child(dom, node, store))
+}
+
+fn is_substantive_content_child(
+    dom: &Dom,
+    node: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    if matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
+    ) {
+        return false;
+    }
+    let stats = get_or_compute_stats(dom, node, store);
+    stats.text_length >= 80
+        && (stats.sentence_end_count > 0
+            || dom.descendants(node).any(|descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(
+                        Tag::Article
+                            | Tag::H1
+                            | Tag::H2
+                            | Tag::H3
+                            | Tag::H4
+                            | Tag::H5
+                            | Tag::H6
+                            | Tag::P
+                    )
+                )
+            }))
+}
+
+fn has_dominant_content_sibling(
+    dom: &Dom,
+    node: NodeId,
+    node_stats: NodeStats,
+    store: &mut crate::dom::NodeStateStore,
+    parent_content: &mut [Option<(u32, u32)>],
+) -> bool {
+    let Some(parent) = dom.parent(node) else {
+        return false;
+    };
+    let minimum = node_stats.text_length.saturating_mul(4).max(600);
+    let (mut text_length, mut sentence_ends) = if let Some(total) = parent_content[parent.index()] {
+        total
+    } else {
+        let mut total = (0_u32, 0_u32);
+        for sibling in dom.element_children(parent) {
+            if matches!(
                 dom.tag(sibling),
                 Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
-            )
-            && {
-                let stats = get_or_compute_stats(dom, sibling, store);
-                stats.text_length >= 80
-                    && (stats.sentence_end_count > 0
-                        || dom.descendants(sibling).any(|descendant| {
-                            matches!(
-                                dom.tag(descendant),
-                                Some(
-                                    Tag::Article
-                                        | Tag::H1
-                                        | Tag::H2
-                                        | Tag::H3
-                                        | Tag::H4
-                                        | Tag::H5
-                                        | Tag::H6
-                                        | Tag::P
-                                )
-                            )
-                        }))
+            ) {
+                continue;
             }
-    })
+            let stats = get_or_compute_stats(dom, sibling, store);
+            total.0 = total.0.saturating_add(stats.text_length);
+            total.1 = total.1.saturating_add(stats.sentence_end_count);
+        }
+        parent_content[parent.index()] = Some(total);
+        total
+    };
+    if !matches!(
+        dom.tag(node),
+        Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
+    ) {
+        text_length = text_length.saturating_sub(node_stats.text_length);
+        sentence_ends = sentence_ends.saturating_sub(node_stats.sentence_end_count);
+    }
+    text_length >= minimum && sentence_ends >= 4
+}
+
+fn has_only_header_or_empty_siblings_before(
+    dom: &Dom,
+    node: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let mut sibling = dom.prev_sibling(node);
+    let mut saw_header = false;
+    while let Some(previous) = sibling {
+        if dom.tag(previous) == Some(Tag::Header) {
+            saw_header = true;
+        } else if get_or_compute_stats(dom, previous, store).text_length > 0 {
+            return false;
+        }
+        sibling = dom.prev_sibling(previous);
+    }
+    saw_header
 }
 
 struct ChromeMetrics<'a> {
@@ -2694,7 +2816,8 @@ fn is_global_navigation(
     {
         return false;
     }
-    if is_inside_article_content(dom, node, root)
+    if is_inside_explicit_article_body(dom, node, root)
+        || is_meaningful_article_region(dom, node, metrics)
         || is_content_relative_navigation(dom, node)
         || is_document_toc(dom, node, metrics.name)
         || is_within_pricing_region(dom, node)
@@ -2732,6 +2855,16 @@ fn is_global_navigation(
         ],
     );
     let low_prose = metrics.stats.sentence_end_count <= 4 && metrics.non_link_chars <= 360.0;
+    let pagination = metrics.at_end
+        && metrics.links >= 1
+        && [
+            "previous post",
+            "next post",
+            "previous article",
+            "next article",
+        ]
+        .iter()
+        .any(|label| metrics.text.contains(label));
     let compact = metrics.links >= 3 && metrics.link_density >= 0.35
         || metrics.repeated && metrics.links >= 2 && metrics.link_density >= 0.45;
     let positioned = metrics.at_start || metrics.at_end || metrics.adjacent_content;
@@ -2753,7 +2886,7 @@ fn is_global_navigation(
             && !metrics.has_meaningful_media
             && !metrics.has_content_structure
             && (metrics.at_start || metrics.at_end);
-    structural && compact && low_prose
+    structural && (compact || pagination) && low_prose
 }
 
 fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetrics<'_>) -> bool {
@@ -2763,7 +2896,8 @@ fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetri
             Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::Header | Tag::Other | Tag::Section)
         )
         || matches!(dom.tag(node), Some(Tag::Article | Tag::Main))
-        || is_inside_article_content(dom, node, root)
+        || is_inside_explicit_article_body(dom, node, root)
+        || is_meaningful_article_region(dom, node, metrics)
         || is_within_pricing_region(dom, node)
         || has_pricing_content(dom, node, metrics.text)
         || metrics.has_meaningful_media
@@ -2810,6 +2944,137 @@ fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetri
     low_prose
         && ((global_structure && (link_cluster || footer_text || contact_link))
             || (footer_text && metrics.links >= 2 && metrics.link_density >= 0.15))
+}
+
+fn is_leading_metadata(
+    dom: &Dom,
+    node: NodeId,
+    metrics: &ChromeMetrics<'_>,
+    dominant_content_sibling: bool,
+) -> bool {
+    let inside_article_header = is_inside_article_header(dom, node);
+    if (!metrics.at_start && !inside_article_header)
+        || metrics.stats.text_length > 420
+        || metrics.stats.sentence_end_count > 3
+        || metrics.has_meaningful_media
+        || has_substantive_prose(dom, node)
+        || std::iter::once(node)
+            .chain(dom.descendants(node))
+            .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Pre | Tag::Table)))
+    {
+        return false;
+    }
+    let named = has_metadata_name(metrics.name);
+    let structural = matches!(dom.tag(node), Some(Tag::Address | Tag::Time))
+        || metrics.links >= 1
+            && dom
+                .descendants(node)
+                .any(|descendant| dom.tag(descendant) == Some(Tag::Time));
+    let header_navigation_label = metrics.links == 1
+        && metrics.stats.word_count <= 4
+        && matches!(metrics.text, "blog" | "changelog" | "news")
+        && dom
+            .parent(node)
+            .is_some_and(|parent| dom.tag(parent) == Some(Tag::Header));
+    (named || structural || header_navigation_label)
+        && (dominant_content_sibling
+            || metrics.adjacent_content
+            || inside_article_header
+            || dom.parent(node).is_some_and(|parent| {
+                matches!(dom.tag(parent), Some(Tag::Header | Tag::Aside))
+                    || node_name(dom, parent).contains("header")
+            }))
+}
+
+fn is_inside_article_header(dom: &Dom, node: NodeId) -> bool {
+    dom.ancestors(node).take(8).any(|ancestor| {
+        dom.tag(ancestor) == Some(Tag::Header)
+            || contains_any(
+                &node_name(dom, ancestor),
+                &[
+                    "article-head",
+                    "article_head",
+                    "articleheader",
+                    "page-head",
+                    "pageheader",
+                    "post-head",
+                    "postheader",
+                ],
+            )
+    })
+}
+
+fn has_metadata_name(name: &str) -> bool {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "author"
+                    | "authors"
+                    | "byline"
+                    | "category"
+                    | "categories"
+                    | "date"
+                    | "datepublished"
+                    | "dates"
+                    | "kicker"
+                    | "meta"
+                    | "metadata"
+                    | "postmeta"
+                    | "published"
+                    | "taxonomy"
+            )
+        })
+}
+
+fn is_leading_page_frame(
+    dom: &Dom,
+    node: NodeId,
+    metrics: &ChromeMetrics<'_>,
+    dominant_content_sibling: bool,
+    leading_position: bool,
+) -> bool {
+    if dom.tag(node) == Some(Tag::Header)
+        || contains_any(
+            metrics.name,
+            &[
+                "article-head",
+                "article_head",
+                "articleheader",
+                "page-head",
+                "pageheader",
+                "post-head",
+                "postheader",
+            ],
+        )
+        || has_pricing_content(dom, node, metrics.text)
+        || is_document_toc(dom, node, metrics.name)
+        || has_substantive_prose(dom, node)
+        || std::iter::once(node)
+            .chain(dom.ancestors(node))
+            .any(|ancestor| matches!(dom.tag(ancestor), Some(Tag::Code | Tag::Pre)))
+        || metrics
+            .name
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == "pre")
+        || std::iter::once(node)
+            .chain(dom.descendants(node))
+            .any(|descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(Tag::Figure | Tag::Pre | Tag::Table)
+                )
+            })
+    {
+        return false;
+    }
+    leading_position
+        && dominant_content_sibling
+        && metrics.stats.text_length <= 800
+        && metrics.stats.sentence_end_count <= 6
+        && metrics.links >= 3
+        && metrics.non_link_chars <= 520.0
+        && (metrics.link_density >= 0.2 || metrics.links >= 5)
 }
 
 fn is_content_relative_navigation(dom: &Dom, node: NodeId) -> bool {
@@ -2917,23 +3182,44 @@ fn is_within_pricing_region(dom: &Dom, node: NodeId) -> bool {
         })
 }
 
-fn is_inside_article_content(dom: &Dom, node: NodeId, _root: NodeId) -> bool {
+fn is_inside_explicit_article_body(dom: &Dom, node: NodeId, _root: NodeId) -> bool {
     std::iter::once(node)
         .chain(dom.ancestors(node))
         .any(|ancestor| {
-            dom.tag(ancestor) == Some(Tag::Article)
-                || dom.attr(ancestor, AttrName::ItemProp).is_some_and(|value| {
-                    value.split_whitespace().any(|item| {
-                        item.eq_ignore_ascii_case("articleBody")
-                            || item.eq_ignore_ascii_case("text")
-                    })
+            dom.attr(ancestor, AttrName::ItemProp).is_some_and(|value| {
+                value.split_whitespace().any(|item| {
+                    item.eq_ignore_ascii_case("articleBody") || item.eq_ignore_ascii_case("text")
                 })
-                || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
-                    roles
-                        .split_whitespace()
-                        .any(|role| role.eq_ignore_ascii_case("article"))
-                })
+            })
         })
+}
+
+fn is_meaningful_article_region(dom: &Dom, node: NodeId, metrics: &ChromeMetrics<'_>) -> bool {
+    is_inside_article_container(dom, node)
+        && (metrics.has_meaningful_media || has_meaningful_region_content(dom, node))
+}
+
+fn is_inside_article_container(dom: &Dom, node: NodeId) -> bool {
+    dom.ancestors(node).any(|ancestor| {
+        dom.tag(ancestor) == Some(Tag::Article)
+            || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
+                roles
+                    .split_whitespace()
+                    .any(|role| role.eq_ignore_ascii_case("article"))
+            })
+    })
+}
+
+fn has_meaningful_region_content(dom: &Dom, node: NodeId) -> bool {
+    has_substantive_prose(dom, node)
+        || std::iter::once(node)
+            .chain(dom.descendants(node))
+            .any(|descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(Tag::Blockquote | Tag::Figure | Tag::Pre | Tag::Table)
+                )
+            })
 }
 
 fn hoist_footer_identity(dom: &mut Dom, footer: NodeId) {
@@ -3541,6 +3827,7 @@ fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
             "read next",
             "next steps",
             "more stories",
+            "more context",
             "more articles",
             "more posts",
             "you may also like",
@@ -3976,6 +4263,7 @@ fn related_text_signal(text: &str) -> bool {
             "related",
             "recommended",
             "more stories",
+            "more context",
             "you may also like",
             "collection",
         ],
@@ -4219,7 +4507,11 @@ fn remove_contextual_boilerplate_in_workspace(
                 ));
         let advertisement = matches!(
             text,
-            "advertisement" | "advertisement continues below" | "sponsored" | "sponsored content"
+            "advertisement"
+                | "advertisement continues below"
+                | "reg ad"
+                | "sponsored"
+                | "sponsored content"
         ) && (at_start || at_end || strong_ad_name(&name));
         let action = matches!(
             text,
@@ -4249,7 +4541,7 @@ fn remove_contextual_boilerplate_in_workspace(
 fn is_contextual_text_boundary(dom: &Dom, node: NodeId) -> bool {
     matches!(
         dom.tag(node),
-        Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::P | Tag::Section | Tag::Small)
+        Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::P | Tag::Section | Tag::Small | Tag::Span)
     )
 }
 
@@ -5099,6 +5391,26 @@ mod tests {
     }
 
     #[test]
+    fn global_chrome_keeps_a_dated_article_header_with_hero_media() {
+        let text = clean_fragment(
+            r#"<article><header><figure><img src="hero.jpg" alt="A complete benchmark result"><figcaption>The benchmark setup before the first run.</figcaption></figure><p class="byline"><a href="/author">A. Writer</a> · <time>August 19, 2026</time></p></header><p>The report describes the measured system in enough detail for another operator to repeat the complete experiment.</p><p>The results use the same input data, environment, and validation procedure for every recorded run.</p></article>"#,
+        );
+
+        assert!(text.contains("benchmark setup"), "{text}");
+        assert!(text.contains("measured system"), "{text}");
+    }
+
+    #[test]
+    fn global_chrome_keeps_meaningful_terminal_article_prose() {
+        let text = clean_fragment(
+            r#"<article><p>The report explains how the implementation processes each record and validates the final result.</p><p>The method repeats the operation with stable inputs so another operator can verify the result.</p><footer><p>The source material remains available under the <a href="/license">project license</a>. Read the <a href="/sources">source notes</a> for the collection method and the limits that apply to this published result.</p></footer></article>"#,
+        );
+
+        assert!(text.contains("source material remains available"), "{text}");
+        assert!(text.contains("collection method"), "{text}");
+    }
+
+    #[test]
     fn heuristic_cleanup_removes_trailing_audio_and_collection_cards() {
         let text = clean_fragment(
             r#"<article><p>The product report explains the complete result and the purchase options.</p>
@@ -5190,10 +5502,10 @@ mod tests {
     #[test]
     fn heuristic_cleanup_removes_contextual_text_boilerplate() {
         let text = clean_fragment(
-            r#"<article><p class="reading-time">5 min read</p><p>This substantive article paragraph explains the complete result and gives useful context to readers.</p><p><a href="/more">Read more</a></p><p>Advertisement</p></article>"#,
+            r#"<article><p class="reading-time">5 min read</p><p>This substantive article paragraph explains the complete result and gives useful context to readers.</p><span class="ad-label">REG AD</span><p><a href="/more">Read more</a></p><p>Advertisement</p></article>"#,
         );
         assert!(text.contains("substantive article"), "{text}");
-        for clutter in ["5 min read", "Read more", "Advertisement"] {
+        for clutter in ["5 min read", "REG AD", "Read more", "Advertisement"] {
             assert!(!text.contains(clutter), "retained {clutter}: {text}");
         }
     }

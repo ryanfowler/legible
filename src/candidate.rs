@@ -799,7 +799,10 @@ pub(crate) fn select_content_root<'a>(
     // A schema match is already a high-confidence boundary, so do not broaden
     // it with unrelated peer candidates.
     let mut branches = SmallVec::new();
-    if reason != RootSelectionReason::StructuredData {
+    if !matches!(
+        reason,
+        RootSelectionReason::StructuredData | RootSelectionReason::ArticleBody
+    ) {
         if let Some(parent) =
             shared_semantic_parent(dom, candidates, ranked, selected, body, first.score)
         {
@@ -1124,6 +1127,18 @@ fn complete_semantic_boundary(
     body: NodeId,
 ) -> Option<NodeId> {
     if is_article_semantic_node(dom, selected) {
+        return None;
+    }
+    let selected_features = candidates.get(selected)?.features;
+    let selected_has_structure = selected_features.code_block_count >= 2
+        || selected_features.table_count >= 1
+        || selected_features.heading_count >= 2;
+    let selected_is_complete = selected_features.text_chars >= 500
+        && selected_features.word_count >= 30
+        && selected_features.paragraph_count >= 2
+        && selected_has_structure
+        && selected_features.link_density <= 0.45;
+    if selected_is_complete {
         return None;
     }
     let body_text_chars = candidates
@@ -2979,5 +2994,132 @@ mod tests {
 
         assert!(markdown.contains("primary report"), "{markdown}");
         assert!(!markdown.contains("related card"), "{markdown}");
+    }
+
+    #[test]
+    fn article_body_boundary_excludes_article_metadata() {
+        let html = r##"<body><main><article>
+            <header><h1>Repair guide</h1><div class="post-meta"><time>August 19, 2026</time><a href="/category/hardware">Hardware</a><span>42 minute read</span></div></header>
+            <div itemprop="articleBody">
+                <p>The repair guide explains how to recover a computer after a failed firmware update. It starts with a verified backup and a stable power source.</p>
+                <p>The operator then identifies the flash chip and records its exact part number before connecting the programmer.</p>
+                <h2>Read the original image</h2>
+                <pre><code>flashrom --programmer ch341a_spi --read backup.bin</code></pre>
+                <p>The first read preserves the original image. A second read confirms that the connection is stable before any write starts.</p>
+                <figure><img src="board.jpg" alt="The programmer connected to the firmware chip"><figcaption>The clip connects to the firmware chip.</figcaption></figure>
+                <p>After the verification succeeds, the operator can write the replacement image and compare it with the source file.</p>
+            </div>
+        </article></main></body>"##;
+
+        let markdown = crate::extract(html, Some("https://example.com/repair"))
+            .unwrap()
+            .markdown();
+
+        assert!(markdown.contains("recover a computer"), "{markdown}");
+        assert!(markdown.contains("flashrom --programmer"), "{markdown}");
+        assert!(markdown.contains("programmer connected"), "{markdown}");
+        assert!(!markdown.contains("August 19, 2026"), "{markdown}");
+        assert!(!markdown.contains("42 minute read"), "{markdown}");
+        assert!(!markdown.contains("Hardware"), "{markdown}");
+    }
+
+    #[test]
+    fn complete_content_boundary_excludes_article_siblings() {
+        let html = r##"<body><main><article>
+            <section class="resource-hero"><a href="/software/one">Featured One</a><a href="/software/two">Featured Two</a><a href="/language/rust">Rust</a><p>Quick reference material from the software catalog.</p></section>
+            <div class="post-content">
+                <p>This reference explains how to process records in a stable pipeline. Each stage uses an explicit input and produces a verified output.</p>
+                <p>The examples keep parsing, validation, and storage separate so that failures remain easy to diagnose.</p>
+                <h2>Validate each record</h2>
+                <pre><code>let valid = records.filter(validate);</code></pre>
+                <p>Validation reports the rejected row and keeps the original source available for inspection.</p>
+                <h2>Store the result</h2>
+                <table><tr><th>Stage</th><th>Output</th></tr><tr><td>Parse</td><td>Record</td></tr><tr><td>Validate</td><td>Verified record</td></tr></table>
+                <p>The storage stage writes only verified records and records the final count in the operation log.</p>
+            </div>
+            <aside class="blog-toc"><a href="#validate">Validate each record</a><a href="#store">Store the result</a></aside>
+            <section class="recommendations"><h2>Featured software</h2><a href="/other"><img src="other.png" alt="Other software package">Other package</a></section>
+        </article></main></body>"##;
+
+        let markdown = crate::extract(html, Some("https://example.com/reference"))
+            .unwrap()
+            .markdown();
+
+        assert!(markdown.contains("process records"), "{markdown}");
+        assert!(markdown.contains("let valid"), "{markdown}");
+        assert!(markdown.contains("Verified record"), "{markdown}");
+        assert!(!markdown.contains("Featured One"), "{markdown}");
+        assert!(!markdown.contains("Quick reference material"), "{markdown}");
+        assert_eq!(
+            markdown.matches("Validate each record").count(),
+            1,
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Featured software"), "{markdown}");
+        assert!(!markdown.contains("Other package"), "{markdown}");
+    }
+
+    #[test]
+    fn article_cleanup_removes_a_leading_recommendation_cluster() {
+        let html = r#"<body><main><article>
+            <header><h1>Compute service</h1><p>A complete guide to stable compute instances.</p></header>
+            <div class="partner-strip"><p>Trusted by</p><a href="/one">One</a><a href="/two">Two</a><a href="/three">Three</a><a href="/four">Four</a><a href="/five">Five</a></div>
+            <h2>Start an instance</h2>
+            <p>The service starts an isolated instance with a fixed processor count, a stable address, and persistent storage. The instance remains active until the operator stops it.</p>
+            <p>The command returns a machine identifier. Use that identifier to inspect state, attach a terminal, or create a snapshot.</p>
+            <h2>Choose a size</h2>
+            <table><tr><th>Size</th><th>Memory</th></tr><tr><td>Small</td><td>4 GB</td></tr><tr><td>Large</td><td>16 GB</td></tr></table>
+            <p>Each size uses dedicated limits. The documented limit prevents one instance from consuming the resources of another instance.</p>
+            <h2>Stop an instance</h2>
+            <p>Stopping an instance releases its processor allocation. Persistent storage remains available for the next start operation.</p>
+        </article></main></body>"#;
+
+        let markdown = crate::extract(html, Some("https://example.com/compute"))
+            .unwrap()
+            .markdown();
+
+        assert!(markdown.contains("Start an instance"), "{markdown}");
+        assert!(
+            markdown.contains("Persistent storage remains"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Trusted by"), "{markdown}");
+        assert!(!markdown.contains("[One]"), "{markdown}");
+        assert!(!markdown.contains("[Five]"), "{markdown}");
+    }
+
+    #[test]
+    fn article_cleanup_keeps_leading_figure_and_table_content() {
+        let html = r#"<body><main><article itemprop="articleBody">
+            <figure><a href="/full-one"><img src="one.jpg" alt="First measured configuration"></a><a href="/full-two"><img src="two.jpg" alt="Second measured configuration"></a><a href="/full-three"><img src="three.jpg" alt="Third measured configuration"></a><figcaption>The three measured configurations show the complete test setup.</figcaption></figure>
+            <table><tr><th>Configuration</th><th>Result</th></tr><tr><td><a href="/one">One</a></td><td>Stable</td></tr><tr><td><a href="/two">Two</a></td><td>Stable</td></tr><tr><td><a href="/three">Three</a></td><td>Stable</td></tr></table>
+            <section><h2>Test method</h2>
+                <p>The test method holds the input load constant and records the result after each complete run. Each configuration uses the same source data and validation rules.</p>
+                <p>The operator repeats every run three times. The repeated results show that the configuration stays stable under the expected workload.</p>
+                <h2>Conclusion</h2>
+                <p>All three configurations complete the workload without data loss. The recorded output gives operators enough information to select a suitable configuration.</p>
+                <p>The final report keeps the images and the comparison table because both structures explain the measured result.</p>
+            </section>
+        </article></main></body>"#;
+
+        let markdown = crate::extract(html, Some("https://example.com/results"))
+            .unwrap()
+            .markdown();
+
+        assert!(
+            markdown.contains("three measured configurations"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("First measured configuration"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| Configuration | Result |"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("[One]"), "{markdown}");
+        assert!(markdown.contains("Test method"), "{markdown}");
+        assert!(markdown.contains("without data loss"), "{markdown}");
     }
 }
