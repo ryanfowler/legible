@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use legible::extract;
 use std::hint::black_box;
 
-fn fixtures() -> [(&'static str, &'static str, &'static str); 9] {
+fn fixtures() -> [(&'static str, &'static str, &'static str); 10] {
     [
         (
             "medium-2",
@@ -48,6 +48,11 @@ fn fixtures() -> [(&'static str, &'static str, &'static str); 9] {
             "guardian-1",
             include_str!("fixtures/readability-js/guardian-1/source.html"),
             "https://www.theguardian.com/environment/2019/jan/03/what-is-the-sea-telling-us-maori-tribes-fearful-over-whale-strandings",
+        ),
+        (
+            "go-net-http",
+            include_str!("fixtures/go-net-http/source.html"),
+            "https://pkg.go.dev/net/http",
         ),
     ]
 }

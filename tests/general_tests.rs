@@ -88,7 +88,13 @@ fn error_name(error: &Error) -> &'static str {
 fn run_fixture(source_path: &Path) -> datatest_stable::Result<()> {
     let directory = source_path.parent().expect("fixture has no directory");
     let source = fs::read_to_string(source_path)?;
-    let result = extract(&source, Some("https://example.test/docs/page.html"));
+    let url_path = directory.join("url.txt");
+    let source_url = if url_path.exists() {
+        fs::read_to_string(url_path)?
+    } else {
+        "https://example.test/docs/page.html".to_owned()
+    };
+    let result = extract(&source, Some(source_url.trim()));
     let error_path = directory.join("expected.error");
     if error_path.exists() {
         let expected = fs::read_to_string(error_path)?;

@@ -19,15 +19,15 @@ baseline updates, or before changing a performance-sensitive implementation:
 cargo bench --bench extraction
 ```
 
-Run the Mozilla Readability real-world fixture benchmarks with one command:
+Run the real-world fixture benchmarks with one command:
 
 ```bash
 cargo bench --bench real_world
 ```
 
 This target measures `medium-2`, `ars-1`, `heise`, `nytimes-5`, `wikipedia-2`,
-`yahoo-2`, `buzzfeed-1`, `engadget`, and `guardian-1`. It measures extraction
-and the full raw HTML to Markdown path for each fixture.
+`yahoo-2`, `buzzfeed-1`, `engadget`, `guardian-1`, and `go-net-http`. It
+measures extraction and the full raw HTML to Markdown path for each fixture.
 
 ## Phase and allocation report
 

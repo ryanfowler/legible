@@ -1,8 +1,7 @@
 # Benchmark fixtures
 
-These HTML snapshots come from Mozilla Readability's test-page corpus. This
-repository also uses the same snapshots in
-`tests/readability-js/test/test-pages/`.
+Most HTML snapshots come from Mozilla Readability's test-page corpus. This
+repository also uses those snapshots in `tests/readability-js/test/test-pages/`.
 
 The `readability-js/` directory contains the source snapshots used by the
 real-world benchmark target:
@@ -16,5 +15,10 @@ real-world benchmark target:
 - `buzzfeed-1`
 - `engadget`
 - `guardian-1`
+
+The `go-net-http` directory contains a snapshot of the Go `net/http` package
+page from `https://pkg.go.dev/net/http`. The snapshot was captured on
+2026-08-20. The page identifies the package content with the BSD-3-Clause
+license.
 
 Keep these copies under `benches/` because Cargo packages benchmark sources but excludes the test suite. Do not change a benchmark copy without changing its source attribution and reviewing the Criterion baseline.
