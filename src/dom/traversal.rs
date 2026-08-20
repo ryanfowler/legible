@@ -263,6 +263,13 @@ impl Dom {
             out.push_str(t);
             return;
         }
+        if let Some(child) = self.first_child(root)
+            && self.next_sibling(child).is_none()
+            && let Some(text) = self.text_node(child)
+        {
+            out.push_str(text);
+            return;
+        }
         for id in self.descendants(root) {
             if let Some(t) = self.text_node(id) {
                 out.push_str(t)
@@ -298,6 +305,22 @@ impl Dom {
         s
     }
     pub(crate) fn append_normalized_text(&self, root: NodeId, out: &mut String) {
+        if let Some(text) = self.text_node(root) {
+            if text.is_ascii() {
+                append_normalized_ascii_text(text, out);
+            } else {
+                append_normalized_text_chunk(text, out);
+            }
+            return;
+        }
+        if let Some(child) = self.first_child(root)
+            && self.next_sibling(child).is_none()
+            && let Some(text) = self.text_node(child)
+            && text.is_ascii()
+        {
+            append_normalized_ascii_text(text, out);
+            return;
+        }
         let mut pending_whitespace = false;
         for id in std::iter::once(root).chain(self.descendants(root)) {
             let Some(text) = self.text_node(id) else {
@@ -440,6 +463,34 @@ impl Dom {
     }
 
     pub(crate) fn normalized_char_count(&self, root: NodeId) -> usize {
+        if let Some(text) = self.text_node(root) {
+            return normalized_ascii_char_count(text).unwrap_or_else(|| {
+                text.split_whitespace()
+                    .map(|word| word.chars().count())
+                    .sum::<usize>()
+                    + text.split_whitespace().count().saturating_sub(1)
+            });
+        }
+        if let Some(child) = self.first_child(root)
+            && self.next_sibling(child).is_none()
+            && let Some(text) = self.text_node(child)
+        {
+            if let Some(count) = normalized_ascii_char_count(text) {
+                return count;
+            }
+            let mut count = 0;
+            let mut pending_whitespace = false;
+            for character in text.chars() {
+                if character.is_whitespace() {
+                    pending_whitespace = true;
+                } else {
+                    count += usize::from(pending_whitespace);
+                    pending_whitespace = false;
+                    count += 1;
+                }
+            }
+            return count;
+        }
         let mut count = 0;
         let mut has_text = false;
         let mut pending_whitespace = false;
@@ -486,6 +537,23 @@ impl Dom {
     ) -> Option<usize> {
         if threshold == 0 {
             return None;
+        }
+        if let Some(text) = self.text_node(root) {
+            return normalized_ascii_char_count_below(text, threshold).or_else(|| {
+                let count = text
+                    .split_whitespace()
+                    .map(|word| word.chars().count())
+                    .sum::<usize>()
+                    + text.split_whitespace().count().saturating_sub(1);
+                (count < threshold).then_some(count)
+            });
+        }
+        if let Some(child) = self.first_child(root)
+            && self.next_sibling(child).is_none()
+            && let Some(text) = self.text_node(child)
+            && let Some(count) = normalized_ascii_char_count_below(text, threshold)
+        {
+            return Some(count);
         }
         let mut count = 0;
         let mut has_text = false;
@@ -582,4 +650,78 @@ fn append_normalized_text_chunk(text: &str, out: &mut String) {
             out.push(character);
         }
     }
+}
+
+#[inline]
+fn append_normalized_ascii_text(text: &str, out: &mut String) {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut pending_whitespace = false;
+    while index < bytes.len() {
+        let start = index;
+        while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if start != index {
+            if pending_whitespace {
+                out.push(' ');
+                pending_whitespace = false;
+            }
+            out.push_str(&text[start..index]);
+        }
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            pending_whitespace |= !out.is_empty();
+            index += 1;
+        }
+    }
+}
+
+#[inline]
+fn normalized_ascii_char_count(text: &str) -> Option<usize> {
+    if !text.is_ascii() {
+        return None;
+    }
+    let mut count = 0;
+    let mut has_text = false;
+    let mut pending_whitespace = false;
+    for &byte in text.as_bytes() {
+        if byte.is_ascii_whitespace() {
+            pending_whitespace |= has_text;
+        } else {
+            count += usize::from(pending_whitespace);
+            pending_whitespace = false;
+            count += 1;
+            has_text = true;
+        }
+    }
+    Some(count)
+}
+
+#[inline]
+fn normalized_ascii_char_count_below(text: &str, threshold: usize) -> Option<usize> {
+    if !text.is_ascii() {
+        return None;
+    }
+    let mut count = 0;
+    let mut has_text = false;
+    let mut pending_whitespace = false;
+    for &byte in text.as_bytes() {
+        if byte.is_ascii_whitespace() {
+            pending_whitespace |= has_text;
+            continue;
+        }
+        if pending_whitespace {
+            count += 1;
+            if count >= threshold {
+                return None;
+            }
+            pending_whitespace = false;
+        }
+        count += 1;
+        if count >= threshold {
+            return None;
+        }
+        has_text = true;
+    }
+    Some(count)
 }

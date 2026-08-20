@@ -1526,30 +1526,41 @@ fn char_prefix(text: &str, limit: usize) -> &str {
 }
 
 fn structured_agreement(dom: &Dom, node: NodeId, hints: &[StructuredHint]) -> f64 {
-    let candidate_text =
-        bounded_normalized_text(dom, node, MAX_CANDIDATE_MATCH_CHARS).to_lowercase();
+    let mut candidate_text = bounded_normalized_text(dom, node, MAX_CANDIDATE_MATCH_CHARS);
+    if candidate_text.is_ascii() {
+        candidate_text.make_ascii_lowercase();
+    } else {
+        candidate_text = candidate_text.to_lowercase();
+    }
     let candidate_tokens: Vec<_> = split_word_tokens(&candidate_text).collect();
     if candidate_tokens.is_empty() {
         return 0.0;
     }
-    let candidate_set: HashSet<_> = candidate_tokens.iter().copied().collect();
     hints
         .iter()
         .map(|hint| {
+            let mut matched_tokens = HashSet::with_capacity(hint.token_set.len());
+            let precision_count = candidate_tokens
+                .iter()
+                .filter(|token| {
+                    if hint.token_set.contains(**token) {
+                        matched_tokens.insert(**token);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
             let (unique_count, unique_chars) = hint
                 .tokens
                 .iter()
-                .filter(|token| !candidate_set.contains(token.as_str()))
+                .filter(|token| !matched_tokens.contains(token.as_str()))
                 .fold((0_usize, 0_usize), |(count, chars), token| {
                     (count + 1, chars + token.chars().count())
                 });
             let unique_chars = unique_chars + unique_count.saturating_sub(1);
             let coverage = 1.0 - unique_chars as f64 / hint.text_chars as f64;
-            let precision = candidate_tokens
-                .iter()
-                .filter(|token| hint.token_set.contains(**token))
-                .count() as f64
-                / candidate_tokens.len() as f64;
+            let precision = precision_count as f64 / candidate_tokens.len() as f64;
             if coverage + precision == 0.0 {
                 0.0
             } else {

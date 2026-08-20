@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
-use super::{Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
+use super::{Attribute, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use crate::budget::ParseBudget;
 use html5ever::tokenizer::TokenizerOpts;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
@@ -346,7 +346,7 @@ impl TreeSink for DomSink {
         let Some(id) = self.create_node(NodeData::Element(ElementData {
             name,
             tag,
-            attrs,
+            attrs: attrs.into_iter().map(Attribute::from).collect(),
             template_contents: NodeLink::NONE,
             mathml_annotation_xml_integration_point: flags.mathml_annotation_xml_integration_point,
         })) else {
@@ -517,7 +517,7 @@ impl TreeSink for DomSink {
             }
             for a in attrs {
                 if !e.attrs.iter().any(|x| x.name == a.name) {
-                    e.attrs.push(a)
+                    e.attrs.push(a.into())
                 }
             }
         }

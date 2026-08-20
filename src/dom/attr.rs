@@ -66,16 +66,16 @@ pub(crate) enum AttrName {
 }
 impl AttrName {
     pub(crate) fn from_local(s: &str) -> Self {
-        // html5ever normalizes HTML attribute names to lowercase. Avoid an
-        // allocation for that hot path, but keep case-insensitive behavior for
-        // qualified names supplied by callers.
-        let lowercase;
-        let s = if s.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            lowercase = s.to_ascii_lowercase();
-            lowercase.as_str()
-        } else {
-            s
-        };
+        let kind = Self::from_lowercase(s);
+        if kind != Self::Other || !s.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return kind;
+        }
+        let lowercase = s.to_ascii_lowercase();
+        Self::from_lowercase(&lowercase)
+    }
+
+    #[inline]
+    fn from_lowercase(s: &str) -> Self {
         match s {
             "align" => Self::Align,
             "aria-hidden" => Self::AriaHidden,
@@ -140,13 +140,6 @@ impl AttrName {
             "vspace" => Self::VSpace,
             "width" => Self::Width,
             _ => Self::Other,
-        }
-    }
-    pub(crate) fn matches_local(self, local: &str) -> bool {
-        if self == Self::Other {
-            Self::from_local(local) == Self::Other
-        } else {
-            local == self.as_str() || local.eq_ignore_ascii_case(self.as_str())
         }
     }
     pub(crate) const fn as_str(self) -> &'static str {
@@ -218,4 +211,34 @@ impl AttrName {
     }
 }
 
-pub(crate) type Attribute = html5ever::Attribute;
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub(crate) struct Attribute {
+    pub(crate) name: html5ever::QualName,
+    pub(crate) value: tendril::StrTendril,
+    kind: AttrName,
+}
+
+impl From<html5ever::Attribute> for Attribute {
+    #[inline]
+    fn from(attribute: html5ever::Attribute) -> Self {
+        let kind = AttrName::from_local(attribute.name.local.as_ref());
+        Self {
+            name: attribute.name,
+            value: attribute.value,
+            kind,
+        }
+    }
+}
+
+impl Attribute {
+    #[inline]
+    pub(crate) fn new(name: html5ever::QualName, value: tendril::StrTendril) -> Self {
+        let kind = AttrName::from_local(name.local.as_ref());
+        Self { name, value, kind }
+    }
+
+    #[inline]
+    pub(crate) fn is_named(&self, name: AttrName) -> bool {
+        self.kind == name
+    }
+}
