@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
-use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
+use super::{AttrName, Attribute, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
 use smallvec::SmallVec;
 use tendril::StrTendril;
@@ -161,14 +161,14 @@ impl Dom {
             if let Some(a) = e
                 .attrs
                 .iter_mut()
-                .find(|attribute| name.matches_local(attribute.name.local.as_ref()))
+                .find(|attribute| attribute.is_named(name))
             {
                 a.value = StrTendril::from(value)
             } else {
-                e.attrs.push(super::Attribute {
-                    name: QualName::new(None, ns!(), LocalName::from(name.as_str())),
-                    value: StrTendril::from(value),
-                })
+                e.attrs.push(Attribute::new(
+                    QualName::new(None, ns!(), LocalName::from(name.as_str())),
+                    StrTendril::from(value),
+                ))
             }
         }
     }
@@ -178,21 +178,19 @@ impl Dom {
             if let Some(a) = e.attrs.iter_mut().find(|a| a.name == name) {
                 a.value = value
             } else {
-                e.attrs.push(super::Attribute { name, value })
+                e.attrs.push(Attribute::new(name, value))
             }
         }
     }
     pub(crate) fn remove_attr(&mut self, node: NodeId, name: AttrName) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs
-                .retain(|attribute| !name.matches_local(attribute.name.local.as_ref()));
+            e.attrs.retain(|attribute| !attribute.is_named(name));
         }
     }
     pub(crate) fn remove_attrs(&mut self, node: NodeId, names: &[AttrName]) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            e.attrs.retain(|attribute| {
-                !names.contains(&AttrName::from_local(attribute.name.local.as_ref()))
-            });
+            e.attrs
+                .retain(|attribute| !names.iter().any(|name| attribute.is_named(*name)));
         }
     }
     #[cfg(test)]

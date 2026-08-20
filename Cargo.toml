@@ -14,6 +14,16 @@ exclude = [".github/", "examples/", "tests/", "fuzz/"]
 [lib]
 bench = false
 
+# Extraction is a cross-module hot path. Thin LTO keeps the release and bench
+# builds linkable in a reasonable time while allowing the optimizer to inline
+# the small DOM, scoring, and rendering helpers across module boundaries.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
 [features]
 default = []
 fuzzing = []

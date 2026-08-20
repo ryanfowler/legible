@@ -41,6 +41,13 @@ static EXTRACTORS: [&dyn SpecializedExtractor; 5] = [
 
 /// Runs the first high-confidence extractor in registry order.
 pub(crate) fn extract(context: &DocumentContext<'_>) -> Option<SpecializedResult> {
+    // Ordinary pages are common. Avoid running each specialized recognizer's
+    // full DOM scan when the source has none of their identifying markers.
+    // Keep share URLs in the scan because AI conversation extraction uses the
+    // URL as its primary signature.
+    if !has_specialized_signature(context) {
+        return None;
+    }
     extract_with_registry(context, &EXTRACTORS)
 }
 
@@ -52,6 +59,80 @@ fn extract_with_registry(
         .iter()
         .find(|extractor| extractor.matches(context))
         .and_then(|extractor| extractor.extract(context))
+}
+
+fn has_specialized_signature(context: &DocumentContext<'_>) -> bool {
+    if context.source_uri.is_some_and(is_ai_share_url) {
+        return true;
+    }
+    context.dom.descendants(context.dom.root()).any(|node| {
+        let id = context.dom.attr(node, crate::dom::AttrName::Id);
+        if id == Some("siteTable") || id == Some("hnmain") {
+            return true;
+        }
+        context
+            .dom
+            .attr(node, crate::dom::AttrName::Class)
+            .is_some_and(|classes| {
+                classes.split_ascii_whitespace().any(|class| {
+                    matches!(
+                        class,
+                        "athing"
+                            | "comtr"
+                            | "js-issue-title"
+                            | "js-comment-body"
+                            | "comment-body"
+                            | "markdown-body"
+                            | "review-comment-contents"
+                            | "topic-post"
+                            | "cooked"
+                            | "discourse-application"
+                            | "thing"
+                            | "link"
+                            | "linklisting"
+                            | "nestedlisting"
+                            | "title"
+                    )
+                })
+            })
+            || context
+                .dom
+                .attr_by_local_name(node, "data-turbo-body")
+                .is_some()
+            || context
+                .dom
+                .attr_by_local_name(node, "data-testid")
+                .is_some()
+            || context
+                .dom
+                .attr_by_local_name(node, "data-post-id")
+                .is_some()
+            || context
+                .dom
+                .attr_by_local_name(node, "data-discourse-base-url")
+                .is_some()
+            || context
+                .dom
+                .attr_by_local_name(node, "data-fullname")
+                .is_some()
+    })
+}
+
+fn is_ai_share_url(url: &url::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if !matches!(
+        host,
+        "chatgpt.com" | "chat.openai.com" | "claude.ai" | "gemini.google.com" | "grok.com"
+    ) {
+        return false;
+    }
+    let mut segments = url.path_segments().into_iter().flatten();
+    segments.next() == Some("share")
+        && segments.next().is_some_and(|segment| !segment.is_empty())
+        && segments.next().is_none()
 }
 
 pub(super) fn has_class(dom: &Dom, node: NodeId, expected: &str) -> bool {

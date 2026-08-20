@@ -55,17 +55,25 @@ impl ElementData {
     pub(crate) fn attr(&self, name: AttrName) -> Option<&str> {
         self.attrs
             .iter()
-            .find(|attribute| name.matches_local(attribute.name.local.as_ref()))
+            .find(|attribute| attribute.is_named(name))
             .map(|attribute| attribute.value.as_ref())
     }
     #[inline]
     pub(crate) fn attr_local(&self, name: &str) -> Option<&str> {
+        let kind = AttrName::from_local(name);
+        if kind != AttrName::Other {
+            return self
+                .attrs
+                .iter()
+                .find(|attribute| attribute.is_named(kind))
+                .map(|attribute| attribute.value.as_ref());
+        }
         self.attrs
             .iter()
-            .find(|a| {
-                let local = a.name.local.as_ref();
+            .find(|attribute| {
+                let local = attribute.name.local.as_ref();
                 local == name || local.eq_ignore_ascii_case(name)
             })
-            .map(|a| a.value.as_ref())
+            .map(|attribute| attribute.value.as_ref())
     }
 }
