@@ -242,6 +242,36 @@ struct BestAttempt {
     diagnostic_index: Option<usize>,
 }
 
+struct AttemptVerdict {
+    ignores_visible_source_barrier: bool,
+    link_only_semantic_root: bool,
+    valid_result: bool,
+    visibility_improves: bool,
+    deferred_for_visibility: bool,
+    acceptance_exception: bool,
+    accepted: bool,
+}
+
+struct AttemptPolicyInput<'a> {
+    strategy: ExtractionStrategy,
+    structured_root: Option<NodeId>,
+    selection_node: NodeId,
+    quality: ExtractionQuality,
+    metrics: ContentMetrics,
+    best: Option<&'a BestAttempt>,
+    has_relaxable_hidden_content: bool,
+    visibility_recovery_needed: bool,
+    short_source_access_barrier: bool,
+    root_in_document_chrome: bool,
+    access_barrier: bool,
+    interactive_shell: bool,
+    incoherent_short: bool,
+    visibility_root_semantic: bool,
+    semantic_root_complete_candidate: bool,
+    semantic_root_boilerplate: bool,
+    rejected_link_only_semantic_root: &'a mut bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExactRootOrigin {
     Caller,
@@ -834,9 +864,7 @@ impl<'a> ContentExtractor<'a> {
         // External definitions can only be adopted when the source contains
         // a reference target. Avoid the full-document definition scan for the
         // common article path without footnote links.
-        let footnote_definitions = (exact_root.is_none()
-            && prepared_source.has_possible_footnote_reference())
-        .then(|| {
+        let footnote_definitions = prepared_source.has_possible_footnote_reference().then(|| {
             crate::instrumentation::record_external_footnote_scan();
             collect_external_footnotes(&self.dom)
         });
@@ -955,7 +983,6 @@ impl<'a> ContentExtractor<'a> {
             crate::instrumentation::record_logical_attempt_plan();
             let plan = self.build_attempt_plan(
                 strategy,
-                exact_root,
                 structured_root,
                 short_source_access_barrier,
                 &prepared_source,
@@ -983,7 +1010,6 @@ impl<'a> ContentExtractor<'a> {
                 if source_metrics.has_meaningful_text() {
                     let broad = self.build_attempt_plan(
                         ExtractionStrategy::BroadContent,
-                        exact_root,
                         structured_root,
                         short_source_access_barrier,
                         &prepared_source,
@@ -1009,7 +1035,6 @@ impl<'a> ContentExtractor<'a> {
                 }
                 let body = self.build_attempt_plan(
                     ExtractionStrategy::BodyFallback,
-                    exact_root,
                     structured_root,
                     short_source_access_barrier,
                     &prepared_source,
@@ -1075,60 +1100,26 @@ impl<'a> ContentExtractor<'a> {
                     result_metrics,
                     selection.node != body && strategy != ExtractionStrategy::BodyFallback,
                 );
-                let schema_match = structured_root == Some(selection.node)
-                    && !quality.is_suspiciously_small()
-                    && (quality.coverage >= 0.2 || quality.text_chars >= 500);
-                let ignores_visible_source_barrier = strategy
-                    == ExtractionStrategy::RelaxedVisibility
-                    && has_relaxable_hidden_content;
-                let selected_link_only_semantic_root = exact_root.is_none()
-                    && strategy != ExtractionStrategy::RelaxedVisibility
-                    && visibility_root_semantic
-                    && is_link_only_semantic_root(result_metrics);
-                let link_only_semantic_root = selected_link_only_semantic_root
-                    || strategy == ExtractionStrategy::BodyFallback
-                        && rejected_link_only_semantic_root
-                        && is_link_only_semantic_root(result_metrics);
-                rejected_link_only_semantic_root |= selected_link_only_semantic_root;
-                let valid_result = !root_in_document_chrome
-                    && result_metrics.has_meaningful_text()
-                    && !cached.access_barrier
-                    && (!short_source_access_barrier || ignores_visible_source_barrier)
-                    && !cached.interactive_shell
-                    && !cached.incoherent_short
-                    && !link_only_semantic_root;
-                let visibility_candidate_coherent = strategy
-                    != ExtractionStrategy::RelaxedVisibility
-                    || result_metrics.paragraph_count >= 2
-                    || visibility_root_semantic && result_metrics.structured_block_count > 0;
-                let visibility_improves = visibility_candidate_coherent
-                    && (strategy != ExtractionStrategy::RelaxedVisibility
-                        || self.best_attempt.as_ref().is_none_or(|best| {
-                            quality.text_chars >= best.quality.text_chars.saturating_mul(2)
-                                || quality.text_chars > best.quality.text_chars
-                                    && quality.coverage >= best.quality.coverage + 0.2
-                        }));
-                let deferred_for_visibility =
-                    visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
-                let acceptance_exception = exact_root.is_none()
-                    && !quality.is_good()
-                    && !schema_match
-                    && valid_result
-                    && visibility_improves
-                    && !deferred_for_visibility
-                    && !semantic_root_boilerplate
-                    && Self::trusted_semantic_root(
-                        visibility_root_semantic,
-                        semantic_root_complete_candidate,
-                        result_metrics,
-                        valid_result,
-                    );
-                let accepted = valid_result
-                    && (exact_root.is_some()
-                        || visibility_improves
-                            && !deferred_for_visibility
-                            && (quality.is_good() || schema_match || acceptance_exception));
-                if accepted {
+                let verdict = Self::evaluate_attempt(AttemptPolicyInput {
+                    strategy,
+                    structured_root,
+                    selection_node: selection.node,
+                    quality,
+                    metrics: result_metrics,
+                    best: self.best_attempt.as_ref(),
+                    has_relaxable_hidden_content,
+                    visibility_recovery_needed,
+                    short_source_access_barrier,
+                    root_in_document_chrome,
+                    access_barrier: cached.access_barrier,
+                    interactive_shell: cached.interactive_shell,
+                    incoherent_short: cached.incoherent_short,
+                    visibility_root_semantic,
+                    semantic_root_complete_candidate,
+                    semantic_root_boilerplate,
+                    rejected_link_only_semantic_root: &mut rejected_link_only_semantic_root,
+                });
+                if verdict.accepted {
                     let excerpt = cached.excerpt.take();
                     self.page_direction = source_direction.clone();
                     self.record_attempt(
@@ -1140,7 +1131,7 @@ impl<'a> ContentExtractor<'a> {
                         cached.semantic_coverage.clone(),
                         cached.representation,
                         true,
-                        acceptance_exception,
+                        verdict.acceptance_exception,
                         None,
                     );
                     let content = cached.content.take().ok_or(Error::NoContent)?;
@@ -1165,12 +1156,12 @@ impl<'a> ContentExtractor<'a> {
                 let rejection = Self::attempt_rejection_reason(
                     root_in_document_chrome,
                     cached.access_barrier,
-                    short_source_access_barrier && !ignores_visible_source_barrier,
-                    link_only_semantic_root,
+                    short_source_access_barrier && !verdict.ignores_visible_source_barrier,
+                    verdict.link_only_semantic_root,
                     cached.interactive_shell,
                     cached.incoherent_short,
-                    visibility_improves,
-                    deferred_for_visibility,
+                    verdict.visibility_improves,
+                    verdict.deferred_for_visibility,
                 );
                 let diagnostic_index = self.record_attempt(
                     strategy,
@@ -1184,8 +1175,8 @@ impl<'a> ContentExtractor<'a> {
                     false,
                     Some(rejection),
                 );
-                if valid_result
-                    && visibility_improves
+                if verdict.valid_result
+                    && verdict.visibility_improves
                     && self.best_attempt.as_ref().is_none_or(|best| {
                         quality.best_attempt_score() > best.quality.best_attempt_score()
                     })
@@ -1443,62 +1434,26 @@ impl<'a> ContentExtractor<'a> {
                 quality.link_density
             );
 
-            let schema_match = structured_root == Some(selection.node)
-                && !quality.is_suspiciously_small()
-                && (quality.coverage >= 0.2 || quality.text_chars >= 500);
-            let ignores_visible_source_barrier =
-                strategy == ExtractionStrategy::RelaxedVisibility && has_relaxable_hidden_content;
-            let selected_link_only_semantic_root = exact_root.is_none()
-                && strategy != ExtractionStrategy::RelaxedVisibility
-                && visibility_root_semantic
-                && is_link_only_semantic_root(result_metrics);
-            let link_only_semantic_root = selected_link_only_semantic_root
-                || strategy == ExtractionStrategy::BodyFallback
-                    && rejected_link_only_semantic_root
-                    && is_link_only_semantic_root(result_metrics);
-            rejected_link_only_semantic_root |= selected_link_only_semantic_root;
-            let valid_result = if exact_root.is_some() {
-                result_metrics.has_meaningful_text()
-            } else {
-                !root_in_document_chrome
-                    && result_metrics.has_meaningful_text()
-                    && !access_barrier
-                    && (!short_source_access_barrier || ignores_visible_source_barrier)
-                    && !interactive_shell
-                    && !incoherent_short
-                    && !link_only_semantic_root
-            };
-            let visibility_candidate_coherent = strategy != ExtractionStrategy::RelaxedVisibility
-                || result_metrics.paragraph_count >= 2
-                || visibility_root_semantic && result_metrics.structured_block_count > 0;
-            let visibility_improves = visibility_candidate_coherent
-                && (strategy != ExtractionStrategy::RelaxedVisibility
-                    || self.best_attempt.as_ref().is_none_or(|best| {
-                        quality.text_chars >= best.quality.text_chars.saturating_mul(2)
-                            || quality.text_chars > best.quality.text_chars
-                                && quality.coverage >= best.quality.coverage + 0.2
-                    }));
-            let deferred_for_visibility =
-                visibility_recovery_needed && strategy != ExtractionStrategy::RelaxedVisibility;
-            let acceptance_exception = exact_root.is_none()
-                && !quality.is_good()
-                && !schema_match
-                && valid_result
-                && visibility_improves
-                && !deferred_for_visibility
-                && !semantic_root_boilerplate
-                && Self::trusted_semantic_root(
-                    visibility_root_semantic,
-                    semantic_root_complete_candidate,
-                    result_metrics,
-                    valid_result,
-                );
-            let accepted = valid_result
-                && (exact_root.is_some()
-                    || visibility_improves
-                        && !deferred_for_visibility
-                        && (quality.is_good() || schema_match || acceptance_exception));
-            if accepted {
+            let verdict = Self::evaluate_attempt(AttemptPolicyInput {
+                strategy,
+                structured_root,
+                selection_node: selection.node,
+                quality,
+                metrics: result_metrics,
+                best: self.best_attempt.as_ref(),
+                has_relaxable_hidden_content,
+                visibility_recovery_needed,
+                short_source_access_barrier,
+                root_in_document_chrome,
+                access_barrier,
+                interactive_shell,
+                incoherent_short,
+                visibility_root_semantic,
+                semantic_root_complete_candidate,
+                semantic_root_boilerplate,
+                rejected_link_only_semantic_root: &mut rejected_link_only_semantic_root,
+            });
+            if verdict.accepted {
                 let excerpt = self.content_excerpt_if_needed(result_root);
                 self.record_attempt(
                     strategy,
@@ -1509,7 +1464,7 @@ impl<'a> ContentExtractor<'a> {
                     semantic_coverage,
                     representation,
                     true,
-                    acceptance_exception,
+                    verdict.acceptance_exception,
                     None,
                 );
                 let content = std::mem::replace(&mut self.dom, source_dom);
@@ -1532,12 +1487,12 @@ impl<'a> ContentExtractor<'a> {
             let rejection = Self::attempt_rejection_reason(
                 root_in_document_chrome,
                 access_barrier,
-                short_source_access_barrier && !ignores_visible_source_barrier,
-                link_only_semantic_root,
+                short_source_access_barrier && !verdict.ignores_visible_source_barrier,
+                verdict.link_only_semantic_root,
                 interactive_shell,
                 incoherent_short,
-                visibility_improves,
-                deferred_for_visibility,
+                verdict.visibility_improves,
+                verdict.deferred_for_visibility,
             );
             let diagnostic_index = self.record_attempt(
                 strategy,
@@ -1561,8 +1516,8 @@ impl<'a> ContentExtractor<'a> {
                 interactive_shell,
                 incoherent_short,
             );
-            let can_be_best = valid_result
-                && visibility_improves
+            let can_be_best = verdict.valid_result
+                && verdict.visibility_improves
                 && self.best_attempt.as_ref().is_none_or(|best| {
                     quality.best_attempt_score() > best.quality.best_attempt_score()
                 });
@@ -1664,7 +1619,6 @@ impl<'a> ContentExtractor<'a> {
     fn build_attempt_plan(
         &mut self,
         strategy: ExtractionStrategy,
-        exact_root: Option<NodeId>,
         structured_root: Option<NodeId>,
         short_source_access_barrier: bool,
         prepared_source: &SourceAnalysis,
@@ -1741,13 +1695,6 @@ impl<'a> ContentExtractor<'a> {
         {
             selection = RootSelection {
                 node: hidden.node,
-                reason: RootSelectionReason::SpecificChild,
-                branches: SmallVec::new(),
-            };
-        }
-        if let Some(node) = exact_root {
-            selection = RootSelection {
-                node,
                 reason: RootSelectionReason::SpecificChild,
                 branches: SmallVec::new(),
             };
@@ -1888,9 +1835,7 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let synthetic = !selection.branches.is_empty() || selection.node == body;
-        let lead_media = (!synthetic
-            && exact_root.is_none()
-            && selection.reason != RootSelectionReason::ArticleBody)
+        let lead_media = (!synthetic && selection.reason != RootSelectionReason::ArticleBody)
             .then(|| adjacent_lead_media(working_dom, top_id))
             .flatten();
         let direction_root = selection
@@ -2713,6 +2658,68 @@ impl<'a> ContentExtractor<'a> {
             math_count: metrics.math_count,
             structured_block_count: metrics.structured_block_count,
             link_density: metrics.link_density,
+        }
+    }
+
+    fn evaluate_attempt(input: AttemptPolicyInput<'_>) -> AttemptVerdict {
+        let schema_match = input.structured_root == Some(input.selection_node)
+            && !input.quality.is_suspiciously_small()
+            && (input.quality.coverage >= 0.2 || input.quality.text_chars >= 500);
+        let ignores_visible_source_barrier = input.strategy
+            == ExtractionStrategy::RelaxedVisibility
+            && input.has_relaxable_hidden_content;
+        let selected_link_only_semantic_root = input.strategy
+            != ExtractionStrategy::RelaxedVisibility
+            && input.visibility_root_semantic
+            && is_link_only_semantic_root(input.metrics);
+        let link_only_semantic_root = selected_link_only_semantic_root
+            || input.strategy == ExtractionStrategy::BodyFallback
+                && *input.rejected_link_only_semantic_root
+                && is_link_only_semantic_root(input.metrics);
+        *input.rejected_link_only_semantic_root |= selected_link_only_semantic_root;
+        let valid_result = !input.root_in_document_chrome
+            && input.metrics.has_meaningful_text()
+            && !input.access_barrier
+            && (!input.short_source_access_barrier || ignores_visible_source_barrier)
+            && !input.interactive_shell
+            && !input.incoherent_short
+            && !link_only_semantic_root;
+        let visibility_candidate_coherent = input.strategy != ExtractionStrategy::RelaxedVisibility
+            || input.metrics.paragraph_count >= 2
+            || input.visibility_root_semantic && input.metrics.structured_block_count > 0;
+        let visibility_improves = visibility_candidate_coherent
+            && (input.strategy != ExtractionStrategy::RelaxedVisibility
+                || input.best.is_none_or(|best| {
+                    input.quality.text_chars >= best.quality.text_chars.saturating_mul(2)
+                        || input.quality.text_chars > best.quality.text_chars
+                            && input.quality.coverage >= best.quality.coverage + 0.2
+                }));
+        let deferred_for_visibility = input.visibility_recovery_needed
+            && input.strategy != ExtractionStrategy::RelaxedVisibility;
+        let acceptance_exception = !input.quality.is_good()
+            && !schema_match
+            && valid_result
+            && visibility_improves
+            && !deferred_for_visibility
+            && !input.semantic_root_boilerplate
+            && Self::trusted_semantic_root(
+                input.visibility_root_semantic,
+                input.semantic_root_complete_candidate,
+                input.metrics,
+                valid_result,
+            );
+        let accepted = valid_result
+            && visibility_improves
+            && !deferred_for_visibility
+            && (input.quality.is_good() || schema_match || acceptance_exception);
+        AttemptVerdict {
+            ignores_visible_source_barrier,
+            link_only_semantic_root,
+            valid_result,
+            visibility_improves,
+            deferred_for_visibility,
+            acceptance_exception,
+            accepted,
         }
     }
 
