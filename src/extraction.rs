@@ -32,10 +32,10 @@ use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
 use crate::prepared::{SourceAnalysis, SourceElements, SourceEntry, SourceFlags};
 use crate::quality::{
-    ContentMetrics, ExtractionQuality, SemanticStructureCounts, interactive_shell_evidence,
-    is_access_barrier, is_access_barrier_prepared, is_application_shell_notice,
-    is_incoherent_short_result, is_interactive_shell, is_link_only_semantic_root,
-    semantic_coverage,
+    CleanedFragmentAnalysis, ContentMetrics, ExtractionQuality, SemanticStructureCounts,
+    interactive_shell_evidence, is_access_barrier, is_access_barrier_prepared,
+    is_application_shell_notice, is_incoherent_short_result, is_interactive_shell,
+    is_link_only_semantic_root, semantic_coverage,
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
@@ -1383,13 +1383,17 @@ impl<'a> ContentExtractor<'a> {
             if let Some(source_facts) = source_facts.as_mut() {
                 source_facts.rebase_root(&self.dom, result_root);
             }
-            let mut ordinary_plan = self.diagnostic_attempts.as_ref().and_then(|_| {
-                retained_stream.as_ref().and_then(|stream| {
-                    crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
+            let cleaned_analysis = retained_stream
+                .take()
+                .map(|stream| {
+                    CleanedFragmentAnalysis::from_retained_stream(
+                        &self.dom,
+                        result_root,
+                        stream,
+                        Some(&source_evidence),
+                    )
                 })
-            });
-            let mut ordinary_checked =
-                self.diagnostic_attempts.is_some() && retained_stream.is_some();
+                .ok_or(Error::NoContent)?;
             // Normal extraction only needs the semantic document for a candidate
             // that can win. Diagnostics still compile every attempt so that they
             // retain complete semantic metrics.
@@ -1402,9 +1406,9 @@ impl<'a> ContentExtractor<'a> {
                         &crate::document::CompileInputs {
                             source_facts: source_facts.as_ref(),
                             source_evidence: Some(&source_evidence),
-                            retained_stream: retained_stream.as_ref(),
-                            ordinary_plan: ordinary_plan.as_ref(),
-                            ordinary_checked,
+                            retained_stream: Some(&cleaned_analysis.retained_stream),
+                            ordinary_plan: cleaned_analysis.ordinary_plan.as_ref(),
+                            ordinary_checked: cleaned_analysis.ordinary_checked,
                         },
                     )
                     .map_err(|_| Error::NoContent)?,
@@ -1425,7 +1429,7 @@ impl<'a> ContentExtractor<'a> {
                         estimated_document_bytes: document.retained_bytes_estimate(),
                     });
             let result_metrics = result_document.as_ref().map_or_else(
-                || ContentMetrics::measure_fast(&self.dom, result_root),
+                || cleaned_analysis.metrics,
                 ContentMetrics::measure_document,
             );
             let result_semantic_counts = result_document.as_ref().and_then(|document| {
@@ -1479,12 +1483,6 @@ impl<'a> ContentExtractor<'a> {
                 rejected_link_only_semantic_root: &mut rejected_link_only_semantic_root,
             });
             if verdict.accepted {
-                if !ordinary_checked {
-                    ordinary_plan = retained_stream.as_ref().and_then(|stream| {
-                        crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
-                    });
-                    ordinary_checked = retained_stream.is_some();
-                }
                 let excerpt = self.content_excerpt_if_needed(result_root);
                 self.record_attempt(
                     strategy,
@@ -1509,9 +1507,9 @@ impl<'a> ContentExtractor<'a> {
                         crate::document::CompileInputs {
                             source_facts: source_facts.as_ref(),
                             source_evidence: Some(&source_evidence),
-                            retained_stream: retained_stream.as_ref(),
-                            ordinary_plan: ordinary_plan.as_ref(),
-                            ordinary_checked,
+                            retained_stream: Some(&cleaned_analysis.retained_stream),
+                            ordinary_plan: cleaned_analysis.ordinary_plan.as_ref(),
+                            ordinary_checked: cleaned_analysis.ordinary_checked,
                         },
                     )
                     .map_err(|_| Error::NoContent)?
@@ -1560,11 +1558,17 @@ impl<'a> ContentExtractor<'a> {
                 strategy == ExtractionStrategy::Normal && structured_root.is_some();
             if can_be_best || may_have_a_later_duplicate {
                 cached.excerpt = self.content_excerpt_if_needed(result_root);
+                let CleanedFragmentAnalysis {
+                    retained_stream,
+                    ordinary_plan,
+                    ordinary_checked,
+                    ..
+                } = cleaned_analysis;
                 cached.content = Some(FrozenContent {
                     dom: std::mem::replace(&mut self.dom, source_dom),
                     source_facts,
                     source_evidence,
-                    retained_stream,
+                    retained_stream: Some(retained_stream),
                     ordinary_plan,
                     ordinary_checked,
                 });
@@ -2327,12 +2331,18 @@ impl<'a> ContentExtractor<'a> {
         if let Some(source_facts) = source_facts.as_mut() {
             source_facts.rebase_root(&self.dom, result_root);
         }
-        let mut ordinary_plan = self.diagnostic_attempts.as_ref().and_then(|_| {
-            retained_stream.as_ref().and_then(|stream| {
-                crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
+        let cleaned_analysis = retained_stream
+            .take()
+            .map(|stream| {
+                CleanedFragmentAnalysis::from_retained_stream(
+                    &self.dom,
+                    result_root,
+                    stream,
+                    Some(&source_evidence),
+                )
             })
-        });
-        let mut ordinary_checked = self.diagnostic_attempts.is_some() && retained_stream.is_some();
+            .ok_or(Error::NoContent)?;
+        let ordinary_plan = cleaned_analysis.ordinary_plan.as_ref();
 
         let result_document = if self.diagnostic_attempts.is_some() {
             Some(
@@ -2343,9 +2353,9 @@ impl<'a> ContentExtractor<'a> {
                     &crate::document::CompileInputs {
                         source_facts: source_facts.as_ref(),
                         source_evidence: Some(&source_evidence),
-                        retained_stream: retained_stream.as_ref(),
-                        ordinary_plan: ordinary_plan.as_ref(),
-                        ordinary_checked,
+                        retained_stream: Some(&cleaned_analysis.retained_stream),
+                        ordinary_plan,
+                        ordinary_checked: cleaned_analysis.ordinary_checked,
                     },
                 )
                 .map_err(|_| Error::NoContent)?,
@@ -2365,7 +2375,7 @@ impl<'a> ContentExtractor<'a> {
                 estimated_document_bytes: document.retained_bytes_estimate(),
             });
         let result_metrics = result_document.as_ref().map_or_else(
-            || ContentMetrics::measure_fast(&self.dom, result_root),
+            || cleaned_analysis.metrics,
             ContentMetrics::measure_document,
         );
         let result_semantic_counts = result_document.as_ref().and_then(|document| {
@@ -2409,12 +2419,6 @@ impl<'a> ContentExtractor<'a> {
             return Err(Error::NoContent);
         }
 
-        if !ordinary_checked {
-            ordinary_plan = retained_stream.as_ref().and_then(|stream| {
-                crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
-            });
-            ordinary_checked = retained_stream.is_some();
-        }
         let excerpt = self.content_excerpt_if_needed(result_root);
         self.record_attempt(
             ExtractionStrategy::Normal,
@@ -2438,9 +2442,9 @@ impl<'a> ContentExtractor<'a> {
                 &crate::document::CompileInputs {
                     source_facts: source_facts.as_ref(),
                     source_evidence: Some(&source_evidence),
-                    retained_stream: retained_stream.as_ref(),
-                    ordinary_plan: ordinary_plan.as_ref(),
-                    ordinary_checked,
+                    retained_stream: Some(&cleaned_analysis.retained_stream),
+                    ordinary_plan,
+                    ordinary_checked: cleaned_analysis.ordinary_checked,
                 },
             )
             .map_err(|_| Error::NoContent)?

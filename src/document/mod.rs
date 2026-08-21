@@ -73,17 +73,10 @@ pub(crate) fn selected_image_sources_for_cleanup(
     let analysis = images::analyze(dom, nodes, None);
     analysis.into_sources(dom.len())
 }
-pub(crate) use ordinary::OrdinarySourcePlan;
-pub(crate) use retained::RetainedStream;
+pub(crate) use ordinary::{OrdinarySourcePlan, OrdinarySourceProfiler};
+pub(crate) use retained::{RetainedEntry, RetainedStream};
 pub(crate) use stats::DocumentStats;
 
-pub(crate) fn ordinary_source_plan(
-    dom: &crate::dom::Dom,
-    root: crate::dom::NodeId,
-    retained_stream: Option<&RetainedStream>,
-) -> Option<OrdinarySourcePlan> {
-    ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)
-}
 pub(crate) fn semantic_source_is_protected(
     dom: &crate::dom::Dom,
     node: crate::dom::NodeId,

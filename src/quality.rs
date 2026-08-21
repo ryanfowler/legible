@@ -332,19 +332,13 @@ impl ContentMetrics {
         metrics
     }
 
-    /// Measures the structural and text quality signals without semantic
-    /// normalization counts. Extraction uses this before it knows whether a
-    /// candidate can win. The compiler remains responsible for final semantic
-    /// metrics on the selected result.
-    pub(crate) fn measure_fast(dom: &Dom, root: NodeId) -> Self {
+    #[cfg(test)]
+    fn measure_fast(dom: &Dom, root: NodeId) -> Self {
         let mut metrics = Self::measure_dom(dom, root);
-        crate::instrumentation::record_source_full_scan();
         if std::iter::once(root)
             .chain(dom.descendants(root))
             .any(|node| crate::document::semantic_source_evidence(dom, node, None))
         {
-            // Preserve enough context to avoid rejecting short semantic
-            // content before the compiler can classify it.
             metrics.structured_block_count += 1;
             metrics.contextual_structure = true;
         }
@@ -505,6 +499,80 @@ impl ContentMetrics {
 
     pub(crate) fn has_meaningful_text(self) -> bool {
         self.has_alphanumeric_text && self.word_count > 0 && self.text_chars > 0
+    }
+}
+
+/// Facts produced at the final cleanup boundary.
+///
+/// The retained stream is the source-order view used by semantic lowering.
+/// Metrics and ordinary routing are collected while that view is consumed, so
+/// production extraction does not scan the cleaned fragment again.
+pub(crate) struct CleanedFragmentAnalysis {
+    pub(crate) retained_stream: crate::document::RetainedStream,
+    pub(crate) metrics: ContentMetrics,
+    pub(crate) ordinary_plan: Option<crate::document::OrdinarySourcePlan>,
+    pub(crate) ordinary_checked: bool,
+}
+
+impl CleanedFragmentAnalysis {
+    pub(crate) fn from_retained_stream(
+        dom: &Dom,
+        root: NodeId,
+        retained_stream: crate::document::RetainedStream,
+        source_evidence: Option<&crate::document::SourceEvidence>,
+    ) -> Self {
+        let mut ordinary = crate::document::OrdinarySourceProfiler::new();
+        let mut store = NodeStateStore::new();
+        store.enable_link_lengths();
+        let root_stats = get_or_compute_stats(dom, root, &mut store);
+        let link_density = get_link_density_cached(dom, root, root_stats.text_length, &mut store);
+        let mut metrics = ContentMetrics::from_text_stats(
+            root_stats,
+            link_density,
+            root_stats.has_alphanumeric(),
+        );
+        let mut semantic_evidence =
+            crate::document::semantic_source_evidence(dom, root, source_evidence);
+        metrics.count_structure(Self::source_structure(dom, root));
+        for entry in retained_stream.entries() {
+            ordinary.observe(dom, entry);
+            let node = entry.node;
+            metrics.count_structure(Self::source_structure(dom, node));
+            if dom.tag(node) == Some(Tag::A) {
+                metrics.link_text_chars = metrics.link_text_chars.saturating_add(
+                    get_or_compute_stats(dom, node, &mut store).text_length as usize,
+                );
+            }
+            semantic_evidence |=
+                crate::document::semantic_source_evidence(dom, node, source_evidence);
+        }
+        if semantic_evidence {
+            metrics.structured_block_count = metrics.structured_block_count.saturating_add(1);
+            metrics.contextual_structure = true;
+        }
+        Self {
+            ordinary_plan: ordinary.finish(),
+            ordinary_checked: true,
+            metrics,
+            retained_stream,
+        }
+    }
+
+    fn source_structure(dom: &Dom, node: NodeId) -> SourceStructure {
+        let tag = dom.tag(node);
+        SourceStructure {
+            tag,
+            code_bytes: if tag == Some(Tag::Pre) {
+                dom.text(node).len()
+            } else {
+                0
+            },
+            non_empty_table_cell: matches!(tag, Some(Tag::Td | Tag::Th))
+                && dom
+                    .text(node)
+                    .chars()
+                    .any(|character| !character.is_whitespace()),
+        }
     }
 }
 
@@ -1276,6 +1344,53 @@ mod tests {
     }
 
     #[test]
+    fn cleaned_stream_metrics_match_legacy_dom_metrics() {
+        let dom = Dom::parse_fragment(
+            r##"<div><h1>Heading</h1><p>First <a href="#guide">linked words</a>.</p><p>Second paragraph.</p><ul><li>One</li><li>Two</li></ul><pre><code>let x = 1;</code></pre><figure><img src="image.png" alt="Image"><figcaption>Figure caption</figcaption></figure><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table></div>"##,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let nodes: Vec<_> = dom.descendants(root).collect();
+        let stream = crate::document::RetainedStream::from_preorder(&dom, root, &nodes);
+        let mut expected = ContentMetrics::measure_dom(&dom, root);
+        if std::iter::once(root)
+            .chain(dom.descendants(root))
+            .any(|node| crate::document::semantic_source_evidence(&dom, node, None))
+        {
+            expected.structured_block_count += 1;
+            expected.contextual_structure = true;
+        }
+        let actual =
+            CleanedFragmentAnalysis::from_retained_stream(&dom, root, stream, None).metrics;
+
+        assert_eq!(actual.word_count, expected.word_count);
+        assert_eq!(actual.text_chars, expected.text_chars);
+        assert_eq!(actual.link_text_chars, expected.link_text_chars);
+        assert_eq!(actual.paragraph_count, expected.paragraph_count);
+        assert_eq!(actual.heading_count, expected.heading_count);
+        assert_eq!(actual.list_item_count, expected.list_item_count);
+        assert_eq!(actual.code_block_count, expected.code_block_count);
+        assert_eq!(actual.code_bytes, expected.code_bytes);
+        assert_eq!(actual.table_count, expected.table_count);
+        assert_eq!(
+            actual.non_empty_table_cell_count,
+            expected.non_empty_table_cell_count
+        );
+        assert_eq!(actual.figure_count, expected.figure_count);
+        assert_eq!(actual.image_count, expected.image_count);
+        assert_eq!(
+            actual.structured_block_count,
+            expected.structured_block_count
+        );
+        assert_eq!(actual.has_alphanumeric_text, expected.has_alphanumeric_text);
+        assert_eq!(actual.alphabetic_chars, expected.alphabetic_chars);
+        assert_eq!(actual.digit_chars, expected.digit_chars);
+        assert_eq!(actual.contextual_structure, expected.contextual_structure);
+        assert_eq!(actual.link_density, expected.link_density);
+    }
+
+    #[test]
     fn distinguishes_short_valid_and_large_source_tiny_results() {
         let short =
             ExtractionQuality::new(metrics(35, 180, 0, 0.0), metrics(30, 160, 0, 0.0), true);
@@ -1508,7 +1623,7 @@ mod tests {
             let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
             let root = dom.root();
             assert!(
-                !is_incoherent_short_result(ContentMetrics::measure(&dom, root)),
+                !is_incoherent_short_result(ContentMetrics::measure_fast(&dom, root)),
                 "{html}"
             );
         }
