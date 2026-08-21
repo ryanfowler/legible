@@ -18,6 +18,9 @@ mod dom;
 #[path = "../src/instrumentation.rs"]
 mod instrumentation;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/scan.rs"]
+mod scan;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/tokens.rs"]
 mod tokens;
 

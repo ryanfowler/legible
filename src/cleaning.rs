@@ -3218,26 +3218,34 @@ fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
         name,
         &["table-of-contents", "table_of_contents", "docs-toc", "toc"],
     );
-    let headings = dom.descendants(node).any(|descendant| {
-        matches!(
-            dom.tag(descendant),
-            Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-        ) && {
+    if labelled || named {
+        return true;
+    }
+    // One traversal answers both remaining questions: whether a heading says
+    // this is a table of contents, and whether every link is a fragment.
+    let mut heading_matches = false;
+    let mut links = 0usize;
+    let mut non_fragment_link = false;
+    for descendant in dom.descendants(node) {
+        let tag = dom.tag(descendant);
+        if !heading_matches && matches!(tag, Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6))
+        {
             let mut text = String::new();
             dom.append_normalized_text_limited(descendant, &mut text, 128);
-            equals_any_ascii_case_insensitive(text.trim(), &["contents", "on this page"])
+            heading_matches =
+                equals_any_ascii_case_insensitive(text.trim(), &["contents", "on this page"]);
+            if heading_matches {
+                return true;
+            }
         }
-    });
-    let links: Vec<_> = dom
-        .descendants(node)
-        .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
-        .collect();
-    let all_fragment_links = !links.is_empty()
-        && links.iter().all(|&link| {
-            dom.attr(link, AttrName::Href)
-                .is_some_and(|href| href.trim_start().starts_with('#'))
-        });
-    labelled || named || headings || all_fragment_links
+        if tag == Some(Tag::A) {
+            links += 1;
+            non_fragment_link |= !dom
+                .attr(descendant, AttrName::Href)
+                .is_some_and(|href| href.trim_start().starts_with('#'));
+        }
+    }
+    links > 0 && !non_fragment_link
 }
 
 fn has_pricing_heading(dom: &Dom, node: NodeId) -> bool {
@@ -3261,18 +3269,26 @@ fn has_pricing_content(dom: &Dom, node: NodeId, text: &str) -> bool {
     if pricing_heading {
         return true;
     }
+    // Pricing content always shows a currency symbol next to digits. Check
+    // that cheap signal first so unrelated nodes skip every substring scan.
+    let bytes = text.as_bytes();
+    let has_currency = if text.is_ascii() {
+        memchr::memchr(b'$', bytes).is_some()
+    } else {
+        text.chars()
+            .any(|character| matches!(character, '$' | '€' | '£' | '¥'))
+    } && bytes.iter().any(|byte| byte.is_ascii_digit());
+    if !has_currency {
+        return false;
+    }
     let price_words = ["pricing", "price", "plan", "monthly", "annual", "per month"]
         .into_iter()
         .filter(|word| text.contains(word))
         .count();
-    let has_currency = text
-        .chars()
-        .any(|character| matches!(character, '$' | '€' | '£' | '¥'))
-        && text.chars().any(|character| character.is_ascii_digit());
     let price_period = ["/month", "/year", "/mo", "/yr", "per month", "per year"]
         .into_iter()
         .any(|period| text.contains(period));
-    has_currency && (price_words >= 2 || price_words >= 1 && price_period)
+    price_words >= 2 || price_words >= 1 && price_period
 }
 
 fn is_within_pricing_region(dom: &Dom, node: NodeId) -> bool {

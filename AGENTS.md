@@ -76,6 +76,7 @@ The extraction pipeline flows through these stages:
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
 | `render/markdown.rs` / `render/html.rs` / `document/stats.rs` | Stack-safe Markdown and HTML renderers plus normalized text rendering from the semantic document |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
+| `scan.rs` | Word-at-a-time ASCII whitespace scanners with scalar small-input fast paths |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
 | `dom/parse.rs` | Parser-only poisoned TreeSink and in-work resource budget enforcement |
 | `dom/traversal.rs` | Iterative DOM-preorder snapshots and cached document anchors for immutable source phases |

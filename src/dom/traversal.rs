@@ -307,7 +307,8 @@ impl Dom {
     pub(crate) fn append_normalized_text(&self, root: NodeId, out: &mut String) {
         if let Some(text) = self.text_node(root) {
             if text.is_ascii() {
-                append_normalized_ascii_text(text, out);
+                let mut pending_whitespace = false;
+                append_normalized_ascii_tokens(text, out, &mut pending_whitespace);
             } else {
                 append_normalized_text_chunk(text, out);
             }
@@ -318,7 +319,8 @@ impl Dom {
             && let Some(text) = self.text_node(child)
             && text.is_ascii()
         {
-            append_normalized_ascii_text(text, out);
+            let mut pending_whitespace = false;
+            append_normalized_ascii_tokens(text, out, &mut pending_whitespace);
             return;
         }
         let mut pending_whitespace = false;
@@ -327,25 +329,7 @@ impl Dom {
                 continue;
             };
             if text.is_ascii() {
-                let bytes = text.as_bytes();
-                let mut index = 0;
-                while index < bytes.len() {
-                    let start = index;
-                    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
-                        index += 1;
-                    }
-                    if start != index {
-                        if pending_whitespace {
-                            out.push(' ');
-                            pending_whitespace = false;
-                        }
-                        out.push_str(&text[start..index]);
-                    }
-                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-                        pending_whitespace |= !out.is_empty();
-                        index += 1;
-                    }
-                }
+                append_normalized_ascii_tokens(text, out, &mut pending_whitespace);
             } else {
                 for c in text.chars() {
                     if c.is_whitespace() {
@@ -384,36 +368,13 @@ impl Dom {
                 continue;
             };
             if text.is_ascii() {
-                let bytes = text.as_bytes();
-                let mut index = 0;
-                while index < bytes.len() {
-                    let start = index;
-                    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
-                        index += 1;
-                    }
-                    if start != index {
-                        if pending_whitespace {
-                            if remaining == 0 {
-                                return;
-                            }
-                            out.push(' ');
-                            remaining -= 1;
-                            pending_whitespace = false;
-                        }
-                        let take = (index - start).min(remaining);
-                        out.push_str(&text[start..start + take]);
-                        remaining -= take;
-                        if take != index - start {
-                            return;
-                        }
-                    }
-                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-                        pending_whitespace |= !out.is_empty();
-                        index += 1;
-                    }
-                    if remaining == 0 {
-                        return;
-                    }
+                if !append_normalized_ascii_tokens_limited(
+                    text,
+                    out,
+                    &mut pending_whitespace,
+                    &mut remaining,
+                ) {
+                    return;
                 }
             } else {
                 for c in text.chars() {
@@ -574,17 +535,31 @@ impl Dom {
                 continue;
             };
             if text.is_ascii() {
-                for &byte in text.as_bytes() {
-                    if byte.is_ascii_whitespace() {
-                        pending_whitespace |= has_text;
-                    } else {
-                        if pending_whitespace {
-                            count += 1;
-                            pending_whitespace = false;
+                let bytes = text.as_bytes();
+                let mut index = 0;
+                while index < bytes.len() {
+                    if bytes[index].is_ascii_whitespace() {
+                        let Some(skip) = crate::scan::find_non_ascii_whitespace(&bytes[index..])
+                        else {
+                            break;
+                        };
+                        if has_text {
+                            pending_whitespace = true;
                         }
-                        count += 1;
-                        has_text = true;
+                        index += skip;
+                        if index == bytes.len() {
+                            break;
+                        }
                     }
+                    let token = crate::scan::find_ascii_whitespace(&bytes[index..])
+                        .unwrap_or(bytes.len() - index);
+                    if pending_whitespace {
+                        count += 1;
+                        pending_whitespace = false;
+                    }
+                    count += token;
+                    has_text = true;
+                    index += token;
                 }
             } else {
                 for c in text.chars() {
@@ -638,11 +613,24 @@ impl Dom {
                 continue;
             };
             if text.is_ascii() {
-                for &byte in text.as_bytes() {
-                    if byte.is_ascii_whitespace() {
-                        pending_whitespace |= has_text;
-                        continue;
+                let bytes = text.as_bytes();
+                let mut index = 0;
+                while index < bytes.len() {
+                    if bytes[index].is_ascii_whitespace() {
+                        let Some(skip) = crate::scan::find_non_ascii_whitespace(&bytes[index..])
+                        else {
+                            break;
+                        };
+                        if has_text {
+                            pending_whitespace = true;
+                        }
+                        index += skip;
+                        if index == bytes.len() {
+                            break;
+                        }
                     }
+                    let token = crate::scan::find_ascii_whitespace(&bytes[index..])
+                        .unwrap_or(bytes.len() - index);
                     if pending_whitespace {
                         count += 1;
                         if count >= threshold {
@@ -650,11 +638,12 @@ impl Dom {
                         }
                         pending_whitespace = false;
                     }
-                    count += 1;
+                    count += token;
                     if count >= threshold {
                         return None;
                     }
                     has_text = true;
+                    index += token;
                 }
             } else {
                 for c in text.chars() {
@@ -727,28 +716,85 @@ fn append_normalized_text_chunk(text: &str, out: &mut String) {
     }
 }
 
+/// Appends whitespace-normalized ASCII tokens from `text` to `out`.
+///
+/// Whitespace runs between tokens collapse into one separator space. Leading
+/// and trailing whitespace never produces output. The scan uses word-sized
+/// steps so long runs stay cheap.
 #[inline]
-fn append_normalized_ascii_text(text: &str, out: &mut String) {
+fn append_normalized_ascii_tokens(text: &str, out: &mut String, pending_whitespace: &mut bool) {
     let bytes = text.as_bytes();
     let mut index = 0;
-    let mut pending_whitespace = false;
     while index < bytes.len() {
-        let start = index;
-        while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
-            index += 1;
-        }
-        if start != index {
-            if pending_whitespace {
-                out.push(' ');
-                pending_whitespace = false;
+        if bytes[index].is_ascii_whitespace() {
+            let Some(skip) = crate::scan::find_non_ascii_whitespace(&bytes[index..]) else {
+                break;
+            };
+            if !out.is_empty() {
+                *pending_whitespace = true;
             }
-            out.push_str(&text[start..index]);
+            index += skip;
+            if index == bytes.len() {
+                break;
+            }
         }
-        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-            pending_whitespace |= !out.is_empty();
-            index += 1;
+        let token =
+            crate::scan::find_ascii_whitespace(&bytes[index..]).unwrap_or(bytes.len() - index);
+        if *pending_whitespace {
+            out.push(' ');
+            *pending_whitespace = false;
         }
+        out.push_str(&text[index..index + token]);
+        index += token;
     }
+    if index < bytes.len() && !out.is_empty() {
+        *pending_whitespace = true;
+    }
+}
+
+/// Appends at most `remaining` characters of normalized ASCII text.
+/// Returns false when the output limit is reached and callers must stop.
+#[inline]
+fn append_normalized_ascii_tokens_limited(
+    text: &str,
+    out: &mut String,
+    pending_whitespace: &mut bool,
+    remaining: &mut usize,
+) -> bool {
+    let bytes = text.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset].is_ascii_whitespace() {
+            let Some(skip) = crate::scan::find_non_ascii_whitespace(&bytes[offset..]) else {
+                break;
+            };
+            if !out.is_empty() {
+                *pending_whitespace = true;
+            }
+            offset += skip;
+            if offset == bytes.len() {
+                break;
+            }
+        }
+        let token_end = offset
+            + crate::scan::find_ascii_whitespace(&bytes[offset..]).unwrap_or(bytes.len() - offset);
+        if *pending_whitespace {
+            if *remaining == 0 {
+                return false;
+            }
+            out.push(' ');
+            *remaining -= 1;
+            *pending_whitespace = false;
+        }
+        let take = (token_end - offset).min(*remaining);
+        out.push_str(&text[offset..offset + take]);
+        *remaining -= take;
+        if take != token_end - offset {
+            return false;
+        }
+        offset = token_end;
+    }
+    true
 }
 
 #[inline]

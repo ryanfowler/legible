@@ -3,9 +3,6 @@
 /// True when any whitespace-separated token equals `expected` (ASCII case-insensitive).
 #[inline]
 pub(crate) fn has_token(value: &str, expected: &str) -> bool {
-    if !value.is_empty() && !contains_whitespace(value) {
-        return value.eq_ignore_ascii_case(expected);
-    }
     if value.is_ascii() {
         value
             .split_ascii_whitespace()
@@ -20,11 +17,6 @@ pub(crate) fn has_token(value: &str, expected: &str) -> bool {
 /// True when any token equals any entry in `expected`.
 #[inline]
 pub(crate) fn has_any_token(value: &str, expected: &[&str]) -> bool {
-    if !value.is_empty() && !contains_whitespace(value) {
-        return expected
-            .iter()
-            .any(|candidate| value.eq_ignore_ascii_case(candidate));
-    }
     if value.is_ascii() {
         value.split_ascii_whitespace().any(|token| {
             expected
@@ -46,9 +38,6 @@ pub(crate) fn any_token_contains(value: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return value.split_whitespace().next().is_some();
     }
-    if !value.is_empty() && !contains_whitespace(value) {
-        return contains_ascii_case_insensitive(value, needle);
-    }
     if value.is_ascii() && needle.is_ascii() {
         value
             .split_ascii_whitespace()
@@ -62,22 +51,37 @@ pub(crate) fn any_token_contains(value: &str, needle: &str) -> bool {
 
 #[inline]
 fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
-    value
-        .as_bytes()
-        .windows(needle.len())
-        .any(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-#[inline]
-fn contains_whitespace(value: &str) -> bool {
-    if value.is_ascii() {
-        value
-            .as_bytes()
-            .iter()
-            .any(|byte| byte.is_ascii_whitespace())
-    } else {
-        value.chars().any(char::is_whitespace)
+    if needle.is_empty() {
+        return true;
     }
+    // Short values scan directly; memchr setup does not pay off yet.
+    if value.len() <= 24 {
+        return value
+            .as_bytes()
+            .windows(needle.len())
+            .any(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()));
+    }
+    // memchr finds candidate positions for the first needle byte quickly;
+    // each candidate then needs one short case-insensitive compare.
+    let value_bytes = value.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let first = needle_bytes[0];
+    let mut start = 0;
+    while let Some(position) = memchr::memchr2(
+        first.to_ascii_lowercase(),
+        first.to_ascii_uppercase(),
+        &value_bytes[start..],
+    ) {
+        let candidate = start + position;
+        if candidate + needle_bytes.len() <= value_bytes.len()
+            && value_bytes[candidate..candidate + needle_bytes.len()]
+                .eq_ignore_ascii_case(needle_bytes)
+        {
+            return true;
+        }
+        start = candidate + 1;
+    }
+    false
 }
 
 #[cfg(test)]
