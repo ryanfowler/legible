@@ -783,13 +783,14 @@ impl<'a> ContentExtractor<'a> {
             crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref());
         self.strategy = ExtractionStrategy::MetadataFallback;
         crate::instrumentation::record_strategy(ExtractionStrategy::MetadataFallback as u8);
-        let document = crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+        let document = crate::document::compile_document_owned(
             dom,
             root,
             &compile_context,
-            None,
-            &source_evidence,
-            None,
+            crate::document::CompileInputs {
+                source_evidence: Some(&source_evidence),
+                ..Default::default()
+            },
         )
         .map_err(|_| Error::NoContent)?;
         if self.diagnostic_attempts.is_some() {
@@ -1138,13 +1139,15 @@ impl<'a> ContentExtractor<'a> {
                         retained_stream,
                     } = content;
                     let root = dom.root();
-                    let document = crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+                    let document = crate::document::compile_document_owned(
                         dom,
                         root,
                         &compile_context,
-                        source_facts.as_ref(),
-                        &source_evidence,
-                        retained_stream.as_ref(),
+                        crate::document::CompileInputs {
+                            source_facts: source_facts.as_ref(),
+                            source_evidence: Some(&source_evidence),
+                            retained_stream: retained_stream.as_ref(),
+                        },
                     )
                     .map_err(|_| Error::NoContent)?;
                     return Ok(ExtractedContent { excerpt, document });
@@ -1369,13 +1372,15 @@ impl<'a> ContentExtractor<'a> {
             // retain complete semantic metrics.
             let result_document = if self.diagnostic_attempts.is_some() {
                 Some(
-                    crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+                    crate::document::compile_document(
                         &self.dom,
                         result_root,
                         &compile_context,
-                        source_facts.as_ref(),
-                        Some(&source_evidence),
-                        retained_stream.as_ref(),
+                        &crate::document::CompileInputs {
+                            source_facts: source_facts.as_ref(),
+                            source_evidence: Some(&source_evidence),
+                            retained_stream: retained_stream.as_ref(),
+                        },
                     )
                     .map_err(|_| Error::NoContent)?,
                 )
@@ -1467,13 +1472,15 @@ impl<'a> ContentExtractor<'a> {
                 let document = if let Some(document) = result_document {
                     document
                 } else {
-                    crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
+                    crate::document::compile_document_owned(
                         content,
                         result_root,
                         &compile_context,
-                        source_facts.as_ref(),
-                        &source_evidence,
-                        retained_stream.as_ref(),
+                        crate::document::CompileInputs {
+                            source_facts: source_facts.as_ref(),
+                            source_evidence: Some(&source_evidence),
+                            retained_stream: retained_stream.as_ref(),
+                        },
                     )
                     .map_err(|_| Error::NoContent)?
                 };
@@ -1595,16 +1602,17 @@ impl<'a> ContentExtractor<'a> {
             .and_then(|cached| cached.content)
             .ok_or(Error::NoContent)?;
         let root = dom.root();
-        let document =
-            crate::document::compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
-                dom,
-                root,
-                &compile_context,
-                source_facts.as_ref(),
-                &source_evidence,
-                retained_stream.as_ref(),
-            )
-            .map_err(|_| Error::NoContent)?;
+        let document = crate::document::compile_document_owned(
+            dom,
+            root,
+            &compile_context,
+            crate::document::CompileInputs {
+                source_facts: source_facts.as_ref(),
+                source_evidence: Some(&source_evidence),
+                retained_stream: retained_stream.as_ref(),
+            },
+        )
+        .map_err(|_| Error::NoContent)?;
         Ok(ExtractedContent {
             excerpt: best.excerpt,
             document,
@@ -2301,13 +2309,15 @@ impl<'a> ContentExtractor<'a> {
 
         let result_document = if self.diagnostic_attempts.is_some() {
             Some(
-                crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+                crate::document::compile_document(
                     &self.dom,
                     result_root,
                     compile_context,
-                    source_facts.as_ref(),
-                    Some(&source_evidence),
-                    retained_stream.as_ref(),
+                    &crate::document::CompileInputs {
+                        source_facts: source_facts.as_ref(),
+                        source_evidence: Some(&source_evidence),
+                        retained_stream: retained_stream.as_ref(),
+                    },
                 )
                 .map_err(|_| Error::NoContent)?,
             )
@@ -2386,13 +2396,15 @@ impl<'a> ContentExtractor<'a> {
         let document = if let Some(document) = result_document {
             document
         } else {
-            crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+            crate::document::compile_document(
                 &self.dom,
                 result_root,
                 compile_context,
-                source_facts.as_ref(),
-                Some(&source_evidence),
-                retained_stream.as_ref(),
+                &crate::document::CompileInputs {
+                    source_facts: source_facts.as_ref(),
+                    source_evidence: Some(&source_evidence),
+                    retained_stream: retained_stream.as_ref(),
+                },
             )
             .map_err(|_| Error::NoContent)?
         };
@@ -3579,12 +3591,14 @@ impl<'a> ContentExtractor<'a> {
             .as_ref()
             .filter(|_| credible_semantic_candidate)
             .and_then(|_| {
-                crate::document::compile_document_with_optional_source_facts_and_evidence(
+                crate::document::compile_document(
                     &self.dom,
                     root,
                     compile_context,
-                    None,
-                    Some(&source_evidence),
+                    &crate::document::CompileInputs {
+                        source_evidence: Some(&source_evidence),
+                        ..Default::default()
+                    },
                 )
                 .ok()
                 .map(|document| SemanticStructureCounts::measure(&document))

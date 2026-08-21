@@ -399,6 +399,7 @@ mod tests {
             dom,
             root,
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         crate::render::markdown::render_markdown(
@@ -463,19 +464,21 @@ mod tests {
         assert!(!retained.contains(&empty));
         assert!(retained.iter().all(|&node| dom.parent(node).is_some()));
 
-        let streamed = crate::document::compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
+        let streamed = crate::document::compile_document(
             &dom,
             root,
             &crate::document::CompileContext::default(),
-            None,
-            None,
-            Some(&retained),
+            &crate::document::CompileInputs {
+                retained_stream: Some(&retained),
+                ..Default::default()
+            },
         )
         .unwrap();
         let direct = crate::document::compile_document(
             &dom,
             root,
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         assert_eq!(streamed.debug_tape(), direct.debug_tape());
@@ -621,6 +624,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
                 &dom,
                 root,
                 &crate::document::CompileContext::default(),
+                &crate::document::CompileInputs::default(),
             )
             .unwrap();
             assert_eq!(
@@ -643,6 +647,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             &dom,
             root,
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         assert!(document.debug_tape().starts_with("Figure\n"));
@@ -686,6 +691,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             &dom,
             root,
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         let tree = document.debug_tape();
@@ -730,6 +736,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             &dom,
             root,
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         let tree = document.debug_tape();

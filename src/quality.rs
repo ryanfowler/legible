@@ -1250,6 +1250,7 @@ mod tests {
             &dom,
             dom.root(),
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         let semantic = ContentMetrics::measure_document(&document);
@@ -1412,6 +1413,7 @@ mod tests {
             &dom,
             dom.root(),
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
 

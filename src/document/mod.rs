@@ -38,12 +38,7 @@ pub(crate) use code::{
 };
 #[allow(unused_imports)]
 pub(crate) use compiler::{
-    CompileContext, compile_document, compile_document_owned_with_optional_source_facts,
-    compile_document_owned_with_optional_source_facts_and_evidence,
-    compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes,
-    compile_document_with_optional_source_facts,
-    compile_document_with_optional_source_facts_and_evidence,
-    compile_document_with_optional_source_facts_and_evidence_and_retained_nodes,
+    CompileContext, CompileInputs, compile_document, compile_document_owned,
     complex_storage_metrics_for_benchmark,
 };
 pub(crate) use facts::{SemanticGate, SemanticSourceFacts, SourceEvidence};
