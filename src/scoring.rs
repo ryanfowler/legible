@@ -6,6 +6,8 @@ use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use crate::prepared::{SourceAnalysis, SourceEntry};
 use smallvec::SmallVec;
 
+pub(crate) const TOP_CANDIDATES: usize = 5;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PreparedScoreSeed {
     Node { node: NodeId, parent: NodeId },

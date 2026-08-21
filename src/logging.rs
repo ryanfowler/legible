@@ -1,16 +1,7 @@
-/// Emits a structured debug event when the `tracing` feature is enabled.
 macro_rules! debug_log {
-    (@bool $debug:expr, $($arg:tt)*) => {
-        if $debug {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(target: "legible::extraction", "{}", format_args!($($arg)*));
-        }
-    };
-    ($self:ident, $($arg:tt)*) => {
-        if $self.options.debug {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(target: "legible::extraction", "{}", format_args!($($arg)*));
-        }
+    ($($arg:tt)*) => {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: "legible::extraction", $($arg)*);
     };
 }
 pub(crate) use debug_log;

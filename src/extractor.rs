@@ -48,8 +48,6 @@ pub struct ExtractorBuilder {
 pub(crate) struct ExtractorConfig {
     pub(crate) parse_budget: ParseBudget,
     pub(crate) structured_data: bool,
-    pub(crate) top_candidates: usize,
-    pub(crate) debug: bool,
     pub(crate) diagnostics: bool,
     pub(crate) metadata_diagnostics: bool,
     pub(crate) retain_structured_data: bool,
@@ -62,8 +60,6 @@ impl Default for ExtractorConfig {
         Self {
             parse_budget: ParseBudget::default(),
             structured_data: true,
-            top_candidates: 5,
-            debug: false,
             diagnostics: false,
             metadata_diagnostics: false,
             retain_structured_data: false,
