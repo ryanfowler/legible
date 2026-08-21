@@ -10,9 +10,9 @@ use super::{
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
-pub(super) struct OrdinarySourcePlan {
-    pub(super) source_node_count: usize,
-    pub(super) capacity: BuildCapacityPlan,
+pub(crate) struct OrdinarySourcePlan {
+    pub(crate) source_node_count: usize,
+    pub(crate) capacity: BuildCapacityPlan,
 }
 
 /// Returns the source-node count when a fragment is safe to try on the ordinary path.
