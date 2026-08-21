@@ -407,12 +407,17 @@ fn is_line_number_element(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn is_line_wrapper(dom: &Dom, node: NodeId) -> bool {
-    dom.tag(node) == Some(Tag::Span)
+    let line_element = matches!(dom.tag(node), Some(Tag::Div | Tag::Span));
+    line_element
         && (dom.attr_by_local_name(node, "data-line").is_some()
             || dom.attr_by_local_name(node, "line").is_some()
-            || dom
-                .attr(node, AttrName::Class)
-                .is_some_and(|class| class.split_whitespace().any(|token| token == "line")))
+            || dom.attr(node, AttrName::Class).is_some_and(|class| {
+                class.split_whitespace().any(|token| {
+                    token.eq_ignore_ascii_case("line")
+                        || token.eq_ignore_ascii_case("ec-line")
+                        || token.eq_ignore_ascii_case("code-line")
+                })
+            }))
 }
 
 fn block_language_hint(dom: &Dom, code: NodeId, pre: NodeId) -> Option<String> {
@@ -506,6 +511,35 @@ fn has_single_tag_inside_element(dom: &Dom, node: NodeId, tag: Tag) -> bool {
         }
     }
     found
+}
+
+/// Returns true for a visible syntax-highlighter language badge adjacent to a
+/// code block. These badges are source metadata, not code content.
+pub(crate) fn is_code_language_label(dom: &Dom, node: NodeId) -> bool {
+    if !matches!(dom.tag(node), Some(Tag::Div | Tag::Span)) {
+        return false;
+    }
+    let named = [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(str::split_whitespace)
+        .any(|token| {
+            token.eq_ignore_ascii_case("label")
+                || token.eq_ignore_ascii_case("code-label")
+                || token.eq_ignore_ascii_case("language-label")
+        });
+    if !named {
+        return false;
+    }
+    let text = dom.text(node);
+    if !known_language(text.trim().to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    // A selected fragment can split the badge from its original wrapper and
+    // code block. The explicit label class and a known language are enough to
+    // classify it as source metadata without requiring the surrounding block
+    // to survive candidate copying.
+    true
 }
 
 fn is_language_label(dom: &Dom, node: NodeId) -> bool {
@@ -776,6 +810,28 @@ after</code></div>"#,
             "<pre><code><span data-line>first</span>\n  <span data-line>second</span></code></pre>",
         );
         assert_eq!(code.text, "first\n  second");
+    }
+
+    #[test]
+    fn reconstructs_div_line_wrappers_with_gutters() {
+        let code = block(
+            r#"<pre data-language="rust"><code><div class="ec-line"><div class="gutter"><div class="ln">1</div></div><div class="code">let value = 1;</div></div><div class="ec-line"><div class="gutter"><div class="ln">2</div></div><div class="code">value</div></div></code></pre>"#,
+        );
+        assert_eq!(code.text, "let value = 1;\nvalue");
+    }
+
+    #[test]
+    fn identifies_adjacent_language_badges_as_code_metadata() {
+        let dom = Dom::parse_fragment(
+            r#"<div class="code-container"><span class="label bash">bash</span><div class="language-bash"><pre><code>echo ok</code></pre></div></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let label = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Class) == Some("label bash"))
+            .unwrap();
+        assert!(is_code_language_label(&dom, label));
     }
 
     #[test]

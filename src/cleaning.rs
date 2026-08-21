@@ -1661,6 +1661,146 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     workspace.restore_scratch(scratch);
 }
 
+/// Removes small utility controls and media credits that survive root
+/// selection. These elements often sit beside useful article content rather
+/// than in a removable navigation subtree.
+pub(crate) fn remove_inline_chrome_controls_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
+    workspace: &mut FragmentWorkspace,
+) -> bool {
+    workspace.ensure_snapshot(dom, root);
+    let snapshot = workspace.elements_with_depth();
+    let mut remove = vec![false; dom.len()];
+    let mut text = String::new();
+
+    for &(node, _) in snapshot {
+        if node == root || dom.parent(node).is_none() || is_protected_content(dom, node, evidence) {
+            continue;
+        }
+        let at_start = near_content_start(dom, node, root, store);
+        if !at_start {
+            continue;
+        }
+
+        if is_small_navigation_media_link(dom, node, &mut text) {
+            remove[node.index()] = true;
+            continue;
+        }
+
+        if is_media_credit(dom, node, &mut text) {
+            remove[node.index()] = true;
+        }
+    }
+
+    let mut changed = false;
+    for &(node, _) in snapshot {
+        if !remove[node.index()] || dom.parent(node).is_none() {
+            continue;
+        }
+        detach_and_invalidate_stats(dom, node, store);
+        changed = true;
+    }
+    if changed {
+        workspace.invalidate();
+    }
+    changed
+}
+
+fn is_small_navigation_media_link(dom: &Dom, node: NodeId, text: &mut String) -> bool {
+    if dom.tag(node) != Some(Tag::A) {
+        return false;
+    }
+    let images = dom
+        .descendants(node)
+        .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
+        .count();
+    if images != 1
+        || dom.descendants(node).any(|descendant| {
+            matches!(
+                dom.tag(descendant),
+                Some(Tag::Pre | Tag::Table | Tag::Video | Tag::Audio)
+            )
+        })
+    {
+        return false;
+    }
+    get_normalized_inner_text(dom, node, text);
+    let label = text.trim().to_ascii_lowercase();
+    let title = dom.attr(node, AttrName::Title).unwrap_or_default();
+    let alt = dom
+        .descendants(node)
+        .find(|&descendant| dom.tag(descendant) == Some(Tag::Img))
+        .and_then(|image| dom.attr_by_local_name(image, "alt"))
+        .unwrap_or_default();
+    let utility = [label.as_str(), title, alt]
+        .into_iter()
+        .map(str::trim)
+        .any(|value| {
+            contains_any(
+                &value.to_ascii_lowercase(),
+                &["back", "return", "previous", "go to", "archive"],
+            )
+        });
+    utility && dom.normalized_char_count(node) <= 96
+}
+
+fn is_media_credit(dom: &Dom, node: NodeId, text: &mut String) -> bool {
+    if !matches!(
+        dom.tag(node),
+        Some(Tag::Div | Tag::P | Tag::Small | Tag::Span)
+    ) {
+        return false;
+    }
+    get_normalized_inner_text(dom, node, text);
+    let value = text.trim();
+    if value.is_empty() || value.chars().count() > 140 {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    let credit = lower.starts_with("copyright")
+        || lower.starts_with("©")
+        || lower.starts_with("photo credit")
+        || lower.starts_with("photo by")
+        || lower.starts_with("image credit");
+    if !credit
+        || dom.descendants(node).any(|descendant| {
+            matches!(
+                dom.tag(descendant),
+                Some(
+                    Tag::H1
+                        | Tag::H2
+                        | Tag::H3
+                        | Tag::H4
+                        | Tag::H5
+                        | Tag::H6
+                        | Tag::Pre
+                        | Tag::Table
+                )
+            )
+        })
+    {
+        return false;
+    }
+    let Some(parent) = dom.parent(node) else {
+        return false;
+    };
+    let mut previous = dom.prev_sibling(node);
+    while let Some(sibling) = previous {
+        if dom.is_comment(sibling) {
+            previous = dom.prev_sibling(sibling);
+            continue;
+        }
+        return dom
+            .descendants(sibling)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::Img));
+    }
+    dom.element_children(parent)
+        .any(|sibling| dom.tag(sibling) == Some(Tag::Img))
+}
+
 /// Removes document-level navigation and footer material that survives root
 /// selection. These regions often sit inside a broad `main` wrapper, so root
 /// semantics alone cannot separate them from the useful page.
@@ -3571,7 +3711,8 @@ fn remove_job_company_profiles(
         if dom.element_children(node).next().is_none() {
             let mut text = String::new();
             dom.append_normalized_text(node, &mut text);
-            founder_counts[node.index()] = u8::from(text.trim().eq_ignore_ascii_case("founder"));
+            founder_counts[node.index()] =
+                u8::from(text.trim().to_ascii_lowercase().contains("founder"));
         }
         image_counts[node.index()] = u8::from(dom.tag(node) == Some(Tag::Img));
         if let Some(parent) = dom.parent(node) {
@@ -5234,6 +5375,30 @@ mod tests {
             dom.first_descendant_by_tag(figure, Tag::Figcaption)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn removes_small_navigation_media_links_and_media_credits() {
+        let mut dom = Dom::parse_fragment(
+            r#"<article><header><a href="/news" title="Back to news"><img src="back.svg" alt="Back to news"></a><div><img src="hero.jpg" alt="Hero"></div><div class="credit">© Photographer</div></header><p>The useful article remains.</p></article>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let store = &mut NodeStateStore::new();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, store);
+        let mut workspace = FragmentWorkspace::default();
+        assert!(remove_inline_chrome_controls_in_workspace(
+            &mut dom,
+            root,
+            store,
+            &evidence,
+            &mut workspace,
+        ));
+        let text = dom.text(root);
+        assert!(!text.contains("Back to news"));
+        assert!(!text.contains("Photographer"));
+        assert!(text.contains("useful article remains"));
     }
 
     fn clean_fragment(html: &str) -> String {

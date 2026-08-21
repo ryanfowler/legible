@@ -738,7 +738,16 @@ fn lower_complex_document(
             push_children(dom, node, scope, &mut tasks);
             continue;
         }
+        if dom.is_element(node) && super::code::is_code_language_label(dom, node) {
+            continue;
+        }
         if let Some(text) = dom.text_node(node) {
+            if dom
+                .parent(node)
+                .is_some_and(|parent| super::code::is_code_language_label(dom, parent))
+            {
+                continue;
+            }
             let text = tables
                 .replacement_text(node)
                 .or_else(|| lists.replacement_text(node))

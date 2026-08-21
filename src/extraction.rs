@@ -3643,6 +3643,15 @@ impl<'a> ContentExtractor<'a> {
             );
             self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
             let before = self.diagnostic_element_count(root);
+            remove_inline_chrome_controls_in_workspace(
+                &mut self.dom,
+                root,
+                &mut self.node_data,
+                &source_evidence,
+                workspace,
+            );
+            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
+            let before = self.diagnostic_element_count(root);
             remove_repeated_and_discussion_content_in_workspace(
                 &mut self.dom,
                 root,

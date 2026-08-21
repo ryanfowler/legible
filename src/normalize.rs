@@ -70,6 +70,7 @@ pub(crate) fn cleanup_selected_content_in_workspace(
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
     workspace.ensure_snapshot(dom, root);
+    remove_code_language_labels(dom, root, workspace);
     {
         let source_nodes = workspace.preorder();
         images::remove_duplicates_with_source_nodes(dom, root, source_nodes, nodes);
@@ -86,6 +87,30 @@ pub(crate) fn cleanup_selected_content_in_workspace(
         flatten_javascript_links_for_quality(dom, root);
         workspace.invalidate();
     }
+}
+
+/// Removes visible syntax-highlighter language badges before semantic lowering.
+fn remove_code_language_labels(
+    dom: &mut Dom,
+    root: NodeId,
+    workspace: &mut crate::cleaning::FragmentWorkspace,
+) {
+    let labels: Vec<NodeId> = workspace
+        .preorder()
+        .iter()
+        .copied()
+        .filter(|&node| crate::document::is_code_language_label(dom, node))
+        .collect();
+    if labels.is_empty() {
+        return;
+    }
+    for label in labels {
+        if dom.parent(label).is_some() {
+            dom.detach(label);
+        }
+    }
+    workspace.invalidate();
+    workspace.ensure_snapshot(dom, root);
 }
 
 /// Preserves the established DOM-based link-density metric until result metrics use the IR.
@@ -514,6 +539,14 @@ mod tests {
             semantic_markdown(&dom, root),
             "```rust\nfn main() {\n}\n```\n"
         );
+    }
+
+    #[test]
+    fn removes_adjacent_code_language_badges() {
+        let (dom, root) = normalized(
+            r#"<div class="code-container"><span class="label bash">bash</span><div class="language-bash"><pre class="shiki"><code><span class="line">echo ok</span></code></pre></div></div>"#,
+        );
+        assert_eq!(semantic_markdown(&dom, root), "```bash\necho ok\n```\n");
     }
 
     #[test]
