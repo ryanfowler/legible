@@ -9,6 +9,7 @@ mod reddit;
 
 use crate::dom::{Dom, NodeId};
 use crate::page_kind::PageKind;
+use crate::tokens::{any_token_contains, has_any_token, has_token};
 use url::Url;
 
 /// Read-only document data used for cheap extractor recognition.
@@ -74,26 +75,26 @@ fn has_specialized_signature(context: &DocumentContext<'_>) -> bool {
             .dom
             .attr(node, crate::dom::AttrName::Class)
             .is_some_and(|classes| {
-                classes.split_ascii_whitespace().any(|class| {
-                    matches!(
-                        class,
-                        "athing"
-                            | "comtr"
-                            | "js-issue-title"
-                            | "js-comment-body"
-                            | "comment-body"
-                            | "markdown-body"
-                            | "review-comment-contents"
-                            | "topic-post"
-                            | "cooked"
-                            | "discourse-application"
-                            | "thing"
-                            | "link"
-                            | "linklisting"
-                            | "nestedlisting"
-                            | "title"
-                    )
-                })
+                has_any_token(
+                    classes,
+                    &[
+                        "athing",
+                        "comtr",
+                        "js-issue-title",
+                        "js-comment-body",
+                        "comment-body",
+                        "markdown-body",
+                        "review-comment-contents",
+                        "topic-post",
+                        "cooked",
+                        "discourse-application",
+                        "thing",
+                        "link",
+                        "linklisting",
+                        "nestedlisting",
+                        "title",
+                    ],
+                )
             })
             || context
                 .dom
@@ -137,30 +138,12 @@ fn is_ai_share_url(url: &url::Url) -> bool {
 
 pub(super) fn has_class(dom: &Dom, node: NodeId, expected: &str) -> bool {
     dom.attr(node, crate::dom::AttrName::Class)
-        .is_some_and(|classes| {
-            if classes.is_ascii() {
-                classes
-                    .split_ascii_whitespace()
-                    .any(|class| class == expected)
-            } else {
-                classes.split_whitespace().any(|class| class == expected)
-            }
-        })
+        .is_some_and(|classes| has_token(classes, expected))
 }
 
 pub(super) fn class_contains(dom: &Dom, node: NodeId, needle: &str) -> bool {
     dom.attr(node, crate::dom::AttrName::Class)
-        .is_some_and(|classes| {
-            if classes.is_ascii() {
-                classes
-                    .split_ascii_whitespace()
-                    .any(|class| class.contains(needle))
-            } else {
-                classes
-                    .split_whitespace()
-                    .any(|class| class.contains(needle))
-            }
-        })
+        .is_some_and(|classes| any_token_contains(classes, needle))
 }
 
 pub(super) fn create_element(
@@ -271,5 +254,18 @@ mod tests {
         };
 
         assert!(extract_with_registry(&context, &[&DummyExtractor]).is_none());
+    }
+
+    #[test]
+    fn class_helpers_match_ascii_case_insensitively() {
+        let dom = Dom::parse_document("<body><div class='GH-Header-Title utility'></div></body>")
+            .unwrap();
+        let node = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Class).is_some())
+            .unwrap();
+
+        assert!(has_class(&dom, node, "gh-header-title"));
+        assert!(class_contains(&dom, node, "HEADER-title"));
     }
 }

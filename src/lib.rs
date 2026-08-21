@@ -80,6 +80,7 @@ mod quality;
 mod render;
 mod scoring;
 mod specialized;
+mod tokens;
 
 pub use budget::ParseBudget;
 pub use diagnostics::{

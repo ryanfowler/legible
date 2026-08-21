@@ -1,6 +1,7 @@
 //! Constants and regex patterns used by content extraction.
 
 use crate::dom::{AttrName, Tag};
+use crate::tokens::has_any_token;
 use regex::{Regex, RegexSet};
 use std::sync::LazyLock;
 
@@ -323,8 +324,9 @@ pub fn parse_b64_data_url(s: &str) -> Option<(usize, &str)> {
 
 #[inline]
 pub fn is_unlikely_role(roles: &str) -> bool {
-    roles.split_whitespace().any(|role| {
-        [
+    has_any_token(
+        roles,
+        &[
             "menu",
             "menubar",
             "banner",
@@ -333,10 +335,8 @@ pub fn is_unlikely_role(roles: &str) -> bool {
             "alert",
             "alertdialog",
             "dialog",
-        ]
-        .iter()
-        .any(|unlikely| role.eq_ignore_ascii_case(unlikely))
-    })
+        ],
+    )
 }
 
 #[inline]

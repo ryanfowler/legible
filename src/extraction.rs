@@ -39,6 +39,7 @@ use crate::quality::{
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
+use crate::tokens::{has_any_token, has_token};
 use regex::Regex;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
@@ -2721,7 +2722,7 @@ impl<'a> ContentExtractor<'a> {
             matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
                 || dom
                     .attr(node, AttrName::Role)
-                    .is_some_and(Self::has_primary_role)
+                    .is_some_and(|roles| has_any_token(roles, &["main", "article"]))
         });
         let mut in_primary_region = vec![false; dom.len()];
         let mut remove = SmallVec::<[NodeId; 16]>::new();
@@ -2733,22 +2734,13 @@ impl<'a> ContentExtractor<'a> {
                 || matches!(dom.tag(node), Some(Tag::Main | Tag::Article))
                 || dom
                     .attr(node, AttrName::Role)
-                    .is_some_and(Self::has_primary_role);
+                    .is_some_and(|roles| has_any_token(roles, &["main", "article"]));
             let role = dom.attr(node, AttrName::Role);
             let document_chrome =
                 matches!(dom.tag(node), Some(Tag::Header | Tag::Footer | Tag::Nav))
-                    || role.is_some_and(|roles| {
-                        roles.split_whitespace().any(|role| {
-                            role.eq_ignore_ascii_case("banner")
-                                || role.eq_ignore_ascii_case("navigation")
-                        })
-                    });
+                    || role.is_some_and(|roles| has_any_token(roles, &["banner", "navigation"]));
             let contextual_sidebar = dom.tag(node) == Some(Tag::Aside)
-                || role.is_some_and(|roles| {
-                    roles
-                        .split_whitespace()
-                        .any(|role| role.eq_ignore_ascii_case("complementary"))
-                });
+                || role.is_some_and(|roles| has_token(roles, "complementary"));
             if (document_chrome || contextual_sidebar && has_primary_region)
                 && !in_primary_region[node.index()]
             {
@@ -2760,12 +2752,6 @@ impl<'a> ContentExtractor<'a> {
         }
     }
 
-    fn has_primary_role(roles: &str) -> bool {
-        roles
-            .split_whitespace()
-            .any(|role| role.eq_ignore_ascii_case("main") || role.eq_ignore_ascii_case("article"))
-    }
-
     fn is_document_chrome_root(dom: &Dom, node: NodeId, body: NodeId) -> bool {
         let protected = std::iter::once(node)
             .chain(dom.ancestors(node))
@@ -2774,7 +2760,7 @@ impl<'a> ContentExtractor<'a> {
                 matches!(dom.tag(ancestor), Some(Tag::Main | Tag::Article))
                     || dom
                         .attr(ancestor, AttrName::Role)
-                        .is_some_and(Self::has_primary_role)
+                        .is_some_and(|roles| has_any_token(roles, &["main", "article"]))
             });
         !protected
             && std::iter::once(node)
@@ -2785,11 +2771,7 @@ impl<'a> ContentExtractor<'a> {
                         dom.tag(ancestor),
                         Some(Tag::Aside | Tag::Header | Tag::Footer | Tag::Nav)
                     ) || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
-                        roles.split_whitespace().any(|role| {
-                            role.eq_ignore_ascii_case("banner")
-                                || role.eq_ignore_ascii_case("complementary")
-                                || role.eq_ignore_ascii_case("navigation")
-                        })
+                        has_any_token(roles, &["banner", "complementary", "navigation"])
                     })
                 })
     }
@@ -2816,11 +2798,9 @@ impl<'a> ContentExtractor<'a> {
                     .chain(dom.ancestors(normal.node))
                     .find(|&node| {
                         dom.tag(node) == Some(Tag::Main)
-                            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                                roles
-                                    .split_whitespace()
-                                    .any(|role| role.eq_ignore_ascii_case("main"))
-                            })
+                            || dom
+                                .attr(node, AttrName::Role)
+                                .is_some_and(|roles| has_token(roles, "main"))
                     })
                     .or_else(|| {
                         std::iter::once(normal.node)
@@ -2947,18 +2927,14 @@ impl<'a> ContentExtractor<'a> {
 
     fn is_modal_or_dialog_in(dom: &Dom, node: NodeId) -> bool {
         dom.attr(node, AttrName::AriaModal) == Some("true")
-            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                roles.split_whitespace().any(|role| {
-                    role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
-                })
-            })
+            || dom
+                .attr(node, AttrName::Role)
+                .is_some_and(|roles| has_any_token(roles, &["dialog", "alertdialog"]))
             || (!is_probably_visible(dom, node)
                 || has_hidden_utility_class_for_discovery(dom, node))
-                && dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                    classes.split_whitespace().any(|class| {
-                        class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
-                    })
-                })
+                && dom
+                    .attr(node, AttrName::Class)
+                    .is_some_and(|classes| has_any_token(classes, &["modal", "dialog"]))
     }
 
     #[cfg(test)]
@@ -3249,10 +3225,7 @@ impl<'a> ContentExtractor<'a> {
                 let is_main = dom.tag(candidate.node) == Some(Tag::Main)
                     || dom
                         .attr(candidate.node, AttrName::Role)
-                        .is_some_and(|role| {
-                            role.split_whitespace()
-                                .any(|value| value.eq_ignore_ascii_case("main"))
-                        });
+                        .is_some_and(|role| has_token(role, "main"));
                 let (article_peer_count, article_peer_score) = if is_main {
                     context.article_peer_summary(candidate_index)
                 } else {

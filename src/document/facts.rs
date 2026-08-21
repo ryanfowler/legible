@@ -1,6 +1,7 @@
 //! Shared source facts for complex semantic compilation.
 
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
+use crate::tokens::has_token;
 use std::collections::HashSet;
 
 use super::BuildCapacityPlan;
@@ -1032,11 +1033,9 @@ impl SemanticFacts {
                 inventory.media.push(node);
             }
             if matches!(tag, Tag::Ul | Tag::Ol)
-                || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                    roles
-                        .split_ascii_whitespace()
-                        .any(|role| role.eq_ignore_ascii_case("list"))
-                })
+                || dom
+                    .attr(node, AttrName::Role)
+                    .is_some_and(|roles| has_token(roles, "list"))
             {
                 inventory.lists.push(node);
             }

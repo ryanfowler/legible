@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_token;
 use smallvec::SmallVec;
 
 use super::{List, ListKind};
@@ -116,11 +117,8 @@ impl ListAnalysis {
 }
 
 fn has_role(dom: &Dom, node: NodeId, expected: &str) -> bool {
-    dom.attr(node, AttrName::Role).is_some_and(|roles| {
-        roles
-            .split_ascii_whitespace()
-            .any(|role| role.eq_ignore_ascii_case(expected))
-    })
+    dom.attr(node, AttrName::Role)
+        .is_some_and(|roles| has_token(roles, expected))
 }
 
 #[derive(Clone, Copy)]

@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, NodeLink, Tag};
+use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
@@ -926,7 +927,7 @@ fn mark_definition_chrome(
             .to_ascii_lowercase();
         let backlink = dom
             .attr(link, AttrName::Rel)
-            .is_some_and(|value| token(value, "backlink"))
+            .is_some_and(|value| has_token(value, "backlink"))
             || dom
                 .attr_by_local_name(link, "data-footnote-backref")
                 .is_some()
@@ -999,7 +1000,7 @@ fn is_explicit_reference(dom: &Dom, anchor: NodeId) -> bool {
             .is_some()
         || dom
             .attr(anchor, AttrName::Rel)
-            .is_some_and(|rel| token(rel, "footnote"))
+            .is_some_and(|rel| has_token(rel, "footnote"))
         || dom
             .attr_by_local_name(anchor, "data-type")
             .is_some_and(|value| value.eq_ignore_ascii_case("noteref"))
@@ -1174,38 +1175,13 @@ fn numeric_suffix(value: &str) -> Option<&str> {
 }
 
 fn has_any_class(dom: &Dom, node: NodeId, expected: &[&str]) -> bool {
-    dom.attr(node, AttrName::Class).is_some_and(|classes| {
-        // Most callers check one class. Avoid creating the nested expected
-        // iterator and use the same token matcher as role checks.
-        if let [value] = expected {
-            return token(classes, value);
-        }
-        any_token(classes, |class| {
-            let Some(first) = class.as_bytes().first().copied() else {
-                return false;
-            };
-            let first = first.to_ascii_lowercase();
-            expected.iter().any(|value| {
-                value
-                    .as_bytes()
-                    .first()
-                    .copied()
-                    .map(|byte| byte.to_ascii_lowercase())
-                    == Some(first)
-                    && class.len() == value.len()
-                    && class.eq_ignore_ascii_case(value)
-            })
-        })
-    })
+    dom.attr(node, AttrName::Class)
+        .is_some_and(|classes| has_any_token(classes, expected))
 }
 
 fn has_role(dom: &Dom, node: NodeId, role: &str) -> bool {
     dom.attr(node, AttrName::Role)
-        .is_some_and(|value| token(value, role))
-}
-
-fn token(value: &str, expected: &str) -> bool {
-    any_token(value, |value| value.eq_ignore_ascii_case(expected))
+        .is_some_and(|value| has_token(value, role))
 }
 
 #[inline]

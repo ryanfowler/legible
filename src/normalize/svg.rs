@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_token;
 use html5ever::ns;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
@@ -546,8 +547,7 @@ fn is_math_rendering(dom: &Dom, svg: NodeId) -> bool {
                 .is_some_and(|name| name.local.as_ref().to_ascii_lowercase().starts_with("mjx"))
             || dom.attr(node, AttrName::Class).is_some_and(|classes| {
                 classes.split_ascii_whitespace().any(|class| {
-                    class.eq_ignore_ascii_case("mathjax")
-                        || class.to_ascii_lowercase().starts_with("mjx")
+                    has_token(class, "mathjax") || class.to_ascii_lowercase().starts_with("mjx")
                 })
             })
     })

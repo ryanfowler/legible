@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_token;
 use smallvec::SmallVec;
 
 /// Rewrites ARIA lists only in the scoring DOM.
@@ -51,11 +52,8 @@ pub(super) fn normalize_for_scoring(dom: &mut Dom, root: NodeId) {
 }
 
 fn has_role(dom: &Dom, node: NodeId, expected: &str) -> bool {
-    dom.attr(node, AttrName::Role).is_some_and(|roles| {
-        roles
-            .split_ascii_whitespace()
-            .any(|role| role.eq_ignore_ascii_case(expected))
-    })
+    dom.attr(node, AttrName::Role)
+        .is_some_and(|roles| has_token(roles, expected))
 }
 
 fn ordered_markers(dom: &Dom, items: &[NodeId]) -> Option<Vec<(u32, (NodeId, usize))>> {

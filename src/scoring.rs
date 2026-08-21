@@ -4,6 +4,7 @@ use crate::constants::is_div_to_p_elem;
 use crate::constants::{has_byline, is_phrasing_elem, is_unlikely_role, regexps};
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
 use crate::prepared::{SourceAnalysis, SourceEntry};
+use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
 
 pub(crate) const TOP_CANDIDATES: usize = 5;
@@ -169,9 +170,7 @@ impl ScoringView {
         for entry in source.elements() {
             let node = entry.node;
             let roles = dom.attr(node, AttrName::Role).unwrap_or_default();
-            if roles
-                .split_ascii_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("heading"))
+            if has_token(roles, "heading")
                 && let Some(tag) = dom
                     .attr_by_local_name(node, "aria-level")
                     .and_then(|value| value.trim().parse::<u8>().ok())
@@ -187,20 +186,14 @@ impl ScoringView {
             {
                 self.set_tag(node, tag);
             }
-            if !roles
-                .split_ascii_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("list"))
-            {
+            if !has_token(roles, "list") {
                 continue;
             }
             let items: SmallVec<[NodeId; 16]> = dom
                 .element_children(node)
                 .filter(|&child| {
-                    dom.attr(child, AttrName::Role).is_some_and(|roles| {
-                        roles
-                            .split_ascii_whitespace()
-                            .any(|role| role.eq_ignore_ascii_case("listitem"))
-                    })
+                    dom.attr(child, AttrName::Role)
+                        .is_some_and(|roles| has_token(roles, "listitem"))
                 })
                 .collect();
             if items.is_empty() {
@@ -1377,11 +1370,7 @@ fn name_signals(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> (f6
             negative |= matches.matched(0) || regexps::UNLIKELY_CANDIDATES.is_match(value);
         }
         let role = dom.attr(node, AttrName::Role);
-        positive |= role.is_some_and(|roles| {
-            roles.split_whitespace().any(|role| {
-                role.eq_ignore_ascii_case("article") || role.eq_ignore_ascii_case("main")
-            })
-        });
+        positive |= role.is_some_and(|roles| has_any_token(roles, &["article", "main"]));
         negative |= role.is_some_and(is_unlikely_role);
         (positive, negative)
     }
@@ -1973,21 +1962,14 @@ pub(crate) fn has_hidden_utility_class(dom: &Dom, id: NodeId) -> bool {
                 visibility_show |= value.eq_ignore_ascii_case("visible");
                 accessibility_show |= value.eq_ignore_ascii_case("not-sr-only");
             }
-            hidden |= matches_ascii_ci(class, &["hidden", "d-none", "display-none", "u-hidden"]);
-            invisible |= class.eq_ignore_ascii_case("invisible");
-            accessibility_hidden |= matches_ascii_ci(class, &["visually-hidden", "sr-only"]);
+            hidden |= has_any_token(class, &["hidden", "d-none", "display-none", "u-hidden"]);
+            invisible |= has_token(class, "invisible");
+            accessibility_hidden |= has_any_token(class, &["visually-hidden", "sr-only"]);
         }
         hidden && !display_show
             || invisible && !visibility_show
             || accessibility_hidden && !accessibility_show
     })
-}
-
-#[inline]
-fn matches_ascii_ci(value: &str, expected: &[&str]) -> bool {
-    expected
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 fn is_responsive_breakpoint(value: &str) -> bool {
@@ -2032,18 +2014,15 @@ pub(crate) fn has_hidden_utility_class_for_discovery(dom: &Dom, id: NodeId) -> b
         return false;
     }
     let authoritative_root = matches!(dom.tag(id), Some(Tag::Article | Tag::Main))
-        || dom.attr(id, AttrName::Role).is_some_and(|roles| {
-            roles.split_ascii_whitespace().any(|role| {
-                role.eq_ignore_ascii_case("article") || role.eq_ignore_ascii_case("main")
-            })
-        });
+        || dom
+            .attr(id, AttrName::Role)
+            .is_some_and(|roles| has_any_token(roles, &["article", "main"]));
     authoritative_root
         || dom.attr(id, AttrName::Class).is_some_and(|classes| {
-            classes.split_ascii_whitespace().any(|class| {
-                ["invisible", "d-none", "display-none", "u-hidden"]
-                    .iter()
-                    .any(|expected| class.eq_ignore_ascii_case(expected))
-            })
+            has_any_token(
+                classes,
+                &["invisible", "d-none", "display-none", "u-hidden"],
+            )
         })
 }
 

@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_any_token;
 use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,13 +450,9 @@ pub(crate) fn repeated_listing_start(dom: &Dom, table: NodeId) -> Option<u32> {
         || dom
             .attr(table, AttrName::DataTable)
             .is_some_and(|value| value != "0")
-        || dom.attr(table, AttrName::Role).is_some_and(|role| {
-            role.split_whitespace().any(|value| {
-                value.eq_ignore_ascii_case("table")
-                    || value.eq_ignore_ascii_case("grid")
-                    || value.eq_ignore_ascii_case("treegrid")
-            })
-        })
+        || dom
+            .attr(table, AttrName::Role)
+            .is_some_and(|role| has_any_token(role, &["table", "grid", "treegrid"]))
         || dom.table_descendants(table).into_iter().any(|node| {
             matches!(
                 dom.tag(node),
@@ -540,13 +537,9 @@ fn repeated_listing_start_from_analysis(
         || dom
             .attr(table, AttrName::DataTable)
             .is_some_and(|value| value != "0")
-        || dom.attr(table, AttrName::Role).is_some_and(|role| {
-            role.split_whitespace().any(|value| {
-                value.eq_ignore_ascii_case("table")
-                    || value.eq_ignore_ascii_case("grid")
-                    || value.eq_ignore_ascii_case("treegrid")
-            })
-        })
+        || dom
+            .attr(table, AttrName::Role)
+            .is_some_and(|role| has_any_token(role, &["table", "grid", "treegrid"]))
         || analysis.has_explicit_structure(table)
     {
         return None;
@@ -691,11 +684,10 @@ fn is_phrasing_content(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
-    if dom.attr(table, AttrName::Role).is_some_and(|role| {
-        role.split_whitespace().any(|value| {
-            value.eq_ignore_ascii_case("presentation") || value.eq_ignore_ascii_case("none")
-        })
-    }) || dom.attr(table, AttrName::DataTable) == Some("0")
+    if dom
+        .attr(table, AttrName::Role)
+        .is_some_and(|role| has_any_token(role, &["presentation", "none"]))
+        || dom.attr(table, AttrName::DataTable) == Some("0")
     {
         return true;
     }
@@ -703,13 +695,9 @@ fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
         || dom
             .attr(table, AttrName::DataTable)
             .is_some_and(|value| value != "0")
-        || dom.attr(table, AttrName::Role).is_some_and(|role| {
-            role.split_whitespace().any(|value| {
-                value.eq_ignore_ascii_case("table")
-                    || value.eq_ignore_ascii_case("grid")
-                    || value.eq_ignore_ascii_case("treegrid")
-            })
-        })
+        || dom
+            .attr(table, AttrName::Role)
+            .is_some_and(|role| has_any_token(role, &["table", "grid", "treegrid"]))
         || analysis.has_explicit_structure(table)
     {
         return false;

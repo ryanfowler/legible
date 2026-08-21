@@ -10,6 +10,7 @@ use crate::document::{has_math_wrapper_class, is_math_root, is_tex_annotation};
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStats, Tag};
 use crate::quality::ContentMetrics;
 use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text};
+use crate::tokens::{has_any_token, has_token};
 use std::collections::HashSet;
 
 const NO_POSITION: u32 = u32::MAX;
@@ -445,12 +446,9 @@ fn possible_footnote_reference(dom: &Dom, node: NodeId, tag: Option<Tag>) -> boo
             .attr(node, AttrName::Href)
             .is_some_and(has_local_fragment_target))
         || tag == Some(Tag::Label)
-            && dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                classes.split_whitespace().any(|class| {
-                    class.eq_ignore_ascii_case("footref")
-                        || class.eq_ignore_ascii_case("sidenote-number")
-                })
-            })
+            && dom
+                .attr(node, AttrName::Class)
+                .is_some_and(|classes| has_any_token(classes, &["footref", "sidenote-number"]))
             && dom.attr_by_local_name(node, "for").is_some()
         || dom.attr(node, AttrName::DataFootnoteRef).is_some()
         || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
@@ -482,31 +480,17 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     }
     let role = dom.attr(node, AttrName::Role);
     if role.is_some_and(|roles| {
-        roles.split_whitespace().any(|role| {
-            matches_ignore_ascii_case(role, &["banner", "complementary", "dialog", "navigation"])
-        })
+        has_any_token(roles, &["banner", "complementary", "dialog", "navigation"])
     }) {
         flags.insert(SourceFlags::GENERIC_CLUTTER_ROLE);
     }
     if matches!(tag, Tag::Header | Tag::Footer | Tag::Nav)
-        || role.is_some_and(|roles| {
-            roles.split_whitespace().any(|role| {
-                role.eq_ignore_ascii_case("banner") || role.eq_ignore_ascii_case("navigation")
-            })
-        })
+        || role.is_some_and(|roles| has_any_token(roles, &["banner", "navigation"]))
     {
         flags.insert(SourceFlags::DOCUMENT_CHROME);
     }
-    let article_role = role.is_some_and(|roles| {
-        roles
-            .split_whitespace()
-            .any(|role| role.eq_ignore_ascii_case("article"))
-    });
-    let main_role = role.is_some_and(|roles| {
-        roles
-            .split_whitespace()
-            .any(|role| role.eq_ignore_ascii_case("main"))
-    });
+    let article_role = role.is_some_and(|roles| has_token(roles, "article"));
+    let main_role = role.is_some_and(|roles| has_token(roles, "main"));
     if article_role {
         flags.insert(SourceFlags::ARTICLE_ROLE);
     }
@@ -520,11 +504,7 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     if matches!(tag, Tag::Article | Tag::Main) || article_role || main_role || article_body {
         flags.insert(SourceFlags::PRIMARY_REGION);
     }
-    if role.is_some_and(|roles| {
-        roles
-            .split_whitespace()
-            .any(|role| role.eq_ignore_ascii_case("complementary"))
-    }) {
+    if role.is_some_and(|roles| has_token(roles, "complementary")) {
         flags.insert(SourceFlags::COMPLEMENTARY_REGION);
     }
     let mut class_weight = 0_i8;
@@ -575,10 +555,10 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     if matches!(
         tag,
         Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
-    ) || dom.attr(node, AttrName::Role).is_some_and(|role| {
-        role.split_whitespace()
-            .any(|value| value.eq_ignore_ascii_case("heading"))
-    }) || dom.attr_by_local_name(node, "aria-level").is_some()
+    ) || dom
+        .attr(node, AttrName::Role)
+        .is_some_and(|role| has_token(role, "heading"))
+        || dom.attr_by_local_name(node, "aria-level").is_some()
     {
         flags.insert(SourceFlags::PRIMARY_HEADING);
     }
@@ -589,12 +569,6 @@ fn is_strong_content_id(id: &str) -> bool {
     ["post", "content", "article-content"]
         .into_iter()
         .any(|pattern| id.eq_ignore_ascii_case(pattern))
-}
-
-fn matches_ignore_ascii_case(value: &str, expected: &[&str]) -> bool {
-    expected
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 fn has_strong_content_class(classes: &str) -> bool {
@@ -608,11 +582,7 @@ fn has_strong_content_class(classes: &str) -> bool {
         "markdown-body",
         "post",
     ];
-    classes.split_whitespace().any(|token| {
-        STRONG_CLASSES
-            .iter()
-            .any(|pattern| token.eq_ignore_ascii_case(pattern))
-    })
+    has_any_token(classes, STRONG_CLASSES)
 }
 
 fn is_modal_or_dialog(
@@ -623,17 +593,13 @@ fn is_modal_or_dialog(
     aria_modal: bool,
 ) -> bool {
     aria_modal
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles.split_whitespace().any(|role| {
-                role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
-            })
-        })
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| has_any_token(roles, &["dialog", "alertdialog"]))
         || (static_hidden || utility_hidden)
-            && dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                classes.split_whitespace().any(|class| {
-                    class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
-                })
-            })
+            && dom
+                .attr(node, AttrName::Class)
+                .is_some_and(|classes| has_any_token(classes, &["modal", "dialog"]))
 }
 
 #[cfg(test)]
