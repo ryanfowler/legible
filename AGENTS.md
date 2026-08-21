@@ -74,7 +74,7 @@ The extraction pipeline flows through these stages:
 | `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
-| `render/markdown.rs` / `render/text.rs` / `render/html.rs` | Stack-safe format renderers from the semantic document |
+| `render/markdown.rs` / `render/html.rs` / `document/stats.rs` | Stack-safe Markdown and HTML renderers plus normalized text rendering from the semantic document |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
 | `dom/parse.rs` | Parser-only poisoned TreeSink and in-work resource budget enforcement |
@@ -88,6 +88,8 @@ These invariants are costly to violate:
 - **No CSS matcher.** Use `Dom`'s direct `NodeId` traversal and typed query helpers.
 - **No `RefCell` after parse.** Parser-only interior mutability stays in `dom/parse.rs`.
 - **Snapshot before mutation.** Collect preorder snapshots when tree order matters. Arena allocation order can differ from DOM order after HTML tree repair. Use element-only snapshots when a pass skips text nodes and removed subtrees.
+- **Keep workspace wrappers clear.** A function with the `_in_workspace` suffix is the production path that reuses a `FragmentWorkspace`. A bare-name counterpart is a `#[cfg(test)]` convenience wrapper. Keep this convention when adding or changing cleanup helpers.
+- **Pass compiler inputs explicitly.** Semantic compiler entry points take `CompileInputs`. Pass cached source facts, source evidence, and retained streams through this value, or use `CompileInputs::default()` when no precomputed inputs are available.
 - **Keep extraction structural.** Do not serialize the DOM for internal inspection. Render only the final requested format.
 - **Lazy rendering.** `ExtractedPage` owns only the private semantic representation, not a retained DOM. Render HTML, Markdown, and text lazily from that representation. Derive result metrics from cached internal stats; defer that measurement until a text or metric method needs it. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
