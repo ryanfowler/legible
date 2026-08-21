@@ -2255,10 +2255,7 @@ impl<'a> ContentExtractor<'a> {
 
         let root_info = self.exact_root_info(&self.dom, root, origin);
         let synthetic = root == body;
-        let top_id;
-        let content_id;
-
-        if synthetic {
+        let (top_id, content_id) = if synthetic {
             Self::prune_body_fallback_chrome(&mut self.dom, body);
             self.dom.reserve_additional_nodes_exact(1);
             let container = self
@@ -2276,8 +2273,7 @@ impl<'a> ContentExtractor<'a> {
                 &mut self.node_data,
                 self.strategy.weight_classes(),
             );
-            top_id = container;
-            content_id = container;
+            (container, container)
         } else {
             if !self.node_data.has(root) {
                 initialize_node(
@@ -2287,9 +2283,8 @@ impl<'a> ContentExtractor<'a> {
                     self.strategy.weight_classes(),
                 );
             }
-            top_id = root;
-            content_id = self.create_container(root, &[root]).unwrap_or(root);
-        }
+            (root, self.create_container(root, &[root]).unwrap_or(root))
+        };
 
         if let Some(direction) = std::iter::once(top_id)
             .chain(self.dom.ancestors(top_id))
