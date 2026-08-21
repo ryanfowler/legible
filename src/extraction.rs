@@ -141,6 +141,19 @@ struct TitleHeadingPlan {
     brand_headings: SmallVec<[NodeId; 2]>,
 }
 
+struct PlanContext<'a> {
+    prepared_source: &'a SourceAnalysis,
+    accessible_math: &'a HashSet<NodeId>,
+    title_plan: &'a TitleHeadingPlan,
+    base_candidates: &'a CandidateSet,
+    content_hint_targets: &'a [NodeId],
+    source_anchors: DocumentAnchors,
+    document_evidence: DocumentEvidence,
+    structured_texts: &'a [&'a str],
+    structured_root: Option<NodeId>,
+    short_source_access_barrier: bool,
+}
+
 fn remove_title_brand_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingPlan) {
     let Some(preferred) = plan.preferred else {
         return;
@@ -957,6 +970,18 @@ impl<'a> ContentExtractor<'a> {
         }
         let compile_context =
             crate::document::CompileContext::new(self.base_uri.clone(), self.source_uri.as_ref());
+        let ctx = PlanContext {
+            prepared_source: &prepared_source,
+            accessible_math: &accessible_math,
+            title_plan: &title_plan,
+            base_candidates: &base_candidates,
+            content_hint_targets: &content_hint_targets,
+            source_anchors,
+            document_evidence,
+            structured_texts: &structured_text_refs,
+            structured_root,
+            short_source_access_barrier,
+        };
         let mut analysis_cache = AnalysisCache::default();
         let mut physical_cache: HashMap<AttemptKey, CachedPhysicalAttempt> = HashMap::new();
         let mut plans = Vec::new();
@@ -981,21 +1006,8 @@ impl<'a> ContentExtractor<'a> {
             self.strategy = strategy;
             crate::instrumentation::record_strategy(strategy as u8);
             crate::instrumentation::record_logical_attempt_plan();
-            let plan = self.build_attempt_plan(
-                strategy,
-                structured_root,
-                short_source_access_barrier,
-                &prepared_source,
-                &accessible_math,
-                &title_plan,
-                &base_candidates,
-                &content_hint_targets,
-                source_anchors,
-                document_evidence,
-                &structured_text_refs,
-                &mut text_buffer,
-                &mut analysis_cache,
-            )?;
+            let plan =
+                self.build_attempt_plan(&ctx, strategy, &mut text_buffer, &mut analysis_cache)?;
             plans.push(plan);
         }
 
@@ -1008,17 +1020,8 @@ impl<'a> ContentExtractor<'a> {
                 broad_planned = true;
                 if source_metrics.has_meaningful_text() {
                     let broad = self.build_attempt_plan(
+                        &ctx,
                         ExtractionStrategy::BroadContent,
-                        structured_root,
-                        short_source_access_barrier,
-                        &prepared_source,
-                        &accessible_math,
-                        &title_plan,
-                        &base_candidates,
-                        &content_hint_targets,
-                        source_anchors,
-                        document_evidence,
-                        &structured_text_refs,
                         &mut text_buffer,
                         &mut analysis_cache,
                     )?;
@@ -1032,17 +1035,8 @@ impl<'a> ContentExtractor<'a> {
                     break;
                 }
                 let body = self.build_attempt_plan(
+                    &ctx,
                     ExtractionStrategy::BodyFallback,
-                    structured_root,
-                    short_source_access_barrier,
-                    &prepared_source,
-                    &accessible_math,
-                    &title_plan,
-                    &base_candidates,
-                    &content_hint_targets,
-                    source_anchors,
-                    document_evidence,
-                    &structured_text_refs,
                     &mut text_buffer,
                     &mut analysis_cache,
                 )?;
@@ -1619,20 +1613,10 @@ impl<'a> ContentExtractor<'a> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build_attempt_plan(
         &mut self,
+        ctx: &PlanContext<'_>,
         strategy: ExtractionStrategy,
-        structured_root: Option<NodeId>,
-        short_source_access_barrier: bool,
-        prepared_source: &SourceAnalysis,
-        accessible_math: &HashSet<NodeId>,
-        title_plan: &TitleHeadingPlan,
-        base_candidates: &CandidateSet,
-        content_hint_targets: &[NodeId],
-        source_anchors: DocumentAnchors,
-        document_evidence: DocumentEvidence,
-        structured_texts: &[&str],
         text_buffer: &mut String,
         analysis_cache: &mut AnalysisCache,
     ) -> Result<AttemptPlan> {
@@ -1642,18 +1626,7 @@ impl<'a> ContentExtractor<'a> {
         } else {
             #[cfg(test)]
             record_generic_scoring_call();
-            let analysis = self.build_scoring_analysis(
-                visibility,
-                text_buffer,
-                prepared_source,
-                accessible_math,
-                title_plan,
-                base_candidates,
-                content_hint_targets,
-                structured_root,
-                source_anchors,
-                document_evidence,
-            )?;
+            let analysis = self.build_scoring_analysis(ctx, visibility, text_buffer)?;
             crate::instrumentation::record_unique_attempt_plan(visibility as u8);
             analysis_cache.variants.push((visibility, analysis));
             analysis_cache.variants.len() - 1
@@ -1663,9 +1636,9 @@ impl<'a> ContentExtractor<'a> {
             if analysis.unweighted.is_none() {
                 self.prepare_unweighted_scoring(
                     analysis,
-                    prepared_source,
-                    content_hint_targets,
-                    structured_root,
+                    ctx.prepared_source,
+                    ctx.content_hint_targets,
+                    ctx.structured_root,
                 );
             }
         }
@@ -1685,12 +1658,17 @@ impl<'a> ContentExtractor<'a> {
             candidates,
             ranked,
             body,
-            structured_texts.iter().copied(),
+            ctx.structured_texts.iter().copied(),
         );
-        selection =
-            self.selection_for_strategy(strategy, working_dom, body, selection, structured_root);
+        selection = self.selection_for_strategy(
+            strategy,
+            working_dom,
+            body,
+            selection,
+            ctx.structured_root,
+        );
         if strategy == ExtractionStrategy::RelaxedVisibility
-            && short_source_access_barrier
+            && ctx.short_source_access_barrier
             && let Some(hidden) = ranked
                 .iter()
                 .find(|candidate| self.is_inside_static_hidden(candidate.node))
@@ -1937,19 +1915,11 @@ impl<'a> ContentExtractor<'a> {
         analysis.unweighted = Some(unweighted);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build_scoring_analysis(
         &mut self,
+        ctx: &PlanContext<'_>,
         visibility: VisibilityVariant,
         text_buffer: &mut String,
-        prepared_source: &SourceAnalysis,
-        accessible_math: &HashSet<NodeId>,
-        title_plan: &TitleHeadingPlan,
-        base_candidates: &CandidateSet,
-        content_hint_targets: &[NodeId],
-        structured_root: Option<NodeId>,
-        source_anchors: DocumentAnchors,
-        document_evidence: DocumentEvidence,
     ) -> Result<ScoringAnalysis> {
         // Discovery is source-only and therefore shared by every strategy with
         // the same visibility policy. Keep its side effects out of the retry
@@ -1958,10 +1928,10 @@ impl<'a> ContentExtractor<'a> {
             let _phase = PhaseGuard::new(Phase::CandidateDiscovery);
             self.discover_candidates_with_indexes(
                 text_buffer,
-                prepared_source,
-                accessible_math,
-                title_plan,
-                base_candidates,
+                ctx.prepared_source,
+                ctx.accessible_math,
+                ctx.title_plan,
+                ctx.base_candidates,
                 visibility,
             )
         };
@@ -1979,12 +1949,13 @@ impl<'a> ContentExtractor<'a> {
         let working_root = working_dom.root();
         let view = ScoringView::build(
             working_dom,
-            prepared_source,
+            ctx.prepared_source,
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
         let excluded_mask = build_exclusion_mask(working_dom, &discovery.remove_after_scoring);
-        let body = source_anchors
+        let body = ctx
+            .source_anchors
             .body
             .filter(|&node| {
                 working_dom.tag(node) == Some(Tag::Body)
@@ -1997,14 +1968,14 @@ impl<'a> ContentExtractor<'a> {
         // lazily only if a later broad or body-fallback strategy needs it.
         let (weighted, feature_index, working_snapshot) = self.score_candidates(
             working_dom,
-            prepared_source,
+            ctx.prepared_source,
             &view,
             &discovery,
             &excluded_mask,
             true,
-            content_hint_targets,
-            structured_root,
-            document_evidence,
+            ctx.content_hint_targets,
+            ctx.structured_root,
+            ctx.document_evidence,
             body,
             None,
             None,
