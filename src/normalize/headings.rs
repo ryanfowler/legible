@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_token;
 use smallvec::SmallVec;
 
 /// Removes heading controls and named placeholders that are irrelevant to quality metrics.
@@ -118,11 +119,8 @@ pub(super) fn has_primary_role(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn has_role(dom: &Dom, node: NodeId, expected: &str) -> bool {
-    dom.attr(node, AttrName::Role).is_some_and(|roles| {
-        roles
-            .split_ascii_whitespace()
-            .any(|role| role.eq_ignore_ascii_case(expected))
-    })
+    dom.attr(node, AttrName::Role)
+        .is_some_and(|roles| has_token(roles, expected))
 }
 
 fn heading_tag(level: u8) -> Option<Tag> {
@@ -147,11 +145,7 @@ pub(crate) fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
         Some(Tag::H6) => Some(6),
         _ => dom
             .attr(node, AttrName::Role)
-            .filter(|roles| {
-                roles
-                    .split_ascii_whitespace()
-                    .any(|role| role.eq_ignore_ascii_case("heading"))
-            })
+            .filter(|roles| has_token(roles, "heading"))
             .and_then(|_| dom.attr_by_local_name(node, "aria-level"))
             .and_then(|level| level.trim().parse::<u8>().ok())
             .filter(|level| (1..=6).contains(level)),

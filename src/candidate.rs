@@ -4,6 +4,7 @@ use crate::constants::split_word_tokens;
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::prepared::{SourceAnalysis, SourceFlags};
 use crate::scoring::has_static_hidden_marker;
+use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
@@ -353,13 +354,10 @@ impl CandidateSet {
                 candidates.add(node, CandidateSource::Semantic, OTHER_SEMANTIC_PRIOR);
             }
 
-            if dom.attr(node, AttrName::Class).is_some_and(|class| {
-                class.split_whitespace().any(|token| {
-                    STRONG_CLASSES
-                        .iter()
-                        .any(|pattern| token.eq_ignore_ascii_case(pattern))
-                })
-            }) {
+            if dom
+                .attr(node, AttrName::Class)
+                .is_some_and(|class| has_any_token(class, STRONG_CLASSES))
+            {
                 candidates.add(node, CandidateSource::Semantic, OTHER_SEMANTIC_PRIOR);
             }
         }
@@ -625,9 +623,7 @@ fn is_generic_clutter_container(dom: &Dom, node: NodeId) -> bool {
         dom.tag(node),
         Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
     ) || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-        ["banner", "complementary", "dialog", "navigation"]
-            .into_iter()
-            .any(|role| matches_role(roles, role))
+        has_any_token(roles, &["banner", "complementary", "dialog", "navigation"])
     })
 }
 
@@ -639,17 +635,12 @@ fn is_generic_clutter_entry(entry: &crate::prepared::SourceEntry) -> bool {
 }
 
 fn matches_role(roles: &str, expected: &str) -> bool {
-    roles
-        .split_whitespace()
-        .any(|role| role.eq_ignore_ascii_case(expected))
+    has_token(roles, expected)
 }
 
 pub(crate) fn has_article_body_itemprop(dom: &Dom, node: NodeId) -> bool {
-    dom.attr(node, AttrName::ItemProp).is_some_and(|value| {
-        value
-            .split_ascii_whitespace()
-            .any(|item| item.eq_ignore_ascii_case("articleBody"))
-    })
+    dom.attr(node, AttrName::ItemProp)
+        .is_some_and(|value| has_token(value, "articleBody"))
 }
 
 /// Checks source-relative completeness that remains valid after the selected
@@ -1262,11 +1253,7 @@ fn balanced_semantic_boundary(
                     && (dom.tag(candidate.node) == Some(Tag::Article)
                         || dom
                             .attr(candidate.node, AttrName::Role)
-                            .is_some_and(|roles| {
-                                roles
-                                    .split_whitespace()
-                                    .any(|role| role.eq_ignore_ascii_case("article"))
-                            }))
+                            .is_some_and(|roles| has_token(roles, "article")))
             })
             .count();
         if independent_articles >= 2 {
@@ -1334,11 +1321,9 @@ fn has_chrome_outside_descendant(dom: &Dom, ancestor: NodeId, descendant: NodeId
     dom.element_children(ancestor).any(|branch| {
         branch != content_branch
             && (matches!(dom.tag(branch), Some(Tag::Nav | Tag::Footer))
-                || dom.attr(branch, AttrName::Role).is_some_and(|roles| {
-                    roles.split_whitespace().any(|role| {
-                        matches!(role.to_ascii_lowercase().as_str(), "navigation" | "status")
-                    })
-                })
+                || dom
+                    .attr(branch, AttrName::Role)
+                    .is_some_and(|roles| has_any_token(roles, &["navigation", "status"]))
                 || node_tokens(dom, branch).iter().any(|token| {
                     matches!(
                         token.as_str(),
@@ -1771,11 +1756,9 @@ fn is_navigation_region(dom: &Dom, node: NodeId) -> bool {
         .chain(dom.ancestors(node))
         .any(|ancestor| {
             matches!(dom.tag(ancestor), Some(Tag::A | Tag::Nav))
-                || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
-                    roles
-                        .split_whitespace()
-                        .any(|role| role.eq_ignore_ascii_case("navigation"))
-                })
+                || dom
+                    .attr(ancestor, AttrName::Role)
+                    .is_some_and(|roles| has_token(roles, "navigation"))
         })
 }
 

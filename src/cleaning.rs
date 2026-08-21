@@ -11,6 +11,7 @@ use crate::scoring::{
     has_hidden_utility_class, has_static_hidden_marker, is_hidden_utility_class,
     is_phrasing_content,
 };
+use crate::tokens::{has_any_token, has_token};
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
 use smallvec::SmallVec;
@@ -621,9 +622,7 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
                         lazy_srcset = Some(v.to_string())
                     }
                 }
-                AttrName::Class => {
-                    lazy |= v.split_whitespace().any(|x| x.eq_ignore_ascii_case("lazy"))
-                }
+                AttrName::Class => lazy |= has_token(v, "lazy"),
                 _ => {
                     other |= has_image_extension(v);
                     if has_image_srcset(v) && lazy_srcset.is_none() {
@@ -1068,25 +1067,21 @@ pub(crate) fn hard_cleanup_in_workspace(
                 .attr(node, AttrName::Href)
                 .is_some_and(|href| href.starts_with('#'))
             && dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                classes.split_ascii_whitespace().any(|class| {
-                    class.eq_ignore_ascii_case("skip-link")
-                        || starts_ascii_case_insensitive(class, "skip-to-")
-                })
+                has_token(classes, "skip-link")
+                    || classes
+                        .split_ascii_whitespace()
+                        .any(|class| starts_ascii_case_insensitive(class, "skip-to-"))
             });
         let utility_visibility = has_hidden_utility_class(dom, node) && !accessible_skip_link;
         let static_visibility = has_static_hidden_marker(dom, node) || utility_visibility;
         let modal = dom.attr(node, AttrName::AriaModal) == Some("true")
-            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                roles.split_whitespace().any(|role| {
-                    role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
-                })
-            })
+            || dom
+                .attr(node, AttrName::Role)
+                .is_some_and(|roles| has_any_token(roles, &["dialog", "alertdialog"]))
             || static_visibility
-                && dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                    classes.split_whitespace().any(|class| {
-                        class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
-                    })
-                });
+                && dom
+                    .attr(node, AttrName::Class)
+                    .is_some_and(|classes| has_any_token(classes, &["modal", "dialog"]));
         let math_source = evidence.math(node) || evidence.accessible_math(node);
         let hidden =
             dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image && !math_source
@@ -1123,19 +1118,15 @@ pub(crate) fn hard_cleanup_in_workspace(
                 .ancestors(node)
                 .find(|&ancestor| {
                     matches!(dom.tag(ancestor), Some(Tag::Form | Tag::Li))
-                        || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
-                            roles
-                                .split_ascii_whitespace()
-                                .any(|role| role.eq_ignore_ascii_case("listitem"))
-                        })
+                        || dom
+                            .attr(ancestor, AttrName::Role)
+                            .is_some_and(|roles| has_token(roles, "listitem"))
                 })
                 .is_some_and(|ancestor| {
                     dom.tag(ancestor) == Some(Tag::Li)
-                        || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
-                            roles
-                                .split_ascii_whitespace()
-                                .any(|role| role.eq_ignore_ascii_case("listitem"))
-                        })
+                        || dom
+                            .attr(ancestor, AttrName::Role)
+                            .is_some_and(|roles| has_token(roles, "listitem"))
                 });
         if content_checkbox {
             // Keep only the semantic state. The retained control is disabled,
@@ -1502,10 +1493,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
 
         let breadcrumb = is_breadcrumb(dom, node, &metrics);
         let navigation_semantic = dom.tag(node) == Some(Tag::Nav)
-            || dom.attr(node, AttrName::Role).is_some_and(|role| {
-                role.split_whitespace()
-                    .any(|value| value.eq_ignore_ascii_case("navigation"))
-            });
+            || dom
+                .attr(node, AttrName::Role)
+                .is_some_and(|role| has_token(role, "navigation"));
         let menu_name = contains_any(name, &["menu", "navigation", "breadcrumb"]);
         let documentation_toc = dom
             .attr_by_local_name(node, "aria-label")
@@ -1865,12 +1855,9 @@ pub(crate) fn remove_global_chrome_in_workspace(
         let semantic_navigation = matches!(dom.tag(node), Some(Tag::Aside | Tag::Nav))
             || dom.tag(node) == Some(Tag::Footer)
             || dom.tag(node) == Some(Tag::Header) && aggregate.link_count >= 3
-            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                roles.split_whitespace().any(|role| {
-                    role.eq_ignore_ascii_case("navigation")
-                        || role.eq_ignore_ascii_case("contentinfo")
-                })
-            });
+            || dom
+                .attr(node, AttrName::Role)
+                .is_some_and(|roles| has_any_token(roles, &["navigation", "contentinfo"]));
         let named_chrome = contains_any(
             name,
             &[
@@ -1979,11 +1966,9 @@ pub(crate) fn remove_global_chrome_in_workspace(
         if dom.tag(node) == Some(Tag::Header) {
             hoist_header_identity(dom, node);
         } else if dom.tag(node) == Some(Tag::Footer)
-            || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                roles
-                    .split_whitespace()
-                    .any(|role| role.eq_ignore_ascii_case("contentinfo"))
-            })
+            || dom
+                .attr(node, AttrName::Role)
+                .is_some_and(|roles| has_token(roles, "contentinfo"))
             || node_name(dom, node).contains("footer")
         {
             hoist_footer_identity(dom, node);
@@ -2454,16 +2439,12 @@ fn is_primary_article_region(dom: &Dom, node: NodeId, root: NodeId) -> bool {
 
 fn is_primary_article_element(dom: &Dom, node: NodeId) -> bool {
     dom.tag(node) == Some(Tag::Article)
-        || dom.attr(node, AttrName::ItemProp).is_some_and(|value| {
-            value.split_ascii_whitespace().any(|item| {
-                item.eq_ignore_ascii_case("articleBody") || item.eq_ignore_ascii_case("text")
-            })
-        })
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles
-                .split_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("article"))
-        })
+        || dom
+            .attr(node, AttrName::ItemProp)
+            .is_some_and(|value| has_any_token(value, &["articleBody", "text"]))
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| has_token(roles, "article"))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2517,11 +2498,9 @@ fn is_comment_region(
 ) -> bool {
     let name = node_name(dom, node);
     let named = has_comment_token(&name);
-    let semantic = dom.attr(node, AttrName::Role).is_some_and(|roles| {
-        roles
-            .split_whitespace()
-            .any(|role| matches!(role.to_ascii_lowercase().as_str(), "comment" | "discussion"))
-    });
+    let semantic = dom
+        .attr(node, AttrName::Role)
+        .is_some_and(|roles| has_any_token(roles, &["comment", "discussion"]));
     if !(named || semantic) || matches!(dom.tag(node), Some(Tag::P | Tag::A | Tag::Span)) {
         return false;
     }
@@ -2967,11 +2946,9 @@ fn is_global_navigation(
     }
     let semantic = dom.tag(node) == Some(Tag::Nav)
         || dom.tag(node) == Some(Tag::Header) && metrics.links >= 3
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles
-                .split_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("navigation"))
-        });
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| has_token(roles, "navigation"));
     let named = contains_any(
         metrics.name,
         &[
@@ -3043,11 +3020,9 @@ fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetri
         return false;
     }
     let semantic = dom.tag(node) == Some(Tag::Footer)
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles
-                .split_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("contentinfo"))
-        });
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| has_token(roles, "contentinfo"));
     let named_contact = metrics.name.contains("contact")
         && !has_meaningful_heading(dom, node)
         && !has_substantive_prose(dom, node);
@@ -3329,11 +3304,8 @@ fn is_inside_explicit_article_body(dom: &Dom, node: NodeId, _root: NodeId) -> bo
     std::iter::once(node)
         .chain(dom.ancestors(node))
         .any(|ancestor| {
-            dom.attr(ancestor, AttrName::ItemProp).is_some_and(|value| {
-                value.split_whitespace().any(|item| {
-                    item.eq_ignore_ascii_case("articleBody") || item.eq_ignore_ascii_case("text")
-                })
-            })
+            dom.attr(ancestor, AttrName::ItemProp)
+                .is_some_and(|value| has_any_token(value, &["articleBody", "text"]))
         })
 }
 
@@ -3345,11 +3317,9 @@ fn is_meaningful_article_region(dom: &Dom, node: NodeId, metrics: &ChromeMetrics
 fn is_inside_article_container(dom: &Dom, node: NodeId) -> bool {
     dom.ancestors(node).any(|ancestor| {
         dom.tag(ancestor) == Some(Tag::Article)
-            || dom.attr(ancestor, AttrName::Role).is_some_and(|roles| {
-                roles
-                    .split_whitespace()
-                    .any(|role| role.eq_ignore_ascii_case("article"))
-            })
+            || dom
+                .attr(ancestor, AttrName::Role)
+                .is_some_and(|roles| has_token(roles, "article"))
     })
 }
 
@@ -4098,11 +4068,9 @@ fn mark_subscription_boundary(
 
 fn is_structural_breadcrumb_candidate(dom: &Dom, node: NodeId, inside_table: bool) -> bool {
     let semantic_navigation = dom.tag(node) == Some(Tag::Nav)
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles
-                .split_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("navigation"))
-        });
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| has_token(roles, "navigation"));
     if dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
         equals_any_ascii_case_insensitive(label.trim(), &["breadcrumb", "breadcrumbs"])
     }) {
@@ -4239,11 +4207,9 @@ fn is_breadcrumb(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bo
 
     let explicit = has_breadcrumb_name(dom, node, metrics.name);
     let navigation = dom.tag(node) == Some(Tag::Nav)
-        || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-            roles
-                .split_whitespace()
-                .any(|role| role.eq_ignore_ascii_case("navigation"))
-        });
+        || dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|roles| has_token(roles, "navigation"));
     let separator = breadcrumb_separator_count(metrics.text) >= 2;
     let linked_list_items = dom
         .descendants(node)

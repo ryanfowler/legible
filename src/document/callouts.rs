@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_token;
 
 use super::sparse::SparseNodeValues;
 
@@ -111,11 +112,10 @@ pub(crate) fn class_is_semantic_evidence(dom: &Dom, node: NodeId) -> bool {
 fn callout_evidence(dom: &Dom, node: NodeId) -> (bool, Option<&'static str>) {
     let mut structural = false;
     let mut kind = None;
-    if dom.attr(node, AttrName::Role).is_some_and(|roles| {
-        roles
-            .split_whitespace()
-            .any(|role| role.eq_ignore_ascii_case("note"))
-    }) {
+    if dom
+        .attr(node, AttrName::Role)
+        .is_some_and(|roles| has_token(roles, "note"))
+    {
         structural = true;
         kind = Some("note");
     }

@@ -1,4 +1,5 @@
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_any_token;
 use std::collections::HashSet;
 
 use super::sparse::{SparseNodeSet, SparseNodeValues};
@@ -668,12 +669,17 @@ pub(crate) fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {
     dom.qual_name(node)
         .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"))
         || dom.attr(node, AttrName::Class).is_some_and(|classes| {
-            classes.split_whitespace().any(|class| {
-                let class = class.to_ascii_lowercase();
-                matches!(
-                    class.as_str(),
-                    "katex" | "katex-display" | "mathjax" | "mathjax-display" | "tex2jax_process"
-                ) || class.starts_with("mathjax_")
+            classes.split_ascii_whitespace().any(|class| {
+                has_any_token(
+                    class,
+                    &[
+                        "katex",
+                        "katex-display",
+                        "mathjax",
+                        "mathjax-display",
+                        "tex2jax_process",
+                    ],
+                ) || class.to_ascii_lowercase().starts_with("mathjax_")
             })
         })
 }
@@ -709,12 +715,10 @@ fn is_block_math(dom: &Dom, node: NodeId) -> bool {
             value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("block")
         })
         || dom.attr(node, AttrName::Class).is_some_and(|classes| {
-            classes.split_whitespace().any(|class| {
-                matches!(
-                    class.to_ascii_lowercase().as_str(),
-                    "katex-display" | "math-display" | "mathjax-display"
-                )
-            })
+            has_any_token(
+                classes,
+                &["katex-display", "math-display", "mathjax-display"],
+            )
         })
     {
         return true;

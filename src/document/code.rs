@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_any_token;
 use tendril::StrTendril;
 
 use super::RawCodeText;
@@ -403,13 +404,9 @@ fn is_line_wrapper(dom: &Dom, node: NodeId) -> bool {
     line_element
         && (dom.attr_by_local_name(node, "data-line").is_some()
             || dom.attr_by_local_name(node, "line").is_some()
-            || dom.attr(node, AttrName::Class).is_some_and(|class| {
-                class.split_whitespace().any(|token| {
-                    token.eq_ignore_ascii_case("line")
-                        || token.eq_ignore_ascii_case("ec-line")
-                        || token.eq_ignore_ascii_case("code-line")
-                })
-            }))
+            || dom
+                .attr(node, AttrName::Class)
+                .is_some_and(|class| has_any_token(class, &["line", "ec-line", "code-line"])))
 }
 
 fn block_language_hint(dom: &Dom, code: NodeId, pre: NodeId) -> Option<String> {

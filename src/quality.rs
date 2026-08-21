@@ -14,6 +14,8 @@ use crate::scoring::{
 };
 #[cfg(test)]
 use crate::scoring::{has_hidden_utility_class_for_discovery, has_static_hidden_marker};
+#[cfg(test)]
+use crate::tokens::has_any_token;
 use std::collections::{HashMap, HashSet};
 
 /// Text and structure measured for one DOM region.
@@ -250,19 +252,14 @@ impl ContentMetrics {
             let statically_hidden = has_static_hidden_marker(dom, node);
             let utility_hidden = has_hidden_utility_class_for_discovery(dom, node);
             let modal_class = (statically_hidden || utility_hidden)
-                && dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                    classes.split_whitespace().any(|class| {
-                        class.eq_ignore_ascii_case("modal") || class.eq_ignore_ascii_case("dialog")
-                    })
-                });
+                && dom
+                    .attr(node, AttrName::Class)
+                    .is_some_and(|classes| has_any_token(classes, &["modal", "dialog"]));
             let hidden = dom.attr(node, AttrName::AriaHidden) == Some("true")
                 || !relax_static_visibility && (statically_hidden || utility_hidden)
-                || dom.attr(node, AttrName::Role).is_some_and(|roles| {
-                    roles.split_whitespace().any(|role| {
-                        role.eq_ignore_ascii_case("dialog")
-                            || role.eq_ignore_ascii_case("alertdialog")
-                    })
-                })
+                || dom
+                    .attr(node, AttrName::Role)
+                    .is_some_and(|roles| has_any_token(roles, &["dialog", "alertdialog"]))
                 || dom.attr(node, AttrName::AriaModal) == Some("true")
                 || modal_class;
             let hard_non_content = hidden
@@ -287,18 +284,9 @@ impl ContentMetrics {
                 );
             let role = dom.attr(node, AttrName::Role);
             let document_chrome = matches!(tag, Some(Tag::Header | Tag::Footer | Tag::Nav))
-                || role.is_some_and(|roles| {
-                    roles.split_whitespace().any(|role| {
-                        role.eq_ignore_ascii_case("banner")
-                            || role.eq_ignore_ascii_case("navigation")
-                    })
-                });
+                || role.is_some_and(|roles| has_any_token(roles, &["banner", "navigation"]));
             let contextual_sidebar = tag == Some(Tag::Aside)
-                || role.is_some_and(|roles| {
-                    roles
-                        .split_whitespace()
-                        .any(|role| role.eq_ignore_ascii_case("complementary"))
-                });
+                || role.is_some_and(|roles| has_any_token(roles, &["complementary"]));
             excluded[node.index()] = hard_non_content
                 || document_chrome && !in_primary_region[node.index()]
                 || contextual_sidebar && has_primary_region && !in_primary_region[node.index()];
@@ -1154,9 +1142,7 @@ fn normalize_barrier_text_in_place(text: &mut String) {
 
 #[cfg(test)]
 fn is_primary_role(roles: &str) -> bool {
-    roles
-        .split_whitespace()
-        .any(|role| role.eq_ignore_ascii_case("main") || role.eq_ignore_ascii_case("article"))
+    has_any_token(roles, &["main", "article"])
 }
 
 fn ratio(value: usize, total: usize) -> f64 {

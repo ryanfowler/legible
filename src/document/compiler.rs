@@ -11,6 +11,7 @@ use super::{
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::instrumentation::{Phase, PhaseGuard};
+use crate::tokens::has_token;
 
 use super::sparse::SparseNodeSet;
 
@@ -1613,11 +1614,7 @@ pub(super) fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
     };
     native.or_else(|| {
         dom.attr(node, AttrName::Role)
-            .filter(|roles| {
-                roles
-                    .split_ascii_whitespace()
-                    .any(|role| role.eq_ignore_ascii_case("heading"))
-            })
+            .filter(|roles| has_token(roles, "heading"))
             .and_then(|_| dom.attr_by_local_name(node, "aria-level"))
             .and_then(|level| level.trim().parse::<u8>().ok())
             .filter(|level| (1..=6).contains(level))

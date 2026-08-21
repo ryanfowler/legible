@@ -10,6 +10,7 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::{
     get_inner_text, get_inner_text_owned, get_normalized_inner_text, has_static_hidden_marker,
 };
+use crate::tokens::{has_any_token, has_token};
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -690,12 +691,12 @@ fn source_has_meta_value(dom: &Dom, key: &str, expected: &str) -> bool {
 fn source_has_canonical_url(dom: &Dom, base_url: Option<&Url>, source_url: Option<&Url>) -> bool {
     dom.descendants(dom.root()).any(|node| {
         if dom.tag(node) == Some(Tag::Link) {
-            return dom.attr(node, AttrName::Rel).is_some_and(|rel| {
-                rel.split_ascii_whitespace()
-                    .any(|part| part.eq_ignore_ascii_case("canonical"))
-            }) && dom
-                .attr(node, AttrName::Href)
-                .is_some_and(|href| canonical_matches_source(href, base_url, source_url));
+            return dom
+                .attr(node, AttrName::Rel)
+                .is_some_and(|rel| has_token(rel, "canonical"))
+                && dom
+                    .attr(node, AttrName::Href)
+                    .is_some_and(|href| canonical_matches_source(href, base_url, source_url));
         }
         dom.tag(node) == Some(Tag::Meta)
             && dom
@@ -1423,10 +1424,7 @@ fn collect_link_candidates(dom: &Dom, out: &mut MetadataCandidates) {
         let Some(href) = dom.attr(id, AttrName::Href) else {
             continue;
         };
-        if rel
-            .split_ascii_whitespace()
-            .any(|part| part.eq_ignore_ascii_case("canonical"))
-        {
+        if has_token(rel, "canonical") {
             out.add(
                 |set| &mut set.canonical_url,
                 href,
@@ -1434,12 +1432,7 @@ fn collect_link_candidates(dom: &Dom, out: &mut MetadataCandidates) {
                 100,
             );
         }
-        if rel.split_ascii_whitespace().any(|part| {
-            matches!(
-                part.to_ascii_lowercase().as_str(),
-                "icon" | "shortcut" | "apple-touch-icon"
-            )
-        }) {
+        if has_any_token(rel, &["icon", "shortcut", "apple-touch-icon"]) {
             out.add(
                 |set| &mut set.favicon,
                 href,
@@ -1503,12 +1496,8 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
             }
         }
         let itemprop = dom.attr(id, AttrName::ItemProp).unwrap_or("");
-        let mut has_author_itemprop = false;
-        let mut has_published_itemprop = false;
-        for part in itemprop.split_ascii_whitespace() {
-            has_author_itemprop |= part.eq_ignore_ascii_case("author");
-            has_published_itemprop |= part.eq_ignore_ascii_case("datePublished");
-        }
+        let has_author_itemprop = has_token(itemprop, "author");
+        let has_published_itemprop = has_token(itemprop, "datePublished");
         // Most elements have no relevant itemprop. Do not calculate their
         // distance from the heading because that scans ancestors and siblings.
         let itemprop_is_page_metadata = dom.tag(id) == Some(Tag::Meta)
@@ -1519,11 +1508,8 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
                 });
         if itemprop_is_page_metadata && has_author_itemprop {
             let name_node = dom.descendants(id).find(|&child| {
-                dom.attr(child, AttrName::ItemProp).is_some_and(|value| {
-                    value
-                        .split_ascii_whitespace()
-                        .any(|part| part.eq_ignore_ascii_case("name"))
-                })
+                dom.attr(child, AttrName::ItemProp)
+                    .is_some_and(|value| has_token(value, "name"))
             });
             let value = dom
                 .attr(id, AttrName::Content)
@@ -1572,10 +1558,9 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
             );
         }
         if dom.tag(id) == Some(Tag::A) {
-            let rel_author = dom.attr(id, AttrName::Rel).is_some_and(|rel| {
-                rel.split_ascii_whitespace()
-                    .any(|part| part.eq_ignore_ascii_case("author"))
-            });
+            let rel_author = dom
+                .attr(id, AttrName::Rel)
+                .is_some_and(|rel| has_token(rel, "author"));
             let profile_author = dom
                 .attr(id, AttrName::Href)
                 .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"));
@@ -1863,8 +1848,7 @@ fn has_class_or_id_token(dom: &Dom, node: NodeId, expected: &str) -> bool {
     ]
     .into_iter()
     .flatten()
-    .flat_map(|value| value.split_ascii_whitespace())
-    .any(|token| token.eq_ignore_ascii_case(expected))
+    .any(|value| has_token(value, expected))
 }
 
 fn best_visible_heading(dom: &Dom, headings: impl Iterator<Item = NodeId>) -> Option<NodeId> {
@@ -1879,18 +1863,19 @@ fn best_visible_heading(dom: &Dom, headings: impl Iterator<Item = NodeId>) -> Op
 }
 
 fn is_primary_content_token(token: &str) -> bool {
-    [
-        "article-content",
-        "article-body",
-        "entry-content",
-        "e-content",
-        "h-entry",
-        "main-content",
-        "post-content",
-        "post-body",
-    ]
-    .iter()
-    .any(|value| token.eq_ignore_ascii_case(value))
+    has_any_token(
+        token,
+        &[
+            "article-content",
+            "article-body",
+            "entry-content",
+            "e-content",
+            "h-entry",
+            "main-content",
+            "post-content",
+            "post-body",
+        ],
+    )
 }
 
 fn preferred_author_node(dom: &Dom, container: NodeId) -> Option<NodeId> {
@@ -1903,12 +1888,12 @@ fn preferred_author_node(dom: &Dom, container: NodeId) -> Option<NodeId> {
         .or_else(|| {
             dom.descendants(container).find(|&node| {
                 dom.tag(node) == Some(Tag::A)
-                    && (dom.attr(node, AttrName::Rel).is_some_and(|rel| {
-                        rel.split_ascii_whitespace()
-                            .any(|part| part.eq_ignore_ascii_case("author"))
-                    }) || dom
-                        .attr(node, AttrName::Href)
-                        .is_some_and(|href| href.to_ascii_lowercase().contains("/author/")))
+                    && (dom
+                        .attr(node, AttrName::Rel)
+                        .is_some_and(|rel| has_token(rel, "author"))
+                        || dom
+                            .attr(node, AttrName::Href)
+                            .is_some_and(|href| href.to_ascii_lowercase().contains("/author/")))
             })
         })
         .or_else(|| {
@@ -2022,13 +2007,17 @@ fn is_author_name_node(dom: &Dom, node: NodeId) -> bool {
     .flatten()
     .flat_map(|value| value.split_ascii_whitespace())
     .any(|token| {
-        let token = token.to_ascii_lowercase();
-        token == "author-name"
-            || token == "byline-name"
-            || token == "byline__author"
-            || token == "byline__author-name"
-            || token == "p-author"
-            || token == "p-name"
+        has_any_token(
+            token,
+            &[
+                "author-name",
+                "byline-name",
+                "byline__author",
+                "byline__author-name",
+                "p-author",
+                "p-name",
+            ],
+        )
     })
 }
 
@@ -2041,18 +2030,20 @@ fn is_author_role_node(dom: &Dom, node: NodeId) -> bool {
     .flatten()
     .flat_map(|value| value.split_ascii_whitespace())
     .any(|token| {
-        matches!(
-            token.to_ascii_lowercase().as_str(),
-            "author-bio"
-                | "author-role"
-                | "author-title"
-                | "author__bio"
-                | "author__role"
-                | "author__title"
-                | "byline-role"
-                | "byline-title"
-                | "byline__role"
-                | "byline__title"
+        has_any_token(
+            token,
+            &[
+                "author-bio",
+                "author-role",
+                "author-title",
+                "author__bio",
+                "author__role",
+                "author__title",
+                "byline-role",
+                "byline-title",
+                "byline__role",
+                "byline__title",
+            ],
         )
     })
 }
@@ -2066,10 +2057,9 @@ fn preferred_byline_section_node(
         dom.tag(node) == Some(Tag::A)
             && author_node.is_none_or(|author| node != author)
             && is_section_link(dom, node)
-            && !dom.attr(node, AttrName::Rel).is_some_and(|rel| {
-                rel.split_ascii_whitespace()
-                    .any(|part| part.eq_ignore_ascii_case("author"))
-            })
+            && !dom
+                .attr(node, AttrName::Rel)
+                .is_some_and(|rel| has_token(rel, "author"))
             && !dom
                 .attr(node, AttrName::Href)
                 .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"))
@@ -2107,11 +2097,8 @@ fn previous_element_sibling(dom: &Dom, node: NodeId) -> Option<Tag> {
 }
 
 fn has_itemprop(dom: &Dom, node: NodeId, expected: &str) -> bool {
-    dom.attr(node, AttrName::ItemProp).is_some_and(|value| {
-        value
-            .split_ascii_whitespace()
-            .any(|part| part.eq_ignore_ascii_case(expected))
-    })
+    dom.attr(node, AttrName::ItemProp)
+        .is_some_and(|value| has_token(value, expected))
 }
 
 fn is_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {

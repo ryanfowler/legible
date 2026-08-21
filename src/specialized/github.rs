@@ -5,6 +5,7 @@ use super::{
     discussion::DiscussionBuilder, has_class,
 };
 use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::tokens::has_token;
 
 pub(super) struct GitHubExtractor;
 
@@ -154,10 +155,9 @@ fn find_author(dom: &Dom, container: NodeId) -> Option<NodeId> {
     dom.descendants(container).find(|&node| {
         dom.tag(node) == Some(Tag::A)
             && (has_class(dom, node, "author")
-                || dom.attr(node, AttrName::Rel).is_some_and(|rel| {
-                    rel.split_whitespace()
-                        .any(|token| token.eq_ignore_ascii_case("author"))
-                })
+                || dom
+                    .attr(node, AttrName::Rel)
+                    .is_some_and(|rel| has_token(rel, "author"))
                 || dom.attr_by_local_name(node, "data-testid") == Some("comment-header-author"))
     })
 }
