@@ -51,7 +51,14 @@ impl PageKind {
                 .trim()
                 .to_ascii_lowercase();
             match text.as_str() {
-                "about the role" | "the role" | "qualifications" | "requirements" => {
+                "about the role"
+                | "the role"
+                | "the opportunity"
+                | "what you'll do"
+                | "what we're looking for"
+                | "what you'll get"
+                | "qualifications"
+                | "requirements" => {
                     role_headings = role_headings.saturating_add(1);
                 }
                 "founded" | "batch" | "team size" | "status" => {
@@ -82,6 +89,16 @@ mod tests {
     fn detects_wrapped_job_profile_labels() {
         let dom = Dom::parse_document(
             "<main class='job'><h2><span>About the role</span></h2><h3>Qualifications</h3></main>",
+        )
+        .unwrap();
+
+        assert_eq!(PageKind::detect(&dom), PageKind::JobListing);
+    }
+
+    #[test]
+    fn detects_common_job_section_headings() {
+        let dom = Dom::parse_document(
+            "<main class='show_job'><h2>The Opportunity</h2><h2>What You'll Do</h2><h2>What We're Looking For</h2></main>",
         )
         .unwrap();
 

@@ -1093,7 +1093,7 @@ impl<'a> ContentExtractor<'a> {
                 let valid_result = !root_in_document_chrome
                     && result_metrics.has_meaningful_text()
                     && !cached.access_barrier
-                    && !(short_source_access_barrier && !ignores_visible_source_barrier)
+                    && (!short_source_access_barrier || ignores_visible_source_barrier)
                     && !cached.interactive_shell
                     && !cached.incoherent_short
                     && !link_only_semantic_root;
@@ -1463,7 +1463,7 @@ impl<'a> ContentExtractor<'a> {
                 !root_in_document_chrome
                     && result_metrics.has_meaningful_text()
                     && !access_barrier
-                    && !(short_source_access_barrier && !ignores_visible_source_barrier)
+                    && (!short_source_access_barrier || ignores_visible_source_barrier)
                     && !interactive_shell
                     && !incoherent_short
                     && !link_only_semantic_root
@@ -2255,10 +2255,7 @@ impl<'a> ContentExtractor<'a> {
 
         let root_info = self.exact_root_info(&self.dom, root, origin);
         let synthetic = root == body;
-        let top_id;
-        let content_id;
-
-        if synthetic {
+        let (top_id, content_id) = if synthetic {
             Self::prune_body_fallback_chrome(&mut self.dom, body);
             self.dom.reserve_additional_nodes_exact(1);
             let container = self
@@ -2276,8 +2273,7 @@ impl<'a> ContentExtractor<'a> {
                 &mut self.node_data,
                 self.strategy.weight_classes(),
             );
-            top_id = container;
-            content_id = container;
+            (container, container)
         } else {
             if !self.node_data.has(root) {
                 initialize_node(
@@ -2287,9 +2283,8 @@ impl<'a> ContentExtractor<'a> {
                     self.strategy.weight_classes(),
                 );
             }
-            top_id = root;
-            content_id = self.create_container(root, &[root]).unwrap_or(root);
-        }
+            (root, self.create_container(root, &[root]).unwrap_or(root))
+        };
 
         if let Some(direction) = std::iter::once(top_id)
             .chain(self.dom.ancestors(top_id))
@@ -3635,6 +3630,15 @@ impl<'a> ContentExtractor<'a> {
             // extraction strategy, including broad and fallback attempts.
             let before = self.diagnostic_element_count(root);
             remove_global_chrome_in_workspace(
+                &mut self.dom,
+                root,
+                &mut self.node_data,
+                &source_evidence,
+                workspace,
+            );
+            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
+            let before = self.diagnostic_element_count(root);
+            remove_inline_chrome_controls_in_workspace(
                 &mut self.dom,
                 root,
                 &mut self.node_data,

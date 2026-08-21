@@ -47,7 +47,7 @@ impl CalloutAnalysis {
             let label = title_text
                 .map(|text| text.trim().trim_end_matches(':'))
                 .filter(|text| explicit_name || text.len() <= 16);
-            if !structural && !label.is_some_and(|label| canonical_kind(label) == Some(kind)) {
+            if !structural && label.is_none_or(|label| canonical_kind(label) != Some(kind)) {
                 continue;
             }
             let explicit_title = title_node

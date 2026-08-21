@@ -709,6 +709,9 @@ pub(super) fn compile_with_retained_capacity_plan(
         let Some(tag) = dom.tag(node) else {
             requires_complex!();
         };
+        if super::code::is_code_language_label(dom, node) {
+            continue;
+        }
         if has_complex_tag(tag) {
             requires_complex!();
         }

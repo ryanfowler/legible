@@ -32,7 +32,7 @@ pub(crate) const HAS_VISIBLE_IMAGE: u8 = 1 << 1;
 
 pub(crate) use builder::{BuildCapacityPlan, BuildError, SemanticTapeBuilder};
 pub(crate) use code::{
-    count_blocks_for_nodes as source_code_block_count_for_nodes,
+    count_blocks_for_nodes as source_code_block_count_for_nodes, is_code_language_label,
     is_multiline_orphan_with_evidence as is_multiline_code_with_evidence,
     multiline_content as code_multiline_content,
 };
