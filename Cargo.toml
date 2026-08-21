@@ -14,15 +14,18 @@ exclude = [".github/", "examples/", "tests/", "fuzz/"]
 [lib]
 bench = false
 
-# Extraction is a cross-module hot path. Thin LTO keeps the release and bench
-# builds linkable in a reasonable time while allowing the optimizer to inline
-# the small DOM, scoring, and rendering helpers across module boundaries.
+# Extraction is a cross-module hot path. Thin LTO keeps release builds
+# linkable in a reasonable time while allowing the optimizer to inline the
+# small DOM, scoring, and rendering helpers across module boundaries.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 
 [profile.bench]
 inherits = "release"
+# Benchmarks include html5ever and tendril in the hot path. Fat LTO lets the
+# benchmark binary inline these boundaries for representative measurements.
+lto = "fat"
 
 [features]
 default = []

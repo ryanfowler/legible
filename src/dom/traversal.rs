@@ -462,6 +462,81 @@ impl Dom {
         nodes
     }
 
+    /// Compares normalized source text without allocating a temporary String.
+    /// This is used by small cleanup labels that are checked on many links.
+    pub(crate) fn normalized_text_eq_ignore_ascii_case(
+        &self,
+        root: NodeId,
+        expected: &[u8],
+    ) -> bool {
+        let mut position = 0;
+        let mut pending_whitespace = false;
+        let mut has_text = false;
+        for id in std::iter::once(root).chain(self.descendants(root)) {
+            let Some(text) = self.text_node(id) else {
+                continue;
+            };
+            if text.is_ascii() {
+                for byte in text.bytes() {
+                    if !Self::normalized_text_match_byte(
+                        byte,
+                        expected,
+                        &mut position,
+                        &mut pending_whitespace,
+                        &mut has_text,
+                    ) {
+                        return false;
+                    }
+                }
+            } else {
+                for character in text.chars() {
+                    if character.is_whitespace() {
+                        pending_whitespace |= has_text;
+                    } else if !character.is_ascii()
+                        || !Self::normalized_text_match_byte(
+                            character as u8,
+                            expected,
+                            &mut position,
+                            &mut pending_whitespace,
+                            &mut has_text,
+                        )
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        position == expected.len()
+    }
+
+    #[inline]
+    fn normalized_text_match_byte(
+        byte: u8,
+        expected: &[u8],
+        position: &mut usize,
+        pending_whitespace: &mut bool,
+        has_text: &mut bool,
+    ) -> bool {
+        if byte.is_ascii_whitespace() {
+            *pending_whitespace |= *has_text;
+            return true;
+        }
+        if *pending_whitespace {
+            if *position >= expected.len() || expected[*position] != b' ' {
+                return false;
+            }
+            *position += 1;
+            *pending_whitespace = false;
+        }
+        if *position >= expected.len() || byte.to_ascii_lowercase() != expected[*position] {
+            return false;
+        }
+        *position += 1;
+        *has_text = true;
+        true
+    }
+
+    #[inline]
     pub(crate) fn normalized_char_count(&self, root: NodeId) -> usize {
         if let Some(text) = self.text_node(root) {
             return normalized_ascii_char_count(text).unwrap_or_else(|| {

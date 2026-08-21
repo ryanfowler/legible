@@ -313,29 +313,39 @@ pub(crate) fn clean_styles_with_semantic_gate_in_workspace(
         }
     }
 }
+#[inline]
 fn is_directly_protected(
     dom: &Dom,
     id: NodeId,
     evidence: &crate::document::SourceEvidence,
 ) -> bool {
-    evidence.is_semantic_source(id)
-        || dom.attr(id, AttrName::DataFootnote).is_some()
-        || dom.attr(id, AttrName::DataFootnotes).is_some()
-        || dom.attr(id, AttrName::DataMath).is_some()
-        || matches!(
-            dom.tag(id),
-            Some(
-                Tag::Pre
-                    | Tag::Code
-                    | Tag::Figure
-                    | Tag::Picture
-                    | Tag::Blockquote
-                    | Tag::Details
-                    | Tag::Math
-                    | Tag::Dl
-            )
+    let tag = dom.tag(id);
+    if evidence.is_semantic_source(id) {
+        return true;
+    }
+    if matches!(
+        tag,
+        Some(
+            Tag::Pre
+                | Tag::Code
+                | Tag::Figure
+                | Tag::Picture
+                | Tag::Blockquote
+                | Tag::Details
+                | Tag::Math
+                | Tag::Dl
         )
-        || dom.tag(id) == Some(Tag::Table) && evidence.data_table(id)
+    ) {
+        return true;
+    }
+    if tag == Some(Tag::Table) && evidence.data_table(id) {
+        return true;
+    }
+    dom.attrs(id).iter().any(|attribute| {
+        attribute.is_named(AttrName::DataFootnote)
+            || attribute.is_named(AttrName::DataFootnotes)
+            || attribute.is_named(AttrName::DataMath)
+    })
 }
 
 fn is_protected_content(dom: &Dom, id: NodeId, evidence: &crate::document::SourceEvidence) -> bool {
@@ -2504,7 +2514,7 @@ fn has_comment_token(name: &str) -> bool {
 
 fn is_reply_link(dom: &Dom, node: NodeId) -> bool {
     dom.tag(node) == Some(Tag::A)
-        && (get_normalized_inner_text(dom, node, &mut String::new()).eq_ignore_ascii_case("reply")
+        && (dom.normalized_text_eq_ignore_ascii_case(node, b"reply")
             || dom
                 .attr(node, AttrName::Href)
                 .is_some_and(|href| contains_ascii_case_insensitive(href, "reply")))
@@ -3074,11 +3084,16 @@ fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetri
     );
     let low_prose = metrics.stats.sentence_end_count <= 4 && metrics.non_link_chars <= 480.0;
     let link_cluster = metrics.links >= 2 && metrics.link_density >= 0.2;
+    let mut contact_text = String::new();
     let contact_link = dom.descendants(node).any(|descendant| {
-        dom.tag(descendant) == Some(Tag::A)
-            && get_normalized_inner_text(dom, descendant, &mut String::new())
-                .to_ascii_lowercase()
-                .contains("contact")
+        if dom.tag(descendant) != Some(Tag::A) {
+            return false;
+        }
+        contact_text.clear();
+        contains_ascii_case_insensitive(
+            get_normalized_inner_text(dom, descendant, &mut contact_text),
+            "contact",
+        )
     });
     let global_structure = semantic || named;
     low_prose

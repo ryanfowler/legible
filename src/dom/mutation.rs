@@ -71,6 +71,7 @@ impl Dom {
         n.prev_sibling = NodeLink::NONE;
         n.next_sibling = NodeLink::NONE;
     }
+    #[inline]
     pub(crate) fn append_child(&mut self, parent: NodeId, child: NodeId) {
         self.ensure_no_cycle(parent, child);
         if self.parent(child).is_some() {
@@ -90,6 +91,7 @@ impl Dom {
         }
         self.node_mut(parent).last_child = NodeLink::from_option(Some(child));
     }
+    #[inline]
     pub(crate) fn insert_before(&mut self, reference: NodeId, node: NodeId) {
         let parent = self.parent(reference).expect("reference is detached");
         self.ensure_no_cycle(parent, node);

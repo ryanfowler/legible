@@ -201,6 +201,20 @@ fn bounded_subtree_text(dom: &Dom, nodes: &[NodeId]) -> Vec<Option<Box<str>>> {
 
 fn append_normalized(output: &mut String, input: &str, limit: usize) {
     if input.is_ascii() {
+        // Callout values are often single short words. Avoid constructing the
+        // split iterator and its boundary checks for that common case.
+        if input
+            .as_bytes()
+            .iter()
+            .all(|byte| !byte.is_ascii_whitespace())
+        {
+            if !input.is_empty() && !output.is_empty() && output.len() < limit {
+                output.push(' ');
+            }
+            let remaining = limit.saturating_sub(output.len());
+            output.push_str(&input[..input.len().min(remaining)]);
+            return;
+        }
         for word in input.split_ascii_whitespace() {
             if !output.is_empty() {
                 if output.len() == limit {

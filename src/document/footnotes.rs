@@ -4,6 +4,26 @@ use std::collections::{HashMap, HashSet};
 
 use super::sparse::SparseNodeValues;
 
+#[inline]
+fn trim_text(value: &str) -> &str {
+    if value.is_ascii() {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        while start < bytes.len()
+            && (bytes[start] == b' ' || (b'\t'..=b'\r').contains(&bytes[start]))
+        {
+            start += 1;
+        }
+        let mut end = bytes.len();
+        while end > start && (bytes[end - 1] == b' ' || (b'\t'..=b'\r').contains(&bytes[end - 1])) {
+            end -= 1;
+        }
+        &value[start..end]
+    } else {
+        value.trim()
+    }
+}
+
 #[derive(Clone)]
 struct Reference {
     node: NodeId,
@@ -600,12 +620,12 @@ fn detect_definitions_with_index(
                 .map(str::to_owned)
                 .or_else(|| {
                     dom.attr(node, AttrName::DataFootnote)
-                        .filter(|value| !value.trim().is_empty())
+                        .filter(|value| !trim_text(value).is_empty())
                         .map(str::to_owned)
                 })
                 .or_else(|| {
                     dom.attr_by_local_name(node, "data-footnote")
-                        .filter(|value| !value.trim().is_empty())
+                        .filter(|value| !trim_text(value).is_empty())
                         .map(str::to_owned)
                 })
                 .or_else(|| {
@@ -760,7 +780,7 @@ fn word_definition_key(dom: &Dom, node: NodeId) -> Option<String> {
         .take_while(|&descendant| descendant != anchor)
         .any(|descendant| {
             dom.text_node(descendant)
-                .is_some_and(|text| !text.trim().is_empty())
+                .is_some_and(|text| !trim_text(text).is_empty())
         })
     {
         return None;
@@ -807,7 +827,7 @@ fn previous_significant_sibling(dom: &Dom, node: NodeId) -> Option<NodeId> {
     while let Some(candidate) = previous {
         if !dom
             .text_node(candidate)
-            .is_some_and(|text| text.trim().is_empty())
+            .is_some_and(|text| trim_text(text).is_empty())
         {
             return Some(candidate);
         }
@@ -831,7 +851,7 @@ fn mark_definition_chrome(
         }
         if dom
             .text_node(node)
-            .is_some_and(|text| text.trim().is_empty())
+            .is_some_and(|text| trim_text(text).is_empty())
         {
             previous = dom.prev_sibling(node);
             continue;
@@ -850,7 +870,7 @@ fn mark_definition_chrome(
                 dom.tag(child) == Some(Tag::Sup)
                     || dom
                         .text_node(child)
-                        .is_some_and(|text| text.trim().is_empty())
+                        .is_some_and(|text| trim_text(text).is_empty())
             })
         {
             dom.element_children(node).next()
@@ -861,9 +881,7 @@ fn mark_definition_chrome(
             return false;
         };
         let text = dom.text(marker_node);
-        let marker = text
-            .trim()
-            .trim_matches(|character| matches!(character, '[' | ']'));
+        let marker = trim_text(&text).trim_matches(|character| matches!(character, '[' | ']'));
         !marker.is_empty()
             && marker.chars().count() <= 4
             && marker.chars().all(|character| character.is_ascii_digit())
@@ -897,7 +915,7 @@ fn mark_definition_chrome(
         .collect();
     for link in links {
         let text = dom.text(link);
-        let label = text.trim().to_ascii_lowercase();
+        let label = trim_text(&text).to_ascii_lowercase();
         let href = dom
             .attr(link, AttrName::Href)
             .unwrap_or("")
@@ -934,7 +952,7 @@ fn mark_definition_chrome(
                 child == link
                     || dom
                         .text_node(child)
-                        .is_some_and(|text| text.trim().is_empty())
+                        .is_some_and(|text| trim_text(text).is_empty())
             })
         {
             skipped[parent.index()] = true;
@@ -945,7 +963,7 @@ fn mark_definition_chrome(
 fn first_significant_child(dom: &Dom, node: NodeId) -> Option<NodeId> {
     dom.children(node).find(|&child| {
         !dom.text_node(child)
-            .is_some_and(|text| text.trim().is_empty())
+            .is_some_and(|text| trim_text(text).is_empty())
     })
 }
 
@@ -1157,6 +1175,11 @@ fn numeric_suffix(value: &str) -> Option<&str> {
 
 fn has_any_class(dom: &Dom, node: NodeId, expected: &[&str]) -> bool {
     dom.attr(node, AttrName::Class).is_some_and(|classes| {
+        // Most callers check one class. Avoid creating the nested expected
+        // iterator and use the same token matcher as role checks.
+        if let [value] = expected {
+            return token(classes, value);
+        }
         any_token(classes, |class| {
             let Some(first) = class.as_bytes().first().copied() else {
                 return false;

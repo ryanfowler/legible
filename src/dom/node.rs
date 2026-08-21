@@ -60,6 +60,19 @@ impl ElementData {
     }
     #[inline]
     pub(crate) fn attr_local(&self, name: &str) -> Option<&str> {
+        // These dynamic names are queried often but are not part of the
+        // typed attribute set. Avoid running the full attribute-name matcher
+        // before scanning the small per-element attribute list.
+        if matches!(
+            name,
+            "action" | "alt" | "aria-level" | "data-fn" | "data-type" | "for"
+        ) {
+            return self
+                .attrs
+                .iter()
+                .find(|attribute| attribute.name.local.as_ref().eq_ignore_ascii_case(name))
+                .map(|attribute| attribute.value.as_ref());
+        }
         let kind = AttrName::from_local(name);
         if kind != AttrName::Other {
             return self

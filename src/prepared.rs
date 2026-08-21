@@ -180,13 +180,16 @@ impl SourceAnalysis {
             if flags.contains(SourceFlags::ELEMENT) {
                 element_count += 1;
             }
-            let text_stats_index = dom.text_node(node).map_or(NO_TEXT_STATS, |text| {
+            let text = dom.text_node(node);
+            let text_stats_index = text.map_or(NO_TEXT_STATS, |text| {
                 let index = u32::try_from(text_stats.len()).unwrap_or(NO_TEXT_STATS);
                 if index != NO_TEXT_STATS {
                     text_stats.push(stats_for_text(text));
                 }
                 index
             });
+            let subtree_text_bytes =
+                text.map_or(0, |text| u32::try_from(text.len()).unwrap_or(u32::MAX));
             entries.push(SourceEntry {
                 node,
                 subtree_end: 0,
@@ -195,9 +198,7 @@ impl SourceAnalysis {
                 flags,
                 class_weight,
                 text_stats_index,
-                subtree_text_bytes: dom
-                    .text_node(node)
-                    .map_or(0, |text| u32::try_from(text.len()).unwrap_or(u32::MAX)),
+                subtree_text_bytes,
             });
             candidate_builder.observe(dom, &entries[position]);
             if let Some(slot) = position_by_node.get_mut(node.index()) {
