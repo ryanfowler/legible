@@ -297,6 +297,8 @@ struct FrozenContent {
     source_facts: Option<crate::document::SemanticSourceFacts>,
     source_evidence: crate::document::SourceEvidence,
     retained_stream: Option<crate::document::RetainedStream>,
+    ordinary_plan: Option<crate::document::OrdinarySourcePlan>,
+    ordinary_checked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -510,6 +512,25 @@ impl ScoringAnalysis {
             Some(&self.weighted)
         } else {
             self.unweighted.as_ref()
+        }
+    }
+
+    fn variant_mut(&mut self, weight_classes: bool) -> Option<&mut ScoredVariant> {
+        if weight_classes {
+            Some(&mut self.weighted)
+        } else {
+            self.unweighted.as_mut()
+        }
+    }
+
+    fn take_node_data(&mut self, weight_classes: bool) -> Option<NodeStateStore> {
+        self.variant_mut(weight_classes)
+            .map(|variant| std::mem::take(&mut variant.node_data))
+    }
+
+    fn restore_node_data(&mut self, weight_classes: bool, node_data: NodeStateStore) {
+        if let Some(variant) = self.variant_mut(weight_classes) {
+            variant.node_data = node_data;
         }
     }
 }
@@ -1055,12 +1076,8 @@ impl<'a> ContentExtractor<'a> {
             self.diagnostic_cleanup_actions.clear();
             self.diagnostic_normalization = NormalizationCountsInfo::default();
             let analysis = &analysis_cache.variants[analysis_index].1;
-            let variant = analysis
-                .variant(strategy.weight_classes())
-                .ok_or(Error::NoContent)?;
             let body = analysis.body;
             self.page_byline = plan.byline.clone();
-            self.node_data = variant.node_data.clone();
             let selection = plan.selection.clone();
             let source_siblings = plan.source_siblings.clone();
             let top_id = plan.top_id;
@@ -1132,6 +1149,8 @@ impl<'a> ContentExtractor<'a> {
                         source_facts,
                         source_evidence,
                         retained_stream,
+                        ordinary_plan,
+                        ordinary_checked,
                     } = content;
                     let root = dom.root();
                     let document = crate::document::compile_document_owned(
@@ -1142,6 +1161,8 @@ impl<'a> ContentExtractor<'a> {
                             source_facts: source_facts.as_ref(),
                             source_evidence: Some(&source_evidence),
                             retained_stream: retained_stream.as_ref(),
+                            ordinary_plan: ordinary_plan.as_ref(),
+                            ordinary_checked,
                         },
                     )
                     .map_err(|_| Error::NoContent)?;
@@ -1362,6 +1383,13 @@ impl<'a> ContentExtractor<'a> {
             if let Some(source_facts) = source_facts.as_mut() {
                 source_facts.rebase_root(&self.dom, result_root);
             }
+            let mut ordinary_plan = self.diagnostic_attempts.as_ref().and_then(|_| {
+                retained_stream.as_ref().and_then(|stream| {
+                    crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
+                })
+            });
+            let mut ordinary_checked =
+                self.diagnostic_attempts.is_some() && retained_stream.is_some();
             // Normal extraction only needs the semantic document for a candidate
             // that can win. Diagnostics still compile every attempt so that they
             // retain complete semantic metrics.
@@ -1375,6 +1403,8 @@ impl<'a> ContentExtractor<'a> {
                             source_facts: source_facts.as_ref(),
                             source_evidence: Some(&source_evidence),
                             retained_stream: retained_stream.as_ref(),
+                            ordinary_plan: ordinary_plan.as_ref(),
+                            ordinary_checked,
                         },
                     )
                     .map_err(|_| Error::NoContent)?,
@@ -1449,6 +1479,12 @@ impl<'a> ContentExtractor<'a> {
                 rejected_link_only_semantic_root: &mut rejected_link_only_semantic_root,
             });
             if verdict.accepted {
+                if !ordinary_checked {
+                    ordinary_plan = retained_stream.as_ref().and_then(|stream| {
+                        crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
+                    });
+                    ordinary_checked = retained_stream.is_some();
+                }
                 let excerpt = self.content_excerpt_if_needed(result_root);
                 self.record_attempt(
                     strategy,
@@ -1474,6 +1510,8 @@ impl<'a> ContentExtractor<'a> {
                             source_facts: source_facts.as_ref(),
                             source_evidence: Some(&source_evidence),
                             retained_stream: retained_stream.as_ref(),
+                            ordinary_plan: ordinary_plan.as_ref(),
+                            ordinary_checked,
                         },
                     )
                     .map_err(|_| Error::NoContent)?
@@ -1527,6 +1565,8 @@ impl<'a> ContentExtractor<'a> {
                     source_facts,
                     source_evidence,
                     retained_stream,
+                    ordinary_plan,
+                    ordinary_checked,
                 });
             } else {
                 self.dom = source_dom;
@@ -1591,6 +1631,8 @@ impl<'a> ContentExtractor<'a> {
             source_facts,
             source_evidence,
             retained_stream,
+            ordinary_plan,
+            ordinary_checked,
         } = physical_cache
             .remove(&best.physical_key)
             .and_then(|cached| cached.content)
@@ -1604,6 +1646,8 @@ impl<'a> ContentExtractor<'a> {
                 source_facts: source_facts.as_ref(),
                 source_evidence: Some(&source_evidence),
                 retained_stream: retained_stream.as_ref(),
+                ordinary_plan: ordinary_plan.as_ref(),
+                ordinary_checked,
             },
         )
         .map_err(|_| Error::NoContent)?;
@@ -1642,15 +1686,19 @@ impl<'a> ContentExtractor<'a> {
                 );
             }
         }
+        let node_data = analysis_cache.variants[analysis_index]
+            .1
+            .take_node_data(strategy.weight_classes())
+            .ok_or(Error::NoContent)?;
         let analysis = &analysis_cache.variants[analysis_index].1;
+        let discovery = &analysis.discovery;
         let variant = analysis
             .variant(strategy.weight_classes())
             .ok_or(Error::NoContent)?;
-        let discovery = &analysis.discovery;
         let candidates = &variant.candidates;
         let ranked = &variant.ranked;
         let body = analysis.body;
-        self.node_data = variant.node_data.clone();
+        let mut node_data = node_data;
         let working_dom = &self.dom;
         let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
         let mut selection = select_content_root(
@@ -1743,22 +1791,22 @@ impl<'a> ContentExtractor<'a> {
                         parent = analysis.view.effective_parent(working_dom, node)
                     }
                 }
-                if !self.node_data.has(top_id) {
+                if !node_data.has(top_id) {
                     initialize_node(
                         working_dom,
                         top_id,
-                        &mut self.node_data,
+                        &mut node_data,
                         self.strategy.weight_classes(),
                     )
                 }
-                let threshold = self.node_data.get_content_score(top_id) / 3.0;
-                let mut last = self.node_data.get_content_score(top_id);
+                let threshold = node_data.get_content_score(top_id) / 3.0;
+                let mut last = node_data.get_content_score(top_id);
                 let mut parent = analysis.view.effective_parent(working_dom, top_id);
                 while let Some(node) = parent {
                     if node == body {
                         break;
                     }
-                    if let Some(score) = self.node_data.get_content_score_if_initialized(node) {
+                    if let Some(score) = node_data.get_content_score_if_initialized(node) {
                         if score < threshold {
                             break;
                         }
@@ -1804,11 +1852,11 @@ impl<'a> ContentExtractor<'a> {
             {
                 top_id = article;
             }
-            if !self.node_data.has(top_id) {
+            if !node_data.has(top_id) {
                 initialize_node(
                     working_dom,
                     top_id,
-                    &mut self.node_data,
+                    &mut node_data,
                     self.strategy.weight_classes(),
                 )
             }
@@ -1833,7 +1881,7 @@ impl<'a> ContentExtractor<'a> {
             .map(str::to_owned);
         let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
             if selection.reason == RootSelectionReason::Ranked {
-                Self::gather_siblings(working_dom, &analysis.view, top_id, &mut self.node_data)
+                Self::gather_siblings(working_dom, &analysis.view, top_id, &mut node_data)
                     .into_iter()
                     .collect()
             } else {
@@ -1863,7 +1911,7 @@ impl<'a> ContentExtractor<'a> {
             lead_media,
             source_direction: source_direction.clone(),
         };
-        Ok(AttemptPlan {
+        let plan = AttemptPlan {
             strategy,
             visibility,
             analysis_index,
@@ -1881,7 +1929,11 @@ impl<'a> ContentExtractor<'a> {
             semantic_root_boilerplate,
             byline: discovery.byline.clone(),
             key,
-        })
+        };
+        analysis_cache.variants[analysis_index]
+            .1
+            .restore_node_data(strategy.weight_classes(), node_data);
+        Ok(plan)
     }
 
     fn prepare_unweighted_scoring(
@@ -1947,7 +1999,11 @@ impl<'a> ContentExtractor<'a> {
             &discovery.divs_to_prepare,
             &discovery.candidates,
         );
-        let excluded_mask = build_exclusion_mask(working_dom, &discovery.remove_after_scoring);
+        let excluded_mask = build_exclusion_mask_with_source(
+            working_dom,
+            ctx.prepared_source,
+            &discovery.remove_after_scoring,
+        );
         let body = ctx
             .source_anchors
             .body
@@ -2271,6 +2327,12 @@ impl<'a> ContentExtractor<'a> {
         if let Some(source_facts) = source_facts.as_mut() {
             source_facts.rebase_root(&self.dom, result_root);
         }
+        let mut ordinary_plan = self.diagnostic_attempts.as_ref().and_then(|_| {
+            retained_stream.as_ref().and_then(|stream| {
+                crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
+            })
+        });
+        let mut ordinary_checked = self.diagnostic_attempts.is_some() && retained_stream.is_some();
 
         let result_document = if self.diagnostic_attempts.is_some() {
             Some(
@@ -2282,6 +2344,8 @@ impl<'a> ContentExtractor<'a> {
                         source_facts: source_facts.as_ref(),
                         source_evidence: Some(&source_evidence),
                         retained_stream: retained_stream.as_ref(),
+                        ordinary_plan: ordinary_plan.as_ref(),
+                        ordinary_checked,
                     },
                 )
                 .map_err(|_| Error::NoContent)?,
@@ -2345,6 +2409,12 @@ impl<'a> ContentExtractor<'a> {
             return Err(Error::NoContent);
         }
 
+        if !ordinary_checked {
+            ordinary_plan = retained_stream.as_ref().and_then(|stream| {
+                crate::document::ordinary_source_plan(&self.dom, result_root, Some(stream))
+            });
+            ordinary_checked = retained_stream.is_some();
+        }
         let excerpt = self.content_excerpt_if_needed(result_root);
         self.record_attempt(
             ExtractionStrategy::Normal,
@@ -2369,6 +2439,8 @@ impl<'a> ContentExtractor<'a> {
                     source_facts: source_facts.as_ref(),
                     source_evidence: Some(&source_evidence),
                     retained_stream: retained_stream.as_ref(),
+                    ordinary_plan: ordinary_plan.as_ref(),
+                    ordinary_checked,
                 },
             )
             .map_err(|_| Error::NoContent)?

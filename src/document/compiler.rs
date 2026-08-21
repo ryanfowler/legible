@@ -141,6 +141,11 @@ pub(crate) struct CompileInputs<'a> {
     pub(crate) source_facts: Option<&'a super::facts::SemanticSourceFacts>,
     pub(crate) source_evidence: Option<&'a super::facts::SourceEvidence>,
     pub(crate) retained_stream: Option<&'a super::RetainedStream>,
+    pub(crate) ordinary_plan: Option<&'a super::ordinary::OrdinarySourcePlan>,
+    /// True when final cleanup already classified the retained stream. A
+    /// `None` plan then means that the complex compiler is required, not that
+    /// the source must be gated again.
+    pub(crate) ordinary_checked: bool,
 }
 
 /// Compiles the children of a retained source root into semantic nodes.
@@ -151,7 +156,31 @@ pub(crate) fn compile_document(
     inputs: &CompileInputs<'_>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
-    if let Some(result) = try_ordinary_compilation(dom, root, context, inputs.retained_stream) {
+    let ordinary_result = if inputs.ordinary_checked {
+        inputs.ordinary_plan.map(|plan| {
+            let result = super::ordinary::compile_with_retained_capacity_plan(
+                dom,
+                root,
+                context,
+                plan.capacity,
+                inputs.retained_stream,
+            );
+            if result.is_ok() {
+                crate::instrumentation::record_semantic_source_nodes(plan.source_node_count);
+            }
+            result
+        })
+    } else {
+        try_ordinary_compilation(
+            dom,
+            root,
+            context,
+            inputs.retained_stream,
+            inputs.ordinary_plan,
+            false,
+        )
+    };
+    if let Some(result) = ordinary_result {
         match result {
             Ok(document) => {
                 record_document_metrics(&document);
@@ -191,7 +220,31 @@ pub(crate) fn compile_document_owned(
     inputs: CompileInputs<'_>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
-    if let Some(result) = try_ordinary_compilation(&dom, root, context, inputs.retained_stream) {
+    let ordinary_result = if inputs.ordinary_checked {
+        inputs.ordinary_plan.map(|plan| {
+            let result = super::ordinary::compile_with_retained_capacity_plan(
+                &dom,
+                root,
+                context,
+                plan.capacity,
+                inputs.retained_stream,
+            );
+            if result.is_ok() {
+                crate::instrumentation::record_semantic_source_nodes(plan.source_node_count);
+            }
+            result
+        })
+    } else {
+        try_ordinary_compilation(
+            &dom,
+            root,
+            context,
+            inputs.retained_stream,
+            inputs.ordinary_plan,
+            false,
+        )
+    };
+    if let Some(result) = ordinary_result {
         match result {
             Ok(document) => {
                 record_document_metrics(&document);
@@ -235,9 +288,20 @@ fn try_ordinary_compilation(
     root: NodeId,
     context: &CompileContext,
     retained_stream: Option<&super::RetainedStream>,
+    ordinary_plan: Option<&super::ordinary::OrdinarySourcePlan>,
+    ordinary_checked: bool,
 ) -> Option<Result<Document, CompileError>> {
-    let source_plan =
-        super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)?;
+    if ordinary_checked && ordinary_plan.is_none() {
+        return None;
+    }
+    let owned_plan;
+    let source_plan = if let Some(plan) = ordinary_plan {
+        plan
+    } else {
+        owned_plan =
+            super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)?;
+        &owned_plan
+    };
     let source_node_count = source_plan.source_node_count;
     let result = super::ordinary::compile_with_retained_capacity_plan(
         dom,

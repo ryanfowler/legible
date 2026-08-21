@@ -27,6 +27,10 @@ pub(crate) struct ScoringView {
     wrapper_replacements: SmallVec<[(NodeId, NodeId); 32]>,
     parent_overrides: SmallVec<[(NodeId, NodeId); 32]>,
     text_overrides: SmallVec<[(NodeId, NodeStats); 32]>,
+    /// Sparse facts for the DIVs that need projection. This replaces a
+    /// descendant walk for every prepared DIV without adding a DOM-sized
+    /// scoring allocation for each visibility variant.
+    div_descendant_facts: SmallVec<[(NodeId, bool); 128]>,
 }
 
 impl ScoringView {
@@ -42,10 +46,13 @@ impl ScoringView {
             wrapper_replacements: SmallVec::new(),
             parent_overrides: SmallVec::new(),
             text_overrides: SmallVec::new(),
+            div_descendant_facts: SmallVec::new(),
         };
         view.project_aria_structure(dom, source);
         view.sort_and_compact_tags();
         let projected_tag_count = view.tag_overrides.len();
+        view.div_descendant_facts =
+            view.build_div_descendant_facts(dom, source, divs, projected_tag_count);
         view.prepare_divs(dom, source, divs, candidates, projected_tag_count);
         view.tag_overrides.sort_unstable_by_key(|(node, _)| *node);
         view.wrapper_replacements
@@ -315,12 +322,23 @@ impl ScoringView {
                 // marks its old wrapper as absent while the virtual seed carries
                 // the paragraph score at the projected parent.
                 self.wrapper_replacements.push((div, promoted));
-            } else if !dom.descendants(div).any(|node| {
-                dom.is_element(node)
-                    && self
-                        .projected_tag(dom, node, projected_tag_count)
-                        .is_some_and(crate::constants::is_div_to_p_elem)
-            }) {
+            } else if !self
+                .div_descendant_facts
+                .binary_search_by_key(&div, |(node, _)| *node)
+                .ok()
+                .map(|index| self.div_descendant_facts[index].1)
+                .unwrap_or_else(|| {
+                    // Synthetic or detached nodes are not part of the prepared
+                    // source index. Keep the cold fallback exact for tests and
+                    // callers that construct a view over such a tree.
+                    dom.descendants(div).any(|node| {
+                        dom.is_element(node)
+                            && self
+                                .projected_tag(dom, node, projected_tag_count)
+                                .is_some_and(crate::constants::is_div_to_p_elem)
+                    })
+                })
+            {
                 self.set_tag(div, Tag::P);
                 self.prepared_seeds.push(PreparedScoreSeed::Node {
                     node: div,
@@ -334,6 +352,43 @@ impl ScoringView {
                 );
             }
         }
+    }
+
+    fn build_div_descendant_facts(
+        &self,
+        dom: &Dom,
+        source: &SourceAnalysis,
+        divs: &[NodeId],
+        projected_tag_count: usize,
+    ) -> SmallVec<[(NodeId, bool); 128]> {
+        if divs.is_empty() {
+            return SmallVec::new();
+        }
+        let matching_positions: Vec<_> = source
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(position, entry)| {
+                (entry.is_element()
+                    && self
+                        .projected_tag(dom, entry.node, projected_tag_count)
+                        .is_some_and(crate::constants::is_div_to_p_elem))
+                .then_some(position)
+            })
+            .collect();
+        let mut facts = SmallVec::with_capacity(divs.len());
+        for &div in divs {
+            let Some(range) = source.subtree_range(div) else {
+                continue;
+            };
+            let first = matching_positions.partition_point(|&position| position <= range.start);
+            let contains = matching_positions
+                .get(first)
+                .is_some_and(|&position| position < range.end);
+            facts.push((div, contains));
+        }
+        facts.sort_unstable_by_key(|(node, _)| *node);
+        facts
     }
 }
 
@@ -667,7 +722,7 @@ fn short_ascii_stats(bytes: &[u8]) -> Option<NodeStats> {
     Some(stats)
 }
 
-fn append_stats(a: &mut NodeStats, b: &NodeStats) {
+pub(crate) fn append_stats(a: &mut NodeStats, b: &NodeStats) {
     if !b.has_text() {
         return;
     }
@@ -1692,6 +1747,7 @@ fn initial_readability_for_tag(
 /// A boolean index avoids repeatedly walking candidate ancestor chains. This is
 /// important for malformed documents, where HTML tree repair can create deep
 /// nesting and many candidates.
+#[cfg(test)]
 pub(crate) fn build_exclusion_mask(dom: &Dom, excluded: &[NodeId]) -> Vec<bool> {
     if excluded.is_empty() {
         return Vec::new();
@@ -1704,6 +1760,66 @@ pub(crate) fn build_exclusion_mask(dom: &Dom, excluded: &[NodeId]) -> Vec<bool> 
         mask[root.index()] = true;
         for node in dom.descendants(root) {
             mask[node.index()] = true;
+        }
+    }
+    mask
+}
+
+/// Builds an exclusion mask from prepared source intervals.
+///
+/// The normal source path converts each excluded root to one preorder range,
+/// merges overlapping ranges, and fills the mask in one source-order pass.
+/// Detached or synthetic roots use the legacy descendant walk as a cold
+/// fallback because they have no entry in `SourceAnalysis`.
+pub(crate) fn build_exclusion_mask_with_source(
+    dom: &Dom,
+    source: &SourceAnalysis,
+    excluded: &[NodeId],
+) -> Vec<bool> {
+    if excluded.is_empty() {
+        return Vec::new();
+    }
+    let mut mask = vec![false; dom.len()];
+    let mut ranges = Vec::with_capacity(excluded.len());
+    let mut detached = Vec::new();
+    for &root in excluded {
+        if let Some(range) = source.subtree_range(root) {
+            ranges.push(range);
+        } else {
+            detached.push(root);
+        }
+    }
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    let mut range_index = 0;
+    for (position, entry) in source.entries.iter().enumerate() {
+        while range_index < merged.len() && position >= merged[range_index].end {
+            range_index += 1;
+        }
+        if range_index < merged.len()
+            && position >= merged[range_index].start
+            && let Some(slot) = mask.get_mut(entry.node.index())
+        {
+            *slot = true;
+        }
+    }
+    for root in detached {
+        if let Some(slot) = mask.get_mut(root.index()) {
+            *slot = true;
+            for node in dom.descendants(root) {
+                if let Some(slot) = mask.get_mut(node.index()) {
+                    *slot = true;
+                }
+            }
         }
     }
     mask
@@ -2873,6 +2989,26 @@ mod tests {
         let fresh = get_or_compute_stats(&dom, main, &mut store);
         assert!(fresh.text_length < stale.text_length);
         assert_eq!(store.link_length(main), 0.0);
+    }
+
+    #[test]
+    fn source_interval_exclusion_matches_descendant_walk() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div id="outer"><p>Keep</p><div id="inner"><p>Drop</p></div><p>Keep too</p></div><aside><p>Other</p></aside></main></body>"#,
+        )
+        .unwrap();
+        let outer = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("outer"))
+            .unwrap();
+        let inner = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("inner"))
+            .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let legacy = build_exclusion_mask(&dom, &[outer, inner]);
+        let indexed = super::build_exclusion_mask_with_source(&dom, &source, &[outer, inner]);
+        assert_eq!(indexed, legacy);
     }
 
     #[test]
