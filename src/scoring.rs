@@ -467,6 +467,14 @@ pub(crate) fn stats_for_text(text: &str) -> NodeStats {
         }
         return s;
     }
+    // Source HTML has many short text leaves. For these leaves, combine the
+    // ASCII check with the statistics scan instead of walking the bytes once
+    // in `is_ascii` and once again to count them.
+    if text.len() <= 64
+        && let Some(stats) = short_ascii_stats(text.as_bytes())
+    {
+        return stats;
+    }
     let mut prev = true;
     let mut dot = false;
     let mut text_length = 0usize;
@@ -566,6 +574,69 @@ pub(crate) fn stats_for_text(text: &str) -> NodeStats {
     s.set_ends_with_dot(dot);
     s.set_has_sentence_end(has_sentence_break || dot);
     s
+}
+
+fn short_ascii_stats(bytes: &[u8]) -> Option<NodeStats> {
+    let mut stats = NodeStats::default();
+    stats.set_has_text(!bytes.is_empty());
+    stats.set_starts_with_whitespace(
+        bytes
+            .first()
+            .is_some_and(|byte| ASCII_CLASSES[usize::from(*byte)] & ASCII_WHITESPACE != 0),
+    );
+    stats.set_ends_with_whitespace(
+        bytes
+            .last()
+            .is_some_and(|byte| ASCII_CLASSES[usize::from(*byte)] & ASCII_WHITESPACE != 0),
+    );
+
+    let mut previous_whitespace = true;
+    let mut ends_with_dot = false;
+    let mut has_sentence_break = false;
+    let mut text_length = 0usize;
+    let mut word_count = 0usize;
+    let mut alphabetic_chars = 0usize;
+    let mut digit_chars = 0usize;
+    let mut comma_count = 0usize;
+    let mut sentence_end_count = 0usize;
+    for &byte in bytes {
+        if !byte.is_ascii() {
+            return None;
+        }
+        let class = ASCII_CLASSES[usize::from(byte)];
+        alphabetic_chars += usize::from(class & ASCII_ALPHA != 0);
+        digit_chars += usize::from(class & ASCII_DIGIT != 0);
+        comma_count += usize::from(class & ASCII_COMMA != 0);
+        sentence_end_count += usize::from(class & ASCII_SENTENCE_END != 0);
+        if class & ASCII_WHITESPACE != 0 {
+            has_sentence_break |= ends_with_dot;
+            ends_with_dot = false;
+            if !previous_whitespace {
+                text_length += 1;
+                previous_whitespace = true;
+            }
+        } else {
+            word_count += usize::from(previous_whitespace);
+            ends_with_dot = class & ASCII_DOT != 0;
+            text_length += 1;
+            previous_whitespace = false;
+        }
+    }
+    if previous_whitespace && text_length > 0 {
+        text_length -= 1;
+    }
+    stats.text_length = text_length as u32;
+    stats.word_count = word_count as u32;
+    stats.alphabetic_chars = alphabetic_chars as u32;
+    stats.digit_chars = digit_chars as u32;
+    stats.comma_count = comma_count as u32;
+    stats.sentence_end_count = sentence_end_count as u32;
+    stats.set_has_non_whitespace(word_count != 0);
+    stats.set_has_alphanumeric(alphabetic_chars != 0 || digit_chars != 0);
+    stats.set_has_sentence_break(has_sentence_break);
+    stats.set_ends_with_dot(ends_with_dot);
+    stats.set_has_sentence_end(has_sentence_break || ends_with_dot);
+    Some(stats)
 }
 
 fn append_stats(a: &mut NodeStats, b: &NodeStats) {
@@ -824,34 +895,59 @@ fn get_or_compute_stats_excluding_impl(
         return *s;
     }
 
-    // Most small content elements have no descendants or exactly one text
-    // child. Avoid creating a traversal frame for these nodes.
-    let simple_text = match dom.first_child(id) {
-        None => Some((dom.text_node(id).unwrap_or(""), None)),
-        Some(child) if dom.next_sibling(child).is_none() => {
-            dom.text_node(child).map(|text| (text, Some(child)))
+    // Most small content elements are linear wrapper chains around one text
+    // leaf, such as p > span > text. Avoid a stack frame for every wrapper.
+    let mut chain = SmallVec::<[NodeId; 8]>::new();
+    if let Some(text) = dom.text_node(id) {
+        let stats = source
+            .and_then(|source| source.text_stats(id))
+            .unwrap_or_else(|| stats_for_text(text));
+        store.set_stats(id, stats);
+        return stats;
+    }
+    let mut current = id;
+    let leaf = loop {
+        if let Some(text) = dom.text_node(current) {
+            break Some((text, None));
         }
-        _ => None,
+        let Some(child) = dom.first_child(current) else {
+            break Some(("", None));
+        };
+        if dom.next_sibling(child).is_some()
+            || excluded.get(child.index()).copied().unwrap_or(false)
+        {
+            break None;
+        }
+        chain.push(current);
+        if let Some(text) = dom.text_node(child) {
+            break Some((text, Some(child)));
+        }
+        current = child;
     };
-    if let Some((text, child)) = simple_text {
+    if let Some((text, child)) = leaf
+        && !chain.is_empty()
+    {
         let stats = child
             .and_then(|child| store.get_stats(child).copied())
             .or_else(|| child.and_then(|child| source.and_then(|source| source.text_stats(child))))
             .unwrap_or_else(|| stats_for_text(text));
-        if store.link_lengths_enabled() {
-            let link_length = if dom.tag(id) == Some(Tag::A) {
-                stats.text_length as f64
-                    * if dom.attr(id, AttrName::Href).is_some_and(is_hash_url) {
-                        0.3
-                    } else {
-                        1.0
-                    }
-            } else {
-                0.0
-            };
-            store.set_link_length(id, link_length);
+        let cache_links = store.link_lengths_enabled();
+        for &node in chain.iter().rev() {
+            if cache_links {
+                let link_length = if dom.tag(node) == Some(Tag::A) {
+                    stats.text_length as f64
+                        * if dom.attr(node, AttrName::Href).is_some_and(is_hash_url) {
+                            0.3
+                        } else {
+                            1.0
+                        }
+                } else {
+                    0.0
+                };
+                store.set_link_length(node, link_length);
+            }
+            store.set_stats(node, stats);
         }
-        store.set_stats(id, stats);
         return stats;
     }
 
@@ -863,6 +959,7 @@ fn get_or_compute_stats_excluding_impl(
     }
 
     impl StatsFrame {
+        #[inline(always)]
         fn new(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> Self {
             Self {
                 node,

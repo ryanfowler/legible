@@ -143,17 +143,34 @@ impl SemanticGate {
 /// valid while the fragment is reduced and compiled.
 #[derive(Default)]
 pub(crate) struct SourceEvidence {
-    callout: HashSet<NodeId>,
-    callout_candidate: HashSet<NodeId>,
-    footnote: HashSet<NodeId>,
-    footnote_candidate: HashSet<NodeId>,
-    math: HashSet<NodeId>,
-    accessible_math: HashSet<NodeId>,
-    contains_semantic: HashSet<NodeId>,
-    data_table: HashSet<NodeId>,
+    callout: Vec<u8>,
+    callout_candidate: Vec<u8>,
+    footnote: Vec<u8>,
+    footnote_candidate: Vec<u8>,
+    math: Vec<u8>,
+    accessible_math: Vec<u8>,
+    // This is a hot query during ordinary lowering. Keep the union in a
+    // dense node-indexed mask so each source node needs one load instead of
+    // four hash lookups.
+    semantic_source: Vec<u8>,
+    contains_semantic: Vec<u8>,
+    data_table: Vec<u8>,
 }
 
 type SourceSnapshot<'a> = (&'a [NodeId], &'a [(NodeId, u32)]);
+
+fn node_mask(nodes: &HashSet<NodeId>, length: usize) -> Vec<u8> {
+    let mut mask = vec![0; length];
+    for &node in nodes {
+        mask[node.index()] = 1;
+    }
+    mask
+}
+
+#[inline]
+fn mask_contains(mask: &[u8], node: NodeId) -> bool {
+    mask.get(node.index()).copied() == Some(1)
+}
 
 impl SourceEvidence {
     /// Analyzes source evidence in one pass when no earlier cleanup traversal
@@ -405,6 +422,16 @@ impl SourceEvidence {
         } else {
             HashSet::new()
         };
+        let mut semantic_source = vec![0_u8; dom.len()];
+        for node in callout
+            .iter()
+            .chain(footnote.iter())
+            .chain(math.iter())
+            .chain(accessible_math.iter())
+        {
+            semantic_source[node.index()] = 1;
+        }
+
         let mut contains_semantic = HashSet::new();
         let add_contains = |node: NodeId, contains_semantic: &mut HashSet<NodeId>| {
             let value = callout.contains(&node)
@@ -430,51 +457,55 @@ impl SourceEvidence {
             }
         }
         Self {
-            callout,
-            callout_candidate,
-            footnote,
-            footnote_candidate,
-            math,
-            accessible_math,
-            contains_semantic,
-            data_table,
+            callout: node_mask(&callout, dom.len()),
+            callout_candidate: node_mask(&callout_candidate, dom.len()),
+            footnote: node_mask(&footnote, dom.len()),
+            footnote_candidate: node_mask(&footnote_candidate, dom.len()),
+            math: node_mask(&math, dom.len()),
+            accessible_math: node_mask(&accessible_math, dom.len()),
+            semantic_source,
+            contains_semantic: node_mask(&contains_semantic, dom.len()),
+            data_table: node_mask(&data_table, dom.len()),
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn callout(&self, node: NodeId) -> bool {
-        self.callout.contains(&node)
+        mask_contains(&self.callout, node)
     }
 
     pub(crate) fn callout_candidate(&self, node: NodeId) -> bool {
-        self.callout_candidate.contains(&node)
+        mask_contains(&self.callout_candidate, node)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn footnote(&self, node: NodeId) -> bool {
-        self.footnote.contains(&node)
+        mask_contains(&self.footnote, node)
     }
 
     pub(crate) fn footnote_candidate(&self, node: NodeId) -> bool {
-        self.footnote_candidate.contains(&node)
+        mask_contains(&self.footnote_candidate, node)
     }
 
     pub(crate) fn math(&self, node: NodeId) -> bool {
-        self.math.contains(&node)
+        mask_contains(&self.math, node)
     }
 
     pub(crate) fn accessible_math(&self, node: NodeId) -> bool {
-        self.accessible_math.contains(&node)
+        mask_contains(&self.accessible_math, node)
     }
 
     pub(crate) fn contains_semantic(&self, node: NodeId) -> bool {
-        self.contains_semantic.contains(&node)
+        mask_contains(&self.contains_semantic, node)
     }
 
     pub(crate) fn data_table(&self, node: NodeId) -> bool {
-        self.data_table.contains(&node)
+        mask_contains(&self.data_table, node)
     }
 
+    #[inline]
     pub(crate) fn is_semantic_source(&self, node: NodeId) -> bool {
-        self.callout(node) || self.footnote(node) || self.math(node) || self.accessible_math(node)
+        self.semantic_source.get(node.index()).copied() == Some(1)
     }
 }
 

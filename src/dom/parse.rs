@@ -49,6 +49,10 @@ struct DomSink {
     quirks: Cell<QuirksMode>,
     budget: ParseBudget,
     error: RefCell<Option<ParseError>>,
+    // Parsing checks this flag for every token. Keep the hot poisoned check
+    // out of RefCell borrow bookkeeping; the error value is only read at the
+    // end of parsing.
+    poisoned: Cell<bool>,
     elements: Cell<usize>,
     total_attributes: Cell<usize>,
     text_bytes: Cell<usize>,
@@ -70,6 +74,7 @@ impl DomSink {
             quirks: Cell::new(html5ever::tree_builder::NoQuirks),
             budget,
             error: RefCell::new(None),
+            poisoned: Cell::new(false),
             elements: Cell::new(0),
             total_attributes: Cell::new(0),
             text_bytes: Cell::new(0),
@@ -77,14 +82,14 @@ impl DomSink {
         }
     }
 
+    #[inline]
     fn is_poisoned(&self) -> bool {
-        self.error.borrow().is_some()
+        self.poisoned.get()
     }
 
     fn poison(&self, error: ParseError) {
-        let mut current = self.error.borrow_mut();
-        if current.is_none() {
-            *current = Some(error);
+        if !self.poisoned.replace(true) {
+            *self.error.borrow_mut() = Some(error);
         }
     }
 
@@ -101,14 +106,19 @@ impl DomSink {
         }
     }
 
+    #[inline]
     fn reserve_node(&self) -> bool {
         if self.is_poisoned() {
             return false;
+        }
+        if self.budget.max_nodes == 0 {
+            return true;
         }
         let observed = self.dom.borrow().len().saturating_add(1);
         self.limit(ParseLimitKind::Nodes, observed, self.budget.max_nodes)
     }
 
+    #[inline]
     fn create_node(&self, data: NodeData) -> Option<NodeId> {
         if !self.reserve_node() {
             return None;
@@ -116,7 +126,9 @@ impl DomSink {
         let result = self.dom.borrow_mut().create(data);
         match result {
             Ok(id) => {
-                self.depths.borrow_mut().push(0);
+                if self.budget.max_depth != 0 {
+                    self.depths.borrow_mut().push(0);
+                }
                 Some(id)
             }
             Err(error) => {
@@ -130,7 +142,11 @@ impl DomSink {
         self.dom.borrow().root()
     }
 
+    #[inline]
     fn add_text_bytes(&self, bytes: usize) -> bool {
+        if self.budget.max_text_bytes == 0 {
+            return true;
+        }
         let observed = self.text_bytes.get().saturating_add(bytes);
         if !self.limit(
             ParseLimitKind::TextBytes,
@@ -143,7 +159,11 @@ impl DomSink {
         true
     }
 
+    #[inline]
     fn check_attributes(&self, existing: usize, count: usize) -> bool {
+        if self.budget.max_attributes_per_element == 0 && self.budget.max_total_attributes == 0 {
+            return true;
+        }
         if !self.limit(
             ParseLimitKind::AttributesPerElement,
             existing.saturating_add(count),
@@ -326,6 +346,7 @@ impl TreeSink for DomSink {
             .unwrap_or_else(|| QualName::new(None, html5ever::ns!(html), "div".into()));
         OwnedElemName(name)
     }
+    #[inline]
     fn create_element(
         &self,
         name: QualName,
@@ -335,12 +356,14 @@ impl TreeSink for DomSink {
         if self.is_poisoned() || !self.check_attributes(0, attrs.len()) {
             return self.inert_handle();
         }
-        if !self.limit(
-            ParseLimitKind::Elements,
-            self.elements.get().saturating_add(1),
-            self.budget.max_elements,
-        ) {
-            return self.inert_handle();
+        if self.budget.max_elements != 0 {
+            if !self.limit(
+                ParseLimitKind::Elements,
+                self.elements.get().saturating_add(1),
+                self.budget.max_elements,
+            ) {
+                return self.inert_handle();
+            }
         }
         let tag = Tag::from_qual_name(&name);
         let Some(id) = self.create_node(NodeData::Element(ElementData {
@@ -352,7 +375,9 @@ impl TreeSink for DomSink {
         })) else {
             return self.inert_handle();
         };
-        self.elements.set(self.elements.get() + 1);
+        if self.budget.max_elements != 0 {
+            self.elements.set(self.elements.get() + 1);
+        }
         if flags.template {
             let Some(f) = self.create_node(NodeData::Fragment) else {
                 return self.inert_handle();
@@ -375,6 +400,7 @@ impl TreeSink for DomSink {
         })
         .unwrap_or_else(|| self.inert_handle())
     }
+    #[inline]
     fn append(&self, parent: &NodeId, child: NodeOrText<NodeId>) {
         if self.is_poisoned() {
             return;
@@ -382,6 +408,10 @@ impl TreeSink for DomSink {
         let mut d = self.dom.borrow_mut();
         match child {
             NodeOrText::AppendNode(id) => {
+                if self.budget.max_depth == 0 {
+                    d.append_child(*parent, id);
+                    return;
+                }
                 drop(d);
                 if !self.check_attachment(*parent, id) {
                     return;
@@ -462,6 +492,7 @@ impl TreeSink for DomSink {
         }
         self.quirks.set(mode)
     }
+    #[inline]
     fn append_before_sibling(&self, sibling: &NodeId, child: NodeOrText<NodeId>) {
         if self.is_poisoned() {
             return;
@@ -474,6 +505,10 @@ impl TreeSink for DomSink {
                     self.poison(ParseError::Dom(DomError("reference is detached".into())));
                     return;
                 };
+                if self.budget.max_depth == 0 {
+                    d.insert_before(*sibling, id);
+                    return;
+                }
                 drop(d);
                 if !self.check_attachment(parent, id) {
                     return;
@@ -533,6 +568,10 @@ impl TreeSink for DomSink {
             return;
         }
         let children: Vec<_> = self.dom.borrow().children(*node).collect();
+        if self.budget.max_depth == 0 {
+            self.dom.borrow_mut().move_children(*node, *new_parent);
+            return;
+        }
         for child in &children {
             if !self.check_attachment(*new_parent, *child) {
                 return;
