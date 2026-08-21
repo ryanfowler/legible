@@ -215,3 +215,50 @@ bytes** and **384,892 allocation events**, versus **100,573,277 bytes** and
 bytes** and **9.6% fewer allocation events**. The synthetic large-prose
 report recorded **13,857,591 peak live bytes** for the large-prose workload
 and **18,695,952** for the large ordinary-inline workload.
+
+## Scanner and token fast-path pass
+
+- Machine: macOS arm64 (Apple M2 Pro, 12 logical CPUs), AC power
+- Rust: `rustc 1.98.0`
+- Command: `cargo bench --bench real_world -- 'mozilla_readability_markdown' --noplot --baseline ac-start`
+- Baseline: the parent revision on the same machine, saved as `ac-start`
+- Values: Criterion median, milliseconds. Sample size is the repository default of 10.
+
+| Fixture | Markdown before | Markdown after | Change |
+|---|---:|---:|---:|
+| `medium-2` | 1.249 | 1.172 | -6.2% |
+| `ars-1` | 1.712 | 1.708 | -0.3% |
+| `heise` | 1.614 | 1.527 | -5.4% |
+| `nytimes-5` | 10.294 | 9.733 | -5.4% |
+| `wikipedia-2` | 64.453 | 60.976 | -5.4% |
+| `yahoo-2` | 13.632 | 13.488 | -1.1% |
+| `buzzfeed-1` | 7.286 | 6.922 | -5.0% |
+| `engadget` | 19.400 | 17.641 | -9.1% |
+| `guardian-1` | 6.788 | 6.572 | -3.2% |
+| `go-net-http` | 39.788 | 40.336 | +1.4% |
+
+The summed median improved by about **3.7%** for raw HTML to Markdown.
+Repeated runs on this machine varied by roughly two percentage points per
+fixture, and background load skewed whole-corpus runs, so the recorded run
+was taken on a quiet machine.
+
+The changes came from profile-guided analysis:
+
+- New `scan.rs` word-at-a-time ASCII whitespace scanners with a scalar fast
+  path below 32 bytes. Normalized-text appending and normalized character
+  counting now iterate whitespace-separated tokens through these scanners,
+  which also removed a redundant UTF-8 validation pass per token.
+- Mixed-content text statistics classify ASCII bytes through the class table
+  and decode only real non-ASCII characters, removing Unicode property table
+  lookups from common text.
+- Token matchers no longer pre-scan values for whitespace before matching.
+  Case-insensitive substring search uses memchr candidates on longer values.
+- Pricing-content detection checks its currency-symbol gate first and skips
+  all substring scans when no currency mark exists near digits. Document TOC
+  detection makes one traversal instead of two plus a link vector.
+- Footnote ID convention checks compare prefixes without allocating.
+- The dynamic attribute fast gate covers the frequently queried footnote and
+  callout data attributes, skipping the full attribute-name matcher.
+
+All fixture outputs remain unchanged; the general, Defuddle, web, and Mozilla
+Readability suites pass without snapshot updates.

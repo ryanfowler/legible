@@ -65,7 +65,16 @@ impl ElementData {
         // before scanning the small per-element attribute list.
         if matches!(
             name,
-            "action" | "alt" | "aria-level" | "data-fn" | "data-type" | "for"
+            "action"
+                | "alt"
+                | "aria-level"
+                | "data-callout"
+                | "data-fn"
+                | "data-footnote"
+                | "data-footnote-ref"
+                | "data-footnotes"
+                | "data-type"
+                | "for"
         ) {
             return self
                 .attrs

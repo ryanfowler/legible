@@ -477,11 +477,10 @@ pub(crate) fn stats_for_text(text: &str) -> NodeStats {
     let mut comma_count = 0usize;
     let mut sentence_end_count = 0usize;
     let mut has_non_whitespace = false;
-    let mut has_alphanumeric = false;
     let mut has_sentence_break = false;
     // Most article text is ASCII. Scan bytes to avoid UTF-8 decoding and
     // Unicode whitespace tables in the hot loop.
-    if text.is_ascii() {
+    let has_alphanumeric = if text.is_ascii() {
         let bytes = text.as_bytes();
         s.set_starts_with_whitespace(bytes.first().is_some_and(u8::is_ascii_whitespace));
         s.set_ends_with_whitespace(bytes.last().is_some_and(u8::is_ascii_whitespace));
@@ -510,27 +509,58 @@ pub(crate) fn stats_for_text(text: &str) -> NodeStats {
         }
         s.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
         s.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
-        has_alphanumeric = alphabetic_chars != 0 || digit_chars != 0;
+        alphabetic_chars != 0 || digit_chars != 0
     } else {
         s.set_starts_with_whitespace(text.starts_with(char::is_whitespace));
         s.set_ends_with_whitespace(text.ends_with(char::is_whitespace));
-        for c in text.chars() {
+        let mut alphabetic_chars = 0_usize;
+        let mut digit_chars = 0_usize;
+        // Mixed-content pages are mostly ASCII with isolated non-ASCII
+        // characters. Handle ASCII bytes through the class table and decode
+        // only real non-ASCII characters, so common text avoids the Unicode
+        // property tables.
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte.is_ascii() {
+                index += 1;
+                let class = ASCII_CLASSES[usize::from(byte)];
+                if class & ASCII_WHITESPACE != 0 {
+                    has_sentence_break |= dot;
+                    dot = false;
+                    if !prev {
+                        text_length += 1;
+                        prev = true;
+                    }
+                } else {
+                    has_non_whitespace = true;
+                    word_count += usize::from(prev);
+                    dot = class & ASCII_DOT != 0;
+                    comma_count += usize::from(class & ASCII_COMMA != 0);
+                    sentence_end_count += usize::from(class & ASCII_SENTENCE_END != 0);
+                    alphabetic_chars += usize::from(class & ASCII_ALPHA != 0);
+                    digit_chars += usize::from(class & ASCII_DIGIT != 0);
+                    text_length += 1;
+                    prev = false;
+                }
+                continue;
+            }
+            let Some(c) = text[index..].chars().next() else {
+                break;
+            };
+            index += c.len_utf8();
             if c.is_whitespace() {
                 has_sentence_break |= dot;
                 dot = false;
                 if !prev {
                     text_length += 1;
-                    prev = true
+                    prev = true;
                 }
             } else {
                 has_non_whitespace = true;
-                if !has_alphanumeric {
-                    has_alphanumeric = c.is_alphanumeric();
-                }
-                s.alphabetic_chars = s
-                    .alphabetic_chars
-                    .saturating_add(u32::from(c.is_alphabetic()));
-                s.digit_chars = s.digit_chars.saturating_add(u32::from(c.is_numeric()));
+                alphabetic_chars += usize::from(c.is_alphabetic());
+                digit_chars += usize::from(c.is_numeric());
                 word_count += usize::from(prev);
                 dot = c == '.';
                 comma_count += usize::from(
@@ -552,10 +582,13 @@ pub(crate) fn stats_for_text(text: &str) -> NodeStats {
                     '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}'
                 ));
                 text_length += 1;
-                prev = false
+                prev = false;
             }
         }
-    }
+        s.alphabetic_chars = alphabetic_chars.min(u32::MAX as usize) as u32;
+        s.digit_chars = digit_chars.min(u32::MAX as usize) as u32;
+        alphabetic_chars != 0 || digit_chars != 0
+    };
     if prev && text_length > 0 {
         text_length -= 1
     }
@@ -2165,6 +2198,124 @@ fn valid_opacity(value: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hybrid_matches_reference_implementation() {
+        // Reference: straightforward per-char implementation.
+        fn reference(
+            text: &str,
+        ) -> (
+            usize,
+            usize,
+            usize,
+            usize,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            u32,
+            u32,
+        ) {
+            let mut prev = true;
+            let mut dot = false;
+            let mut text_length = 0usize;
+            let mut word_count = 0usize;
+            let mut comma_count = 0usize;
+            let mut sentence_end_count = 0usize;
+            let mut has_non_whitespace = false;
+            let mut has_alphanumeric = false;
+            let mut has_sentence_break = false;
+            let mut alphabetic_chars = 0u32;
+            let mut digit_chars = 0u32;
+            for c in text.chars() {
+                if c.is_whitespace() {
+                    has_sentence_break |= dot;
+                    dot = false;
+                    if !prev {
+                        text_length += 1;
+                        prev = true
+                    }
+                } else {
+                    has_non_whitespace = true;
+                    if !has_alphanumeric {
+                        has_alphanumeric = c.is_alphanumeric();
+                    }
+                    alphabetic_chars =
+                        alphabetic_chars.saturating_add(u32::from(c.is_alphabetic()));
+                    digit_chars = digit_chars.saturating_add(u32::from(c.is_numeric()));
+                    word_count += usize::from(prev);
+                    dot = c == '.';
+                    comma_count += usize::from(
+                        c == ','
+                            || matches!(
+                                c,
+                                '\u{060C}'
+                                    | '\u{FE50}'
+                                    | '\u{FE10}'
+                                    | '\u{FE11}'
+                                    | '\u{2E41}'
+                                    | '\u{2E34}'
+                                    | '\u{2E32}'
+                                    | '\u{FF0C}'
+                            ),
+                    );
+                    sentence_end_count += usize::from(matches!(
+                        c,
+                        '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}'
+                    ));
+                    text_length += 1;
+                    prev = false
+                }
+            }
+            if prev && text_length > 0 {
+                text_length -= 1
+            }
+            (
+                text_length,
+                word_count,
+                comma_count,
+                sentence_end_count,
+                has_non_whitespace,
+                has_alphanumeric,
+                has_sentence_break,
+                dot,
+                has_sentence_break || dot,
+                alphabetic_chars,
+                digit_chars,
+            )
+        }
+
+        let samples = [
+            "AI hasn\u{2019}t meaningfully changed anything in cybersecurity so far. Deep fake phishing is still rare, L",
+            "café naïve 日本語 text with mixed 漢字 content!",
+            "\u{3000}甲， 乙.\u{a0}",
+            "plain ascii words. two sentences!",
+            "tabs\tand\nnewlines\r\nmixed   spaces ",
+            "no trailing newline",
+            "trailing space ",
+            " leading tab\tthen words, more.",
+            "emoji \u{1F600} and accents éàü",
+        ];
+        for sample in samples {
+            let s = stats_for_text(sample);
+            let r = reference(sample);
+            assert_eq!(s.text_length as usize, r.0, "text_length {sample:?}");
+            assert_eq!(s.word_count as usize, r.1, "word_count {sample:?}");
+            assert_eq!(s.comma_count as usize, r.2, "comma_count {sample:?}");
+            assert_eq!(
+                s.sentence_end_count as usize, r.3,
+                "sentence_end {sample:?}"
+            );
+            assert_eq!(s.has_non_whitespace(), r.4, "has_non_ws {sample:?}");
+            assert_eq!(s.has_alphanumeric(), r.5, "has_alnum {sample:?}");
+            assert_eq!(s.has_sentence_break(), r.6, "sentence_break {sample:?}");
+            assert_eq!(s.ends_with_dot(), r.7, "ends_dot {sample:?}");
+            assert_eq!(s.has_sentence_end(), r.8, "sentence_end_flag {sample:?}");
+            assert_eq!(s.alphabetic_chars, r.9, "alpha_chars {sample:?}");
+            assert_eq!(s.digit_chars, r.10, "digit_chars {sample:?}");
+        }
+    }
+
     use super::{
         CandidateFeatureIndex, PreparedScoreSeed, ScoringView, build_exclusion_mask,
         compute_readability_scores, compute_readability_scores_in_view, get_link_density,

@@ -78,6 +78,7 @@ mod page_kind;
 mod prepared;
 mod quality;
 mod render;
+mod scan;
 mod scoring;
 mod specialized;
 mod tokens;

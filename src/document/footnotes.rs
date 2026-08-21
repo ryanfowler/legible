@@ -1023,12 +1023,16 @@ fn reference_convention(dom: &Dom, anchor: NodeId) -> bool {
         ) || has_any_class(dom, parent, &["fn"])
             && dom.attr_by_local_name(parent, "data-fn").is_some()
             || dom.attr(parent, AttrName::Id).is_some_and(|id| {
-                let id = id.to_ascii_lowercase();
-                id.starts_with("ftnt_ref")
-                    || id.starts_with("user-content-fnref")
-                    || id.starts_with("footnoteref")
-                    || id.starts_with("footnote-ref")
-                    || id.starts_with("fnref")
+                starts_with_ignore_case_any(
+                    id,
+                    &[
+                        "ftnt_ref",
+                        "user-content-fnref",
+                        "footnoteref",
+                        "footnote-ref",
+                        "fnref",
+                    ],
+                )
             })
     }) || has_any_class(
         dom,
@@ -1045,13 +1049,28 @@ fn reference_convention(dom: &Dom, anchor: NodeId) -> bool {
         .attr_by_local_name(anchor, "data-footnote-ref")
         .is_some()
         || dom.attr(anchor, AttrName::Id).is_some_and(|id| {
-            let id = id.to_ascii_lowercase();
-            id.starts_with("cite_ref")
-                || id.starts_with("user-content-fnref")
-                || id.starts_with("footnoteref")
-                || id.starts_with("footnote-ref")
-                || id.starts_with("fnref")
+            starts_with_ignore_case_any(
+                id,
+                &[
+                    "cite_ref",
+                    "user-content-fnref",
+                    "footnoteref",
+                    "footnote-ref",
+                    "fnref",
+                ],
+            )
         })
+}
+
+/// ASCII case-insensitive `starts_with` against several prefixes.
+/// Equivalent to lowercasing the value first, but without allocating.
+fn starts_with_ignore_case_any(value: &str, prefixes: &[&str]) -> bool {
+    let bytes = value.as_bytes();
+    prefixes.iter().any(|prefix| {
+        bytes
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    })
 }
 
 fn reference_label(dom: &Dom, node: NodeId) -> Option<String> {
