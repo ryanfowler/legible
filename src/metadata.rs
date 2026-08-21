@@ -559,7 +559,7 @@ struct MetadataCandidate {
 }
 
 #[derive(Default)]
-struct CandidateSet {
+struct MetadataCandidates {
     title: Vec<MetadataCandidate>,
     description: Vec<MetadataCandidate>,
     authors: Vec<MetadataCandidate>,
@@ -576,7 +576,7 @@ struct CandidateSet {
     next_order: usize,
 }
 
-impl CandidateSet {
+impl MetadataCandidates {
     fn add(
         &mut self,
         field: fn(&mut Self) -> &mut Vec<MetadataCandidate>,
@@ -604,7 +604,7 @@ pub(crate) fn discover_with_diagnostics(
     source_url: Option<&Url>,
     retain_diagnostics: bool,
 ) -> (Metadata, Option<MetadataDiagnostics>) {
-    let mut candidates = CandidateSet::default();
+    let mut candidates = MetadataCandidates::default();
     let identity_title = metadata_identity_title(dom, document_title);
     collect_structured_candidates(structured, &identity_title, source_url, &mut candidates);
     collect_meta_candidates(dom, &mut candidates);
@@ -817,7 +817,7 @@ fn collect_visible_brand_candidate(
     dom: &Dom,
     document_title: &str,
     source_url: Option<&Url>,
-    out: &mut CandidateSet,
+    out: &mut MetadataCandidates,
 ) {
     let Some(body) = dom.body() else { return };
     let normalized_title = normalize_text(document_title);
@@ -864,7 +864,7 @@ fn collect_structured_candidates(
     data: &StructuredData,
     document_title: &str,
     source_url: Option<&Url>,
-    out: &mut CandidateSet,
+    out: &mut MetadataCandidates,
 ) {
     let (primary_article, primary_general, use_article, _) =
         primary_structured_items(data, document_title, source_url);
@@ -1214,8 +1214,8 @@ fn structured_item_score(item: &Value, document_title: &str, source_url: Option<
 }
 
 fn add_json_string(
-    out: &mut CandidateSet,
-    field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    out: &mut MetadataCandidates,
+    field: fn(&mut MetadataCandidates) -> &mut Vec<MetadataCandidate>,
     value: Option<&Value>,
     confidence: u8,
 ) {
@@ -1225,8 +1225,8 @@ fn add_json_string(
 }
 
 fn add_json_names(
-    out: &mut CandidateSet,
-    field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    out: &mut MetadataCandidates,
+    field: fn(&mut MetadataCandidates) -> &mut Vec<MetadataCandidate>,
     value: Option<&Value>,
     confidence: u8,
 ) {
@@ -1238,8 +1238,8 @@ fn add_json_names(
 }
 
 fn add_json_url(
-    out: &mut CandidateSet,
-    field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    out: &mut MetadataCandidates,
+    field: fn(&mut MetadataCandidates) -> &mut Vec<MetadataCandidate>,
     value: Option<&Value>,
     confidence: u8,
 ) {
@@ -1280,7 +1280,7 @@ fn collect_json_names(value: &Value, add: &mut impl FnMut(&str)) {
     }
 }
 
-fn collect_json_keywords(value: Option<&Value>, out: &mut CandidateSet) {
+fn collect_json_keywords(value: Option<&Value>, out: &mut MetadataCandidates) {
     let Some(value) = value else { return };
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
@@ -1294,7 +1294,7 @@ fn collect_json_keywords(value: Option<&Value>, out: &mut CandidateSet) {
     }
 }
 
-fn collect_meta_candidates(dom: &Dom, out: &mut CandidateSet) {
+fn collect_meta_candidates(dom: &Dom, out: &mut MetadataCandidates) {
     for id in dom
         .descendants(dom.root())
         .filter(|&id| dom.tag(id) == Some(Tag::Meta))
@@ -1318,13 +1318,13 @@ fn collect_meta_candidates(dom: &Dom, out: &mut CandidateSet) {
     }
 }
 
-fn collect_meta_value(out: &mut CandidateSet, name: &str, content: &str, is_property: bool) {
+fn collect_meta_value(out: &mut MetadataCandidates, name: &str, content: &str, is_property: bool) {
     if is_property && !name.contains(':') {
         return;
     }
     let (source, confidence) = metadata_source(name);
-    let add = |out: &mut CandidateSet,
-               field: fn(&mut CandidateSet) -> &mut Vec<MetadataCandidate>,
+    let add = |out: &mut MetadataCandidates,
+               field: fn(&mut MetadataCandidates) -> &mut Vec<MetadataCandidate>,
                confidence: u8| {
         out.add(field, content, source, confidence);
     };
@@ -1412,7 +1412,7 @@ fn metadata_source(name: &str) -> (MetadataSource, u8) {
     }
 }
 
-fn collect_link_candidates(dom: &Dom, out: &mut CandidateSet) {
+fn collect_link_candidates(dom: &Dom, out: &mut MetadataCandidates) {
     for id in dom
         .descendants(dom.root())
         .filter(|&id| dom.tag(id) == Some(Tag::Link))
@@ -1450,7 +1450,7 @@ fn collect_link_candidates(dom: &Dom, out: &mut CandidateSet) {
     }
 }
 
-fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut CandidateSet) {
+fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut MetadataCandidates) {
     if !document_title.is_empty() {
         out.add(
             |set| &mut set.title,
@@ -2200,7 +2200,7 @@ fn nearest_ancestor_with_tag(dom: &Dom, node: NodeId, tag: Tag) -> Option<NodeId
 }
 
 fn resolve_candidates(
-    mut candidates: CandidateSet,
+    mut candidates: MetadataCandidates,
     base_url: Option<&Url>,
     retain_diagnostics: bool,
 ) -> (Metadata, Option<MetadataDiagnostics>) {

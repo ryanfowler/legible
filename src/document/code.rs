@@ -242,14 +242,6 @@ pub(crate) fn is_multiline_orphan_with_evidence(dom: &Dom, code: NodeId, multili
     !phrasing_parent || sole_content
 }
 
-/// Counts source structures that compile to semantic code-block leaves.
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn count_blocks(dom: &Dom, root: NodeId) -> usize {
-    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    count_blocks_for_nodes(dom, root, &nodes)
-}
-
 pub(crate) fn count_blocks_for_nodes(dom: &Dom, root: NodeId, nodes: &[NodeId]) -> usize {
     let multiline = multiline_content(dom, nodes);
     let mut count = 0;

@@ -169,12 +169,6 @@ pub(crate) fn normalize_svg_before_scoring(dom: &mut Dom, root: NodeId) {
 }
 
 /// Removes decorative media while source sizing and naming evidence is intact.
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn remove_decorative_media_before_cleanup(dom: &mut Dom, root: NodeId) {
-    images::remove_decorative_media(dom, root);
-}
-
 pub(crate) fn remove_decorative_media_before_cleanup_in_workspace(
     dom: &mut Dom,
     root: NodeId,

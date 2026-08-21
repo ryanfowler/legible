@@ -668,7 +668,7 @@ impl<'a> ContentExtractor<'a> {
             .next()
             .is_some()
         {
-            debug_log!(self, "Structured data contains a content-location hint");
+            debug_log!("Structured data contains a content-location hint");
         }
         #[cfg(feature = "bench-instrumentation")]
         drop(_metadata_phase);
@@ -1421,7 +1421,6 @@ impl<'a> ContentExtractor<'a> {
                 selection.node != body && strategy != ExtractionStrategy::BodyFallback,
             );
             debug_log!(
-                self,
                 "Extraction strategy {:?}: words={}, coverage={:.3}, links={:.3}",
                 strategy,
                 quality.word_count,
@@ -1833,15 +1832,9 @@ impl<'a> ContentExtractor<'a> {
             .map(str::to_owned);
         let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
             if selection.reason == RootSelectionReason::Ranked {
-                Self::gather_siblings(
-                    working_dom,
-                    &analysis.view,
-                    top_id,
-                    &mut self.node_data,
-                    self.options.debug,
-                )
-                .into_iter()
-                .collect()
+                Self::gather_siblings(working_dom, &analysis.view, top_id, &mut self.node_data)
+                    .into_iter()
+                    .collect()
             } else {
                 SmallVec::from_slice(&[top_id])
             }
@@ -2082,7 +2075,7 @@ impl<'a> ContentExtractor<'a> {
             excluded_mask,
             &mut node_data,
             weight_classes,
-            self.options.top_candidates,
+            TOP_CANDIDATES,
             shared_feature_index,
         );
         (
@@ -3130,7 +3123,7 @@ impl<'a> ContentExtractor<'a> {
             excluded,
             &mut self.node_data,
             self.strategy.weight_classes(),
-            self.options.top_candidates,
+            TOP_CANDIDATES,
             None,
         )
         .0
@@ -3339,7 +3332,6 @@ impl<'a> ContentExtractor<'a> {
         scoring_view: &ScoringView,
         top: NodeId,
         store: &mut NodeStateStore,
-        debug: bool,
     ) -> SmallVec<[NodeId; 8]> {
         let Some(parent) = scoring_view.effective_parent(dom, top) else {
             let mut out = SmallVec::new();
@@ -3394,7 +3386,7 @@ impl<'a> ContentExtractor<'a> {
                 }
             }
             if yes {
-                debug_log!(@bool debug,"Appending sibling node: {:?}",x);
+                debug_log!("Appending sibling node: {:?}", x);
                 out.push(x)
             }
         }

@@ -1819,18 +1819,6 @@ fn is_media_credit(dom: &Dom, node: NodeId, text: &mut String) -> bool {
 /// or leading position, link-heavy low-prose structure, and either semantic or
 /// repeated structural evidence. This keeps pricing cards, article dates, and
 /// short company content out of the global-chrome bucket.
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn remove_global_chrome(
-    dom: &mut Dom,
-    root: NodeId,
-    store: &mut crate::dom::NodeStateStore,
-    evidence: &crate::document::SourceEvidence,
-) -> bool {
-    let mut workspace = FragmentWorkspace::default();
-    remove_global_chrome_in_workspace(dom, root, store, evidence, &mut workspace)
-}
-
 pub(crate) fn remove_global_chrome_in_workspace(
     dom: &mut Dom,
     root: NodeId,
