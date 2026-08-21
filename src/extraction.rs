@@ -1093,7 +1093,7 @@ impl<'a> ContentExtractor<'a> {
                 let valid_result = !root_in_document_chrome
                     && result_metrics.has_meaningful_text()
                     && !cached.access_barrier
-                    && !(short_source_access_barrier && !ignores_visible_source_barrier)
+                    && (!short_source_access_barrier || ignores_visible_source_barrier)
                     && !cached.interactive_shell
                     && !cached.incoherent_short
                     && !link_only_semantic_root;
@@ -1463,7 +1463,7 @@ impl<'a> ContentExtractor<'a> {
                 !root_in_document_chrome
                     && result_metrics.has_meaningful_text()
                     && !access_barrier
-                    && !(short_source_access_barrier && !ignores_visible_source_barrier)
+                    && (!short_source_access_barrier || ignores_visible_source_barrier)
                     && !interactive_shell
                     && !incoherent_short
                     && !link_only_semantic_root

@@ -96,15 +96,15 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                         // Official fixtures use different selected-container IDs and
                         // retain unrelated runtime data. Keep page IDs, image data,
                         // and generated data-old-* attributes under comparison.
-                        !(local == "id"
-                            && !matches!(
+                        (local != "id"
+                            || matches!(
                                 attribute.value.as_ref(),
                                 "readability-page-1" | "legible-content"
                             ))
-                            && !(attribute.name.ns.as_ref().is_empty()
-                                && local.starts_with("data-")
-                                && !matches!(local, "data-src" | "data-srcset")
-                                && !local.starts_with("data-old-"))
+                            && (!attribute.name.ns.as_ref().is_empty()
+                                || !local.starts_with("data-")
+                                || matches!(local, "data-src" | "data-srcset")
+                                || local.starts_with("data-old-"))
                             // Some Mozilla fixtures retain the noscript image src
                             // where this implementation retains data-srcset.
                             && !(name.local.as_ref() == "img"
