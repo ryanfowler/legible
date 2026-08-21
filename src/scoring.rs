@@ -28,8 +28,8 @@ pub(crate) struct ScoringView {
     parent_overrides: SmallVec<[(NodeId, NodeId); 32]>,
     text_overrides: SmallVec<[(NodeId, NodeStats); 32]>,
     /// Sparse facts for the DIVs that need projection. This replaces a
-    /// descendant walk for every prepared DIV without adding a DOM-sized
-    /// scoring allocation for each visibility variant.
+    /// descendant walk for every prepared DIV while keeping storage
+    /// proportional to the requested scoring nodes.
     div_descendant_facts: SmallVec<[(NodeId, bool); 128]>,
 }
 
@@ -364,28 +364,34 @@ impl ScoringView {
         if divs.is_empty() {
             return SmallVec::new();
         }
-        let matching_positions: Vec<_> = source
-            .entries
+
+        let mut requested: SmallVec<[(usize, NodeId); 128]> = divs
             .iter()
-            .enumerate()
-            .filter_map(|(position, entry)| {
-                (entry.is_element()
-                    && self
-                        .projected_tag(dom, entry.node, projected_tag_count)
-                        .is_some_and(crate::constants::is_div_to_p_elem))
-                .then_some(position)
-            })
+            .filter_map(|&div| source.position(div).map(|position| (position, div)))
             .collect();
-        let mut facts = SmallVec::with_capacity(divs.len());
-        for &div in divs {
-            let Some(range) = source.subtree_range(div) else {
-                continue;
-            };
-            let first = matching_positions.partition_point(|&position| position <= range.start);
-            let contains = matching_positions
-                .get(first)
-                .is_some_and(|&position| position < range.end);
-            facts.push((div, contains));
+        requested.sort_unstable_by_key(|&(position, _)| position);
+
+        // Source preorder makes every subtree contiguous. Track the nearest
+        // projected block in reverse order; a match is a descendant exactly
+        // when it falls before the current entry's subtree end. Each source
+        // entry is visited once, but facts are stored only for requested DIVs.
+        let mut facts = SmallVec::with_capacity(requested.len());
+        let mut next_block_position = usize::MAX;
+        let mut requested_index = requested.len();
+        for position in (0..source.entries.len()).rev() {
+            let entry = &source.entries[position];
+            while requested_index > 0 && requested[requested_index - 1].0 == position {
+                let node = requested[requested_index - 1].1;
+                facts.push((node, next_block_position < entry.subtree_end as usize));
+                requested_index -= 1;
+            }
+            let has_block_descendant = entry.is_element()
+                && self
+                    .projected_tag(dom, entry.node, projected_tag_count)
+                    .is_some_and(crate::constants::is_div_to_p_elem);
+            if has_block_descendant {
+                next_block_position = position;
+            }
         }
         facts.sort_unstable_by_key(|(node, _)| *node);
         facts
@@ -2894,6 +2900,40 @@ mod tests {
     }
 
     #[test]
+    fn projected_block_descendant_facts_propagate_once_through_nested_divs() {
+        let dom = Dom::parse_document(
+            r#"<body><div id="outer"><div role="list" id="list"><div role="listitem">1. First item</div><div role="listitem">2. Second item</div></div></div><div id="leaf"><span>Only phrasing content.</span></div></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let divs: Vec<_> = source
+            .elements()
+            .filter(|entry| entry.tag == Some(Tag::Div))
+            .map(|entry| entry.node)
+            .collect();
+        let view = ScoringView::build(&dom, &source, &divs, &candidates);
+        let node = |id| {
+            divs.iter()
+                .copied()
+                .find(|&node| dom.attr(node, AttrName::Id) == Some(id))
+                .unwrap()
+        };
+
+        assert_eq!(view.effective_tag(&dom, node("list")), Some(Tag::Ol));
+        assert!(
+            view.div_descendant_facts
+                .binary_search_by_key(&node("outer"), |(node, _)| *node)
+                .is_ok_and(|index| view.div_descendant_facts[index].1)
+        );
+        assert!(
+            view.div_descendant_facts
+                .binary_search_by_key(&node("leaf"), |(node, _)| *node)
+                .is_ok_and(|index| !view.div_descendant_facts[index].1)
+        );
+    }
+
+    #[test]
     fn virtual_paragraph_removes_its_source_wrapper_from_topology() {
         let dom = Dom::parse_document(
             r#"<body><div>Useful phrasing <strong>continues here</strong>.</div><p>Adjacent paragraph remains visible.</p></body>"#,
@@ -3009,6 +3049,28 @@ mod tests {
         let legacy = build_exclusion_mask(&dom, &[outer, inner]);
         let indexed = super::build_exclusion_mask_with_source(&dom, &source, &[outer, inner]);
         assert_eq!(indexed, legacy);
+    }
+
+    #[test]
+    fn source_interval_exclusion_handles_overlapping_and_sibling_roots() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div id="first"><p>Drop first</p></div><div id="middle"><p>Keep middle</p></div><div id="last"><p>Drop last</p></div></main></body>"#,
+        )
+        .unwrap();
+        let find = |id| {
+            dom.descendants(dom.root())
+                .find(|&node| dom.attr(node, AttrName::Id) == Some(id))
+                .unwrap()
+        };
+        let first = find("first");
+        let middle = find("middle");
+        let last = find("last");
+        let source = SourceAnalysis::build(&dom);
+        let legacy = build_exclusion_mask(&dom, &[first, last, first]);
+        let indexed = super::build_exclusion_mask_with_source(&dom, &source, &[first, last, first]);
+
+        assert_eq!(indexed, legacy);
+        assert!(!indexed[middle.index()]);
     }
 
     #[test]
