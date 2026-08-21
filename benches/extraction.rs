@@ -301,12 +301,15 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
             storage.sparse_bytes,
             storage.dense_bytes.saturating_add(storage.sparse_bytes),
         );
-        let document = document::compile_document_with_optional_source_facts_and_evidence(
+        let document = document::compile_document(
             &dom,
             root,
             &context,
-            Some(&source_facts),
-            Some(&source_evidence),
+            &document::CompileInputs {
+                source_facts: Some(&source_facts),
+                source_evidence: Some(&source_evidence),
+                ..Default::default()
+            },
         )
         .unwrap();
         let semantic_nodes = document.len();
@@ -339,12 +342,15 @@ fn bench_lower_retained_fragment(c: &mut Criterion) {
             &dom,
             |b, dom| {
                 b.iter(|| {
-                    document::compile_document_with_optional_source_facts_and_evidence(
+                    document::compile_document(
                         black_box(dom),
                         root,
                         black_box(&context),
-                        Some(&source_facts),
-                        Some(&source_evidence),
+                        &document::CompileInputs {
+                            source_facts: Some(&source_facts),
+                            source_evidence: Some(&source_evidence),
+                            ..Default::default()
+                        },
                     )
                     .unwrap()
                 })
@@ -376,12 +382,15 @@ fn bench_owned_lowering_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new(name, "borrowed"), &dom, |b, dom| {
             b.iter(|| {
-                document::compile_document_with_optional_source_facts_and_evidence(
+                document::compile_document(
                     black_box(dom),
                     root,
                     black_box(&context),
-                    Some(&source_facts),
-                    Some(&source_evidence),
+                    &document::CompileInputs {
+                        source_facts: Some(&source_facts),
+                        source_evidence: Some(&source_evidence),
+                        ..Default::default()
+                    },
                 )
                 .unwrap()
             })
@@ -390,12 +399,15 @@ fn bench_owned_lowering_comparison(c: &mut Criterion) {
             b.iter_batched(
                 || dom.clone(),
                 |owned_dom| {
-                    document::compile_document_owned_with_optional_source_facts_and_evidence(
+                    document::compile_document_owned(
                         owned_dom,
                         root,
                         black_box(&context),
-                        Some(&source_facts),
-                        &source_evidence,
+                        document::CompileInputs {
+                            source_facts: Some(&source_facts),
+                            source_evidence: Some(&source_evidence),
+                            ..Default::default()
+                        },
                     )
                     .unwrap()
                 },

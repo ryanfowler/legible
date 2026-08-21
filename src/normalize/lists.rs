@@ -107,6 +107,7 @@ mod tests {
             dom,
             root,
             &crate::document::CompileContext::default(),
+            &crate::document::CompileInputs::default(),
         )
         .unwrap();
         crate::render::markdown::render_markdown(

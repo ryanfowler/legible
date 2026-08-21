@@ -64,14 +64,20 @@ fn is_statically_hidden(dom: &Dom, node: NodeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{CompileContext, compile_document};
+    use crate::document::{CompileContext, CompileInputs, compile_document};
     use crate::render::markdown::{MarkdownConfig, render_markdown};
 
     fn markdown(html: &str) -> String {
         let mut dom = Dom::parse_fragment(html, Tag::Div).unwrap();
         let root = dom.root();
         prepare(&mut dom, root);
-        let document = compile_document(&dom, root, &CompileContext::default()).unwrap();
+        let document = compile_document(
+            &dom,
+            root,
+            &CompileContext::default(),
+            &CompileInputs::default(),
+        )
+        .unwrap();
         render_markdown(&document, 0, MarkdownConfig::default())
     }
 

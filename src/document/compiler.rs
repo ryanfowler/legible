@@ -134,67 +134,25 @@ struct DeferredCaption {
     scope: Scope,
 }
 
+/// Optional precomputed inputs. `Default` runs the compiler's own analysis.
+#[derive(Default)]
+pub(crate) struct CompileInputs<'a> {
+    pub(crate) source_facts: Option<&'a super::facts::SemanticSourceFacts>,
+    pub(crate) source_evidence: Option<&'a super::facts::SourceEvidence>,
+    pub(crate) retained_stream: Option<&'a super::RetainedStream>,
+}
+
 /// Compiles the children of a retained source root into semantic nodes.
-#[allow(dead_code)]
 pub(crate) fn compile_document(
     dom: &Dom,
     root: NodeId,
     context: &CompileContext,
-) -> Result<Document, CompileError> {
-    compile_document_with_optional_source_facts(dom, root, context, None)
-}
-
-#[allow(dead_code)]
-pub(crate) fn compile_document_with_optional_source_facts(
-    dom: &Dom,
-    root: NodeId,
-    context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-) -> Result<Document, CompileError> {
-    compile_document_with_optional_source_facts_and_evidence(dom, root, context, source_facts, None)
-}
-
-pub(crate) fn compile_document_with_optional_source_facts_and_evidence(
-    dom: &Dom,
-    root: NodeId,
-    context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-    source_evidence: Option<&super::facts::SourceEvidence>,
-) -> Result<Document, CompileError> {
-    compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
-        dom,
-        root,
-        context,
-        source_facts,
-        source_evidence,
-        None,
-    )
-}
-
-pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retained_nodes(
-    dom: &Dom,
-    root: NodeId,
-    context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-    source_evidence: Option<&super::facts::SourceEvidence>,
-    retained_stream: Option<&super::RetainedStream>,
+    inputs: &CompileInputs<'_>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
-    // Ordinary pages do not need the rich source-evidence inventory. Run a
-    // cheap gate first, then let the lowering pass validate the few structural
-    // cases that cannot be classified from a flat source scan.
-    if let Some(source_plan) =
-        super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)
-    {
-        match super::ordinary::compile_with_retained_capacity_plan(
-            dom,
-            root,
-            context,
-            source_plan.capacity,
-            retained_stream,
-        ) {
+    if let Some(result) = try_ordinary_compilation(dom, root, context, inputs.retained_stream) {
+        match result {
             Ok(document) => {
-                crate::instrumentation::record_semantic_source_nodes(source_plan.source_node_count);
                 record_document_metrics(&document);
                 return Ok(document);
             }
@@ -204,7 +162,7 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
     }
 
     let owned_evidence;
-    let source_evidence = if let Some(source_evidence) = source_evidence {
+    let source_evidence = if let Some(source_evidence) = inputs.source_evidence {
         source_evidence
     } else {
         owned_evidence = super::facts::SourceEvidence::analyze(dom, root, &NodeStateStore::new());
@@ -214,9 +172,9 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
         dom,
         root,
         context,
-        source_facts,
+        inputs.source_facts,
         source_evidence,
-        retained_stream,
+        inputs.retained_stream,
     )
 }
 
@@ -225,83 +183,16 @@ pub(crate) fn compile_document_with_optional_source_facts_and_evidence_and_retai
 /// Production extraction transfers its winning compact fragment here. This
 /// keeps borrowed compilation available for diagnostics and tests without a
 /// second compiler implementation.
-#[allow(dead_code)]
 pub(crate) fn compile_document_owned(
-    dom: Dom,
-    root: NodeId,
-    context: &CompileContext,
-) -> Result<Document, CompileError> {
-    compile_document_owned_impl(dom, root, context, None, None, None)
-}
-
-/// Compiles an owned fragment while reusing source facts from final cleanup.
-#[allow(dead_code)]
-pub(crate) fn compile_document_owned_with_optional_source_facts(
-    dom: Dom,
-    root: NodeId,
-    context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-) -> Result<Document, CompileError> {
-    compile_document_owned_impl(dom, root, context, source_facts, None, None)
-}
-
-#[allow(dead_code)]
-pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence(
-    dom: Dom,
-    root: NodeId,
-    context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-    source_evidence: &super::facts::SourceEvidence,
-) -> Result<Document, CompileError> {
-    compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
-        dom,
-        root,
-        context,
-        source_facts,
-        source_evidence,
-        None,
-    )
-}
-
-pub(crate) fn compile_document_owned_with_optional_source_facts_and_evidence_and_retained_nodes(
-    dom: Dom,
-    root: NodeId,
-    context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-    source_evidence: &super::facts::SourceEvidence,
-    retained_stream: Option<&super::RetainedStream>,
-) -> Result<Document, CompileError> {
-    compile_document_owned_impl(
-        dom,
-        root,
-        context,
-        source_facts,
-        Some(source_evidence),
-        retained_stream,
-    )
-}
-
-fn compile_document_owned_impl(
     mut dom: Dom,
     root: NodeId,
     context: &CompileContext,
-    source_facts: Option<&super::facts::SemanticSourceFacts>,
-    source_evidence: Option<&super::facts::SourceEvidence>,
-    retained_stream: Option<&super::RetainedStream>,
+    inputs: CompileInputs<'_>,
 ) -> Result<Document, CompileError> {
     let _phase = PhaseGuard::new(Phase::SemanticCompilation);
-    if let Some(source_plan) =
-        super::ordinary::ordinary_source_gate_with_retained_nodes(&dom, root, retained_stream)
-    {
-        match super::ordinary::compile_with_retained_capacity_plan(
-            &dom,
-            root,
-            context,
-            source_plan.capacity,
-            retained_stream,
-        ) {
+    if let Some(result) = try_ordinary_compilation(&dom, root, context, inputs.retained_stream) {
+        match result {
             Ok(document) => {
-                crate::instrumentation::record_semantic_source_nodes(source_plan.source_node_count);
                 record_document_metrics(&document);
                 return Ok(document);
             }
@@ -311,7 +202,7 @@ fn compile_document_owned_impl(
     }
 
     let owned_evidence;
-    let source_evidence = if let Some(source_evidence) = source_evidence {
+    let source_evidence = if let Some(source_evidence) = inputs.source_evidence {
         source_evidence
     } else {
         owned_evidence = super::facts::SourceEvidence::analyze(&dom, root, &NodeStateStore::new());
@@ -321,9 +212,9 @@ fn compile_document_owned_impl(
         &dom,
         root,
         context,
-        source_facts,
+        inputs.source_facts,
         source_evidence,
-        retained_stream,
+        inputs.retained_stream,
     );
     let source_node_count = analysis.facts.nodes().len();
     let mut owned_source_texts = super::code::take_owned_source_texts(
@@ -336,6 +227,28 @@ fn compile_document_owned_impl(
         record_document_metrics(document);
     }
     result
+}
+
+fn try_ordinary_compilation(
+    dom: &Dom,
+    root: NodeId,
+    context: &CompileContext,
+    retained_stream: Option<&super::RetainedStream>,
+) -> Option<Result<Document, CompileError>> {
+    let source_plan =
+        super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)?;
+    let source_node_count = source_plan.source_node_count;
+    let result = super::ordinary::compile_with_retained_capacity_plan(
+        dom,
+        root,
+        context,
+        source_plan.capacity,
+        retained_stream,
+    );
+    if result.is_ok() {
+        crate::instrumentation::record_semantic_source_nodes(source_node_count);
+    }
+    Some(result)
 }
 
 fn record_document_metrics(document: &Document) {
@@ -1731,7 +1644,7 @@ mod tests {
         let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
         let base = base.map(|value| Url::parse(value).unwrap());
         let context = CompileContext::new(base.clone(), base.as_ref());
-        compile_document(&dom, dom.root(), &context).unwrap()
+        compile_document(&dom, dom.root(), &context, &CompileInputs::default()).unwrap()
     }
 
     #[test]
@@ -1741,9 +1654,9 @@ mod tests {
         let root = dom.root();
         let base = Url::parse("https://example.test/base/").unwrap();
         let context = CompileContext::new(Some(base.clone()), Some(&base));
-        let borrowed = compile_document(&dom, root, &context).unwrap();
+        let borrowed = compile_document(&dom, root, &context, &CompileInputs::default()).unwrap();
 
-        let owned = compile_document_owned(dom, root, &context).unwrap();
+        let owned = compile_document_owned(dom, root, &context, CompileInputs::default()).unwrap();
 
         assert_eq!(owned.debug_tape(), borrowed.debug_tape());
         assert_eq!(owned.stats(), borrowed.stats());
@@ -1758,9 +1671,9 @@ mod tests {
         let dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
         let root = dom.root();
         let context = CompileContext::default();
-        let borrowed = compile_document(&dom, root, &context).unwrap();
+        let borrowed = compile_document(&dom, root, &context, &CompileInputs::default()).unwrap();
 
-        let owned = compile_document_owned(dom, root, &context).unwrap();
+        let owned = compile_document_owned(dom, root, &context, CompileInputs::default()).unwrap();
 
         assert_eq!(owned.debug_tape(), borrowed.debug_tape());
         assert_eq!(owned.stats(), borrowed.stats());
@@ -2272,7 +2185,8 @@ mod tests {
         let source = Url::parse("https://example.test/article").unwrap();
         let base = Url::parse("https://cdn.example.test/content/").unwrap();
         let context = CompileContext::new(Some(base), Some(&source));
-        let document = compile_document(&dom, dom.root(), &context).unwrap();
+        let document =
+            compile_document(&dom, dom.root(), &context, &CompileInputs::default()).unwrap();
         assert!(
             document
                 .debug_tape()
