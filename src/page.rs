@@ -1,5 +1,7 @@
 //! The extracted page and lazy output builders.
 
+use std::fmt;
+
 use crate::diagnostics::ExtractionDiagnostics;
 use crate::document::Document;
 use crate::metadata::{Metadata, MetadataDiagnostics};
@@ -63,6 +65,14 @@ impl ExtractedPage {
         self.markdown_builder().render()
     }
 
+    /// Writes the extracted content as CommonMark.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
+    pub fn write_markdown<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        self.markdown_builder().write(writer)
+    }
+
     /// Returns a Markdown output builder.
     pub fn markdown_builder(&self) -> MarkdownBuilder<'_> {
         MarkdownBuilder {
@@ -79,12 +89,30 @@ impl ExtractedPage {
         self.document.text()
     }
 
+    /// Writes the extracted content as normalized plain text.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
+    pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        writer.write_str(&self.document.text())
+    }
+
     /// Renders the extracted content as canonical semantic HTML.
     ///
     /// The private semantic representation cannot contain active source elements,
     /// arbitrary attributes, or unsupported URI schemes.
     pub fn html(&self) -> String {
         self.html_builder().render()
+    }
+
+    /// Writes the extracted content as canonical semantic HTML.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
+    pub fn write_html<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        self.html_builder().write(writer)
     }
 
     /// Returns an HTML output builder.
@@ -223,6 +251,16 @@ impl HtmlBuilder<'_> {
             self.page.document.output_capacity_hint(),
         )
     }
+
+    /// Writes canonical semantic HTML to `writer`.
+    pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        writer.write_str(&crate::render::html::render_html(
+            &self.page.document,
+            self.page.document.output_capacity_hint(),
+        ))
+    }
 }
 
 /// Configures Markdown rendering for an [`ExtractedPage`].
@@ -261,10 +299,26 @@ impl MarkdownBuilder<'_> {
             },
         )
     }
+
+    /// Writes the configured Markdown output to `writer`.
+    pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        writer.write_str(&crate::render::markdown::render_markdown(
+            &self.page.document,
+            self.page.document.output_capacity_hint(),
+            crate::render::markdown::MarkdownConfig {
+                links: self.links,
+                images: self.images,
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+
     use crate::extract;
 
     #[test]
@@ -281,6 +335,54 @@ mod tests {
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
         assert_eq!(page.image_count(), 1);
+    }
+
+    #[test]
+    fn write_methods_match_string_methods() {
+        let page = extract(
+            "<main><p>Hello <a href='/world'>world</a>.</p><img src='image.png' alt='Image'></main>",
+            Some("https://example.com/page"),
+        )
+        .unwrap();
+
+        let mut markdown = String::new();
+        page.write_markdown(&mut markdown).unwrap();
+        assert_eq!(markdown, page.markdown());
+
+        let mut text = String::new();
+        page.write_text(&mut text).unwrap();
+        assert_eq!(text, page.text());
+
+        let mut html = String::new();
+        page.write_html(&mut html).unwrap();
+        assert_eq!(html, page.html());
+
+        let mut configured = String::new();
+        page.markdown_builder()
+            .links(false)
+            .images(false)
+            .write(&mut configured)
+            .unwrap();
+        assert_eq!(
+            configured,
+            page.markdown_builder().links(false).images(false).render()
+        );
+    }
+
+    #[test]
+    fn write_methods_return_writer_errors() {
+        struct FailingWriter;
+
+        impl fmt::Write for FailingWriter {
+            fn write_str(&mut self, _: &str) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+
+        let page = extract("<main><p>Content</p></main>", None).unwrap();
+        assert!(page.write_markdown(&mut FailingWriter).is_err());
+        assert!(page.write_text(&mut FailingWriter).is_err());
+        assert!(page.write_html(&mut FailingWriter).is_err());
     }
 
     #[test]
