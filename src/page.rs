@@ -87,19 +87,9 @@ impl ExtractedPage {
         self.html_builder().render()
     }
 
-    /// Renders canonical semantic HTML.
-    ///
-    /// This method is an alias for [`Self::html`].
-    pub fn safe_html(&self) -> String {
-        self.html_builder().sanitize(true).render()
-    }
-
     /// Returns an HTML output builder.
     pub fn html_builder(&self) -> HtmlBuilder<'_> {
-        HtmlBuilder {
-            page: self,
-            sanitize: false,
-        }
+        HtmlBuilder { page: self }
     }
 
     /// Returns the number of words in the normalized extracted text.
@@ -221,23 +211,13 @@ impl ExtractedPage {
 /// compatibility and for symmetry with [`MarkdownBuilder`].
 pub struct HtmlBuilder<'a> {
     page: &'a ExtractedPage,
-    sanitize: bool,
 }
 
 impl HtmlBuilder<'_> {
-    /// Retained for compatibility. This flag does not change the output.
-    ///
-    /// Canonical semantic HTML is always safe by construction.
-    pub fn sanitize(mut self, enabled: bool) -> Self {
-        self.sanitize = enabled;
-        self
-    }
-
-    /// Renders the configured HTML output.
+    /// Renders canonical semantic HTML.
     pub fn render(self) -> String {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        let _ = self.sanitize;
         crate::render::html::render_html(
             &self.page.document,
             self.page.document.output_capacity_hint(),
@@ -418,24 +398,20 @@ mod tests {
         )
         .unwrap();
 
-        let raw = page.html();
-        let safe = page.safe_html();
-        assert_eq!(raw, safe);
-        assert!(!raw.contains("onclick="));
-        assert!(!safe.to_ascii_lowercase().contains("javascript:"));
-        assert!(!safe.contains("onclick="));
-        assert!(!safe.contains("onfocus="));
-        assert!(!safe.contains("onerror="));
-        assert!(!safe.contains("onload="));
-        assert!(!safe.contains("<script"));
-        assert!(!safe.contains("<animate"));
-        assert!(!safe.contains("attributeName="));
-        assert!(!safe.contains("values="));
-        assert!(!safe.contains("<iframe"));
-        assert!(!safe.contains("srcdoc="));
-        assert!(!safe.contains("data:text/html"));
-        assert!(safe.contains("href=\"https://example.com/safe\""));
-        assert_eq!(raw, page.html());
-        assert_eq!(safe, page.html_builder().sanitize(true).render());
+        let html = page.html();
+        assert!(!html.to_ascii_lowercase().contains("javascript:"));
+        assert!(!html.contains("onclick="));
+        assert!(!html.contains("onfocus="));
+        assert!(!html.contains("onerror="));
+        assert!(!html.contains("onload="));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("<animate"));
+        assert!(!html.contains("attributeName="));
+        assert!(!html.contains("values="));
+        assert!(!html.contains("<iframe"));
+        assert!(!html.contains("srcdoc="));
+        assert!(!html.contains("data:text/html"));
+        assert!(html.contains("href=\"https://example.com/safe\""));
+        assert_eq!(html, page.html());
     }
 }
