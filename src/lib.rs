@@ -90,7 +90,7 @@ pub use diagnostics::{
     RootInfo, RootSelectionReasonInfo, SemanticCategoryCoverageInfo, SemanticCoverageCategory,
     SemanticCoverageInfo,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ResourceLimitKind, Result};
 pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};
 pub use metadata::{
     Metadata, MetadataDiagnostics, MetadataFieldDiagnostics, MetadataListFieldDiagnostics,

@@ -3,7 +3,7 @@ use std::{env, fs, process::ExitCode};
 
 fn error_variant(error: &Error) -> &'static str {
     match error {
-        Error::TooManyElements(..) => "TooManyElements",
+        Error::TooManyElements { .. } => "TooManyElements",
         Error::ResourceLimit { .. } => "ResourceLimit",
         Error::Parse(_) => "Parse",
         Error::NoContent => "NoContent",
@@ -19,10 +19,16 @@ mod tests {
     use legible::Error;
 
     #[test]
-    fn error_variants_do_not_include_payloads() {
+    fn error_variants_have_stable_names() {
         let invalid_url = url::Url::parse("not a URL").unwrap_err();
         let cases = [
-            (Error::TooManyElements(12, 10), "TooManyElements"),
+            (
+                Error::TooManyElements {
+                    observed: 12,
+                    limit: 10,
+                },
+                "TooManyElements",
+            ),
             (Error::InvalidUrl(invalid_url), "InvalidUrl"),
         ];
         for (error, expected) in cases {

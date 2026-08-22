@@ -2,7 +2,7 @@
 
 use crate::budget::ParseBudget;
 use crate::dom::Dom;
-use crate::error::Result;
+use crate::error::{ResourceLimitKind, Result};
 use crate::extraction::ContentExtractor;
 use crate::page::ExtractedPage;
 
@@ -98,7 +98,7 @@ impl Extractor {
             && html.len() > self.config.parse_budget.max_input_bytes
         {
             return Err(crate::error::Error::ResourceLimit {
-                resource: "input bytes",
+                resource: ResourceLimitKind::InputBytes,
                 limit: self.config.parse_budget.max_input_bytes,
             });
         }
@@ -707,7 +707,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         let extractor = Extractor::builder().max_elements(1).build();
         assert!(matches!(
             extractor.extract("<main><p>Content</p></main>", None),
-            Err(Error::TooManyElements(_, 1))
+            Err(Error::TooManyElements { limit: 1, .. })
         ));
     }
 
@@ -717,32 +717,32 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
             (
                 Extractor::builder().max_input_bytes(4).build(),
                 "<p>content</p>",
-                "input bytes",
+                ResourceLimitKind::InputBytes,
             ),
             (
                 Extractor::builder().max_nodes(1).build(),
                 "<p>content</p>",
-                "DOM nodes",
+                ResourceLimitKind::DomNodes,
             ),
             (
                 Extractor::builder().max_total_attributes(1).build(),
                 "<p id='a' class='b'>content</p>",
-                "total attributes",
+                ResourceLimitKind::TotalAttributes,
             ),
             (
                 Extractor::builder().max_attributes_per_element(1).build(),
                 "<p id='a' class='b'>content</p>",
-                "attributes per element",
+                ResourceLimitKind::AttributesPerElement,
             ),
             (
                 Extractor::builder().max_text_bytes(2).build(),
                 "<p>content</p>",
-                "text bytes",
+                ResourceLimitKind::TextBytes,
             ),
             (
                 Extractor::builder().max_depth(1).build(),
                 "<div><div>content</div></div>",
-                "element depth",
+                ResourceLimitKind::ElementDepth,
             ),
         ];
 
@@ -770,7 +770,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
                 .build()
                 .extract(html, None),
             Err(Error::ResourceLimit {
-                resource: "JSON-LD bytes",
+                resource: ResourceLimitKind::JsonLdBytes,
                 ..
             })
         ));
@@ -780,7 +780,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
                 .build()
                 .extract(html, None),
             Err(Error::ResourceLimit {
-                resource: "JSON-LD items",
+                resource: ResourceLimitKind::JsonLdItems,
                 ..
             })
         ));
@@ -794,7 +794,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
                 .build()
                 .extract(cumulative, None),
             Err(Error::ResourceLimit {
-                resource: "JSON-LD bytes",
+                resource: ResourceLimitKind::JsonLdBytes,
                 ..
             })
         ));
@@ -810,7 +810,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
                 .build()
                 .extract(&deep, None),
             Err(Error::ResourceLimit {
-                resource: "JSON-LD depth",
+                resource: ResourceLimitKind::JsonLdDepth,
                 ..
             })
         ));
@@ -840,7 +840,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         assert!(matches!(
             error,
             Err(Error::ResourceLimit {
-                resource: "element depth",
+                resource: ResourceLimitKind::ElementDepth,
                 ..
             })
         ));
@@ -857,7 +857,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         assert!(matches!(
             Extractor::default().extract(&deep, None),
             Err(Error::ResourceLimit {
-                resource: "JSON-LD depth",
+                resource: ResourceLimitKind::JsonLdDepth,
                 ..
             })
         ));
@@ -867,7 +867,7 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
                 .build()
                 .extract(&deep, None),
             Err(Error::ResourceLimit {
-                resource: "JSON-LD depth",
+                resource: ResourceLimitKind::JsonLdDepth,
                 ..
             })
         ));

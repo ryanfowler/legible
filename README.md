@@ -230,8 +230,34 @@ Extraction returns `Result<ExtractedPage, Error>`. The main errors are:
 - `NoBody` when the parsed document has no body.
 - `NoContent` when Legible cannot find useful content.
 - `ContentRootNotFound` when an exact configured root is absent.
-- `TooManyElements` or `ResourceLimit` when a configured limit is exceeded.
+- `TooManyElements` when the HTML element limit is exceeded. Its `observed` and
+  `limit` fields contain the measured and configured values.
+- `ResourceLimit` when another configured limit is exceeded. Its `resource` field
+  is a `ResourceLimitKind` value, and its `limit` field contains the configured
+  maximum.
 - `Parse` when the HTML cannot be converted into the internal document.
+
+For example, callers can handle resource limits without parsing display strings:
+
+```rust
+use legible::{Error, ResourceLimitKind};
+
+fn report_error(error: Error) {
+    match error {
+        Error::TooManyElements { observed, limit } => {
+            eprintln!("found {observed} elements; maximum is {limit}");
+        }
+        Error::ResourceLimit {
+            resource: ResourceLimitKind::JsonLdBytes,
+            limit,
+        } => eprintln!("JSON-LD exceeds the {limit}-byte limit"),
+        Error::ResourceLimit { resource, limit } => {
+            eprintln!("{resource:?} exceeds the {limit} limit");
+        }
+        _ => {}
+    }
+}
+```
 
 Reject unsuccessful HTTP responses before extraction. Legible receives only the
 HTML body and does not know the transport status.

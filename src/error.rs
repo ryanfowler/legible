@@ -4,6 +4,70 @@ use thiserror::Error;
 
 use crate::dom::{ParseError, ParseLimitKind};
 
+/// A parser or structured-data resource with a configurable limit.
+///
+/// The value identifies the resource in [`Error::ResourceLimit`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceLimitKind {
+    /// Input HTML bytes.
+    InputBytes,
+    /// Allocated DOM nodes.
+    DomNodes,
+    /// HTML elements.
+    Elements,
+    /// Attributes across the document.
+    TotalAttributes,
+    /// Attributes on one element.
+    AttributesPerElement,
+    /// Text bytes in the DOM.
+    TextBytes,
+    /// Element nesting depth.
+    ElementDepth,
+    /// JSON-LD script bytes.
+    JsonLdBytes,
+    /// Typed JSON-LD items.
+    JsonLdItems,
+    /// JSON-LD nesting depth.
+    JsonLdDepth,
+}
+
+impl ResourceLimitKind {
+    /// Returns a stable machine-readable name for the resource.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InputBytes => "input_bytes",
+            Self::DomNodes => "dom_nodes",
+            Self::Elements => "elements",
+            Self::TotalAttributes => "total_attributes",
+            Self::AttributesPerElement => "attributes_per_element",
+            Self::TextBytes => "text_bytes",
+            Self::ElementDepth => "element_depth",
+            Self::JsonLdBytes => "json_ld_bytes",
+            Self::JsonLdItems => "json_ld_items",
+            Self::JsonLdDepth => "json_ld_depth",
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceLimitKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::InputBytes => "input bytes",
+            Self::DomNodes => "DOM nodes",
+            Self::Elements => "elements",
+            Self::TotalAttributes => "total attributes",
+            Self::AttributesPerElement => "attributes per element",
+            Self::TextBytes => "text bytes",
+            Self::ElementDepth => "element depth",
+            Self::JsonLdBytes => "JSON-LD bytes",
+            Self::JsonLdItems => "JSON-LD items",
+            Self::JsonLdDepth => "JSON-LD depth",
+        };
+        formatter.write_str(label)
+    }
+}
+
 /// Errors from content extraction.
 ///
 /// # Example
@@ -22,10 +86,15 @@ use crate::dom::{ParseError, ParseLimitKind};
 pub enum Error {
     /// The document exceeds the configured element limit.
     ///
-    /// The first value is the number of HTML elements in the document. The second value
-    /// is the limit set by [`ExtractorBuilder::max_elements`](crate::ExtractorBuilder::max_elements).
-    #[error("Aborting parsing document; {0} elements found (max: {1})")]
-    TooManyElements(usize, usize),
+    /// `observed` is the number of HTML elements that Legible found. `limit` is
+    /// the value set by [`ExtractorBuilder::max_elements`](crate::ExtractorBuilder::max_elements).
+    #[error("Aborting parsing document; {observed} elements found (max: {limit})")]
+    TooManyElements {
+        /// Number of HTML elements found.
+        observed: usize,
+        /// Configured maximum number of HTML elements.
+        limit: usize,
+    },
 
     /// The input exceeds a configured parser or structured-data resource limit.
     ///
@@ -34,8 +103,8 @@ pub enum Error {
     /// some limits stop work before the full value is known.
     #[error("Aborting parsing document; {resource} limit exceeded (max: {limit})")]
     ResourceLimit {
-        /// Name of the resource that exceeded its limit.
-        resource: &'static str,
+        /// Resource that exceeded its limit.
+        resource: ResourceLimitKind,
         /// Configured maximum for the resource.
         limit: usize,
     },
@@ -75,32 +144,46 @@ impl Error {
         match error {
             ParseError::Dom(error) => Self::Parse(error.to_string()),
             ParseError::Limit(limit) => match limit.kind {
-                ParseLimitKind::Elements => Self::TooManyElements(limit.observed, limit.limit),
+                ParseLimitKind::Elements => Self::TooManyElements {
+                    observed: limit.observed,
+                    limit: limit.limit,
+                },
                 ParseLimitKind::Nodes => Self::ResourceLimit {
-                    resource: "DOM nodes",
+                    resource: ResourceLimitKind::DomNodes,
                     limit: limit.limit,
                 },
                 ParseLimitKind::TotalAttributes => Self::ResourceLimit {
-                    resource: "total attributes",
+                    resource: ResourceLimitKind::TotalAttributes,
                     limit: limit.limit,
                 },
                 ParseLimitKind::AttributesPerElement => Self::ResourceLimit {
-                    resource: "attributes per element",
+                    resource: ResourceLimitKind::AttributesPerElement,
                     limit: limit.limit,
                 },
                 ParseLimitKind::TextBytes => Self::ResourceLimit {
-                    resource: "text bytes",
+                    resource: ResourceLimitKind::TextBytes,
                     limit: limit.limit,
                 },
                 ParseLimitKind::Depth => Self::ResourceLimit {
-                    resource: "element depth",
+                    resource: ResourceLimitKind::ElementDepth,
                     limit: limit.limit,
                 },
             },
         }
     }
 
-    pub(crate) fn resource_limit(resource: &'static str, limit: usize) -> Self {
+    pub(crate) fn resource_limit(resource: ResourceLimitKind, limit: usize) -> Self {
         Self::ResourceLimit { resource, limit }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResourceLimitKind;
+
+    #[test]
+    fn resource_limit_names_are_stable() {
+        assert_eq!(ResourceLimitKind::JsonLdBytes.name(), "json_ld_bytes");
+        assert_eq!(ResourceLimitKind::DomNodes.to_string(), "DOM nodes");
     }
 }

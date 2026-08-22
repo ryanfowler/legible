@@ -75,7 +75,7 @@ fn compare_metadata(expected: &ExpectedMetadata, actual: &Metadata) -> Result<()
 
 fn error_name(error: &Error) -> &'static str {
     match error {
-        Error::TooManyElements(..) => "TooManyElements",
+        Error::TooManyElements { .. } => "TooManyElements",
         Error::ResourceLimit { .. } => "ResourceLimit",
         Error::Parse(_) => "Parse",
         Error::NoContent => "NoContent",
