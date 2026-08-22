@@ -28,9 +28,15 @@ pub enum Error {
     TooManyElements(usize, usize),
 
     /// The input exceeds a configured parser or structured-data resource limit.
+    ///
+    /// `resource` identifies the limited resource. `limit` is the configured
+    /// maximum. The error does not always include the observed value because
+    /// some limits stop work before the full value is known.
     #[error("Aborting parsing document; {resource} limit exceeded (max: {limit})")]
     ResourceLimit {
+        /// Name of the resource that exceeded its limit.
         resource: &'static str,
+        /// Configured maximum for the resource.
         limit: usize,
     },
 

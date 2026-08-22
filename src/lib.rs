@@ -47,7 +47,7 @@
 //!
 //! Use [`ParseBudget`] to bound parser and JSON-LD work when the input is not
 //! trusted. Zero-valued limits are unlimited, except that JSON-LD depth uses an
-//! internal safety cap.
+//! internal safety cap. The default extractor has no caller-configured limit.
 //!
 //! # Security
 //!
@@ -113,7 +113,8 @@ pub use instrumentation::{
 ///
 /// This function returns [`Error::InvalidUrl`], [`Error::NoBody`],
 /// [`Error::NoContent`], [`Error::TooManyElements`], [`Error::ResourceLimit`],
-/// or [`Error::Parse`] when applicable.
+/// or [`Error::Parse`] when applicable. [`Error::ContentRootNotFound`] applies
+/// only when you configure an exact root with [`ExtractorBuilder::content_root`].
 pub fn extract(html: &str, url: Option<&str>) -> Result<ExtractedPage> {
     Extractor::default().extract(html, url)
 }

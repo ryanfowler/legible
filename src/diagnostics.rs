@@ -78,20 +78,35 @@ pub struct RootInfo {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ContentMetricsInfo {
+    /// Number of words in normalized text.
     pub word_count: usize,
+    /// Number of characters in normalized text.
     pub text_chars: usize,
+    /// Number of characters inside link content.
     pub link_text_chars: usize,
+    /// Number of semantic paragraphs.
     pub paragraph_count: usize,
+    /// Number of semantic headings.
     pub heading_count: usize,
+    /// Number of semantic list items.
     pub list_item_count: usize,
+    /// Number of semantic code blocks.
     pub code_block_count: usize,
+    /// Number of semantic data tables.
     pub table_count: usize,
+    /// Number of semantic figures.
     pub figure_count: usize,
+    /// Number of semantic images.
     pub image_count: usize,
+    /// Number of footnote references.
     pub footnote_reference_count: usize,
+    /// Number of footnote definitions.
     pub footnote_definition_count: usize,
+    /// Number of math expressions.
     pub math_count: usize,
+    /// Number of blocks with useful structural evidence.
     pub structured_block_count: usize,
+    /// Fraction of normalized text inside links.
     pub link_density: f64,
 }
 
@@ -99,9 +114,13 @@ pub struct ContentMetricsInfo {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct QualityInfo {
+    /// Fraction of useful source content retained in the result.
     pub coverage: f64,
+    /// Internal quality score for the best extraction attempt.
     pub best_attempt_score: f64,
+    /// Whether the result passed the normal quality checks.
     pub good: bool,
+    /// Whether the result is much smaller than the useful source content.
     pub suspiciously_small: bool,
 }
 
@@ -201,7 +220,9 @@ pub enum CleanupActionKind {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CleanupActionInfo {
+    /// Cleanup stage that removed elements.
     pub kind: CleanupActionKind,
+    /// Number of elements removed by the stage.
     pub removed_elements: usize,
 }
 
@@ -209,12 +230,19 @@ pub struct CleanupActionInfo {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NormalizationCountsInfo {
+    /// Number of code blocks produced by normalization.
     pub code_blocks: usize,
+    /// Number of footnote references produced by normalization.
     pub footnote_references: usize,
+    /// Number of footnote definitions produced by normalization.
     pub footnote_definitions: usize,
+    /// Number of math expressions produced by normalization.
     pub math_expressions: usize,
+    /// Number of images retained in the result.
     pub images: usize,
+    /// Number of data tables retained in the result.
     pub tables: usize,
+    /// Number of layout tables flattened during normalization.
     pub flattened_layout_tables: usize,
 }
 
@@ -239,10 +267,15 @@ pub struct RepresentationMetricsInfo {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtractionAttempt {
+    /// Strategy used for this attempt.
     pub strategy: ExtractionStrategyInfo,
+    /// Root selected for this attempt.
     pub selected_root: RootInfo,
+    /// Measurements for the useful source region.
     pub source: ContentMetricsInfo,
+    /// Measurements for the extracted result.
     pub result: ContentMetricsInfo,
+    /// Quality measurements for this attempt.
     pub quality: QualityInfo,
     /// Diagnostics-only semantic coverage for the selected source candidate.
     ///
@@ -254,9 +287,11 @@ pub struct ExtractionAttempt {
     pub normalization: NormalizationCountsInfo,
     /// Source, final DOM, and retained semantic representation sizes.
     pub representation: RepresentationMetricsInfo,
+    /// Whether this attempt was accepted as the result.
     pub accepted: bool,
     /// The positive exception used when normal quality was insufficient.
     pub acceptance_exception: Option<AcceptanceExceptionInfo>,
+    /// Reason that this attempt did not win, when it was rejected.
     pub rejection_reason: Option<AttemptRejectionReason>,
 }
 
@@ -264,8 +299,10 @@ pub struct ExtractionAttempt {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtractionDiagnostics {
+    /// Strategy that produced the final result.
     pub selected_strategy: ExtractionStrategyInfo,
     /// The specialized extractor that produced the canonical input, if any.
     pub specialized_extractor: Option<String>,
+    /// All extraction attempts, in execution order.
     pub attempts: Vec<ExtractionAttempt>,
 }

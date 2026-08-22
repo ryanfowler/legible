@@ -40,26 +40,47 @@ pub enum Phase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub enum SnapshotKind {
+    /// Initial selected-fragment snapshot.
     CleanupSelectedInitial = 0,
+    /// Snapshot after heading selection.
     CleanupSelectedHeading = 1,
+    /// Snapshot during media preparation.
     MediaPreparation = 2,
+    /// Snapshot during decorative-media cleanup.
     DecorativeMedia = 3,
+    /// Snapshot during style cleanup.
     StyleCleanup = 4,
+    /// Snapshot during table classification.
     TableClassification = 5,
+    /// Snapshot during hard cleanup.
     HardCleanup = 6,
+    /// Initial heuristic-cleanup snapshot.
     HeuristicInitial = 7,
+    /// Snapshot after explicit heuristic cleanup.
     HeuristicAfterExplicit = 8,
+    /// Snapshot before taxonomy cleanup.
     HeuristicBeforeTaxonomy = 9,
+    /// Snapshot before job-profile cleanup.
     HeuristicBeforeJob = 10,
+    /// Snapshot after job-profile cleanup.
     HeuristicAfterJob = 11,
+    /// Snapshot before direct-content cleanup.
     HeuristicBeforeDirect = 12,
+    /// Final heuristic-cleanup snapshot.
     HeuristicFinal = 13,
+    /// Snapshot during global document-chrome cleanup.
     GlobalChrome = 14,
+    /// Snapshot during inline document-chrome cleanup.
     InlineChrome = 15,
+    /// Initial repeated-content snapshot.
     RepeatedInitial = 16,
+    /// Snapshot after comment cleanup.
     RepeatedAfterComments = 17,
+    /// Snapshot after document-chrome cleanup.
     RepeatedAfterChrome = 18,
+    /// Snapshot after link cleanup.
     RepeatedAfterLinks = 19,
+    /// Snapshot during final normalization.
     FinalNormalization = 20,
 }
 
@@ -167,64 +188,117 @@ impl Phase {
 #[cfg(feature = "bench-instrumentation")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ExtractionCounters {
+    /// Number of source and fragment parse calls.
     pub parse_calls: u64,
+    /// Number of full source scans.
     pub source_full_scans: u64,
+    /// Number of source element snapshots.
     pub source_element_snapshots: u64,
+    /// Number of fragment snapshot rebuilds.
     pub fragment_snapshot_rebuilds: u64,
+    /// Number of fragment snapshot requests.
     pub fragment_snapshot_requests: u64,
+    /// Number of fragment snapshot requests served from a cache.
     pub fragment_snapshot_reuses: u64,
+    /// Number of nodes in rebuilt fragment snapshots.
     pub fragment_snapshot_nodes: u64,
+    /// Number of nodes covered by reused fragment snapshots.
     pub fragment_snapshot_reuse_nodes: u64,
+    /// Rebuilt snapshot counts by snapshot kind.
     pub fragment_snapshot_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    /// Reused snapshot counts by snapshot kind.
     pub fragment_snapshot_reuses_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    /// Rebuilt snapshot node counts by snapshot kind.
     pub fragment_snapshot_nodes_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    /// Reused snapshot node counts by snapshot kind.
     pub fragment_snapshot_reuse_nodes_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    /// Number of prepared source analyses.
     pub prepared_source_builds: u64,
+    /// Number of entries in prepared source analyses.
     pub prepared_source_entries: u64,
+    /// Number of DOM clones.
     pub dom_clones: u64,
+    /// Number of selected-fragment copies.
     pub fragment_copies: u64,
+    /// Number of extraction strategies started.
     pub strategies_started: u64,
+    /// Number of logical attempt plans.
     pub logical_attempt_plans: u64,
+    /// Number of physical attempt executions.
     pub physical_attempt_executions: u64,
+    /// Number of duplicate attempts removed.
     pub deduplicated_attempts: u64,
+    /// Number of unique attempt plans.
     pub unique_attempt_plans: u64,
+    /// Number of nodes scored.
     pub scoring_nodes: u64,
+    /// Number of cleaned nodes.
     pub cleaned_nodes: u64,
+    /// Number of semantic source nodes.
     pub semantic_source_nodes: u64,
+    /// Number of emitted semantic operations.
     pub semantic_operations: u64,
+    /// Number of allocations.
     pub allocations: u64,
+    /// Total allocated bytes.
     pub allocated_bytes: u64,
+    /// Number of deallocations.
     pub deallocations: u64,
+    /// Total deallocated bytes.
     pub deallocated_bytes: u64,
+    /// Peak live bytes for the run.
     pub peak_live_bytes: u64,
+    /// Live bytes at the end of the run.
     pub final_live_bytes: u64,
+    /// Estimated bytes retained by the final semantic document.
     pub final_retained_bytes: u64,
+    /// Bytes copied while cloning DOM data.
     pub dom_clone_bytes: u64,
+    /// Final operation-vector capacity.
     pub builder_ops_capacity: u64,
+    /// Final close-operation capacity.
     pub builder_ends_capacity: u64,
+    /// Final open-stack capacity.
     pub builder_open_capacity: u64,
+    /// Final semantic-text capacity.
     pub builder_text_capacity: u64,
+    /// Final payload capacity.
     pub builder_payload_capacity: u64,
+    /// Final footnote capacity.
     pub builder_footnotes_capacity: u64,
+    /// Final footnote-index capacity.
     pub builder_footnote_index_capacity: u64,
+    /// Capacity requested by the semantic builder in bytes.
     pub builder_requested_capacity_bytes: u64,
+    /// Final capacity of the semantic builder in bytes.
     pub builder_final_capacity_bytes: u64,
+    /// Peak capacity of the semantic builder in bytes.
     pub builder_peak_capacity_bytes: u64,
+    /// Number of semantic-builder reallocations.
     pub builder_reallocations: u64,
+    /// Maximum open-container depth in the semantic builder.
     pub builder_max_open_depth: u64,
+    /// Bytes released by semantic-builder shrinking.
     pub builder_shrink_bytes: u64,
+    /// JSON-LD source bytes scanned.
     pub json_ld_bytes: u64,
+    /// Estimated parsed JSON-LD bytes.
     pub json_ld_parsed_bytes: u64,
+    /// Estimated retained JSON-LD bytes.
     pub json_ld_retained_bytes: u64,
 }
 
-/// Counts for E01 source-pipeline work that is deferred or skipped.
+/// Counts for source-pipeline work that is deferred or skipped.
 #[cfg(feature = "bench-instrumentation")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DeferredWorkCounters {
+    /// Number of content-hint scans.
     pub content_hint_scans: u64,
+    /// Number of content-excerpt scans.
     pub content_excerpt_scans: u64,
+    /// Number of final-DOM node scans.
     pub final_dom_node_scans: u64,
+    /// Number of external-footnote scans.
     pub external_footnote_scans: u64,
 }
 
@@ -232,15 +306,25 @@ pub struct DeferredWorkCounters {
 #[cfg(feature = "bench-instrumentation")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PhaseDurations {
+    /// Time spent parsing, in nanoseconds.
     pub parse: u64,
+    /// Time spent discovering metadata, in nanoseconds.
     pub metadata: u64,
+    /// Time spent preparing the source, in nanoseconds.
     pub preparation: u64,
+    /// Time spent discovering candidates, in nanoseconds.
     pub candidate_discovery: u64,
+    /// Time spent scoring candidates, in nanoseconds.
     pub scoring: u64,
+    /// Time spent selecting the root, in nanoseconds.
     pub root_selection: u64,
+    /// Time spent copying the selected fragment, in nanoseconds.
     pub fragment_copy: u64,
+    /// Time spent cleaning the fragment, in nanoseconds.
     pub cleanup: u64,
+    /// Time spent compiling semantic content, in nanoseconds.
     pub semantic_compilation: u64,
+    /// Time spent rendering output, in nanoseconds.
     pub rendering: u64,
 }
 
@@ -268,7 +352,9 @@ impl PhaseDurations {
 #[cfg(feature = "bench-instrumentation")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InstrumentationSnapshot {
+    /// Counters collected for the run.
     pub counters: ExtractionCounters,
+    /// Phase durations collected for the run.
     pub phases: PhaseDurations,
 }
 

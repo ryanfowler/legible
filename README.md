@@ -18,6 +18,18 @@ Reject unsuccessful HTTP status codes before you pass a response body to Legible
 Legible does not receive the transport status. It rejects access barriers only when
 the HTML contains enough structural and textual evidence.
 
+## API at a glance
+
+The crate has four main public entry points:
+
+- `extract(html, url)` performs one extraction with the default configuration.
+- `Extractor` stores configuration that you can reuse for many documents.
+- `ExtractedPage` provides Markdown, HTML, text, metadata, diagnostics, and metrics.
+- `ParseBudget` limits parser and JSON-LD resource use.
+
+The extracted representation is private. You can use the output methods without
+depending on the internal document model.
+
 ## Extract content
 
 ```rust
@@ -73,6 +85,54 @@ budget methods to limit input bytes, DOM nodes, attributes, text, nesting depth,
 and JSON-LD work. A value of `0` means no caller-configured limit. JSON-LD depth
 still has an internal safety cap.
 
+You can set all limits with `ParseBudget`:
+
+```rust
+use legible::{Extractor, ParseBudget};
+
+let budget = ParseBudget {
+    max_input_bytes: 10 * 1024 * 1024,
+    max_nodes: 200_000,
+    max_elements: 100_000,
+    max_total_attributes: 500_000,
+    max_attributes_per_element: 200,
+    max_text_bytes: 8 * 1024 * 1024,
+    max_depth: 512,
+    max_json_ld_bytes: 2 * 1024 * 1024,
+    max_json_ld_items: 10_000,
+    max_json_ld_depth: 128,
+};
+
+let extractor = Extractor::builder()
+    .parse_budget(budget)
+    .build();
+```
+
+The limits apply to the input document and its JSON-LD. Legible does not fetch
+resources. A resource limit returns `Error::ResourceLimit`.
+
+## Select content
+
+Legible selects the most relevant content region by default. Use a hint when you
+know a likely container:
+
+```rust
+use legible::{ContentHint, Extractor};
+
+let extractor = Extractor::builder()
+    .content_hint(ContentHint::Class("article-body".into()))
+    .build();
+```
+
+The hint adds evidence. Quality checks still apply. `ContentHint::Id` matches one
+exact ID. `ContentHint::Class` matches one class token. `ContentHint::Tag` matches
+`article`, `main`, `section`, or `div` elements.
+
+Use `content_root` when you must extract one matching subtree. It selects the
+first matching element and returns `Error::ContentRootNotFound` when no element
+matches. This option keeps the requested boundary and does not perform normal
+automatic root selection outside that subtree.
+
 Enable structured decision diagnostics only when you need them:
 
 ```rust
@@ -93,18 +153,6 @@ if let Some(diagnostics) = page.diagnostics() {
 
 Legible does not retain attempt diagnostics by default. When enabled, diagnostics record each strategy, the selected root, quality metrics, candidate-to-result semantic coverage, major cleanup actions, semantic normalization counts, representation sizes, and the specialized extractor identity. Semantic coverage is diagnostic data. It does not affect attempt acceptance.
 
-Use a content hint when you know a likely content container. The hint adds strong
-evidence, but Legible can select a better container. Use `content_root` when you
-must limit extraction to one matching subtree.
-
-```rust
-# use legible::{ContentHint, Extractor};
-let extractor = Extractor::builder()
-    .content_hint(ContentHint::Class("article-body".into()))
-    .build();
-# let _ = extractor;
-```
-
 ## Outputs and metrics
 
 Legible's semantic representation is an internal implementation detail. Public
@@ -121,6 +169,15 @@ println!("{} images", page.image_count());
 ```
 
 The representation can change without a public API change.
+
+`page.markdown()` includes links and images. `page.html()` returns canonical
+semantic HTML. It contains no source scripts, event handlers, arbitrary source
+attributes, or unsupported URI schemes. `page.safe_html()` is a compatibility
+alias for `page.html()`.
+
+`page.text()` returns normalized plain text. Repeated output calls are
+deterministic. Rendering is lazy, so Legible does not create all output formats
+unless you request them.
 
 ## Render Markdown
 
@@ -159,6 +216,33 @@ Missing values stay empty or `None`.
 Enable `metadata_diagnostics(true)` to retain the selected source, confidence, and
 alternatives. Enable `retain_structured_data(true)` to retain parsed JSON-LD items.
 Both options are disabled by default.
+
+`structured_data(true)` controls whether JSON-LD can affect metadata and content
+selection. It is enabled by default. `retain_structured_data(true)` controls only
+whether parsed items remain available through `page.structured_data()`. When
+retention is disabled, that method returns `None`. When retention is enabled, it
+returns `Some`, including when the slice is empty.
+
+## Errors
+
+Extraction returns `Result<ExtractedPage, Error>`. The main errors are:
+
+- `InvalidUrl` when the optional base URL is not absolute or cannot be parsed.
+- `NoBody` when the parsed document has no body.
+- `NoContent` when Legible cannot find useful content.
+- `ContentRootNotFound` when an exact configured root is absent.
+- `TooManyElements` or `ResourceLimit` when a configured limit is exceeded.
+- `Parse` when the HTML cannot be converted into the internal document.
+
+Reject unsuccessful HTTP responses before extraction. Legible receives only the
+HTML body and does not know the transport status.
+
+## Optional features
+
+- `tracing` emits debug events for extraction decisions. Add a `tracing` subscriber
+  in your application to collect them.
+- `bench-instrumentation` exposes phase timings and allocation counters for
+  benchmark work. It adds measurement state and is not needed for normal use.
 
 ## Security
 

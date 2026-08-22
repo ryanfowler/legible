@@ -19,6 +19,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use url::Url;
 
 /// Metadata discovered in the source page.
+///
+/// Legible combines JSON-LD, standard metadata, and visible HTML evidence.
+/// Missing values are `None` for optional fields and empty for list fields.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {

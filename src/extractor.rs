@@ -33,6 +33,10 @@ pub enum ContentTag {
 }
 
 /// A reusable HTML content extractor.
+///
+/// An extractor stores configuration. It does not store a parsed document.
+/// You can use one extractor for many documents. Each extraction creates its
+/// own document state.
 #[derive(Debug, Clone)]
 pub struct Extractor {
     pub(crate) config: ExtractorConfig,
@@ -85,7 +89,10 @@ impl Extractor {
     /// # Errors
     ///
     /// Returns a parser or resource-limit error when the input cannot be
-    /// parsed within the configured budget, or a normal extraction error.
+    /// parsed within the configured budget. It can also return
+    /// [`crate::Error::NoBody`], [`crate::Error::NoContent`],
+    /// [`crate::Error::InvalidUrl`], or
+    /// [`Error::ContentRootNotFound`](crate::Error::ContentRootNotFound).
     pub fn extract(&self, html: &str, url: Option<&str>) -> Result<ExtractedPage> {
         if self.config.parse_budget.max_input_bytes > 0
             && html.len() > self.config.parse_budget.max_input_bytes
@@ -174,7 +181,10 @@ impl ExtractorBuilder {
         self
     }
 
-    /// Controls whether JSON-LD participates in metadata extraction.
+    /// Controls whether JSON-LD participates in metadata and root selection.
+    ///
+    /// This option is enabled by default. It is separate from
+    /// [`Self::retain_structured_data`].
     pub fn structured_data(mut self, enabled: bool) -> Self {
         self.config.structured_data = enabled;
         self
@@ -198,6 +208,9 @@ impl ExtractorBuilder {
     /// Retains parsed JSON-LD values on each extracted page.
     ///
     /// Structured data is not retained by default because it can be large.
+    /// When retention is disabled, [`ExtractedPage::structured_data`] returns
+    /// `None`. When retention is enabled, it returns `Some`, even when no valid
+    /// JSON-LD items were found.
     pub fn retain_structured_data(mut self, enabled: bool) -> Self {
         self.config.retain_structured_data = enabled;
         self
