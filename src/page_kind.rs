@@ -24,7 +24,7 @@ impl PageKind {
             .chain(dom.descendants(root))
             .any(|node| {
                 dom.attrs(node).iter().any(|attribute| {
-                    matches!(attribute.name.local.as_ref(), "class" | "id")
+                    matches!(dom.attribute_local_name(attribute), "class" | "id")
                         && attribute
                             .value
                             .split(|character: char| !character.is_ascii_alphanumeric())

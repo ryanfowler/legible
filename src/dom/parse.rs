@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
-use super::{Attribute, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
+use super::{Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use crate::budget::ParseBudget;
 use html5ever::tokenizer::TokenizerOpts;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
@@ -342,7 +342,6 @@ impl TreeSink for DomSink {
             .dom
             .borrow()
             .qual_name(*target)
-            .cloned()
             .unwrap_or_else(|| QualName::new(None, html5ever::ns!(html), "div".into()));
         OwnedElemName(name)
     }
@@ -366,10 +365,20 @@ impl TreeSink for DomSink {
             }
         }
         let tag = Tag::from_qual_name(&name);
+        let (compact_name, compact_attrs) = {
+            let mut dom = self.dom.borrow_mut();
+            let compact_name = dom.compact_element_name(&name, tag);
+            let compact_attrs = attrs
+                .into_iter()
+                .map(|attribute| dom.compact_attribute(attribute))
+                .collect();
+            (compact_name, compact_attrs)
+        };
         let Some(id) = self.create_node(NodeData::Element(ElementData {
-            name,
+            name: compact_name,
+            local: name.local.clone(),
             tag,
-            attrs: attrs.into_iter().map(Attribute::from).collect(),
+            attrs: compact_attrs,
             template_contents: NodeLink::NONE,
             mathml_annotation_xml_integration_point: flags.mathml_annotation_xml_integration_point,
         })) else {
@@ -542,19 +551,27 @@ impl TreeSink for DomSink {
             return;
         }
         let mut d = self.dom.borrow_mut();
+        let existing = match &d.node(*target).data {
+            NodeData::Element(e) => e.attrs.clone(),
+            _ => return,
+        };
+        let additions = attrs
+            .iter()
+            .filter(|a| !existing.iter().any(|x| d.attribute_matches(x, &a.name)))
+            .count();
+        if !self.check_attributes(existing.len(), additions) {
+            return;
+        }
+        let additions = attrs
+            .into_iter()
+            .filter(|a| !existing.iter().any(|x| d.attribute_matches(x, &a.name)))
+            .collect::<Vec<_>>();
+        let compacted = additions
+            .into_iter()
+            .map(|a| d.compact_attribute(a))
+            .collect::<Vec<_>>();
         if let NodeData::Element(e) = &mut d.node_mut(*target).data {
-            let additions = attrs
-                .iter()
-                .filter(|a| !e.attrs.iter().any(|x| x.name == a.name))
-                .count();
-            if !self.check_attributes(e.attrs.len(), additions) {
-                return;
-            }
-            for a in attrs {
-                if !e.attrs.iter().any(|x| x.name == a.name) {
-                    e.attrs.push(a.into())
-                }
-            }
+            e.attrs.extend(compacted);
         }
     }
     fn remove_from_parent(&self, target: &NodeId) {

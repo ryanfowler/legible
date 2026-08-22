@@ -352,9 +352,9 @@ fn image_role_score(
 fn image_context_name(dom: &Dom, image: NodeId) -> String {
     let mut name = String::new();
     for node in std::iter::once(image).chain(dom.ancestors(image).take(6)) {
-        if let Some(tag) = dom.qual_name(node) {
+        if let Some(tag) = dom.local_name(node) {
             name.push(' ');
-            name.push_str(tag.local.as_ref());
+            name.push_str(tag);
         }
         for attribute in [AttrName::Class, AttrName::Id, AttrName::Role, AttrName::Src] {
             if let Some(value) = dom.attr(node, attribute) {
@@ -370,9 +370,9 @@ fn image_context_name(dom: &Dom, image: NodeId) -> String {
 fn image_structural_context_name(dom: &Dom, image: NodeId) -> String {
     let mut name = String::new();
     for node in std::iter::once(image).chain(dom.ancestors(image).take(6)) {
-        if let Some(tag) = dom.qual_name(node) {
+        if let Some(tag) = dom.local_name(node) {
             name.push(' ');
-            name.push_str(tag.local.as_ref());
+            name.push_str(tag);
         }
         for attribute in [AttrName::Class, AttrName::Id, AttrName::Role] {
             if let Some(value) = dom.attr(node, attribute) {
@@ -480,7 +480,7 @@ fn has_media_control_context(dom: &Dom, image: NodeId, context_media_control: bo
             .take(6)
             .any(|node| {
                 dom.attrs(node).iter().any(|attribute| {
-                    let name = attribute.name.local.as_ref();
+                    let name = dom.attribute_local_name(attribute);
                     name.starts_with("data-")
                         && (contains_role_token(
                             name,
@@ -666,13 +666,7 @@ fn static_dimensions(dom: &Dom, node: NodeId) -> [Option<u32>; 2] {
         && let Some(view_box) = dom
             .attrs(node)
             .iter()
-            .find(|attribute| {
-                attribute
-                    .name
-                    .local
-                    .as_ref()
-                    .eq_ignore_ascii_case("viewbox")
-            })
+            .find(|attribute| attribute.local_name().eq_ignore_ascii_case("viewbox"))
             .map(|attribute| attribute.value.as_ref())
     {
         let values: Vec<_> = view_box
@@ -797,17 +791,13 @@ fn source_has_responsive_or_lazy_image(dom: &Dom, node: NodeId) -> bool {
 }
 
 fn is_svg_description_element(dom: &Dom, node: NodeId) -> bool {
-    dom.qual_name(node).is_some_and(|name| {
-        matches!(
-            name.local.as_ref().to_ascii_lowercase().as_str(),
-            "title" | "desc"
-        )
-    })
+    dom.local_name(node)
+        .is_some_and(|name| matches!(name.to_ascii_lowercase().as_str(), "title" | "desc"))
 }
 
 fn has_lazy_candidate(dom: &Dom, node: NodeId) -> bool {
     dom.attrs(node).iter().any(|attribute| {
-        attribute.name.local.as_ref().starts_with("data-")
+        dom.attribute_local_name(attribute).starts_with("data-")
             && ((crate::constants::has_image_src(attribute.value.as_ref())
                 && non_placeholder_image_attribute(Some(attribute.value.as_ref())).is_some())
                 || (crate::constants::has_image_srcset(attribute.value.as_ref())

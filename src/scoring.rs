@@ -550,8 +550,12 @@ impl ScoringView {
                         }
                     }
 
-                    let data =
-                        projected_node_data(source, source_id, self.text_replacement(source_id));
+                    let data = projected_node_data(
+                        &mut fragment,
+                        source,
+                        source_id,
+                        self.text_replacement(source_id),
+                    );
                     let destination = fragment.create(data)?;
                     fragment.append_child(parent, destination);
                     if let Some(tag) = self.effective_tag(source, source_id) {
@@ -573,11 +577,13 @@ impl ScoringView {
                         && let Some(template) = element.template_contents.get()
                         && !excluded.get(template.index()).copied().unwrap_or(false)
                     {
-                        let template_copy = fragment.create(projected_node_data(
+                        let template_data = projected_node_data(
+                            &mut fragment,
                             source,
                             template,
                             self.text_replacement(template),
-                        ))?;
+                        );
+                        let template_copy = fragment.create(template_data)?;
                         if let NodeData::Element(destination_element) =
                             &mut fragment.node_mut(destination).data
                         {
@@ -746,19 +752,33 @@ enum ProjectionWork {
     },
 }
 
-fn projected_node_data(source: &Dom, node: NodeId, replacement: Option<&str>) -> NodeData {
+fn projected_node_data(
+    destination: &mut Dom,
+    source: &Dom,
+    node: NodeId,
+    replacement: Option<&str>,
+) -> NodeData {
     if let Some(replacement) = replacement {
         return NodeData::Text(StrTendril::from(replacement));
     }
     match &source.node(node).data {
-        NodeData::Element(element) => NodeData::Element(ElementData {
-            name: element.name.clone(),
-            tag: element.tag,
-            attrs: element.attrs.clone(),
-            template_contents: NodeLink::NONE,
-            mathml_annotation_xml_integration_point: element
-                .mathml_annotation_xml_integration_point,
-        }),
+        NodeData::Element(element) => {
+            let compact_name = destination.clone_element_name_from(source, node);
+            let attrs = element
+                .attrs
+                .iter()
+                .map(|attribute| destination.clone_attribute_from(source, attribute))
+                .collect();
+            NodeData::Element(ElementData {
+                name: compact_name,
+                local: element.local.clone(),
+                tag: element.tag,
+                attrs,
+                template_contents: NodeLink::NONE,
+                mathml_annotation_xml_integration_point: element
+                    .mathml_annotation_xml_integration_point,
+            })
+        }
         data => data.clone(),
     }
 }
@@ -2358,7 +2378,7 @@ pub fn get_class_weight(dom: &Dom, id: NodeId, weight_classes: bool) -> i32 {
     }
     let mut w = 0;
     for a in dom.attrs(id) {
-        if !matches!(a.name.local.as_ref(), "class" | "id") || a.value.is_empty() {
+        if !matches!(dom.attribute_local_name(a), "class" | "id") || a.value.is_empty() {
             continue;
         }
         let m = regexps::CLASS_WEIGHT_SET.matches(a.value.as_ref());

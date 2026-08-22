@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use super::{AttrName, Attribute, NodeLink, Tag};
-use html5ever::QualName;
 use tendril::StrTendril;
 
 #[derive(Clone, Debug)]
@@ -23,11 +22,37 @@ pub(crate) enum NodeData {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ElementData {
-    pub(crate) name: QualName,
+    pub(crate) name: ElementName,
+    pub(crate) local: html5ever::LocalName,
     pub(crate) tag: Tag,
     pub(crate) attrs: Vec<Attribute>,
     pub(crate) template_contents: NodeLink,
     pub(crate) mathml_annotation_xml_integration_point: bool,
+}
+
+/// Compact element-name storage.
+///
+/// Common HTML names are encoded by their `Tag`. The high bit identifies an
+/// index into `Dom::element_names` for custom HTML and foreign names. This
+/// keeps the uncommon `QualName` payload out of every element.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ElementName(u32);
+
+impl ElementName {
+    pub(crate) const FOREIGN_FLAG: u32 = 1 << 31;
+
+    pub(crate) fn known(tag: Tag) -> Self {
+        debug_assert!(tag != Tag::Other);
+        Self(tag as u32)
+    }
+
+    pub(crate) fn foreign(index: usize) -> Self {
+        Self(Self::FOREIGN_FLAG | index as u32)
+    }
+
+    pub(crate) fn foreign_index(self) -> Option<usize> {
+        (self.0 & Self::FOREIGN_FLAG != 0).then_some((self.0 & !Self::FOREIGN_FLAG) as usize)
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Node {
@@ -79,7 +104,7 @@ impl ElementData {
             return self
                 .attrs
                 .iter()
-                .find(|attribute| attribute.name.local.as_ref().eq_ignore_ascii_case(name))
+                .find(|attribute| attribute.local_name().eq_ignore_ascii_case(name))
                 .map(|attribute| attribute.value.as_ref());
         }
         let kind = AttrName::from_local(name);
@@ -93,7 +118,7 @@ impl ElementData {
         self.attrs
             .iter()
             .find(|attribute| {
-                let local = attribute.name.local.as_ref();
+                let local = attribute.local_name();
                 local == name || local.eq_ignore_ascii_case(name)
             })
             .map(|attribute| attribute.value.as_ref())

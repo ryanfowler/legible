@@ -971,7 +971,13 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
                 let attributes = dom
                     .attrs(node)
                     .iter()
-                    .map(|attribute| format!("{}={}", attribute.name.local, attribute.value))
+                    .map(|attribute| {
+                        format!(
+                            "{}={}",
+                            dom.attribute_local_name(attribute),
+                            attribute.value
+                        )
+                    })
                     .collect::<Vec<_>>();
                 format!(
                     "parent={:?};tag={:?};text={:?};attrs={attributes:?}",

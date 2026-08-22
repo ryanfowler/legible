@@ -348,7 +348,7 @@ fn has_complex_attributes(dom: &Dom, node: NodeId) -> bool {
                 .all(|token| token.eq_ignore_ascii_case("page"))
         });
     if dom.attrs(node).iter().any(|attribute| {
-        let name = attribute.name.local.as_ref();
+        let name = dom.attribute_local_name(attribute);
         name.starts_with("aria-") || name.starts_with("data-")
     }) {
         return true;
@@ -472,7 +472,7 @@ fn simple_image_source(dom: &Dom, node: NodeId) -> bool {
         && !dom
             .attrs(node)
             .iter()
-            .any(|attribute| attribute.name.local.as_ref().starts_with("data-"))
+            .any(|attribute| dom.attribute_local_name(attribute).starts_with("data-"))
 }
 
 fn summary_is_first_child(dom: &Dom, node: NodeId) -> bool {

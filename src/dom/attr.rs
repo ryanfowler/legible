@@ -142,6 +142,7 @@ impl AttrName {
             _ => Self::Other,
         }
     }
+    #[inline(always)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Align => "align",
@@ -213,32 +214,91 @@ impl AttrName {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub(crate) struct Attribute {
-    pub(crate) name: html5ever::QualName,
+    pub(crate) name: u32,
+    local: html5ever::LocalName,
     pub(crate) value: tendril::StrTendril,
     kind: AttrName,
 }
 
-impl From<html5ever::Attribute> for Attribute {
-    #[inline]
-    fn from(attribute: html5ever::Attribute) -> Self {
-        let kind = AttrName::from_local(attribute.name.local.as_ref());
+pub(crate) const QUALIFIED_NAME_FLAG: u32 = 1 << 31;
+
+impl Attribute {
+    pub(crate) fn known_with_local(
+        kind: AttrName,
+        local: html5ever::LocalName,
+        value: tendril::StrTendril,
+    ) -> Self {
         Self {
-            name: attribute.name,
-            value: attribute.value,
+            name: kind as u32,
+            local,
+            value,
             kind,
         }
     }
-}
-
-impl Attribute {
     #[inline]
-    pub(crate) fn new(name: html5ever::QualName, value: tendril::StrTendril) -> Self {
+    pub(crate) fn new(
+        name: html5ever::QualName,
+        value: tendril::StrTendril,
+        qualified_names: &mut Vec<Option<html5ever::QualName>>,
+        free_names: &mut Vec<usize>,
+    ) -> Self {
         let kind = AttrName::from_local(name.local.as_ref());
-        Self { name, value, kind }
+        if kind != AttrName::Other && name.ns == html5ever::ns!() && name.prefix.is_none() {
+            return Self {
+                name: kind as u32,
+                local: name.local,
+                value,
+                kind,
+            };
+        }
+        let local = name.local.clone();
+        let index = free_names.pop().unwrap_or(qualified_names.len());
+        if index == qualified_names.len() {
+            qualified_names.push(Some(name));
+        } else {
+            qualified_names[index] = Some(name);
+        }
+        Self {
+            name: QUALIFIED_NAME_FLAG | index as u32,
+            local,
+            value,
+            kind,
+        }
     }
 
     #[inline]
     pub(crate) fn is_named(&self, name: AttrName) -> bool {
         self.kind == name
+    }
+
+    #[inline]
+    pub(crate) fn qualified_name(
+        &self,
+        qualified_names: &[Option<html5ever::QualName>],
+    ) -> html5ever::QualName {
+        if self.name & QUALIFIED_NAME_FLAG != 0 {
+            qualified_names[(self.name & !QUALIFIED_NAME_FLAG) as usize]
+                .as_ref()
+                .expect("live qualified attribute name")
+                .clone()
+        } else {
+            html5ever::QualName::new(None, html5ever::ns!(), self.local.clone())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn qualified_name_index(&self) -> Option<usize> {
+        (self.name & QUALIFIED_NAME_FLAG != 0)
+            .then_some((self.name & !QUALIFIED_NAME_FLAG) as usize)
+    }
+
+    #[inline]
+    pub(crate) fn known_kind(&self) -> AttrName {
+        self.kind
+    }
+
+    #[inline]
+    pub(crate) fn local_name(&self) -> &str {
+        self.local.as_ref()
     }
 }

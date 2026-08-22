@@ -543,8 +543,8 @@ fn is_math_rendering(dom: &Dom, svg: NodeId) -> bool {
         dom.tag(node) == Some(Tag::Math)
             || dom.attr(node, AttrName::DataMath).is_some()
             || dom
-                .qual_name(node)
-                .is_some_and(|name| name.local.as_ref().to_ascii_lowercase().starts_with("mjx"))
+                .local_name(node)
+                .is_some_and(|name| name.to_ascii_lowercase().starts_with("mjx"))
             || dom.attr(node, AttrName::Class).is_some_and(|classes| {
                 classes.split_ascii_whitespace().any(|class| {
                     has_token(class, "mathjax") || class.to_ascii_lowercase().starts_with("mjx")
@@ -558,9 +558,9 @@ fn is_svg_element(dom: &Dom, node: NodeId, local: &str) -> bool {
 }
 
 fn svg_local_name(dom: &Dom, node: NodeId) -> Option<&str> {
-    dom.qual_name(node)
-        .filter(|name| name.ns == ns!(svg))
-        .map(|name| name.local.as_ref())
+    dom.is_namespace(node, &ns!(svg))
+        .then(|| dom.local_name(node))
+        .flatten()
 }
 
 #[cfg(test)]

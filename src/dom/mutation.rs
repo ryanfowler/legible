@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
-use super::{AttrName, Attribute, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
+use super::{AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
 use smallvec::SmallVec;
 use tendril::StrTendril;
@@ -10,16 +10,25 @@ std::thread_local! {
     static FRAGMENT_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn copied_node_data(source: &Dom, id: NodeId) -> NodeData {
+fn copied_node_data(destination: &mut Dom, source: &Dom, id: NodeId) -> NodeData {
     match &source.node(id).data {
-        NodeData::Element(element) => NodeData::Element(ElementData {
-            name: element.name.clone(),
-            tag: element.tag,
-            attrs: element.attrs.clone(),
-            template_contents: NodeLink::NONE,
-            mathml_annotation_xml_integration_point: element
-                .mathml_annotation_xml_integration_point,
-        }),
+        NodeData::Element(element) => {
+            let compact_name = destination.clone_element_name_from(source, id);
+            let attrs = element
+                .attrs
+                .iter()
+                .map(|attribute| destination.clone_attribute_from(source, attribute))
+                .collect();
+            NodeData::Element(ElementData {
+                name: compact_name,
+                local: element.local.clone(),
+                tag: element.tag,
+                attrs,
+                template_contents: NodeLink::NONE,
+                mathml_annotation_xml_integration_point: element
+                    .mathml_annotation_xml_integration_point,
+            })
+        }
         data => data.clone(),
     }
 }
@@ -158,46 +167,88 @@ impl Dom {
         }
     }
     pub(crate) fn rename_html(&mut self, node: NodeId, tag: Tag) {
+        let name = QualName::new(None, ns!(html), LocalName::from(tag.as_lowercase_str()));
+        let old_name = match &self.node(node).data {
+            NodeData::Element(e) => Some(e.name),
+            _ => None,
+        };
+        if let Some(old_name) = old_name {
+            self.release_element_name(old_name);
+        }
+        let compact_name = self.compact_element_name(&name, tag);
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.tag = tag;
-            e.name = QualName::new(None, ns!(html), LocalName::from(tag.as_lowercase_str()))
+            e.name = compact_name;
+            e.local = LocalName::from(tag.as_lowercase_str());
         }
     }
     pub(crate) fn set_attr(&mut self, node: NodeId, name: AttrName, value: &str) {
-        if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            if let Some(a) = e
-                .attrs
-                .iter_mut()
-                .find(|attribute| attribute.is_named(name))
-            {
-                a.value = StrTendril::from(value)
-            } else {
-                e.attrs.push(Attribute::new(
-                    QualName::new(None, ns!(), LocalName::from(name.as_str())),
-                    StrTendril::from(value),
-                ))
+        let index = match &self.node(node).data {
+            NodeData::Element(e) => e.attrs.iter().position(|a| a.is_named(name)),
+            _ => None,
+        };
+        if let Some(index) = index {
+            if let NodeData::Element(e) = &mut self.node_mut(node).data {
+                e.attrs[index].value = StrTendril::from(value)
+            }
+        } else {
+            let attribute = self.compact_attribute_parts(
+                QualName::new(None, ns!(), LocalName::from(name.as_str())),
+                StrTendril::from(value),
+            );
+            if let NodeData::Element(e) = &mut self.node_mut(node).data {
+                e.attrs.push(attribute)
             }
         }
     }
 
     pub(crate) fn set_attr_qual(&mut self, node: NodeId, name: QualName, value: StrTendril) {
-        if let NodeData::Element(e) = &mut self.node_mut(node).data {
-            if let Some(a) = e.attrs.iter_mut().find(|a| a.name == name) {
+        let index = match &self.node(node).data {
+            NodeData::Element(e) => e
+                .attrs
+                .iter()
+                .position(|a| self.attribute_matches(a, &name)),
+            _ => None,
+        };
+        if let Some(index) = index {
+            if let NodeData::Element(e) = &mut self.node_mut(node).data {
+                let a = &mut e.attrs[index];
                 a.value = value
-            } else {
-                e.attrs.push(Attribute::new(name, value))
+            }
+        } else {
+            let compact = self.compact_attribute_parts(name, value);
+            if let NodeData::Element(e) = &mut self.node_mut(node).data {
+                e.attrs.push(compact)
             }
         }
     }
     pub(crate) fn remove_attr(&mut self, node: NodeId, name: AttrName) {
+        let released: Vec<_> = self
+            .attrs(node)
+            .iter()
+            .filter(|attribute| attribute.is_named(name))
+            .filter_map(|attribute| attribute.qualified_name_index())
+            .collect();
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.attrs.retain(|attribute| !attribute.is_named(name));
         }
+        for index in released {
+            self.release_attribute_name_index(index);
+        }
     }
     pub(crate) fn remove_attrs(&mut self, node: NodeId, names: &[AttrName]) {
+        let released: Vec<_> = self
+            .attrs(node)
+            .iter()
+            .filter(|attribute| names.iter().any(|name| attribute.is_named(*name)))
+            .filter_map(|attribute| attribute.qualified_name_index())
+            .collect();
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.attrs
                 .retain(|attribute| !names.iter().any(|name| attribute.is_named(*name)));
+        }
+        for index in released {
+            self.release_attribute_name_index(index);
         }
     }
     #[cfg(test)]
@@ -231,21 +282,24 @@ impl Dom {
         source: &Dom,
         source_root: NodeId,
     ) -> Result<NodeId, DomError> {
-        let root = self.create(copied_node_data(source, source_root))?;
+        let root_data = copied_node_data(self, source, source_root);
+        let root = self.create(root_data)?;
         let mut work = SmallVec::<[(NodeId, NodeId); 16]>::new();
         work.push((source_root, root));
         while let Some((source_id, dest_id)) = work.pop() {
             if let NodeData::Element(element) = &source.node(source_id).data
                 && let Some(template) = element.template_contents.get()
             {
-                let template_copy = self.create(copied_node_data(source, template))?;
+                let template_data = copied_node_data(self, source, template);
+                let template_copy = self.create(template_data)?;
                 if let NodeData::Element(destination) = &mut self.node_mut(dest_id).data {
                     destination.template_contents = NodeLink::from_option(Some(template_copy));
                 }
                 work.push((template, template_copy));
             }
             for child in source.children(source_id) {
-                let child_copy = self.create(copied_node_data(source, child))?;
+                let child_data = copied_node_data(self, source, child);
+                let child_copy = self.create(child_data)?;
                 self.append_child(dest_id, child_copy);
                 work.push((child, child_copy));
             }

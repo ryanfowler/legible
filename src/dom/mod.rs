@@ -13,7 +13,7 @@ mod traversal;
 pub(crate) use arena::Dom;
 pub(crate) use attr::{AttrName, Attribute};
 pub(crate) use id::{DomError, NodeId, NodeLink};
-pub(crate) use node::{ElementData, Node, NodeData};
+pub(crate) use node::{ElementData, ElementName, Node, NodeData};
 pub(crate) use parse::{ParseError, ParseLimitKind};
 pub(crate) use state::{DataTableState, NodeStateStore, NodeStats, ScoreStore};
 pub(crate) use tag::Tag;
@@ -171,6 +171,132 @@ mod tests {
             Some(Tag::Em)
         );
         assert_eq!(dom.text(template_contents), "saved");
+    }
+
+    #[test]
+    fn compact_names_preserve_custom_and_namespaced_payloads() {
+        let dom = Dom::parse_document(
+            "<body><x-widget data-custom='yes'>x</x-widget>\
+             <svg><a xlink:href='x'>link</a><foreignObject viewBox='0 0 1 1'>y</foreignObject></svg></body>",
+        )
+        .unwrap();
+        let widget = dom
+            .descendants(dom.root())
+            .find(|&node| dom.local_name(node) == Some("x-widget"))
+            .unwrap();
+        assert_eq!(dom.local_name(widget), Some("x-widget"));
+        assert_eq!(dom.attr_by_local_name(widget, "data-custom"), Some("yes"));
+        let svg_link = dom
+            .descendants(dom.root())
+            .find(|&node| {
+                dom.local_name(node) == Some("a") && dom.is_namespace(node, &html5ever::ns!(svg))
+            })
+            .unwrap();
+        assert_eq!(dom.attr_by_local_name(svg_link, "href"), Some("x"));
+        assert_eq!(dom.attrs(svg_link).len(), 1);
+        assert_eq!(
+            dom.attribute_qual_name(&dom.attrs(svg_link)[0])
+                .prefix
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            "xlink"
+        );
+        let foreign_object = dom
+            .descendants(dom.root())
+            .find(|&node| dom.local_name(node) == Some("foreignObject"))
+            .unwrap();
+        assert!(dom.is_namespace(foreign_object, &html5ever::ns!(svg)));
+        assert_eq!(
+            dom.attribute_local_name(&dom.attrs(foreign_object)[0]),
+            "viewBox"
+        );
+    }
+
+    #[test]
+    fn compact_payloads_are_smaller_than_full_name_pairs() {
+        assert_eq!(std::mem::size_of::<Attribute>(), 32);
+        assert_eq!(std::mem::size_of::<ElementData>(), 48);
+    }
+
+    #[test]
+    fn compact_dom_storage_is_smaller_for_attribute_heavy_markup() {
+        #[allow(dead_code)]
+        struct LegacyAttribute {
+            name: html5ever::QualName,
+            value: tendril::StrTendril,
+            kind: AttrName,
+        }
+        #[allow(dead_code)]
+        struct LegacyElementData {
+            name: html5ever::QualName,
+            tag: Tag,
+            attrs: Vec<LegacyAttribute>,
+            template_contents: NodeLink,
+            mathml_annotation_xml_integration_point: bool,
+        }
+        #[allow(dead_code)]
+        enum LegacyNodeData {
+            Document,
+            Fragment,
+            Doctype {
+                name: tendril::StrTendril,
+                public_id: tendril::StrTendril,
+                system_id: tendril::StrTendril,
+            },
+            Text(tendril::StrTendril),
+            Comment(tendril::StrTendril),
+            Element(LegacyElementData),
+            ProcessingInstruction {
+                target: tendril::StrTendril,
+                contents: tendril::StrTendril,
+            },
+        }
+        #[allow(dead_code)]
+        struct LegacyNode {
+            parent: NodeLink,
+            prev_sibling: NodeLink,
+            next_sibling: NodeLink,
+            first_child: NodeLink,
+            last_child: NodeLink,
+            data: LegacyNodeData,
+        }
+
+        let mut source = String::from("<body>");
+        for index in 0..128 {
+            source.push_str(&format!(
+                "<p class='entry-{index}' data-source='source-{index}'><span>text</span></p>"
+            ));
+        }
+        source.push_str("</body>");
+        let dom = Dom::parse_document(&source).unwrap();
+        let compact_bytes = dom.nodes.capacity() * std::mem::size_of::<Node>()
+            + dom
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.data {
+                    NodeData::Element(element) => {
+                        Some(element.attrs.capacity() * std::mem::size_of::<Attribute>())
+                    }
+                    _ => None,
+                })
+                .sum::<usize>()
+            + dom.auxiliary_name_storage_bytes();
+        let legacy_bytes = dom.nodes.capacity() * std::mem::size_of::<LegacyNode>()
+            + dom
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.data {
+                    NodeData::Element(element) => {
+                        Some(element.attrs.capacity() * std::mem::size_of::<LegacyAttribute>())
+                    }
+                    _ => None,
+                })
+                .sum::<usize>();
+        assert!(
+            compact_bytes < legacy_bytes,
+            "{compact_bytes} >= {legacy_bytes}"
+        );
     }
 
     #[test]

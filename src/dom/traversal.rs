@@ -42,9 +42,8 @@ impl DocumentAnchors {
 
 fn is_html_base(dom: &Dom, node: NodeId) -> bool {
     dom.tag(node) == Some(Tag::Other)
-        && dom
-            .qual_name(node)
-            .is_some_and(|name| name.ns == ns!(html) && name.local.as_ref() == "base")
+        && dom.is_namespace(node, &ns!(html))
+        && dom.local_name(node) == Some("base")
 }
 
 #[cfg(test)]

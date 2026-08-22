@@ -643,7 +643,7 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         let mut lazy_srcset = None;
         for a in dom.attrs(id) {
             let v = a.value.as_ref();
-            match AttrName::from_local(a.name.local.as_ref()) {
+            match AttrName::from_local(dom.attribute_local_name(a)) {
                 AttrName::Src => {
                     src = !v.is_empty();
                     if let Some((_, media_type)) = parse_b64_data_url(v)
@@ -745,7 +745,7 @@ fn noscript_media_root(dom: &Dom, noscript: NodeId, image: NodeId) -> NodeId {
 
 fn useful_image(dom: &Dom, id: NodeId) -> bool {
     dom.attrs(id).iter().any(|attribute| {
-        let name = attribute.name.local.as_ref();
+        let name = dom.attribute_local_name(attribute);
         matches!(name, "src" | "srcset" | "data-src" | "data-srcset")
             || has_image_extension(attribute.value.as_ref())
     })
@@ -758,11 +758,11 @@ fn copy_image_attributes(dom: &mut Dom, from: NodeId, to: NodeId) {
         .filter(|a| {
             !a.value.is_empty()
                 && (matches!(
-                    AttrName::from_local(a.name.local.as_ref()),
+                    AttrName::from_local(dom.attribute_local_name(a)),
                     AttrName::Src | AttrName::Srcset
                 ) || has_image_extension(a.value.as_ref()))
         })
-        .map(|a| (a.name.clone(), a.value.clone()))
+        .map(|a| (dom.attribute_qual_name(a), a.value.clone()))
         .collect();
     for (mut name, value) in attrs {
         if dom.attr_by_local_name(to, name.local.as_ref()) == Some(value.as_ref()) {
@@ -785,14 +785,19 @@ fn copy_missing_image_description(dom: &mut Dom, from: NodeId, to: NodeId) {
         .iter()
         .filter(|attribute| {
             matches!(
-                attribute.name.local.as_ref(),
+                dom.attribute_local_name(attribute),
                 "alt" | "aria-label" | "title"
             ) && !attribute.value.trim().is_empty()
                 && dom
-                    .attr_by_local_name(to, attribute.name.local.as_ref())
+                    .attr_by_local_name(to, dom.attribute_local_name(attribute))
                     .is_none_or(|value| value.trim().is_empty())
         })
-        .map(|attribute| (attribute.name.clone(), attribute.value.to_string()))
+        .map(|attribute| {
+            (
+                dom.attribute_qual_name(attribute),
+                attribute.value.to_string(),
+            )
+        })
         .collect();
     for (name, value) in attrs {
         dom.set_attr_qual(to, name, value.into());
@@ -1292,11 +1297,12 @@ fn populate_heuristic_aggregates(
         has_two_images[node.index()] = image_count >= 2;
         if tag == Some(Tag::Other)
             && dom.attr_by_local_name(node, "action").is_some()
-            && (dom.qual_name(node).is_some_and(|name| {
-                contains_ascii_case_insensitive(name.local.as_ref(), "newsletter-form")
-            }) || dom
-                .attr(node, AttrName::Class)
-                .is_some_and(|value| contains_ascii_case_insensitive(value, "newsletter-form"))
+            && (dom
+                .local_name(node)
+                .is_some_and(|name| contains_ascii_case_insensitive(name, "newsletter-form"))
+                || dom
+                    .attr(node, AttrName::Class)
+                    .is_some_and(|value| contains_ascii_case_insensitive(value, "newsletter-form"))
                 || dom
                     .attr(node, AttrName::Id)
                     .is_some_and(|value| contains_ascii_case_insensitive(value, "newsletter-form")))
@@ -4833,7 +4839,7 @@ fn invalidate_stats_for_ancestors(dom: &Dom, node: NodeId, store: &mut crate::do
 
 fn has_lazy_image_candidate(dom: &Dom, image: NodeId) -> bool {
     dom.attrs(image).iter().any(|attribute| {
-        let name = attribute.name.local.as_ref();
+        let name = dom.attribute_local_name(attribute);
         name.starts_with("data-")
             && (has_image_src(attribute.value.as_ref())
                 || has_image_srcset(attribute.value.as_ref()))
@@ -5018,7 +5024,7 @@ fn near_content_start(
 
 fn node_name<'a>(dom: &'a Dom, node: NodeId) -> Cow<'a, str> {
     let tag_name = (dom.tag(node) == Some(Tag::Other))
-        .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
+        .then(|| dom.local_name(node))
         .flatten();
     let class = dom.attr(node, AttrName::Class);
     let id = dom.attr(node, AttrName::Id);
@@ -5053,7 +5059,7 @@ fn node_name<'a>(dom: &'a Dom, node: NodeId) -> Cow<'a, str> {
 fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
     output.clear();
     let tag_name = (dom.tag(node) == Some(Tag::Other))
-        .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
+        .then(|| dom.local_name(node))
         .flatten();
     let class = dom.attr(node, AttrName::Class);
     let id = dom.attr(node, AttrName::Id);

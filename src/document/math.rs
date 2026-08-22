@@ -230,8 +230,8 @@ fn math_fallback(dom: &Dom, node: NodeId) -> Option<String> {
             .parent(descendant)
             .is_some_and(|parent| inside_annotation[parent.index()]);
         let annotation = dom
-            .qual_name(descendant)
-            .is_some_and(|name| is_annotation_element(name.local.as_ref()));
+            .local_name(descendant)
+            .is_some_and(is_annotation_element);
         inside_annotation[descendant.index()] = inherited || annotation;
         if dom.text_node(descendant).is_none() || inside_annotation[descendant.index()] {
             continue;
@@ -249,8 +249,8 @@ fn math_fallback(dom: &Dom, node: NodeId) -> Option<String> {
 }
 
 pub(crate) fn is_math_root(dom: &Dom, node: NodeId) -> bool {
-    dom.qual_name(node)
-        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("math"))
+    dom.local_name(node)
+        .is_some_and(|name| name.eq_ignore_ascii_case("math"))
 }
 
 fn is_annotation_element(local: &str) -> bool {
@@ -317,8 +317,8 @@ pub(crate) fn accessible_math_nodes_with_root(
 }
 
 pub(crate) fn is_tex_annotation(dom: &Dom, node: NodeId) -> bool {
-    dom.qual_name(node)
-        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("annotation"))
+    dom.local_name(node)
+        .is_some_and(|name| name.eq_ignore_ascii_case("annotation"))
         && dom
             .attr_by_local_name(node, "encoding")
             .is_some_and(is_tex_encoding)
@@ -416,8 +416,8 @@ fn explicit_latex(dom: &Dom, node: NodeId) -> Option<String> {
     let annotated = std::iter::once(node)
         .chain(dom.descendants(node))
         .find(|&descendant| {
-            dom.qual_name(descendant)
-                .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("annotation"))
+            dom.local_name(descendant)
+                .is_some_and(|name| name.eq_ignore_ascii_case("annotation"))
                 && dom
                     .attr_by_local_name(descendant, "encoding")
                     .is_some_and(|encoding| {
@@ -527,10 +527,7 @@ fn mathml_latex(dom: &Dom, root: NodeId) -> Option<String> {
                     output.push_str(text.trim());
                     continue;
                 }
-                let local = dom
-                    .qual_name(node)
-                    .map(|name| name.local.as_ref())
-                    .unwrap_or("");
+                let local = dom.local_name(node).unwrap_or("");
                 let children: Vec<NodeId> = dom
                     .children(node)
                     .filter(|&child| {
@@ -666,8 +663,8 @@ fn is_math_script_type(value: &str) -> bool {
 }
 
 pub(crate) fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {
-    dom.qual_name(node)
-        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"))
+    dom.local_name(node)
+        .is_some_and(|name| name.eq_ignore_ascii_case("mjx-container"))
         || dom.attr(node, AttrName::Class).is_some_and(|classes| {
             classes.split_ascii_whitespace().any(|class| {
                 has_any_token(

@@ -2619,7 +2619,7 @@ impl<'a> ContentExtractor<'a> {
     ) -> Option<RootInfo> {
         self.diagnostic_attempts.as_ref()?;
         Some(RootInfo {
-            tag: dom.qual_name(root).map(|name| name.local.to_string()),
+            tag: dom.local_name(root).map(str::to_owned),
             id: dom.attr(root, AttrName::Id).map(str::to_owned),
             classes: dom
                 .attr(root, AttrName::Class)
@@ -2678,9 +2678,7 @@ impl<'a> ContentExtractor<'a> {
             }
         }
         Some(RootInfo {
-            tag: dom
-                .qual_name(selection.node)
-                .map(|name| name.local.to_string()),
+            tag: dom.local_name(selection.node).map(str::to_owned),
             id: dom.attr(selection.node, AttrName::Id).map(str::to_owned),
             classes: dom
                 .attr(selection.node, AttrName::Class)

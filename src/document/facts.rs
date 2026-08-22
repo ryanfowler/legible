@@ -596,8 +596,7 @@ fn may_have_math_evidence(dom: &Dom, node: NodeId) -> bool {
                 || dom
                     .attr(node, AttrName::Src)
                     .is_some_and(likely_math_source))
-        || dom.qual_name(node).is_some_and(|name| {
-            let local = name.local.as_ref();
+        || dom.local_name(node).is_some_and(|local| {
             local.eq_ignore_ascii_case("annotation") || local.eq_ignore_ascii_case("mjx-container")
         })
         || dom.attr_by_local_name(node, "data-latex").is_some()
