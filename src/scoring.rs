@@ -2006,13 +2006,6 @@ pub(crate) fn compute_initial_readability_data_from_source(
     };
     score + f64::from(class_weight)
 }
-pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, weight_classes: bool) {
-    store.initialize_if_absent(
-        id,
-        compute_initial_readability_data(dom, id, weight_classes),
-    );
-}
-
 pub(crate) fn initialize_score_node(
     dom: &Dom,
     id: NodeId,

@@ -516,6 +516,7 @@ impl NodeStateStore {
         cache.epochs[id.index()] = cache.epoch;
     }
 
+    #[cfg(test)]
     pub(crate) fn has(&self, id: super::NodeId) -> bool {
         self.score_entry(id)
             .is_some_and(|entry| entry.flags.get(SCORE_INITIALIZED))
@@ -542,6 +543,7 @@ impl NodeStateStore {
         entry.flags.set(SCORE_INITIALIZED, true);
     }
 
+    #[cfg(test)]
     pub(crate) fn initialize_if_absent(&mut self, id: super::NodeId, score: f64) -> bool {
         let entry = self.score_entry_mut(id);
         if entry.flags.get(SCORE_INITIALIZED) {
