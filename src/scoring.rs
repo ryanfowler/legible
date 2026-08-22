@@ -2,7 +2,7 @@
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
 use crate::constants::is_div_to_p_elem;
 use crate::constants::{has_byline, is_phrasing_elem, is_unlikely_role, regexps};
-use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, Tag};
+use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, ScoreStore, Tag};
 use crate::prepared::{SourceAnalysis, SourceEntry};
 use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
@@ -139,6 +139,12 @@ impl ScoringView {
     pub(crate) fn seed_text_overrides(&self, store: &mut NodeStateStore) {
         for &(node, stats) in &self.text_overrides {
             store.set_stats(node, stats);
+        }
+    }
+
+    fn seed_source_text_overrides(&self, store: &mut NodeStateStore) {
+        for &(node, stats) in &self.text_overrides {
+            store.set_source_stats(node, stats);
         }
     }
 
@@ -980,7 +986,13 @@ fn get_or_compute_stats_excluding_impl(
     store: &mut NodeStateStore,
     excluded: &[bool],
 ) -> NodeStats {
-    if let Some(s) = store.get_stats(id) {
+    let source_cache = store.source_stats_enabled() && source.is_some() && excluded.is_empty();
+    let cached = if source_cache {
+        store.get_source_stats(id)
+    } else {
+        store.get_stats(id)
+    };
+    if let Some(s) = cached {
         return *s;
     }
 
@@ -991,7 +1003,11 @@ fn get_or_compute_stats_excluding_impl(
         let stats = source
             .and_then(|source| source.text_stats(id))
             .unwrap_or_else(|| stats_for_text(text));
-        store.set_stats(id, stats);
+        if source_cache {
+            store.set_source_stats(id, stats);
+        } else {
+            store.set_stats(id, stats);
+        }
         return stats;
     }
     let mut current = id;
@@ -1017,10 +1033,16 @@ fn get_or_compute_stats_excluding_impl(
         && !chain.is_empty()
     {
         let stats = child
-            .and_then(|child| store.get_stats(child).copied())
+            .and_then(|child| {
+                if source_cache {
+                    store.get_source_stats(child).copied()
+                } else {
+                    store.get_stats(child).copied()
+                }
+            })
             .or_else(|| child.and_then(|child| source.and_then(|source| source.text_stats(child))))
             .unwrap_or_else(|| stats_for_text(text));
-        let cache_links = store.link_lengths_enabled();
+        let cache_links = store.link_lengths_enabled() && !source_cache;
         for &node in chain.iter().rev() {
             if cache_links {
                 let link_length = if dom.tag(node) == Some(Tag::A) {
@@ -1035,7 +1057,11 @@ fn get_or_compute_stats_excluding_impl(
                 };
                 store.set_link_length(node, link_length);
             }
-            store.set_stats(node, stats);
+            if source_cache {
+                store.set_source_stats(node, stats);
+            } else {
+                store.set_stats(node, stats);
+            }
         }
         return stats;
     }
@@ -1064,7 +1090,7 @@ fn get_or_compute_stats_excluding_impl(
         }
     }
 
-    let cache_links = store.link_lengths_enabled();
+    let cache_links = store.link_lengths_enabled() && !source_cache;
     let mut stack = SmallVec::<[StatsFrame; 16]>::new();
     stack.push(StatsFrame::new(dom, source, id));
     while let Some(frame) = stack.last_mut() {
@@ -1073,7 +1099,12 @@ fn get_or_compute_stats_excluding_impl(
             if excluded.get(child.index()).copied().unwrap_or(false) {
                 continue;
             }
-            if let Some(child_stats) = store.get_stats(child) {
+            let child_stats = if source_cache {
+                store.get_source_stats(child)
+            } else {
+                store.get_stats(child)
+            };
+            if let Some(child_stats) = child_stats {
                 append_stats(&mut frame.stats, child_stats);
                 if cache_links {
                     frame.link_length += store.link_length(child);
@@ -1102,7 +1133,11 @@ fn get_or_compute_stats_excluding_impl(
             }
             store.set_link_length(completed.node, completed.link_length);
         }
-        store.set_stats(completed.node, completed.stats);
+        if source_cache {
+            store.set_source_stats(completed.node, completed.stats);
+        } else {
+            store.set_stats(completed.node, completed.stats);
+        }
         if let Some(parent) = stack.last_mut() {
             append_stats(&mut parent.stats, &completed.stats);
             if cache_links {
@@ -1110,7 +1145,11 @@ fn get_or_compute_stats_excluding_impl(
             }
         }
     }
-    store.get_stats(id).copied().unwrap_or_default()
+    if source_cache {
+        store.get_source_stats(id).copied().unwrap_or_default()
+    } else {
+        store.get_stats(id).copied().unwrap_or_default()
+    }
 }
 /// Structural counts for candidate subtrees.
 ///
@@ -1512,6 +1551,18 @@ pub fn initialize_node(dom: &Dom, id: NodeId, store: &mut NodeStateStore, weight
     );
 }
 
+pub(crate) fn initialize_score_node(
+    dom: &Dom,
+    id: NodeId,
+    scores: &mut ScoreStore,
+    weight_classes: bool,
+) {
+    scores.initialize_if_absent(
+        id,
+        compute_initial_readability_data(dom, id, weight_classes),
+    );
+}
+
 /// Prepares a scoring-only DOM and returns paragraphs created by the pass.
 ///
 /// The caller must pass a selected fragment or a test-only source copy. This
@@ -1623,7 +1674,7 @@ pub(crate) fn compute_readability_scores(
             store.set_link_length(node, 0.0);
         }
     }
-    let mut scores = SmallVec::new();
+    let mut readability_scores = SmallVec::new();
     for node in discovered {
         if excluded_mask.get(node.index()).copied().unwrap_or(false) {
             continue;
@@ -1631,26 +1682,32 @@ pub(crate) fn compute_readability_scores(
         let content_score = store.get_content_score(node);
         let length = get_or_compute_stats_from_source(dom, source, node, store, &[]).text_length;
         let density = get_link_density_cached(dom, node, length, store);
-        scores.push(ReadabilityScore {
+        readability_scores.push(ReadabilityScore {
             node,
             score: content_score * (1.0 - density),
         });
     }
-    scores
+    readability_scores
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_readability_scores_in_view(
     dom: &Dom,
     source: &SourceAnalysis,
     view: &ScoringView,
     to_score: impl IntoIterator<Item = NodeId>,
     excluded_mask: &[bool],
-    store: &mut NodeStateStore,
+    facts: &mut NodeStateStore,
+    scores: &mut ScoreStore,
     weight_classes: bool,
 ) -> SmallVec<[ReadabilityScore; 64]> {
     let mut discovered = SmallVec::<[NodeId; 256]>::new();
-    view.seed_text_overrides(store);
-    let mut score_seed = |parent: NodeId, stats: NodeStats, store: &mut NodeStateStore| {
+    if facts.source_stats_enabled() {
+        view.seed_source_text_overrides(facts);
+    } else {
+        view.seed_text_overrides(facts);
+    }
+    let mut score_seed = |parent: NodeId, stats: NodeStats, scores: &mut ScoreStore| {
         if stats.text_length < 25 {
             return;
         }
@@ -1668,7 +1725,7 @@ pub(crate) fn compute_readability_scores_in_view(
                 source.class_weight(node),
                 weight_classes,
             );
-            if store.initialize_if_absent(node, score) {
+            if scores.initialize_if_absent(node, score) {
                 discovered.push(node);
             }
             let divisor = match level {
@@ -1676,7 +1733,7 @@ pub(crate) fn compute_readability_scores_in_view(
                 1 => 2.0,
                 _ => (level * 3) as f64,
             };
-            store.add_content_score(node, content_score / divisor);
+            scores.add(node, content_score / divisor);
         }
     };
 
@@ -1687,43 +1744,52 @@ pub(crate) fn compute_readability_scores_in_view(
         else {
             continue;
         };
-        let stats = get_or_compute_stats_from_source(dom, Some(source), node, store, &[]);
-        score_seed(parent, stats, store);
+        let stats = get_or_compute_stats_from_source(dom, Some(source), node, facts, &[]);
+        score_seed(parent, stats, scores);
     }
     for seed in view.prepared_seeds() {
         match *seed {
             PreparedScoreSeed::Node { node, parent } => {
-                if !store.mark_score_seen(node) {
+                if !scores.mark_seen(node) {
                     continue;
                 }
-                let stats = get_or_compute_stats_from_source(dom, Some(source), node, store, &[]);
-                score_seed(parent, stats, store);
+                let stats = get_or_compute_stats_from_source(dom, Some(source), node, facts, &[]);
+                score_seed(parent, stats, scores);
             }
-            PreparedScoreSeed::Virtual { parent, stats } => score_seed(parent, stats, store),
+            PreparedScoreSeed::Virtual { parent, stats } => score_seed(parent, stats, scores),
         }
     }
 
     // Paragraph propagation uses the unfiltered source, just as the mutable
-    // implementation did before detach. Candidate metrics use the retained
-    // scoring view, so discard only cached text and link facts now.
-    store.clear_stats();
-    view.seed_text_overrides(store);
-    let mut scores = SmallVec::new();
+    // implementation did before detach. The first weighted variant switches
+    // the regular cache to the filtered view. A later unweighted variant uses
+    // the separate source cache and can keep reusing these filtered facts.
+    let source_stats_was_enabled = facts.source_stats_enabled();
+    if source_stats_was_enabled {
+        // Candidate ranking and link density use the regular filtered cache.
+        // The source cache is only needed for this variant's propagation pass.
+        facts.disable_source_stats();
+    }
+    if !source_stats_was_enabled {
+        facts.clear_stats();
+        view.seed_text_overrides(facts);
+    }
+    let mut readability_scores = SmallVec::new();
     for node in discovered {
         if excluded_mask.get(node.index()).copied().unwrap_or(false) || view.ignores_wrapper(node) {
             continue;
         }
-        let content_score = store.get_content_score(node);
+        let content_score = scores.get(node);
         let length =
-            get_or_compute_stats_from_source_excluding(dom, source, node, store, excluded_mask)
+            get_or_compute_stats_from_source_excluding(dom, source, node, facts, excluded_mask)
                 .text_length;
-        let density = get_link_density_cached(dom, node, length, store);
-        scores.push(ReadabilityScore {
+        let density = get_link_density_cached(dom, node, length, facts);
+        readability_scores.push(ReadabilityScore {
             node,
             score: content_score * (1.0 - density),
         });
     }
-    scores
+    readability_scores
 }
 
 fn initial_readability_for_tag(
@@ -2446,7 +2512,7 @@ mod tests {
         stats_for_text,
     };
     use crate::candidate::CandidateSet;
-    use crate::dom::{AttrName, Dom, NodeStateStore, Tag};
+    use crate::dom::{AttrName, Dom, NodeStateStore, ScoreStore, Tag};
     use crate::prepared::SourceAnalysis;
 
     #[test]
@@ -2811,8 +2877,9 @@ mod tests {
 
         let view = ScoringView::build(&source_dom, &source, &divs, &candidates);
         let mut view_store = NodeStateStore::new();
+        let mut view_scores = ScoreStore::new();
         for &paragraph in &paragraphs {
-            view_store.mark_score_seen(paragraph);
+            view_scores.mark_seen(paragraph);
         }
         let view_scores = compute_readability_scores_in_view(
             &source_dom,
@@ -2821,6 +2888,7 @@ mod tests {
             paragraphs.clone(),
             &[],
             &mut view_store,
+            &mut view_scores,
             true,
         );
 
