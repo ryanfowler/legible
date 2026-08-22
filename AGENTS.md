@@ -176,7 +176,7 @@ let markdown = page.markdown();
 
 `ExtractedPage` owns a private semantic representation. It provides lazy HTML, Markdown, and text methods, scalar metrics, and page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
 
-`ExtractedPage` also provides `write_markdown`, `write_html`, and `write_text` methods. These methods write output to a `std::fmt::Write` value and return `std::fmt::Result`. The Markdown and HTML builders provide matching `write` methods.
+`ExtractedPage` also provides `write_markdown`, `write_html`, and `write_text` methods. These methods write output to a `std::fmt::Write` value and return `std::fmt::Result`. The page also provides `write_markdown_io`, `write_html_io`, and `write_text_io` methods for `std::io::Write` values. These methods return `std::io::Result<()>`. The Markdown and HTML builders provide matching `write` and `write_io` methods.
 
 ## Fuzzing
 
