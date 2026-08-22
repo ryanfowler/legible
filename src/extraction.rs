@@ -24,7 +24,7 @@ use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
     accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes,
     cleanup_selected_content_in_workspace, collect_external_footnotes,
-    has_primary_heading_semantics, materialize_scoring_structure, normalize_svg_before_scoring,
+    has_primary_heading_semantics, normalize_svg_before_scoring,
     prepare_media_before_cleanup_in_workspace, remove_decorative_media_before_cleanup_in_workspace,
     remove_empty_content_with_source_facts,
 };
@@ -1233,13 +1233,17 @@ impl<'a> ContentExtractor<'a> {
             // Copy only the selected source roots. The scoring view remains
             // available for later strategies, so a rejected attempt does not
             // require another complete DOM clone.
-            let mut fragment = {
+            let fragment = {
                 let _phase = PhaseGuard::new(Phase::FragmentCopy);
-                working_dom
-                    .copy_subtrees_as_fragment_excluding(&source_siblings, &analysis.excluded_mask)
+                analysis
+                    .view
+                    .copy_projected_subtrees_as_fragment_excluding(
+                        working_dom,
+                        &source_siblings,
+                        &analysis.excluded_mask,
+                    )
                     .map_err(|_| Error::NoContent)?
             };
-            materialize_scoring_structure(&mut fragment);
             let copied_siblings: SmallVec<[NodeId; 16]> =
                 fragment.children(fragment.root()).collect();
             let copied_top = if synthetic {
@@ -2007,16 +2011,17 @@ impl<'a> ContentExtractor<'a> {
         let _scoring_phase = PhaseGuard::new(Phase::Scoring);
         let working_dom = &self.dom;
         let working_root = working_dom.root();
-        let view = ScoringView::build(
-            working_dom,
-            ctx.prepared_source,
-            &discovery.divs_to_prepare,
-            &discovery.candidates,
-        );
         let excluded_mask = build_exclusion_mask_with_source(
             working_dom,
             ctx.prepared_source,
             &discovery.remove_after_scoring,
+        );
+        let view = ScoringView::build_with_exclusions(
+            working_dom,
+            ctx.prepared_source,
+            &discovery.divs_to_prepare,
+            &discovery.candidates,
+            &excluded_mask,
         );
         let body = ctx
             .source_anchors

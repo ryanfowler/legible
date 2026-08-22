@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+#[cfg(test)]
 const STRONG_IDS: &[&str] = &["post", "content", "article-content"];
 const ARTICLE_TAG_PRIOR: f64 = 0.003;
 const MAIN_TAG_PRIOR: f64 = 0.0025;
@@ -17,6 +18,7 @@ const ARTICLE_BODY_PRIOR: f64 = 0.0035;
 const OTHER_SEMANTIC_PRIOR: f64 = 0.0025;
 const ADDITIONAL_SIGNAL_BONUS: f64 = 0.0005;
 const MAX_SEMANTIC_PRIOR: f64 = 0.004;
+#[cfg(test)]
 const STRONG_CLASSES: &[&str] = &[
     "post-content",
     "post-body",
@@ -283,6 +285,7 @@ impl CandidateSet {
         Self::discover_semantic_from_snapshot(dom, &snapshot, dom.body())
     }
 
+    #[cfg(test)]
     pub(crate) fn discover_semantic_from_snapshot(
         dom: &Dom,
         snapshot: &[(NodeId, u32)],
@@ -291,6 +294,7 @@ impl CandidateSet {
         Self::discover_semantic_from_entries(dom, snapshot.iter().copied(), body)
     }
 
+    #[cfg(test)]
     fn discover_semantic_from_entries(
         dom: &Dom,
         entries: impl IntoIterator<Item = (NodeId, u32)>,

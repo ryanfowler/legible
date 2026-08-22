@@ -15,6 +15,7 @@ use crate::scoring::is_element_without_content;
 ///
 /// The projections affect retained block boundaries. Apply them after root
 /// selection so the complete source tree stays immutable and shared.
+#[cfg(test)]
 pub(crate) fn materialize_scoring_structure(dom: &mut Dom) {
     let root = dom.root();
     headings::normalize_roles(dom, root);

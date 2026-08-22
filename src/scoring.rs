@@ -1,11 +1,14 @@
 //! Content scoring and DOM text helpers.
 use crate::candidate::{Candidate, CandidateFeatures, CandidateSet};
-use crate::constants::is_div_to_p_elem;
 use crate::constants::{has_byline, is_phrasing_elem, is_unlikely_role, regexps};
-use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, NodeStats, ScoreStore, Tag};
+use crate::dom::{
+    AttrName, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, NodeStateStore, NodeStats,
+    ScoreStore, Tag,
+};
 use crate::prepared::{SourceAnalysis, SourceEntry};
 use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
+use tendril::StrTendril;
 
 pub(crate) const TOP_CANDIDATES: usize = 5;
 
@@ -13,6 +16,14 @@ pub(crate) const TOP_CANDIDATES: usize = 5;
 pub(crate) enum PreparedScoreSeed {
     Node { node: NodeId, parent: NodeId },
     Virtual { parent: NodeId, stats: NodeStats },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DivProjection {
+    Keep,
+    PromoteChild(NodeId),
+    PromotePhrasing,
+    RenameP,
 }
 
 /// The differences between the immutable source tree and Readability's
@@ -31,14 +42,28 @@ pub(crate) struct ScoringView {
     /// descendant walk for every prepared DIV while keeping storage
     /// proportional to the requested scoring nodes.
     div_descendant_facts: SmallVec<[(NodeId, bool); 128]>,
+    div_projections: SmallVec<[(NodeId, DivProjection); 128]>,
+    text_replacements: SmallVec<[(NodeId, String); 16]>,
+    attr_overrides: SmallVec<[(NodeId, AttrName, String); 16]>,
 }
 
 impl ScoringView {
+    #[cfg(test)]
     pub(crate) fn build(
         dom: &Dom,
         source: &SourceAnalysis,
         divs: &[NodeId],
         candidates: &CandidateSet,
+    ) -> Self {
+        Self::build_with_exclusions(dom, source, divs, candidates, &[])
+    }
+
+    pub(crate) fn build_with_exclusions(
+        dom: &Dom,
+        source: &SourceAnalysis,
+        divs: &[NodeId],
+        candidates: &CandidateSet,
+        excluded: &[bool],
     ) -> Self {
         let mut view = Self {
             tag_overrides: SmallVec::new(),
@@ -47,16 +72,20 @@ impl ScoringView {
             parent_overrides: SmallVec::new(),
             text_overrides: SmallVec::new(),
             div_descendant_facts: SmallVec::new(),
+            div_projections: SmallVec::new(),
+            text_replacements: SmallVec::new(),
+            attr_overrides: SmallVec::new(),
         };
-        view.project_aria_structure(dom, source);
+        view.project_aria_structure(dom, source, excluded);
         view.sort_and_compact_tags();
         let projected_tag_count = view.tag_overrides.len();
         view.div_descendant_facts =
-            view.build_div_descendant_facts(dom, source, divs, projected_tag_count);
-        view.prepare_divs(dom, source, divs, candidates, projected_tag_count);
+            view.build_div_descendant_facts(dom, source, divs, projected_tag_count, excluded);
+        view.prepare_divs(dom, source, divs, candidates, projected_tag_count, excluded);
         view.tag_overrides.sort_unstable_by_key(|(node, _)| *node);
         view.wrapper_replacements
             .sort_unstable_by_key(|(wrapper, _)| *wrapper);
+        view.div_projections.sort_unstable_by_key(|(node, _)| *node);
         view.parent_overrides
             .sort_unstable_by_key(|(node, _)| *node);
         view.text_overrides.sort_by_key(|(node, _)| *node);
@@ -179,9 +208,12 @@ impl ScoringView {
         self.tag_overrides = compacted;
     }
 
-    fn project_aria_structure(&mut self, dom: &Dom, source: &SourceAnalysis) {
+    fn project_aria_structure(&mut self, dom: &Dom, source: &SourceAnalysis, excluded: &[bool]) {
         for entry in source.elements() {
             let node = entry.node;
+            if excluded.get(node.index()).copied().unwrap_or(false) {
+                continue;
+            }
             let roles = dom.attr(node, AttrName::Role).unwrap_or_default();
             if has_token(roles, "heading")
                 && let Some(tag) = dom
@@ -205,8 +237,10 @@ impl ScoringView {
             let items: SmallVec<[NodeId; 16]> = dom
                 .element_children(node)
                 .filter(|&child| {
-                    dom.attr(child, AttrName::Role)
-                        .is_some_and(|roles| has_token(roles, "listitem"))
+                    !excluded.get(child.index()).copied().unwrap_or(false)
+                        && dom
+                            .attr(child, AttrName::Role)
+                            .is_some_and(|roles| has_token(roles, "listitem"))
                 })
                 .collect();
             if items.is_empty() {
@@ -214,10 +248,15 @@ impl ScoringView {
             }
             if !matches!(dom.tag(node), Some(Tag::Ol | Tag::Ul)) {
                 if let Some(markers) = scoring_ordered_markers(dom, &items) {
+                    if markers.first().is_some_and(|(number, _, _)| *number != 1) {
+                        self.attr_overrides
+                            .push((node, AttrName::Start, markers[0].0.to_string()));
+                    }
                     self.set_tag(node, Tag::Ol);
                     for (_, text, replacement) in markers {
                         self.text_overrides
-                            .push((text, stats_for_text(replacement)));
+                            .push((text, stats_for_text(&replacement)));
+                        self.text_replacements.push((text, replacement));
                     }
                 } else {
                     self.set_tag(node, Tag::Ul);
@@ -236,15 +275,20 @@ impl ScoringView {
         divs: &[NodeId],
         candidates: &CandidateSet,
         projected_tag_count: usize,
+        excluded: &[bool],
     ) {
         let mut stats = NodeStateStore::new();
         for &div in divs {
-            if dom.parent(div).is_none()
+            if excluded.get(div.index()).copied().unwrap_or(false)
+                || dom.parent(div).is_none()
                 || self.projected_tag(dom, div, projected_tag_count) != Some(Tag::Div)
             {
                 continue;
             }
-            let children: SmallVec<[NodeId; 8]> = dom.children(div).collect();
+            let children: SmallVec<[NodeId; 8]> = dom
+                .children(div)
+                .filter(|child| !excluded.get(child.index()).copied().unwrap_or(false))
+                .collect();
             let mut effective = SmallVec::<[PreparedScoreSeed; 8]>::new();
             let mut index = 0;
             while index < children.len() {
@@ -284,7 +328,7 @@ impl ScoringView {
                             Some(source),
                             child,
                             &mut stats,
-                            &[],
+                            excluded,
                         );
                         append_stats(&mut combined, &child_stats);
                     }
@@ -305,6 +349,7 @@ impl ScoringView {
                 _ => None,
             };
             if candidates.is_semantic(div) {
+                self.div_projections.push((div, DivProjection::Keep));
                 self.prepared_seeds.extend(
                     effective
                         .into_iter()
@@ -312,17 +357,25 @@ impl ScoringView {
                 );
             } else if effective.len() == 1
                 && paragraph_seed(effective[0], div).is_some()
-                && get_link_density(dom, div) < 0.25
+                && get_link_density_from_source_excluding(dom, source, div, &mut stats, excluded)
+                    < 0.25
             {
                 let parent = dom.parent(div).expect("attached div has a parent");
-                if let PreparedScoreSeed::Node { node, .. } = effective[0] {
-                    self.parent_overrides.push((node, parent));
-                }
+                let projection = match effective[0] {
+                    PreparedScoreSeed::Node { node, .. } => {
+                        self.parent_overrides.push((node, parent));
+                        DivProjection::PromoteChild(node)
+                    }
+                    PreparedScoreSeed::Virtual { .. } => DivProjection::PromotePhrasing,
+                };
+                self.div_projections.push((div, projection));
                 self.prepared_seeds
                     .push(paragraph_seed(effective[0], parent).expect("paragraph seed"));
-                let promoted = match effective[0] {
-                    PreparedScoreSeed::Node { node, .. } => node,
-                    PreparedScoreSeed::Virtual { .. } => div,
+                let promoted = match projection {
+                    DivProjection::PromoteChild(node) => node,
+                    DivProjection::PromotePhrasing
+                    | DivProjection::Keep
+                    | DivProjection::RenameP => div,
                 };
                 // A virtual paragraph has no source NodeId. A self replacement
                 // marks its old wrapper as absent while the virtual seed carries
@@ -338,19 +391,25 @@ impl ScoringView {
                     // source index. Keep the cold fallback exact for tests and
                     // callers that construct a view over such a tree.
                     dom.descendants(div).any(|node| {
-                        dom.is_element(node)
+                        !excluded.get(node.index()).copied().unwrap_or(false)
+                            && dom.is_element(node)
                             && self
                                 .projected_tag(dom, node, projected_tag_count)
                                 .is_some_and(crate::constants::is_div_to_p_elem)
                     })
                 })
+                && !effective
+                    .iter()
+                    .any(|seed| matches!(seed, PreparedScoreSeed::Virtual { .. }))
             {
+                self.div_projections.push((div, DivProjection::RenameP));
                 self.set_tag(div, Tag::P);
                 self.prepared_seeds.push(PreparedScoreSeed::Node {
                     node: div,
                     parent: dom.parent(div).expect("attached div has a parent"),
                 });
             } else {
+                self.div_projections.push((div, DivProjection::Keep));
                 self.prepared_seeds.extend(
                     effective
                         .into_iter()
@@ -366,6 +425,7 @@ impl ScoringView {
         source: &SourceAnalysis,
         divs: &[NodeId],
         projected_tag_count: usize,
+        excluded: &[bool],
     ) -> SmallVec<[(NodeId, bool); 128]> {
         if divs.is_empty() {
             return SmallVec::new();
@@ -391,7 +451,8 @@ impl ScoringView {
                 facts.push((node, next_block_position < entry.subtree_end as usize));
                 requested_index -= 1;
             }
-            let has_block_descendant = entry.is_element()
+            let has_block_descendant = !excluded.get(entry.node.index()).copied().unwrap_or(false)
+                && entry.is_element()
                 && self
                     .projected_tag(dom, entry.node, projected_tag_count)
                     .is_some_and(crate::constants::is_div_to_p_elem);
@@ -402,12 +463,413 @@ impl ScoringView {
         facts.sort_unstable_by_key(|(node, _)| *node);
         facts
     }
+
+    fn div_projection(&self, node: NodeId) -> DivProjection {
+        self.div_projections
+            .binary_search_by_key(&node, |(node, _)| *node)
+            .ok()
+            .map(|index| self.div_projections[index].1)
+            .unwrap_or(DivProjection::Keep)
+    }
+
+    fn text_replacement(&self, node: NodeId) -> Option<&str> {
+        self.text_replacements
+            .iter()
+            .find(|(candidate, _)| *candidate == node)
+            .map(|(_, replacement)| replacement.as_str())
+    }
+
+    fn attr_override(&self, node: NodeId, name: AttrName) -> Option<&str> {
+        self.attr_overrides
+            .iter()
+            .find(|(candidate, candidate_name, _)| *candidate == node && *candidate_name == name)
+            .map(|(_, _, value)| value.as_str())
+    }
+
+    /// Copies selected roots while applying the immutable scoring projection.
+    /// The source DOM remains unchanged and no fragment scoring discovery is
+    /// needed after this operation.
+    pub(crate) fn copy_projected_subtrees_as_fragment_excluding(
+        &self,
+        source: &Dom,
+        source_roots: &[NodeId],
+        excluded: &[bool],
+    ) -> Result<Dom, DomError> {
+        crate::instrumentation::record_fragment_copy();
+        #[cfg(test)]
+        Dom::record_fragment_copy_for_test();
+
+        let capacity = 1 + self.projected_fragment_capacity(source, source_roots, excluded);
+        let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
+        let mut work = SmallVec::<[ProjectionWork; 32]>::new();
+        for &root in source_roots.iter().rev() {
+            if excluded.get(root.index()).copied().unwrap_or(false) {
+                return Err(DomError("selected root is excluded".into()));
+            }
+            work.push(ProjectionWork::Node {
+                source: root,
+                parent: fragment.root(),
+            });
+        }
+
+        while let Some(operation) = work.pop() {
+            match operation {
+                ProjectionWork::Node {
+                    source: source_id,
+                    parent,
+                } => {
+                    if excluded.get(source_id.index()).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    if source.is_element(source_id)
+                        && self.effective_tag(source, source_id) == Some(Tag::Div)
+                    {
+                        match self.div_projection(source_id) {
+                            DivProjection::PromoteChild(child)
+                                if !excluded.get(child.index()).copied().unwrap_or(false) =>
+                            {
+                                work.push(ProjectionWork::Node {
+                                    source: child,
+                                    parent,
+                                });
+                                continue;
+                            }
+                            DivProjection::PromotePhrasing => {
+                                let groups = phrasing_groups(source, source_id, excluded);
+                                if let Some(group) = groups.first() {
+                                    work.push(ProjectionWork::Phrasing {
+                                        sources: group.iter().copied().collect(),
+                                        parent,
+                                    });
+                                    continue;
+                                }
+                            }
+                            DivProjection::Keep
+                            | DivProjection::PromoteChild(_)
+                            | DivProjection::RenameP => {}
+                        }
+                    }
+
+                    let data =
+                        projected_node_data(source, source_id, self.text_replacement(source_id));
+                    let destination = fragment.create(data)?;
+                    fragment.append_child(parent, destination);
+                    if let Some(tag) = self.effective_tag(source, source_id) {
+                        let physical_tag = if tag == Tag::Div
+                            && matches!(self.div_projection(source_id), DivProjection::RenameP)
+                        {
+                            Tag::P
+                        } else {
+                            tag
+                        };
+                        if physical_tag != source.tag(source_id).unwrap_or(physical_tag) {
+                            fragment.rename_html(destination, physical_tag);
+                        }
+                    }
+                    if let Some(value) = self.attr_override(source_id, AttrName::Start) {
+                        fragment.set_attr(destination, AttrName::Start, value);
+                    }
+                    if let NodeData::Element(element) = &source.node(source_id).data
+                        && let Some(template) = element.template_contents.get()
+                        && !excluded.get(template.index()).copied().unwrap_or(false)
+                    {
+                        let template_copy = fragment.create(projected_node_data(
+                            source,
+                            template,
+                            self.text_replacement(template),
+                        ))?;
+                        if let NodeData::Element(destination_element) =
+                            &mut fragment.node_mut(destination).data
+                        {
+                            destination_element.template_contents =
+                                NodeLink::from_option(Some(template_copy));
+                        }
+                        work.push(ProjectionWork::Children {
+                            source: template,
+                            parent: template_copy,
+                        });
+                    }
+                    let div_projection = self.div_projection(source_id);
+                    if self.effective_tag(source, source_id) == Some(Tag::Div)
+                        || matches!(div_projection, DivProjection::RenameP)
+                    {
+                        queue_projected_children(
+                            source,
+                            source_id,
+                            destination,
+                            excluded,
+                            &mut work,
+                        );
+                    } else {
+                        work.push(ProjectionWork::Children {
+                            source: source_id,
+                            parent: destination,
+                        });
+                    }
+                }
+                ProjectionWork::Children {
+                    source: source_id,
+                    parent,
+                } => {
+                    let children: SmallVec<[NodeId; 16]> = source.children(source_id).collect();
+                    for child in children.into_iter().rev() {
+                        work.push(ProjectionWork::Node {
+                            source: child,
+                            parent,
+                        });
+                    }
+                }
+                ProjectionWork::Phrasing { sources, parent } => {
+                    let paragraph = fragment.create_html_element(Tag::P)?;
+                    fragment.append_child(parent, paragraph);
+                    for source_id in sources.into_iter().rev() {
+                        work.push(ProjectionWork::Node {
+                            source: source_id,
+                            parent: paragraph,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(fragment)
+    }
+
+    fn projected_fragment_capacity(
+        &self,
+        source: &Dom,
+        source_roots: &[NodeId],
+        excluded: &[bool],
+    ) -> usize {
+        let mut capacity = 0;
+        let mut operations = SmallVec::<[ProjectionWork; 32]>::new();
+        for &root in source_roots.iter().rev() {
+            operations.push(ProjectionWork::Node {
+                source: root,
+                parent: source.root(),
+            });
+        }
+        while let Some(operation) = operations.pop() {
+            match operation {
+                ProjectionWork::Node {
+                    source: node,
+                    parent,
+                } => {
+                    if excluded.get(node.index()).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    if source.is_element(node) && self.effective_tag(source, node) == Some(Tag::Div)
+                    {
+                        match self.div_projection(node) {
+                            DivProjection::PromoteChild(child)
+                                if !excluded.get(child.index()).copied().unwrap_or(false) =>
+                            {
+                                operations.push(ProjectionWork::Node {
+                                    source: child,
+                                    parent,
+                                });
+                                continue;
+                            }
+                            DivProjection::PromotePhrasing => {
+                                if let Some(group) = phrasing_groups(source, node, excluded).first()
+                                {
+                                    operations.push(ProjectionWork::Phrasing {
+                                        sources: group.iter().copied().collect(),
+                                        parent,
+                                    });
+                                    continue;
+                                }
+                            }
+                            DivProjection::Keep
+                            | DivProjection::PromoteChild(_)
+                            | DivProjection::RenameP => {}
+                        }
+                    }
+                    capacity += 1;
+                    if let NodeData::Element(element) = &source.node(node).data
+                        && let Some(template) = element.template_contents.get()
+                        && !excluded.get(template.index()).copied().unwrap_or(false)
+                    {
+                        capacity += 1;
+                        operations.push(ProjectionWork::Children {
+                            source: template,
+                            parent: template,
+                        });
+                    }
+                    let div_projection = self.div_projection(node);
+                    if self.effective_tag(source, node) == Some(Tag::Div)
+                        || matches!(div_projection, DivProjection::RenameP)
+                    {
+                        queue_projected_children(source, node, parent, excluded, &mut operations);
+                    } else {
+                        operations.push(ProjectionWork::Children {
+                            source: node,
+                            parent,
+                        });
+                    }
+                }
+                ProjectionWork::Children { source: node, .. } => {
+                    let children: SmallVec<[NodeId; 16]> = source.children(node).collect();
+                    for child in children.into_iter().rev() {
+                        operations.push(ProjectionWork::Node {
+                            source: child,
+                            parent: node,
+                        });
+                    }
+                }
+                ProjectionWork::Phrasing { sources, parent } => {
+                    capacity += 1;
+                    for node in sources.into_iter().rev() {
+                        operations.push(ProjectionWork::Node {
+                            source: node,
+                            parent,
+                        });
+                    }
+                }
+            }
+        }
+        capacity
+    }
 }
 
-fn scoring_ordered_markers<'a>(
-    dom: &'a Dom,
-    items: &[NodeId],
-) -> Option<Vec<(u32, NodeId, &'a str)>> {
+enum ProjectionWork {
+    Node {
+        source: NodeId,
+        parent: NodeId,
+    },
+    Children {
+        source: NodeId,
+        parent: NodeId,
+    },
+    Phrasing {
+        sources: SmallVec<[NodeId; 16]>,
+        parent: NodeId,
+    },
+}
+
+fn projected_node_data(source: &Dom, node: NodeId, replacement: Option<&str>) -> NodeData {
+    if let Some(replacement) = replacement {
+        return NodeData::Text(StrTendril::from(replacement));
+    }
+    match &source.node(node).data {
+        NodeData::Element(element) => NodeData::Element(ElementData {
+            name: element.name.clone(),
+            tag: element.tag,
+            attrs: element.attrs.clone(),
+            template_contents: NodeLink::NONE,
+            mathml_annotation_xml_integration_point: element
+                .mathml_annotation_xml_integration_point,
+        }),
+        data => data.clone(),
+    }
+}
+
+fn phrasing_groups(
+    dom: &Dom,
+    parent: NodeId,
+    excluded: &[bool],
+) -> SmallVec<[SmallVec<[NodeId; 8]>; 8]> {
+    let children: SmallVec<[NodeId; 16]> = dom
+        .children(parent)
+        .filter(|child| !excluded.get(child.index()).copied().unwrap_or(false))
+        .collect();
+    let mut groups = SmallVec::new();
+    let mut index = 0;
+    while index < children.len() {
+        if !is_phrasing_content(dom, children[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut has_content = false;
+        while index < children.len() && is_phrasing_content(dom, children[index]) {
+            has_content |= dom.is_element(children[index])
+                || dom
+                    .text_node(children[index])
+                    .is_some_and(|text| !trim_text(text).is_empty());
+            index += 1;
+        }
+        if !has_content {
+            continue;
+        }
+        let mut first = start;
+        let mut end = index;
+        while first < end && is_whitespace(dom, children[first]) {
+            first += 1;
+        }
+        while first < end && is_whitespace(dom, children[end - 1]) {
+            end -= 1;
+        }
+        if first < end {
+            groups.push(children[first..end].iter().copied().collect());
+        }
+    }
+    groups
+}
+
+fn queue_projected_children(
+    source: &Dom,
+    parent: NodeId,
+    destination: NodeId,
+    excluded: &[bool],
+    work: &mut SmallVec<[ProjectionWork; 32]>,
+) {
+    let children: SmallVec<[NodeId; 16]> = source
+        .children(parent)
+        .filter(|child| !excluded.get(child.index()).copied().unwrap_or(false))
+        .collect();
+    let mut planned = SmallVec::<[ProjectionWork; 16]>::new();
+    let mut index = 0;
+    while index < children.len() {
+        if !is_phrasing_content(source, children[index]) {
+            planned.push(ProjectionWork::Node {
+                source: children[index],
+                parent: destination,
+            });
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut has_content = false;
+        while index < children.len() && is_phrasing_content(source, children[index]) {
+            has_content |= source.is_element(children[index])
+                || source
+                    .text_node(children[index])
+                    .is_some_and(|text| !trim_text(text).is_empty());
+            index += 1;
+        }
+        if !has_content {
+            planned.extend((start..index).map(|position| ProjectionWork::Node {
+                source: children[position],
+                parent: destination,
+            }));
+            continue;
+        }
+        let mut first = start;
+        let mut end = index;
+        while first < end && is_whitespace(source, children[first]) {
+            first += 1;
+        }
+        while first < end && is_whitespace(source, children[end - 1]) {
+            end -= 1;
+        }
+        if first == end {
+            planned.extend((start..index).map(|position| ProjectionWork::Node {
+                source: children[position],
+                parent: destination,
+            }));
+            continue;
+        }
+        planned.push(ProjectionWork::Phrasing {
+            sources: children[first..end].iter().copied().collect(),
+            parent: destination,
+        });
+    }
+    for operation in planned.into_iter().rev() {
+        work.push(operation);
+    }
+}
+
+fn scoring_ordered_markers(dom: &Dom, items: &[NodeId]) -> Option<Vec<(u32, NodeId, String)>> {
     if items.len() < 2 {
         return None;
     }
@@ -429,7 +891,7 @@ fn scoring_ordered_markers<'a>(
             Some((
                 number,
                 text,
-                dom.text_node(text)?[prefix_end..].trim_start(),
+                dom.text_node(text)?[prefix_end..].trim_start().to_owned(),
             ))
         })
         .collect()
@@ -1568,6 +2030,7 @@ pub(crate) fn initialize_score_node(
 /// The caller must pass a selected fragment or a test-only source copy. This
 /// function can wrap phrasing content, replace simple wrappers, and rename
 /// leaf `div` elements.
+#[cfg(test)]
 pub(crate) fn prepare_readability_structure(
     dom: &mut Dom,
     divs: &[NodeId],
@@ -2000,6 +2463,7 @@ pub fn get_inner_text_owned_limited(dom: &Dom, id: NodeId, limit: usize) -> Stri
     }
     out
 }
+#[cfg(test)]
 pub fn get_link_density_with_text(
     dom: &Dom,
     id: NodeId,
@@ -2029,9 +2493,40 @@ pub fn get_link_density_with_text(
     }
     links / total as f64
 }
+#[cfg(test)]
 pub fn get_link_density(dom: &Dom, id: NodeId) -> f64 {
     get_link_density_with_text(dom, id, None, None)
 }
+
+fn get_link_density_from_source_excluding(
+    dom: &Dom,
+    source: &SourceAnalysis,
+    id: NodeId,
+    store: &mut NodeStateStore,
+    excluded: &[bool],
+) -> f64 {
+    let total = get_or_compute_stats_from_source(dom, Some(source), id, store, excluded);
+    if total.text_length == 0 {
+        return 0.;
+    }
+    let links = dom
+        .descendants(id)
+        .filter(|node| !excluded.get(node.index()).copied().unwrap_or(false))
+        .filter(|&node| dom.tag(node) == Some(Tag::A))
+        .map(|node| {
+            let length = get_or_compute_stats_from_source(dom, Some(source), node, store, excluded)
+                .text_length as f64;
+            length
+                * if dom.attr(node, AttrName::Href).is_some_and(is_hash_url) {
+                    0.3
+                } else {
+                    1.
+                }
+        })
+        .sum::<f64>();
+    links / total.text_length as f64
+}
+
 pub fn get_link_density_cached(dom: &Dom, id: NodeId, len: u32, store: &mut NodeStateStore) -> f64 {
     if len == 0 {
         return 0.;
@@ -2067,6 +2562,7 @@ pub fn is_phrasing_content(dom: &Dom, id: NodeId) -> bool {
     }
     go(dom, id, 0)
 }
+#[cfg(test)]
 pub fn wrap_phrasing_content_in_p(dom: &mut Dom, div: NodeId) {
     let children: SmallVec<[NodeId; 8]> = dom.children(div).collect();
     let mut i = 0;
@@ -2114,6 +2610,7 @@ pub fn is_element_without_content(dom: &Dom, id: NodeId) -> bool {
             .all(|c| matches!(dom.tag(c), Some(Tag::Br | Tag::Hr)))
         && !dom.has_non_whitespace_text(id)
 }
+#[cfg(test)]
 pub fn has_single_tag_inside_element(dom: &Dom, id: NodeId, tag: Tag) -> bool {
     let mut found = false;
     for c in dom.children(id) {
@@ -2132,9 +2629,10 @@ pub fn has_single_tag_inside_element(dom: &Dom, id: NodeId, tag: Tag) -> bool {
     }
     found
 }
+#[cfg(test)]
 pub fn has_child_block_element(dom: &Dom, id: NodeId) -> bool {
     dom.descendants(id)
-        .any(|x| dom.is_element(x) && dom.tag(x).is_some_and(is_div_to_p_elem))
+        .any(|x| dom.is_element(x) && dom.tag(x).is_some_and(crate::constants::is_div_to_p_elem))
 }
 pub fn is_probably_visible(dom: &Dom, id: NodeId) -> bool {
     if has_static_hidden_marker(dom, id) {
@@ -3059,6 +3557,152 @@ mod tests {
             dom.text_node(dom.first_child(first_item).unwrap()),
             Some("3. Three")
         );
+    }
+
+    #[test]
+    fn projected_fragment_preserves_mintlify_source_order() {
+        let dom = Dom::parse_document(include_str!(
+            "../tests/defuddle/code-blocks/mintlify/source.html"
+        ))
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let divs: Vec<_> = source
+            .elements()
+            .filter(|entry| entry.tag == Some(Tag::Div))
+            .map(|entry| entry.node)
+            .collect();
+        let view = ScoringView::build(&dom, &source, &divs, &candidates);
+        let content = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("content"))
+            .unwrap();
+        let fragment = view
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[content], &[])
+            .unwrap();
+        let projected_content = fragment
+            .first_descendant_by_tag(fragment.root(), Tag::Div)
+            .unwrap();
+        let tags: Vec<_> = fragment
+            .element_children(projected_content)
+            .map(|node| (fragment.tag(node), fragment.normalized_text(node, 80).0))
+            .collect();
+        assert_eq!(
+            tags.iter().take(4).map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            vec![Some(Tag::P), Some(Tag::H2), Some(Tag::H3), Some(Tag::P)]
+        );
+    }
+
+    #[test]
+    fn projected_fragment_applies_tags_lists_promotions_and_exclusions() {
+        let dom = Dom::parse_document(
+            r#"<body><div role="heading" aria-level="2">Heading</div><div role="list"><div role="listitem">3. Three</div><div role="listitem">4. Four</div></div><div id="leaf">Inline <strong>content</strong>.</div><div id="wrapped"><p>A wrapped paragraph.</p></div><div id="excluded">Removed subtree.</div></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let divs: Vec<_> = source
+            .elements()
+            .filter(|entry| entry.tag == Some(Tag::Div))
+            .map(|entry| entry.node)
+            .collect();
+        let view = ScoringView::build(&dom, &source, &divs, &candidates);
+        let excluded = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("excluded"))
+            .unwrap();
+        let mut excluded_mask = vec![false; dom.len()];
+        excluded_mask[excluded.index()] = true;
+        for node in dom.descendants(excluded) {
+            excluded_mask[node.index()] = true;
+        }
+        let fragment = view
+            .copy_projected_subtrees_as_fragment_excluding(
+                &dom,
+                &[dom.body().unwrap()],
+                &excluded_mask,
+            )
+            .unwrap();
+        let body = fragment.first_child(fragment.root()).unwrap();
+        let children: Vec<_> = fragment.element_children(body).collect();
+        assert_eq!(fragment.tag(children[0]), Some(Tag::H2));
+        assert_eq!(fragment.tag(children[1]), Some(Tag::Ol));
+        assert_eq!(fragment.attr(children[1], AttrName::Start), Some("3"));
+        assert_eq!(fragment.tag(children[2]), Some(Tag::P));
+        assert_eq!(fragment.tag(children[3]), Some(Tag::P));
+        assert!(!fragment.text(fragment.root()).contains("Removed subtree"));
+        assert_eq!(fragment.text(children[1]), "ThreeFour");
+
+        let wrapped = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("wrapped"))
+            .unwrap();
+        let wrapped_child = dom.first_child(wrapped).unwrap();
+        let mut root_excluded = vec![false; dom.len()];
+        root_excluded[wrapped_child.index()] = true;
+        for node in dom.descendants(wrapped_child) {
+            root_excluded[node.index()] = true;
+        }
+        let retained_root = view
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[wrapped], &root_excluded)
+            .unwrap();
+        assert_eq!(retained_root.children(retained_root.root()).count(), 1);
+    }
+
+    #[test]
+    fn projected_fragment_recomputes_structure_after_exclusions() {
+        let dom = Dom::parse_document(
+            r#"<body><div id="list" role="list"><div role="listitem">1. One</div><div id="hidden-item" role="listitem">2. Hidden</div><div role="listitem">3. Three</div></div><div id="wrapper"><p>Visible paragraph.</p><div id="hidden-block"><p>Hidden paragraph.</p></div></div></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let divs: Vec<_> = source
+            .elements()
+            .filter(|entry| entry.tag == Some(Tag::Div))
+            .map(|entry| entry.node)
+            .collect();
+        let hidden_item = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("hidden-item"))
+            .unwrap();
+        let hidden_block = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("hidden-block"))
+            .unwrap();
+        let mut excluded = vec![false; dom.len()];
+        for root in [hidden_item, hidden_block] {
+            excluded[root.index()] = true;
+            for node in dom.descendants(root) {
+                excluded[node.index()] = true;
+            }
+        }
+        let view = ScoringView::build_with_exclusions(&dom, &source, &divs, &candidates, &excluded);
+        let list = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("list"))
+            .unwrap();
+        let wrapper = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("wrapper"))
+            .unwrap();
+        let list_fragment = view
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[list], &excluded)
+            .unwrap();
+        let list_copy = list_fragment.first_child(list_fragment.root()).unwrap();
+        assert_eq!(list_fragment.tag(list_copy), Some(Tag::Ul));
+        assert!(list_fragment.text(list_copy).contains("1. One"));
+        assert!(list_fragment.text(list_copy).contains("3. Three"));
+        assert!(!list_fragment.text(list_copy).contains("2. Hidden"));
+
+        let wrapper_fragment = view
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[wrapper], &excluded)
+            .unwrap();
+        let paragraph = wrapper_fragment
+            .first_child(wrapper_fragment.root())
+            .unwrap();
+        assert_eq!(wrapper_fragment.tag(paragraph), Some(Tag::P));
+        assert_eq!(wrapper_fragment.text(paragraph), "Visible paragraph.");
     }
 
     #[test]

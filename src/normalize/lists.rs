@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::tokens::has_token;
 use smallvec::SmallVec;
