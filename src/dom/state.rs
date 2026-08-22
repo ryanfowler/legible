@@ -203,11 +203,118 @@ pub(crate) struct NodeStateStore {
     // query them for many non-candidate nodes.
     scores: Vec<ScoreEntry>,
     stats: Vec<TextStatsEntry>,
+    source_stats: Vec<TextStatsEntry>,
+    source_stats_enabled: bool,
     table_states: Vec<TableStateEntry>,
     table_states_sorted: bool,
     state_epoch: u32,
     stats_epoch: u32,
+    source_stats_epoch: u32,
     link_lengths: Option<LinkLengthCache>,
+}
+
+/// Score state that is specific to one scoring policy.
+///
+/// Text statistics, link lengths, and table classifications are source facts
+/// and belong to the shared scoring cache. Keep only readability scores in a
+/// variant overlay so weighted and unweighted retries do not carry copies of
+/// the source-sized fact cache.
+#[derive(Debug, Clone)]
+pub(crate) struct ScoreStore {
+    scores: Vec<ScoreEntry>,
+    state_epoch: u32,
+}
+
+impl Default for ScoreStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScoreStore {
+    pub(crate) fn new() -> Self {
+        Self {
+            scores: Vec::new(),
+            state_epoch: 1,
+        }
+    }
+
+    fn entry(&self, id: super::NodeId) -> Option<&ScoreEntry> {
+        self.scores
+            .get(id.index())
+            .filter(|entry| entry.epoch == self.state_epoch)
+    }
+
+    fn entry_mut(&mut self, id: super::NodeId) -> &mut ScoreEntry {
+        if id.index() >= self.scores.len() {
+            self.scores.resize(id.index() + 1, ScoreEntry::default());
+        }
+        let entry = &mut self.scores[id.index()];
+        if entry.epoch != self.state_epoch {
+            *entry = ScoreEntry {
+                epoch: self.state_epoch,
+                ..ScoreEntry::default()
+            };
+        }
+        entry
+    }
+
+    #[inline]
+    pub(crate) fn mark_seen(&mut self, id: super::NodeId) -> bool {
+        let entry = self.entry_mut(id);
+        if entry.flags.get(SCORE_SEEN) {
+            false
+        } else {
+            entry.flags.set(SCORE_SEEN, true);
+            true
+        }
+    }
+
+    #[inline]
+    pub(crate) fn has(&self, id: super::NodeId) -> bool {
+        self.entry(id)
+            .is_some_and(|entry| entry.flags.get(SCORE_INITIALIZED))
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, id: super::NodeId) -> f64 {
+        self.entry(id)
+            .filter(|entry| entry.flags.get(SCORE_INITIALIZED))
+            .map_or(0.0, |entry| entry.content_score)
+    }
+
+    #[inline]
+    pub(crate) fn get_if_initialized(&self, id: super::NodeId) -> Option<f64> {
+        self.entry(id)
+            .filter(|entry| entry.flags.get(SCORE_INITIALIZED))
+            .map(|entry| entry.content_score)
+    }
+
+    #[inline]
+    pub(crate) fn add(&mut self, id: super::NodeId, value: f64) {
+        let entry = self.entry_mut(id);
+        entry.content_score += value;
+        entry.flags.set(SCORE_INITIALIZED, true);
+    }
+
+    #[inline]
+    pub(crate) fn initialize_if_absent(&mut self, id: super::NodeId, score: f64) -> bool {
+        let entry = self.entry_mut(id);
+        if entry.flags.get(SCORE_INITIALIZED) {
+            false
+        } else {
+            entry.content_score = score;
+            entry.flags.set(SCORE_INITIALIZED, true);
+            true
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, id: super::NodeId, score: f64) {
+        let entry = self.entry_mut(id);
+        entry.content_score = score;
+        entry.flags.set(SCORE_INITIALIZED, true);
+    }
 }
 
 impl NodeStateStore {
@@ -281,7 +388,13 @@ impl NodeStateStore {
             }
         });
         self.clear_stats();
+        Self::advance_epoch(&mut self.source_stats_epoch, || {
+            for entry in &mut self.source_stats {
+                entry.epoch = 0;
+            }
+        });
         self.link_lengths = None;
+        self.source_stats_enabled = false;
     }
 
     pub(crate) fn clear_stats(&mut self) {
@@ -297,6 +410,7 @@ impl NodeStateStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn mark_score_seen(&mut self, id: super::NodeId) -> bool {
         let entry = self.score_entry_mut(id);
         if entry.flags.get(SCORE_SEEN) {
@@ -314,10 +428,49 @@ impl NodeStateStore {
             .map(|entry| &entry.stats)
     }
 
+    pub(crate) fn get_source_stats(&self, id: super::NodeId) -> Option<&NodeStats> {
+        self.source_stats
+            .get(id.index())
+            .filter(|entry| entry.epoch == self.source_stats_epoch)
+            .map(|entry| &entry.stats)
+    }
+
+    pub(crate) fn get_stats_or_source(&self, id: super::NodeId) -> Option<&NodeStats> {
+        self.get_stats(id).or_else(|| self.get_source_stats(id))
+    }
+
+    pub(crate) fn enable_source_stats(&mut self) {
+        Self::advance_epoch(&mut self.source_stats_epoch, || {
+            for entry in &mut self.source_stats {
+                entry.epoch = 0;
+            }
+        });
+        self.source_stats_enabled = true;
+    }
+
+    pub(crate) fn source_stats_enabled(&self) -> bool {
+        self.source_stats_enabled
+    }
+
+    pub(crate) fn disable_source_stats(&mut self) {
+        self.source_stats_enabled = false;
+    }
+
     pub(crate) fn set_stats(&mut self, id: super::NodeId, stats: NodeStats) {
         self.sync_stats(id.index() + 1);
         self.stats[id.index()] = TextStatsEntry {
             epoch: self.stats_epoch,
+            stats,
+        };
+    }
+
+    pub(crate) fn set_source_stats(&mut self, id: super::NodeId, stats: NodeStats) {
+        if id.index() >= self.source_stats.len() {
+            self.source_stats
+                .resize(id.index() + 1, TextStatsEntry::default());
+        }
+        self.source_stats[id.index()] = TextStatsEntry {
+            epoch: self.source_stats_epoch,
             stats,
         };
     }
@@ -368,18 +521,21 @@ impl NodeStateStore {
             .is_some_and(|entry| entry.flags.get(SCORE_INITIALIZED))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_content_score(&self, id: super::NodeId) -> f64 {
         self.score_entry(id)
             .filter(|entry| entry.flags.get(SCORE_INITIALIZED))
             .map_or(0.0, |entry| entry.content_score)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_content_score_if_initialized(&self, id: super::NodeId) -> Option<f64> {
         self.score_entry(id)
             .filter(|entry| entry.flags.get(SCORE_INITIALIZED))
             .map(|entry| entry.content_score)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_content_score(&mut self, id: super::NodeId, value: f64) {
         let entry = self.score_entry_mut(id);
         entry.content_score += value;
@@ -397,6 +553,7 @@ impl NodeStateStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_score(&mut self, id: super::NodeId, score: f64) {
         let entry = self.score_entry_mut(id);
         entry.content_score = score;
@@ -446,10 +603,13 @@ impl Default for NodeStateStore {
         Self {
             scores: Vec::new(),
             stats: Vec::new(),
+            source_stats: Vec::new(),
+            source_stats_enabled: false,
             table_states: Vec::new(),
             table_states_sorted: true,
             state_epoch: 1,
             stats_epoch: 1,
+            source_stats_epoch: 1,
             link_lengths: None,
         }
     }

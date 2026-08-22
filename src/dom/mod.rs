@@ -15,7 +15,7 @@ pub(crate) use attr::{AttrName, Attribute};
 pub(crate) use id::{DomError, NodeId, NodeLink};
 pub(crate) use node::{ElementData, Node, NodeData};
 pub(crate) use parse::{ParseError, ParseLimitKind};
-pub(crate) use state::{DataTableState, NodeStateStore, NodeStats};
+pub(crate) use state::{DataTableState, NodeStateStore, NodeStats, ScoreStore};
 pub(crate) use tag::Tag;
 pub(crate) use traversal::DocumentAnchors;
 

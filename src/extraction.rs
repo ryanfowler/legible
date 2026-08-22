@@ -15,7 +15,7 @@ use crate::diagnostics::{
     ExtractionStrategyInfo, NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo,
     RootInfo, RootSelectionReasonInfo,
 };
-use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, Tag};
+use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, ScoreStore, Tag};
 use crate::error::{Error, Result};
 use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::instrumentation::{Phase, PhaseGuard};
@@ -490,7 +490,7 @@ struct CandidateDiscovery {
 }
 
 struct ScoredVariant {
-    node_data: NodeStateStore,
+    scores: ScoreStore,
     candidates: CandidateSet,
     ranked: SmallVec<[RankedCandidate; 64]>,
 }
@@ -500,6 +500,7 @@ struct ScoringAnalysis {
     discovery: CandidateDiscovery,
     weighted: ScoredVariant,
     unweighted: Option<ScoredVariant>,
+    shared_facts: NodeStateStore,
     working_snapshot: Vec<(NodeId, u32)>,
     excluded_mask: Vec<bool>,
     feature_index: CandidateFeatureIndex,
@@ -523,14 +524,14 @@ impl ScoringAnalysis {
         }
     }
 
-    fn take_node_data(&mut self, weight_classes: bool) -> Option<NodeStateStore> {
+    fn take_scores(&mut self, weight_classes: bool) -> Option<ScoreStore> {
         self.variant_mut(weight_classes)
-            .map(|variant| std::mem::take(&mut variant.node_data))
+            .map(|variant| std::mem::take(&mut variant.scores))
     }
 
-    fn restore_node_data(&mut self, weight_classes: bool, node_data: NodeStateStore) {
+    fn restore_scores(&mut self, weight_classes: bool, scores: ScoreStore) {
         if let Some(variant) = self.variant_mut(weight_classes) {
-            variant.node_data = node_data;
+            variant.scores = scores;
         }
     }
 }
@@ -1690,11 +1691,11 @@ impl<'a> ContentExtractor<'a> {
                 );
             }
         }
-        let node_data = analysis_cache.variants[analysis_index]
+        let scores = analysis_cache.variants[analysis_index]
             .1
-            .take_node_data(strategy.weight_classes())
+            .take_scores(strategy.weight_classes())
             .ok_or(Error::NoContent)?;
-        let analysis = &analysis_cache.variants[analysis_index].1;
+        let analysis = &mut analysis_cache.variants[analysis_index].1;
         let discovery = &analysis.discovery;
         let variant = analysis
             .variant(strategy.weight_classes())
@@ -1702,7 +1703,7 @@ impl<'a> ContentExtractor<'a> {
         let candidates = &variant.candidates;
         let ranked = &variant.ranked;
         let body = analysis.body;
-        let mut node_data = node_data;
+        let mut scores = scores;
         let working_dom = &self.dom;
         let _root_selection_phase = PhaseGuard::new(Phase::RootSelection);
         let mut selection = select_content_root(
@@ -1795,22 +1796,22 @@ impl<'a> ContentExtractor<'a> {
                         parent = analysis.view.effective_parent(working_dom, node)
                     }
                 }
-                if !node_data.has(top_id) {
-                    initialize_node(
+                if !scores.has(top_id) {
+                    initialize_score_node(
                         working_dom,
                         top_id,
-                        &mut node_data,
+                        &mut scores,
                         self.strategy.weight_classes(),
                     )
                 }
-                let threshold = node_data.get_content_score(top_id) / 3.0;
-                let mut last = node_data.get_content_score(top_id);
+                let threshold = scores.get(top_id) / 3.0;
+                let mut last = scores.get(top_id);
                 let mut parent = analysis.view.effective_parent(working_dom, top_id);
                 while let Some(node) = parent {
                     if node == body {
                         break;
                     }
-                    if let Some(score) = node_data.get_content_score_if_initialized(node) {
+                    if let Some(score) = scores.get_if_initialized(node) {
                         if score < threshold {
                             break;
                         }
@@ -1856,11 +1857,11 @@ impl<'a> ContentExtractor<'a> {
             {
                 top_id = article;
             }
-            if !node_data.has(top_id) {
-                initialize_node(
+            if !scores.has(top_id) {
+                initialize_score_node(
                     working_dom,
                     top_id,
-                    &mut node_data,
+                    &mut scores,
                     self.strategy.weight_classes(),
                 )
             }
@@ -1885,9 +1886,15 @@ impl<'a> ContentExtractor<'a> {
             .map(str::to_owned);
         let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
             if selection.reason == RootSelectionReason::Ranked {
-                Self::gather_siblings(working_dom, &analysis.view, top_id, &mut node_data)
-                    .into_iter()
-                    .collect()
+                Self::gather_siblings(
+                    working_dom,
+                    &analysis.view,
+                    top_id,
+                    &mut analysis.shared_facts,
+                    &mut scores,
+                )
+                .into_iter()
+                .collect()
             } else {
                 SmallVec::from_slice(&[top_id])
             }
@@ -1936,7 +1943,7 @@ impl<'a> ContentExtractor<'a> {
         };
         analysis_cache.variants[analysis_index]
             .1
-            .restore_node_data(strategy.weight_classes(), node_data);
+            .restore_scores(strategy.weight_classes(), scores);
         Ok(plan)
     }
 
@@ -1948,6 +1955,7 @@ impl<'a> ContentExtractor<'a> {
         structured_root: Option<NodeId>,
     ) {
         let _scoring_phase = PhaseGuard::new(Phase::Scoring);
+        analysis.shared_facts.enable_source_stats();
         let (unweighted, _, _) = self.score_candidates(
             &self.dom,
             prepared_source,
@@ -1961,6 +1969,8 @@ impl<'a> ContentExtractor<'a> {
             analysis.body,
             Some(&analysis.feature_index),
             Some(&analysis.working_snapshot),
+            Some(&analysis.weighted.candidates),
+            &mut analysis.shared_facts,
         );
         analysis.unweighted = Some(unweighted);
     }
@@ -2020,6 +2030,7 @@ impl<'a> ContentExtractor<'a> {
         // Class weighting changes only score inputs. Keep the normal weighted
         // ranking on the shared scoring view. The unweighted variant is built
         // lazily only if a later broad or body-fallback strategy needs it.
+        let mut shared_facts = NodeStateStore::new();
         let (weighted, feature_index, working_snapshot) = self.score_candidates(
             working_dom,
             ctx.prepared_source,
@@ -2033,6 +2044,8 @@ impl<'a> ContentExtractor<'a> {
             body,
             None,
             None,
+            None,
+            &mut shared_facts,
         );
         crate::instrumentation::record_scoring_nodes(working_snapshot.len());
 
@@ -2041,6 +2054,7 @@ impl<'a> ContentExtractor<'a> {
             discovery,
             weighted,
             unweighted: None,
+            shared_facts,
             working_snapshot,
             excluded_mask,
             feature_index,
@@ -2063,14 +2077,16 @@ impl<'a> ContentExtractor<'a> {
         body: NodeId,
         shared_feature_index: Option<&CandidateFeatureIndex>,
         working_snapshot: Option<&[(NodeId, u32)]>,
+        base_candidates: Option<&CandidateSet>,
+        shared_facts: &mut NodeStateStore,
     ) -> (ScoredVariant, CandidateFeatureIndex, Vec<(NodeId, u32)>) {
-        let mut node_data = NodeStateStore::new();
+        let mut scores = ScoreStore::new();
         if discovery.has_links {
-            node_data.enable_link_lengths();
+            shared_facts.enable_link_lengths();
         }
         let mut to_score = SmallVec::<[NodeId; 256]>::new();
         for &node in &discovery.to_score {
-            if node_data.mark_score_seen(node) {
+            if scores.mark_seen(node) {
                 to_score.push(node);
             }
         }
@@ -2080,7 +2096,8 @@ impl<'a> ContentExtractor<'a> {
             view,
             to_score,
             excluded_mask,
-            &mut node_data,
+            shared_facts,
+            &mut scores,
             weight_classes,
         );
         let mut computed_snapshot = None;
@@ -2106,7 +2123,10 @@ impl<'a> ContentExtractor<'a> {
         };
 
         let working_root = dom.root();
-        let mut candidates = discovery.candidates.clone();
+        let mut candidates = base_candidates.unwrap_or(&discovery.candidates).clone();
+        if base_candidates.is_some() {
+            candidates.reset_variant_state();
+        }
         candidates.set_document_evidence(document_evidence);
         for &node in content_hint_targets {
             let attached = node == working_root
@@ -2125,7 +2145,7 @@ impl<'a> ContentExtractor<'a> {
             candidates.add_structured_data(root);
         }
 
-        let (ranked, feature_index) = Self::rank_candidates_with_snapshot(
+        let (ranked, feature_index) = Self::rank_candidates_with_snapshot_and_scores(
             dom,
             Some(prepared_source),
             Some(view),
@@ -2134,14 +2154,15 @@ impl<'a> ContentExtractor<'a> {
             &mut candidates,
             readability_scores,
             excluded_mask,
-            &mut node_data,
+            shared_facts,
+            &mut scores,
             weight_classes,
             TOP_CANDIDATES,
             shared_feature_index,
         );
         (
             ScoredVariant {
-                node_data,
+                scores,
                 candidates,
                 ranked,
             },
@@ -3181,6 +3202,7 @@ impl<'a> ContentExtractor<'a> {
         .0
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn rank_candidates_with_snapshot(
         dom: &Dom,
@@ -3191,7 +3213,41 @@ impl<'a> ContentExtractor<'a> {
         candidates: &mut CandidateSet,
         readability_scores: SmallVec<[ReadabilityScore; 64]>,
         excluded: &[bool],
-        store: &mut NodeStateStore,
+        facts: &mut NodeStateStore,
+        weight_classes: bool,
+        top_candidates: usize,
+        shared_feature_index: Option<&CandidateFeatureIndex>,
+    ) -> (SmallVec<[RankedCandidate; 64]>, CandidateFeatureIndex) {
+        let mut scores = ScoreStore::new();
+        Self::rank_candidates_with_snapshot_and_scores(
+            dom,
+            source,
+            scoring_view,
+            body,
+            snapshot,
+            candidates,
+            readability_scores,
+            excluded,
+            facts,
+            &mut scores,
+            weight_classes,
+            top_candidates,
+            shared_feature_index,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rank_candidates_with_snapshot_and_scores(
+        dom: &Dom,
+        source: Option<&SourceAnalysis>,
+        scoring_view: Option<&ScoringView>,
+        body: NodeId,
+        snapshot: &[(NodeId, u32)],
+        candidates: &mut CandidateSet,
+        readability_scores: SmallVec<[ReadabilityScore; 64]>,
+        excluded: &[bool],
+        facts: &mut NodeStateStore,
+        scores: &mut ScoreStore,
         weight_classes: bool,
         top_candidates: usize,
         shared_feature_index: Option<&CandidateFeatureIndex>,
@@ -3210,12 +3266,12 @@ impl<'a> ContentExtractor<'a> {
             feature_index.clone()
         } else {
             let mut table_nodes = Vec::new();
-            mark_data_tables_from_snapshot(dom, dom.root(), snapshot, store, &mut table_nodes);
-            CandidateFeatureIndex::new(dom, store, source, snapshot, candidates, scoring_view)
+            mark_data_tables_from_snapshot(dom, dom.root(), snapshot, facts, &mut table_nodes);
+            CandidateFeatureIndex::new(dom, facts, source, snapshot, candidates, scoring_view)
         };
-        feature_index.prepare_text_cache(store);
+        feature_index.prepare_text_cache(facts);
         if let Some(scoring_view) = scoring_view {
-            scoring_view.seed_text_overrides(store);
+            scoring_view.seed_text_overrides(facts);
         }
         for (candidate_index, candidate) in candidates.iter_mut().enumerate() {
             candidate.features = feature_index.features(
@@ -3223,7 +3279,7 @@ impl<'a> ContentExtractor<'a> {
                 source,
                 candidate_index,
                 *candidate,
-                store,
+                facts,
                 weight_classes,
                 excluded,
             );
@@ -3233,7 +3289,7 @@ impl<'a> ContentExtractor<'a> {
                 && candidates.is_authoritative_semantic(dom, candidate.node)
                 && candidate.features.word_count >= 20
         });
-        let context = candidates.ranking_context(dom, store, snapshot);
+        let context = candidates.ranking_context(dom, facts, snapshot);
         let mut scored: SmallVec<[RankedCandidate; 64]> = candidates
             .iter()
             .enumerate()
@@ -3251,13 +3307,13 @@ impl<'a> ContentExtractor<'a> {
                             dom,
                             source,
                             candidate.node,
-                            store,
+                            facts,
                             excluded,
                         )
                         .text_length
                     }
                     None => {
-                        get_or_compute_stats_excluding(dom, candidate.node, store, excluded)
+                        get_or_compute_stats_excluding(dom, candidate.node, facts, excluded)
                             .text_length
                     }
                 };
@@ -3349,7 +3405,7 @@ impl<'a> ContentExtractor<'a> {
                     + sibling_content_bonus
                     + generic_boundary_bonus
                     + complete_root_bonus;
-                store.set_score(candidate.node, final_score);
+                scores.set(candidate.node, final_score);
                 Some(RankedCandidate {
                     node: candidate.node,
                     score: final_score,
@@ -3380,30 +3436,31 @@ impl<'a> ContentExtractor<'a> {
         dom: &Dom,
         scoring_view: &ScoringView,
         top: NodeId,
-        store: &mut NodeStateStore,
+        facts: &mut NodeStateStore,
+        scores: &mut ScoreStore,
     ) -> SmallVec<[NodeId; 8]> {
         let Some(parent) = scoring_view.effective_parent(dom, top) else {
             let mut out = SmallVec::new();
             out.push(top);
             return out;
         };
-        let threshold = 10f64.max(store.get_content_score(top) * 0.2);
+        let threshold = 10f64.max(scores.get(top) * 0.2);
         let class = dom.attr(top, AttrName::Class);
         let mut out = SmallVec::<[NodeId; 8]>::new();
         for x in scoring_view.effective_element_children(dom, parent) {
             let mut yes = x == top;
             if !yes {
                 let bonus = if class.is_some() && dom.attr(x, AttrName::Class) == class {
-                    store.get_content_score(top) * 0.2
+                    scores.get(top) * 0.2
                 } else {
                     0.
                 };
-                if store.has(x) && store.get_content_score(x) + bonus >= threshold {
+                if scores.has(x) && scores.get(x) + bonus >= threshold {
                     yes = true
                 }
                 if !yes && scoring_view.effective_tag(dom, x) == Some(Tag::P) {
-                    let s = get_or_compute_stats(dom, x, store);
-                    let d = get_link_density_cached(dom, x, s.text_length, store);
+                    let s = get_or_compute_stats(dom, x, facts);
+                    let d = get_link_density_cached(dom, x, s.text_length, facts);
                     yes = (s.text_length > 80 && d < 0.25)
                         || (s.text_length < 80
                             && s.text_length > 0
@@ -3429,9 +3486,9 @@ impl<'a> ContentExtractor<'a> {
                             )
                         })
                 {
-                    let stats = get_or_compute_stats(dom, x, store);
+                    let stats = get_or_compute_stats(dom, x, facts);
                     yes = (30..=400).contains(&(stats.text_length as usize))
-                        && get_link_density_cached(dom, x, stats.text_length, store) == 0.0;
+                        && get_link_density_cached(dom, x, stats.text_length, facts) == 0.0;
                 }
             }
             if yes {

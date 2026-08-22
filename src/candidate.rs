@@ -7,6 +7,7 @@ use crate::scoring::has_static_hidden_marker;
 use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 const STRONG_IDS: &[&str] = &["post", "content", "article-content"];
 const ARTICLE_TAG_PRIOR: f64 = 0.003;
@@ -150,7 +151,7 @@ pub(crate) struct CandidateSet {
     /// Candidate indexes are looked up by source NodeId. Keep this map dense
     /// because callers already have stable node IDs, but use a u32 sentinel
     /// so the map does not double the size of the node index on 64-bit hosts.
-    positions: Vec<u32>,
+    positions: Rc<Vec<u32>>,
     has_article_body: bool,
     document_evidence: DocumentEvidence,
 }
@@ -270,7 +271,7 @@ impl CandidateSet {
     pub(crate) fn empty(source_node_count: usize) -> Self {
         Self {
             candidates: Vec::new(),
-            positions: vec![NO_CANDIDATE; source_node_count],
+            positions: Rc::new(vec![NO_CANDIDATE; source_node_count]),
             has_article_body: false,
             document_evidence: DocumentEvidence::default(),
         }
@@ -297,7 +298,7 @@ impl CandidateSet {
     ) -> Self {
         let mut candidates = Self {
             candidates: Vec::new(),
-            positions: vec![NO_CANDIDATE; dom.len()],
+            positions: Rc::new(vec![NO_CANDIDATE; dom.len()]),
             has_article_body: false,
             document_evidence: DocumentEvidence::default(),
         };
@@ -402,6 +403,13 @@ impl CandidateSet {
         self.candidates.iter_mut()
     }
 
+    pub(crate) fn reset_variant_state(&mut self) {
+        for candidate in &mut self.candidates {
+            candidate.readability_score = 0.0;
+            candidate.features = CandidateFeatures::default();
+        }
+    }
+
     pub(crate) fn is_authoritative_semantic(&self, dom: &Dom, node: NodeId) -> bool {
         is_authoritative_semantic_node(dom, node)
     }
@@ -493,7 +501,7 @@ impl CandidateSet {
             if is_article
                 && dom.parent(candidate.node).is_some()
                 && store
-                    .get_stats(candidate.node)
+                    .get_stats_or_source(candidate.node)
                     .is_some_and(|stats| stats.has_non_whitespace())
             {
                 article_peer_count[parent] += 1;
@@ -521,7 +529,7 @@ impl CandidateSet {
 
     fn add(&mut self, node: NodeId, source: CandidateSource, value: f64) {
         if node.index() >= self.positions.len() {
-            self.positions.resize(node.index() + 1, NO_CANDIDATE);
+            Rc::make_mut(&mut self.positions).resize(node.index() + 1, NO_CANDIDATE);
         }
         let position = self.positions[node.index()];
         if position == NO_CANDIDATE {
@@ -535,7 +543,7 @@ impl CandidateSet {
             if position == NO_CANDIDATE {
                 return;
             }
-            self.positions[node.index()] = position;
+            Rc::make_mut(&mut self.positions)[node.index()] = position;
             let mut sources = CandidateSources::default();
             sources.insert(source);
             self.candidates.push(Candidate {
@@ -1840,9 +1848,15 @@ mod tests {
             .filter(|&node| dom.tag(node) == Some(Tag::Article))
             .collect();
         let mut candidates = CandidateSet::discover_semantic(&dom);
+        let shared_positions = candidates.clone();
         for (index, &article) in articles.iter().enumerate() {
             candidates.add_readability(article, 10.0 + index as f64);
         }
+
+        assert!(Rc::ptr_eq(
+            &shared_positions.positions,
+            &candidates.positions
+        ));
 
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
         let mut store = NodeStateStore::new();
