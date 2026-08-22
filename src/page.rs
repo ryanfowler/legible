@@ -96,7 +96,7 @@ impl ExtractedPage {
     pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        writer.write_str(&self.document.text())
+        self.document.write_text(writer)
     }
 
     /// Renders the extracted content as canonical semantic HTML.
@@ -256,10 +256,7 @@ impl HtmlBuilder<'_> {
     pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        writer.write_str(&crate::render::html::render_html(
-            &self.page.document,
-            self.page.document.output_capacity_hint(),
-        ))
+        crate::render::html::write_html(&self.page.document, writer)
     }
 }
 
@@ -304,14 +301,14 @@ impl MarkdownBuilder<'_> {
     pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        writer.write_str(&crate::render::markdown::render_markdown(
+        crate::render::markdown::write_markdown(
             &self.page.document,
-            self.page.document.output_capacity_hint(),
+            writer,
             crate::render::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
             },
-        ))
+        )
     }
 }
 
@@ -383,6 +380,52 @@ mod tests {
         assert!(page.write_markdown(&mut FailingWriter).is_err());
         assert!(page.write_text(&mut FailingWriter).is_err());
         assert!(page.write_html(&mut FailingWriter).is_err());
+    }
+
+    #[test]
+    fn write_methods_send_output_in_multiple_writes() {
+        struct CountingWriter {
+            output: String,
+            writes: usize,
+        }
+
+        impl fmt::Write for CountingWriter {
+            fn write_str(&mut self, value: &str) -> fmt::Result {
+                self.writes += 1;
+                self.output.push_str(value);
+                Ok(())
+            }
+        }
+
+        let page = extract(
+            "<main><p>First paragraph.</p><p>Second paragraph.</p></main>",
+            None,
+        )
+        .unwrap();
+
+        let mut markdown = CountingWriter {
+            output: String::new(),
+            writes: 0,
+        };
+        page.write_markdown(&mut markdown).unwrap();
+        assert_eq!(markdown.output, page.markdown());
+        assert!(markdown.writes > 1);
+
+        let mut html = CountingWriter {
+            output: String::new(),
+            writes: 0,
+        };
+        page.write_html(&mut html).unwrap();
+        assert_eq!(html.output, page.html());
+        assert!(html.writes > 1);
+
+        let mut text = CountingWriter {
+            output: String::new(),
+            writes: 0,
+        };
+        page.write_text(&mut text).unwrap();
+        assert_eq!(text.output, page.text());
+        assert!(text.writes > 1);
     }
 
     #[test]

@@ -1,11 +1,17 @@
 //! Canonical semantic HTML rendering.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use crate::document::{Document, ListKind, MediaKind, OperationKind, SemanticItemView as Item};
 
 pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
     let mut output = String::with_capacity(capacity.max(512));
+    write_html(document, &mut output).expect("writing to a String cannot fail");
+    output
+}
+
+pub(crate) fn write_html<W: fmt::Write>(document: &Document, writer: &mut W) -> fmt::Result {
+    let mut output = HtmlOutput::new(writer);
     let mut containers = Vec::with_capacity(32);
     for (index, operation) in document.operations().iter().copied().enumerate() {
         if operation.is_close() {
@@ -257,7 +263,53 @@ pub(crate) fn render_html(document: &Document, capacity: usize) -> String {
             containers.push(document.operation_kind(index).unwrap());
         }
     }
-    output
+    output.finish()
+}
+
+struct HtmlOutput<'writer> {
+    writer: &'writer mut dyn fmt::Write,
+    error: Option<fmt::Error>,
+}
+
+impl<'writer> HtmlOutput<'writer> {
+    fn new<W: fmt::Write>(writer: &'writer mut W) -> Self {
+        Self {
+            writer,
+            error: None,
+        }
+    }
+
+    fn push(&mut self, value: char) {
+        let _ = self.write_char(value);
+    }
+
+    fn push_str(&mut self, value: &str) {
+        let _ = self.write_str(value);
+    }
+
+    fn finish(self) -> fmt::Result {
+        self.error.map_or(Ok(()), Err)
+    }
+}
+
+impl fmt::Write for HtmlOutput<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.error.is_none()
+            && let Err(error) = self.writer.write_str(value)
+        {
+            self.error = Some(error);
+        }
+        Ok(())
+    }
+
+    fn write_char(&mut self, value: char) -> fmt::Result {
+        if self.error.is_none()
+            && let Err(error) = self.writer.write_char(value)
+        {
+            self.error = Some(error);
+        }
+        Ok(())
+    }
 }
 
 fn html_close_tag(node: Item, parent_is_list: bool) -> Option<&'static str> {
@@ -310,13 +362,13 @@ fn html_close_tag(node: Item, parent_is_list: bool) -> Option<&'static str> {
     })
 }
 
-fn open(output: &mut String, tag: &'static str) {
+fn open(output: &mut HtmlOutput<'_>, tag: &'static str) {
     output.push('<');
     output.push_str(tag);
     output.push('>');
 }
 
-fn escape_text(output: &mut String, value: &str) {
+fn escape_text(output: &mut HtmlOutput<'_>, value: &str) {
     for character in value.chars() {
         match character {
             '&' => output.push_str("&amp;"),
@@ -327,7 +379,7 @@ fn escape_text(output: &mut String, value: &str) {
     }
 }
 
-fn escape_attribute(output: &mut String, value: &str) {
+fn escape_attribute(output: &mut HtmlOutput<'_>, value: &str) {
     for character in value.chars() {
         match character {
             '&' => output.push_str("&amp;"),

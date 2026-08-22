@@ -3,6 +3,8 @@
 // The renderer interprets the private semantic tape in source order. It keeps
 // only formatting and structural state that is needed while writing output.
 
+use std::fmt;
+
 use crate::document::{
     Document, EventOp, FootnoteId, HAS_VISIBLE_IMAGE, HAS_VISIBLE_TEXT, ListKind, OperationKind,
     SemanticItemView as Item, TableAlignment,
@@ -74,23 +76,37 @@ pub(crate) fn render_markdown(
     capacity: usize,
     config: MarkdownConfig,
 ) -> String {
-    MarkdownRenderer::new(document, capacity, config).render()
+    let mut output = String::with_capacity(capacity.max(512));
+    write_markdown(document, &mut output, config).expect("writing to a String cannot fail");
+    output
 }
 
-struct MarkdownRenderer<'a> {
-    document: &'a Document,
-    out: Output,
+pub(crate) fn write_markdown<W: fmt::Write>(
+    document: &Document,
+    writer: &mut W,
+    config: MarkdownConfig,
+) -> fmt::Result {
+    MarkdownRenderer::new(document, config, writer).render()
+}
+
+struct MarkdownRenderer<'document, 'writer> {
+    document: &'document Document,
+    out: Output<'writer>,
     frames: Vec<Frame>,
     list_depth: usize,
     table_depth: usize,
     config: MarkdownConfig,
 }
 
-impl<'a> MarkdownRenderer<'a> {
-    fn new(document: &'a Document, capacity: usize, config: MarkdownConfig) -> Self {
+impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
+    fn new<W: fmt::Write>(
+        document: &'document Document,
+        config: MarkdownConfig,
+        writer: &'writer mut W,
+    ) -> Self {
         Self {
             document,
-            out: Output::new(capacity),
+            out: Output::new(writer),
             frames: Vec::with_capacity(32),
             list_depth: 0,
             table_depth: 0,
@@ -98,7 +114,7 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    fn render(mut self) -> String {
+    fn render(mut self) -> fmt::Result {
         let mut index = 0;
         while index < self.document.operations().len() {
             let Some(operation) = self.document.operations().get(index).copied() else {
@@ -1023,8 +1039,12 @@ pub(crate) fn has_visible_inline_text(text: &str) -> bool {
     crate::document::stats::has_visible_inline_text(text)
 }
 
-struct Output {
+struct Output<'writer> {
+    writer: &'writer mut dyn fmt::Write,
     value: String,
+    error: Option<fmt::Error>,
+    has_output: bool,
+    pending_newlines: usize,
     pending_space: bool,
     last_text_char: Option<char>,
     inline_boundary: bool,
@@ -1058,10 +1078,14 @@ struct Marker {
     opened: bool,
 }
 
-impl Output {
-    fn new(capacity: usize) -> Self {
+impl<'writer> Output<'writer> {
+    fn new<W: fmt::Write>(writer: &'writer mut W) -> Self {
         Self {
-            value: String::with_capacity(capacity.max(512)),
+            writer,
+            value: String::with_capacity(512),
+            error: None,
+            has_output: false,
+            pending_newlines: 0,
             pending_space: false,
             last_text_char: None,
             inline_boundary: false,
@@ -1075,14 +1099,41 @@ impl Output {
         }
     }
 
-    fn finish(mut self) -> String {
+    fn finish(mut self) -> fmt::Result {
         self.resolve_hash_run(true);
         self.value
             .truncate(self.value.trim_end_matches([' ', '\t', '\r', '\n']).len());
-        if !self.value.is_empty() {
-            self.value.push('\n');
+        self.flush_line();
+        self.pending_newlines = 0;
+        if self.has_output {
+            self.write_str("\n");
         }
-        self.value
+        self.error.map_or(Ok(()), Err)
+    }
+
+    fn write_str(&mut self, value: &str) {
+        if self.error.is_none()
+            && let Err(error) = self.writer.write_str(value)
+        {
+            self.error = Some(error);
+        }
+    }
+
+    fn flush_pending_newlines(&mut self) {
+        for _ in 0..self.pending_newlines {
+            self.write_str("\n");
+        }
+        self.pending_newlines = 0;
+    }
+
+    fn flush_line(&mut self) {
+        if self.value.is_empty() {
+            return;
+        }
+        self.flush_pending_newlines();
+        let value = std::mem::take(&mut self.value);
+        self.write_str(&value);
+        self.has_output = true;
     }
 
     fn has_current_line_content(&self) -> bool {
@@ -1093,6 +1144,7 @@ impl Output {
         if !self.line_start {
             return;
         }
+        self.flush_pending_newlines();
         for prefix in &self.prefixes {
             match prefix {
                 Prefix::Quote => self.value.push_str("> "),
@@ -1474,8 +1526,11 @@ impl Output {
         self.flush_space();
         for part in value.split_inclusive('\n') {
             self.prefix();
-            self.value.push_str(part);
+            let line = part.strip_suffix('\n').unwrap_or(part);
+            self.value.push_str(line);
             if part.ends_with('\n') {
+                self.flush_line();
+                self.pending_newlines += 1;
                 self.line_start = true;
                 self.trailing_newlines += 1;
             }
@@ -1505,21 +1560,20 @@ impl Output {
                 self.value.truncate(prefix_start);
             }
         }
-        self.value.push('\n');
+        self.flush_line();
+        self.pending_newlines += 1;
         self.line_start = true;
         self.line_text_state = LineTextState::Start;
         self.trailing_newlines += 1;
     }
 
     fn limit_trailing_newlines(&mut self, maximum: usize) {
-        while self.trailing_newlines > maximum && self.value.ends_with('\n') {
-            self.value.pop();
-            self.trailing_newlines -= 1;
-        }
+        self.trailing_newlines = self.trailing_newlines.min(maximum);
+        self.pending_newlines = self.pending_newlines.min(maximum);
     }
 
     fn ensure_blank_line(&mut self) {
-        if self.value.is_empty() {
+        if !self.has_output && self.value.is_empty() {
             return;
         }
         while self.trailing_newlines < 2 {
@@ -1547,10 +1601,12 @@ impl Output {
         self.resolve_hash_run(true);
         self.pending_space = false;
         self.prefix();
-        self.value.push_str("  \n");
+        self.value.push_str("  ");
+        self.flush_line();
+        self.pending_newlines = 1;
         self.line_start = true;
         self.line_text_state = LineTextState::Start;
-        self.trailing_newlines = 1;
+        self.trailing_newlines += 1;
     }
 }
 

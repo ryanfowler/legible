@@ -179,8 +179,9 @@ deterministic. Rendering is lazy, so Legible does not create all output formats
 unless you request them.
 
 Use `write_markdown`, `write_html`, or `write_text` when an API accepts a
-`std::fmt::Write` value. These methods return `fmt::Result` and write the same
-content as their `String` methods.
+`std::fmt::Write` value. These methods return `fmt::Result` and write directly
+to the provided value. They do not create a complete intermediate output
+`String`.
 
 ```rust
 # let page = legible::extract("<main><p>Text</p></main>", None).unwrap();
