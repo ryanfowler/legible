@@ -3873,7 +3873,11 @@ impl<'a> ContentExtractor<'a> {
         if self.diagnostic_attempts.is_none() {
             return;
         }
-        workspace.ensure_snapshot(&self.dom, root);
+        workspace.ensure_snapshot(
+            &self.dom,
+            root,
+            crate::instrumentation::SnapshotKind::FinalNormalization,
+        );
         let source_nodes = workspace.preorder();
         let (flattened_layout_tables, semantic_tables) =
             crate::document::table_normalization_counts_for_nodes(&self.dom, root, source_nodes);

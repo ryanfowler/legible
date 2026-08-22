@@ -36,6 +36,94 @@ pub enum Phase {
     Rendering = 9,
 }
 
+/// Identifies the cleanup phase that requested a fragment snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub enum SnapshotKind {
+    CleanupSelectedInitial = 0,
+    CleanupSelectedHeading = 1,
+    MediaPreparation = 2,
+    DecorativeMedia = 3,
+    StyleCleanup = 4,
+    TableClassification = 5,
+    HardCleanup = 6,
+    HeuristicInitial = 7,
+    HeuristicAfterExplicit = 8,
+    HeuristicBeforeTaxonomy = 9,
+    HeuristicBeforeJob = 10,
+    HeuristicAfterJob = 11,
+    HeuristicBeforeDirect = 12,
+    HeuristicFinal = 13,
+    GlobalChrome = 14,
+    InlineChrome = 15,
+    RepeatedInitial = 16,
+    RepeatedAfterComments = 17,
+    RepeatedAfterChrome = 18,
+    RepeatedAfterLinks = 19,
+    FinalNormalization = 20,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+const SNAPSHOT_KIND_COUNT: usize = SnapshotKind::FinalNormalization as usize + 1;
+
+impl SnapshotKind {
+    /// Returns all snapshot kinds in stable report order.
+    #[cfg(feature = "bench-instrumentation")]
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::CleanupSelectedInitial,
+            Self::CleanupSelectedHeading,
+            Self::MediaPreparation,
+            Self::DecorativeMedia,
+            Self::StyleCleanup,
+            Self::TableClassification,
+            Self::HardCleanup,
+            Self::HeuristicInitial,
+            Self::HeuristicAfterExplicit,
+            Self::HeuristicBeforeTaxonomy,
+            Self::HeuristicBeforeJob,
+            Self::HeuristicAfterJob,
+            Self::HeuristicBeforeDirect,
+            Self::HeuristicFinal,
+            Self::GlobalChrome,
+            Self::InlineChrome,
+            Self::RepeatedInitial,
+            Self::RepeatedAfterComments,
+            Self::RepeatedAfterChrome,
+            Self::RepeatedAfterLinks,
+            Self::FinalNormalization,
+        ]
+    }
+
+    /// Returns the stable machine-readable snapshot kind name.
+    #[cfg(feature = "bench-instrumentation")]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CleanupSelectedInitial => "cleanup_selected_initial",
+            Self::CleanupSelectedHeading => "cleanup_selected_heading",
+            Self::MediaPreparation => "media_preparation",
+            Self::DecorativeMedia => "decorative_media",
+            Self::StyleCleanup => "style_cleanup",
+            Self::TableClassification => "table_classification",
+            Self::HardCleanup => "hard_cleanup",
+            Self::HeuristicInitial => "heuristic_initial",
+            Self::HeuristicAfterExplicit => "heuristic_after_explicit",
+            Self::HeuristicBeforeTaxonomy => "heuristic_before_taxonomy",
+            Self::HeuristicBeforeJob => "heuristic_before_job",
+            Self::HeuristicAfterJob => "heuristic_after_job",
+            Self::HeuristicBeforeDirect => "heuristic_before_direct",
+            Self::HeuristicFinal => "heuristic_final",
+            Self::GlobalChrome => "global_chrome",
+            Self::InlineChrome => "inline_chrome",
+            Self::RepeatedInitial => "repeated_initial",
+            Self::RepeatedAfterComments => "repeated_after_comments",
+            Self::RepeatedAfterChrome => "repeated_after_chrome",
+            Self::RepeatedAfterLinks => "repeated_after_links",
+            Self::FinalNormalization => "final_normalization",
+        }
+    }
+}
+
 impl Phase {
     #[cfg(feature = "bench-instrumentation")]
     const ALL: [Self; PHASE_COUNT] = [
@@ -82,6 +170,15 @@ pub struct ExtractionCounters {
     pub parse_calls: u64,
     pub source_full_scans: u64,
     pub source_element_snapshots: u64,
+    pub fragment_snapshot_rebuilds: u64,
+    pub fragment_snapshot_requests: u64,
+    pub fragment_snapshot_reuses: u64,
+    pub fragment_snapshot_nodes: u64,
+    pub fragment_snapshot_reuse_nodes: u64,
+    pub fragment_snapshot_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    pub fragment_snapshot_reuses_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    pub fragment_snapshot_nodes_by_kind: [u64; SNAPSHOT_KIND_COUNT],
+    pub fragment_snapshot_reuse_nodes_by_kind: [u64; SNAPSHOT_KIND_COUNT],
     pub prepared_source_builds: u64,
     pub prepared_source_entries: u64,
     pub dom_clones: u64,
@@ -193,6 +290,15 @@ std::thread_local! {
             parse_calls: 0,
             source_full_scans: 0,
             source_element_snapshots: 0,
+            fragment_snapshot_rebuilds: 0,
+            fragment_snapshot_requests: 0,
+            fragment_snapshot_reuses: 0,
+            fragment_snapshot_nodes: 0,
+            fragment_snapshot_reuse_nodes: 0,
+            fragment_snapshot_by_kind: [0; SNAPSHOT_KIND_COUNT],
+            fragment_snapshot_reuses_by_kind: [0; SNAPSHOT_KIND_COUNT],
+            fragment_snapshot_nodes_by_kind: [0; SNAPSHOT_KIND_COUNT],
+            fragment_snapshot_reuse_nodes_by_kind: [0; SNAPSHOT_KIND_COUNT],
             prepared_source_builds: 0,
             prepared_source_entries: 0,
             dom_clones: 0,
@@ -306,6 +412,38 @@ pub(crate) fn record_source_element_snapshot() {
     add_counter(|counters| {
         counters.source_element_snapshots = counters.source_element_snapshots.saturating_add(1)
     });
+}
+
+#[inline(always)]
+pub(crate) fn record_fragment_snapshot(kind: SnapshotKind, nodes: usize, reused: bool) {
+    #[cfg(feature = "bench-instrumentation")]
+    add_counter(|counters| {
+        counters.fragment_snapshot_requests = counters.fragment_snapshot_requests.saturating_add(1);
+        if reused {
+            counters.fragment_snapshot_reuses = counters.fragment_snapshot_reuses.saturating_add(1);
+            counters.fragment_snapshot_reuse_nodes = counters
+                .fragment_snapshot_reuse_nodes
+                .saturating_add(nodes as u64);
+            counters.fragment_snapshot_reuses_by_kind[kind as usize] =
+                counters.fragment_snapshot_reuses_by_kind[kind as usize].saturating_add(1);
+            counters.fragment_snapshot_reuse_nodes_by_kind[kind as usize] = counters
+                .fragment_snapshot_reuse_nodes_by_kind[kind as usize]
+                .saturating_add(nodes as u64);
+        } else {
+            counters.fragment_snapshot_rebuilds =
+                counters.fragment_snapshot_rebuilds.saturating_add(1);
+            counters.fragment_snapshot_nodes = counters
+                .fragment_snapshot_nodes
+                .saturating_add(nodes as u64);
+            counters.fragment_snapshot_by_kind[kind as usize] =
+                counters.fragment_snapshot_by_kind[kind as usize].saturating_add(1);
+            counters.fragment_snapshot_nodes_by_kind[kind as usize] = counters
+                .fragment_snapshot_nodes_by_kind[kind as usize]
+                .saturating_add(nodes as u64);
+        }
+    });
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let _ = (kind, nodes, reused);
 }
 
 #[inline(always)]

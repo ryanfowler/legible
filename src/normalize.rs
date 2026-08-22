@@ -10,6 +10,43 @@ pub(crate) use headings::heading_level;
 
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::is_element_without_content;
+use smallvec::SmallVec;
+
+#[derive(Default)]
+struct MutationBatch {
+    detach: SmallVec<[NodeId; 4]>,
+}
+
+impl MutationBatch {
+    fn detach(&mut self, node: NodeId) {
+        self.detach.push(node);
+    }
+
+    fn apply(self, dom: &mut Dom) -> bool {
+        let mut roots = SmallVec::<[NodeId; 4]>::new();
+        for node in self.detach {
+            if dom.parent(node).is_none()
+                || roots
+                    .iter()
+                    .any(|&ancestor| dom.ancestors(node).any(|candidate| candidate == ancestor))
+            {
+                continue;
+            }
+            roots.push(node);
+        }
+        let changed = !roots.is_empty();
+        for node in roots {
+            if dom.parent(node).is_some() {
+                dom.detach(node);
+            }
+        }
+        changed
+    }
+
+    fn nodes(&self) -> &[NodeId] {
+        &self.detach
+    }
+}
 
 /// Applies the historical scoring projections to the selected fragment.
 ///
@@ -70,14 +107,36 @@ pub(crate) fn cleanup_selected_content_in_workspace(
     flatten_javascript_links: bool,
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
-    workspace.ensure_snapshot(dom, root);
-    remove_code_language_labels(dom, root, workspace);
-    {
-        let source_nodes = workspace.preorder();
-        images::remove_duplicates_with_source_nodes(dom, root, source_nodes, nodes);
-    }
+    workspace.ensure_snapshot(
+        dom,
+        root,
+        crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
+    );
+    let mut batch = MutationBatch::default();
+    collect_code_language_label_removals(dom, workspace.preorder(), &mut batch);
+    workspace.with_pending_detach_mask(
+        dom,
+        batch.nodes(),
+        |dom, source_nodes, pending_detaches| {
+            images::remove_duplicates_with_source_nodes(
+                dom,
+                root,
+                source_nodes,
+                nodes,
+                pending_detaches,
+            );
+        },
+    );
+    batch.apply(dom);
+    // Image deduplication can mutate the fragment. Apply the independent label
+    // removals before the next topology-dependent detector, then invalidate
+    // once for the complete epoch.
     workspace.invalidate();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_snapshot(
+        dom,
+        root,
+        crate::instrumentation::SnapshotKind::CleanupSelectedHeading,
+    );
     {
         let source_nodes = workspace.preorder();
         let elements_with_depth = workspace.elements_with_depth();
@@ -90,28 +149,17 @@ pub(crate) fn cleanup_selected_content_in_workspace(
     }
 }
 
-/// Removes visible syntax-highlighter language badges before semantic lowering.
-fn remove_code_language_labels(
-    dom: &mut Dom,
-    root: NodeId,
-    workspace: &mut crate::cleaning::FragmentWorkspace,
+/// Collects visible syntax-highlighter language badges for the current epoch.
+fn collect_code_language_label_removals(
+    dom: &Dom,
+    source_nodes: &[NodeId],
+    batch: &mut MutationBatch,
 ) {
-    let labels: Vec<NodeId> = workspace
-        .preorder()
-        .iter()
-        .copied()
-        .filter(|&node| crate::document::is_code_language_label(dom, node))
-        .collect();
-    if labels.is_empty() {
-        return;
-    }
-    for label in labels {
-        if dom.parent(label).is_some() {
-            dom.detach(label);
+    for &node in source_nodes {
+        if crate::document::is_code_language_label(dom, node) {
+            batch.detach(node);
         }
     }
-    workspace.invalidate();
-    workspace.ensure_snapshot(dom, root);
 }
 
 /// Preserves the established DOM-based link-density metric until result metrics use the IR.
@@ -155,7 +203,11 @@ pub(crate) fn prepare_media_before_cleanup_in_workspace(
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
     let mut scratch = workspace.take_scratch();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_snapshot(
+        dom,
+        root,
+        crate::instrumentation::SnapshotKind::MediaPreparation,
+    );
     {
         let source_nodes = workspace.preorder();
         media::prepare_with_source_nodes(dom, root, source_nodes, &mut scratch);
@@ -176,7 +228,11 @@ pub(crate) fn remove_decorative_media_before_cleanup_in_workspace(
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
     let mut scratch = workspace.take_scratch();
-    workspace.ensure_snapshot(dom, root);
+    workspace.ensure_snapshot(
+        dom,
+        root,
+        crate::instrumentation::SnapshotKind::DecorativeMedia,
+    );
     {
         let snapshot = workspace.elements_with_depth();
         images::remove_decorative_media_with_snapshot(dom, root, snapshot, &mut scratch);
@@ -757,5 +813,191 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             semantic_markdown(&dom, root),
             "# Guide\n\nText[^note]\n\n[^note]: A reference.\n"
         );
+    }
+
+    #[test]
+    fn batched_cleanup_matches_sequential_cleanup() {
+        for html in [
+            r#"
+                <div class="code-container">
+                    <span class="label rust">rust</span>
+                    <pre class="language-rust"><code>fn main() {}</code></pre>
+                </div>
+                <figure><img src="photo.jpg"><img src="photo.jpg"></figure>
+                <a href="javascript:void(0)">Action</a>
+                <h2 class="trailing-heading">Placeholder</h2>
+            "#,
+            r#"
+                <div class="code-container">
+                    <span class="label rust">rust<img src="label-photo.jpg"></span>
+                    <pre class="language-rust"><code>fn main() {}</code></pre>
+                </div>
+                <table><tr><th>Field</th><th>Value</th></tr><tr><td>A</td><td>B</td></tr></table>
+            "#,
+            r#"
+                <figure><img src="photo.jpg"></figure>
+                <span class="label rust">rust</span>
+                <figure><img src="photo.jpg"></figure>
+            "#,
+            r#"
+                <div><span class="label rust">rust</span><img src="photo.jpg"></div>
+                <div><img src="photo.jpg"></div>
+            "#,
+        ] {
+            let mut batched = Dom::parse_fragment(html, Tag::Div).unwrap();
+            let batched_root = batched.root();
+            let mut sequential = Dom::parse_fragment(html, Tag::Div).unwrap();
+            let sequential_root = sequential.root();
+            let mut batched_nodes = Vec::new();
+            let mut sequential_nodes = Vec::new();
+            cleanup_selected_content(&mut batched, batched_root, &mut batched_nodes, true);
+            cleanup_selected_content_sequential_for_test(
+                &mut sequential,
+                sequential_root,
+                &mut sequential_nodes,
+                true,
+            );
+
+            assert_eq!(
+                fragment_shape(&batched, batched_root),
+                fragment_shape(&sequential, sequential_root)
+            );
+            assert_eq!(
+                node_list_shape(&batched, &batched_nodes),
+                node_list_shape(&sequential, &sequential_nodes)
+            );
+            assert_eq!(
+                semantic_markdown(&batched, batched_root),
+                semantic_markdown(&sequential, sequential_root)
+            );
+        }
+    }
+
+    #[test]
+    fn pending_code_labels_do_not_block_duplicate_image_detection() {
+        let mut dom = Dom::parse_fragment(
+            r#"<figure><img src="photo.jpg"></figure><span class="label rust">rust</span><figure><img src="photo.jpg"></figure>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let mut nodes = Vec::new();
+        cleanup_selected_content(&mut dom, root, &mut nodes, false);
+        assert_eq!(
+            dom.descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mutation_batch_drops_nested_detaches() {
+        let mut dom = Dom::parse_fragment(
+            r#"<div class="label"><span class="label">rust</span></div><p>Keep</p>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let outer = dom
+            .descendants(root)
+            .find(|&node| dom.attr(node, AttrName::Class) == Some("label"))
+            .unwrap();
+        let inner = dom
+            .descendants(outer)
+            .find(|&node| dom.tag(node) == Some(Tag::Span))
+            .unwrap();
+        let mut batch = MutationBatch::default();
+        batch.detach(outer);
+        batch.detach(inner);
+        assert!(batch.apply(&mut dom));
+        assert!(dom.parent(outer).is_none());
+        assert!(dom.parent(inner).is_some());
+    }
+
+    fn cleanup_selected_content_sequential_for_test(
+        dom: &mut Dom,
+        root: NodeId,
+        nodes: &mut Vec<NodeId>,
+        flatten_javascript_links: bool,
+    ) {
+        let mut workspace = crate::cleaning::FragmentWorkspace::default();
+        workspace.ensure_snapshot(
+            dom,
+            root,
+            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
+        );
+        let labels: Vec<_> = workspace
+            .preorder()
+            .iter()
+            .copied()
+            .filter(|&node| crate::document::is_code_language_label(dom, node))
+            .collect();
+        for label in labels {
+            if dom.parent(label).is_some() {
+                dom.detach(label);
+            }
+        }
+        workspace.invalidate();
+        workspace.ensure_snapshot(
+            dom,
+            root,
+            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
+        );
+        images::remove_duplicates_with_source_nodes(dom, root, workspace.preorder(), nodes, &[]);
+        workspace.invalidate();
+        workspace.ensure_snapshot(
+            dom,
+            root,
+            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
+        );
+        headings::remove_artifacts_with_snapshot(
+            dom,
+            root,
+            workspace.elements_with_depth(),
+            workspace.preorder(),
+        );
+        workspace.invalidate();
+        if flatten_javascript_links {
+            flatten_javascript_links_for_quality(dom, root);
+            workspace.invalidate();
+        }
+    }
+
+    fn fragment_shape(dom: &Dom, root: NodeId) -> Vec<String> {
+        std::iter::once(root)
+            .chain(dom.descendants(root))
+            .map(|node| {
+                let attributes = dom
+                    .attrs(node)
+                    .iter()
+                    .map(|attribute| format!("{}={}", attribute.name.local, attribute.value))
+                    .collect::<Vec<_>>();
+                format!(
+                    "parent={:?};tag={:?};text={:?};attrs={attributes:?}",
+                    dom.parent(node).and_then(|parent| {
+                        std::iter::once(root)
+                            .chain(dom.descendants(root))
+                            .position(|candidate| candidate == parent)
+                    }),
+                    dom.tag(node),
+                    dom.text_node(node)
+                )
+            })
+            .collect()
+    }
+
+    fn node_list_shape(dom: &Dom, nodes: &[NodeId]) -> Vec<String> {
+        nodes
+            .iter()
+            .map(|&node| {
+                format!(
+                    "tag={:?};text={:?};src={:?}",
+                    dom.tag(node),
+                    dom.text_node(node),
+                    dom.attr(node, AttrName::Src)
+                )
+            })
+            .collect()
     }
 }

@@ -52,10 +52,20 @@ impl ImageAnalysis {
 
 /// Selects image sources and synthetic image containers in linear passes.
 pub(crate) fn analyze(dom: &Dom, nodes: &[NodeId], base_url: Option<&Url>) -> ImageAnalysis {
-    let has_candidates = nodes
-        .iter()
-        .any(|&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure)));
-    analyze_inner(dom, nodes, base_url, has_candidates)
+    analyze_excluding(dom, nodes, &[], base_url)
+}
+
+pub(crate) fn analyze_excluding(
+    dom: &Dom,
+    nodes: &[NodeId],
+    excluded: &[bool],
+    base_url: Option<&Url>,
+) -> ImageAnalysis {
+    let has_candidates = nodes.iter().any(|&node| {
+        !is_excluded(node, excluded)
+            && matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure))
+    });
+    analyze_inner(dom, nodes, excluded, base_url, has_candidates)
 }
 
 pub(crate) fn analyze_with_inventory(
@@ -64,12 +74,13 @@ pub(crate) fn analyze_with_inventory(
     candidates: &[NodeId],
     base_url: Option<&Url>,
 ) -> ImageAnalysis {
-    analyze_inner(dom, nodes, base_url, !candidates.is_empty())
+    analyze_inner(dom, nodes, &[], base_url, !candidates.is_empty())
 }
 
 fn analyze_inner(
     dom: &Dom,
     nodes: &[NodeId],
+    excluded: &[bool],
     base_url: Option<&Url>,
     has_candidates: bool,
 ) -> ImageAnalysis {
@@ -81,6 +92,9 @@ fn analyze_inner(
     }
     let mut nearest_picture = vec![None; dom.len()];
     for &node in nodes {
+        if is_excluded(node, excluded) {
+            continue;
+        }
         nearest_picture[node.index()] = if dom.tag(node) == Some(Tag::Picture) {
             Some(node)
         } else {
@@ -91,6 +105,9 @@ fn analyze_inner(
 
     let mut picture_sources = vec![None; dom.len()];
     for &node in nodes {
+        if is_excluded(node, excluded) {
+            continue;
+        }
         if dom.tag(node) == Some(Tag::Picture) {
             picture_sources[node.index()] = select_node_source(dom, node, base_url);
         } else if dom.tag(node) == Some(Tag::Source)
@@ -103,6 +120,9 @@ fn analyze_inner(
 
     let mut descendant_images = vec![false; dom.len()];
     for &node in nodes.iter().rev() {
+        if is_excluded(node, excluded) {
+            continue;
+        }
         descendant_images[node.index()] = dom.tag(node) == Some(Tag::Img)
             || dom
                 .children(node)
@@ -112,11 +132,17 @@ fn analyze_inner(
     let mut sources = SparseNodeValues::with_capacity(
         nodes
             .iter()
-            .filter(|&&node| matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure)))
+            .filter(|&&node| {
+                !is_excluded(node, excluded)
+                    && matches!(dom.tag(node), Some(Tag::Img | Tag::Picture | Tag::Figure))
+            })
             .count(),
     );
     let mut synthetic_nodes = Vec::new();
     for &node in nodes {
+        if is_excluded(node, excluded) {
+            continue;
+        }
         let source = match dom.tag(node) {
             Some(Tag::Img) => nearest_picture[node.index()]
                 .and_then(|picture| picture_sources[picture.index()].clone())
@@ -146,6 +172,10 @@ fn analyze_inner(
     }
     synthetic.sort();
     ImageAnalysis { sources, synthetic }
+}
+
+fn is_excluded(node: NodeId, excluded: &[bool]) -> bool {
+    excluded.get(node.index()).copied().unwrap_or(false)
 }
 
 pub(crate) fn canonical_label(value: Option<&str>) -> Box<str> {

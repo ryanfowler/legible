@@ -100,7 +100,9 @@ pub use metadata::{
 pub use page::{ExtractedPage, HtmlBuilder, MarkdownBuilder};
 
 #[cfg(feature = "bench-instrumentation")]
-pub use instrumentation::{ExtractionCounters, InstrumentationSnapshot, Phase, PhaseDurations};
+pub use instrumentation::{
+    ExtractionCounters, InstrumentationSnapshot, Phase, PhaseDurations, SnapshotKind,
+};
 
 /// Extracts relevant content and metadata from an HTML document.
 ///

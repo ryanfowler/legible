@@ -467,6 +467,28 @@ fn report(
         counters.json_ld_parsed_bytes,
         counters.json_ld_retained_bytes,
     );
+    println!(
+        "fragment-snapshots/{group}/{name}: requests={}, rebuilds={}, reuses={}, rebuilt_nodes={}, reused_nodes={}, by_kind={}",
+        counters.fragment_snapshot_requests,
+        counters.fragment_snapshot_rebuilds,
+        counters.fragment_snapshot_reuses,
+        counters.fragment_snapshot_nodes,
+        counters.fragment_snapshot_reuse_nodes,
+        legible::SnapshotKind::all()
+            .iter()
+            .map(|kind| {
+                format!(
+                    "{}:{}/{}/{} / {}",
+                    kind.name(),
+                    counters.fragment_snapshot_by_kind[*kind as usize],
+                    counters.fragment_snapshot_reuses_by_kind[*kind as usize],
+                    counters.fragment_snapshot_nodes_by_kind[*kind as usize],
+                    counters.fragment_snapshot_reuse_nodes_by_kind[*kind as usize]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    );
     if let Err(error) = result {
         println!("error/{group}/{name}: {error:?}");
     }
