@@ -93,6 +93,7 @@ pub(super) fn remove_artifacts_with_snapshot(
     }
 }
 
+#[cfg(test)]
 pub(super) fn normalize_roles(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
     for &(node, _) in &nodes {
@@ -123,6 +124,7 @@ fn has_role(dom: &Dom, node: NodeId, expected: &str) -> bool {
         .is_some_and(|roles| has_token(roles, expected))
 }
 
+#[cfg(test)]
 fn heading_tag(level: u8) -> Option<Tag> {
     match level {
         1 => Some(Tag::H1),
