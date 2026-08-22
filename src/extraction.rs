@@ -50,6 +50,7 @@ pub(crate) struct ContentExtractor<'a> {
     source_dom_nodes: usize,
     options: &'a ExtractorConfig,
     strategy: ExtractionStrategy,
+    #[cfg(test)]
     node_data: NodeStateStore,
     page_title: String,
     structured_title: String,
@@ -253,6 +254,7 @@ struct BestAttempt {
     excerpt: Option<String>,
     direction: Option<String>,
     strategy: ExtractionStrategy,
+    byline: Option<String>,
     diagnostic_index: Option<usize>,
 }
 
@@ -299,6 +301,46 @@ struct FrozenContent {
     retained_stream: Option<crate::document::RetainedStream>,
     ordinary_plan: Option<crate::document::OrdinarySourcePlan>,
     ordinary_checked: bool,
+}
+
+/// Immutable state shared by all physical extraction attempts.
+///
+/// The source DOM is owned by `ContentExtractor`, but this view is the only
+/// source state an attempt needs. An attempt must never take ownership of it or
+/// mutate it.
+struct SourceSession<'a, 'b> {
+    extractor: &'a ContentExtractor<'b>,
+}
+
+/// Mutable state for one physical fragment execution.
+///
+/// Dropping this value drops a rejected fragment. It does not require source
+/// DOM restoration or attempt-state reset on the extraction coordinator.
+struct AttemptRunner<'a, 'b> {
+    source: SourceSession<'a, 'b>,
+    dom: Dom,
+    scratch: AttemptScratch,
+    cleanup_actions: Vec<CleanupActionInfo>,
+    normalization: NormalizationCountsInfo,
+}
+
+#[derive(Default)]
+struct AttemptScratch {
+    node_data: NodeStateStore,
+    workspace: FragmentWorkspace,
+    cleaning_nodes: Vec<NodeId>,
+}
+
+impl<'a, 'b> AttemptRunner<'a, 'b> {
+    fn new(source: &'a ContentExtractor<'b>, dom: Dom, scratch: AttemptScratch) -> Self {
+        Self {
+            source: SourceSession { extractor: source },
+            dom,
+            scratch,
+            cleanup_actions: Vec::new(),
+            normalization: NormalizationCountsInfo::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -604,6 +646,7 @@ impl<'a> ContentExtractor<'a> {
             source_dom_nodes,
             options,
             strategy: ExtractionStrategy::Normal,
+            #[cfg(test)]
             node_data: NodeStateStore::new(),
             page_title: String::new(),
             structured_title: String::new(),
@@ -959,8 +1002,7 @@ impl<'a> ContentExtractor<'a> {
             has_hidden_content: has_relaxable_hidden_content,
         };
         let mut text_buffer = String::new();
-        let mut cleaning_nodes = Vec::new();
-        let mut fragment_workspace = FragmentWorkspace::default();
+        let mut attempt_scratch = AttemptScratch::default();
         let accessible_math = prepared_source.accessible_math_nodes(&self.dom);
         let base_candidates = prepared_source.candidates().clone();
         let content_hint_targets =
@@ -1132,6 +1174,7 @@ impl<'a> ContentExtractor<'a> {
                 if verdict.accepted {
                     let excerpt = cached.excerpt.take();
                     self.page_direction = source_direction.clone();
+                    self.page_byline = plan.byline.clone();
                     self.record_attempt(
                         strategy,
                         root_info,
@@ -1212,19 +1255,12 @@ impl<'a> ContentExtractor<'a> {
                         excerpt: cached.excerpt.take(),
                         direction: source_direction.clone(),
                         strategy,
+                        byline: plan.byline.clone(),
                         diagnostic_index,
                     });
                     physical_cache.insert(key, cached);
-                    self.page_byline = None;
-                    self.page_direction = None;
-                    self.page_language = None;
-                    self.node_data.clear();
                 } else {
                     physical_cache.insert(key, cached);
-                    self.page_byline = None;
-                    self.page_direction = None;
-                    self.page_language = None;
-                    self.node_data.clear();
                 }
                 continue;
             }
@@ -1256,67 +1292,71 @@ impl<'a> ContentExtractor<'a> {
                 copied_siblings[position]
             };
 
-            // Move the selected fragment into the extraction path. The source
-            // DOM is restored after rejection, while the immutable scoring
-            // view stays cached for any later retry.
-            let source_dom = std::mem::replace(&mut self.dom, fragment);
-            fragment_workspace.reset();
+            // The attempt owns its fragment. The prepared source remains
+            // available only through the runner's immutable source session.
+            let mut runner =
+                AttemptRunner::new(self, fragment, std::mem::take(&mut attempt_scratch));
+            runner.scratch.workspace.reset();
+            runner.scratch.node_data.clear();
+            runner.scratch.cleaning_nodes.clear();
             let (_top_id, content_id) = if selection.node == body {
-                Self::prune_body_fallback_chrome(&mut self.dom, copied_top);
-                self.dom.reserve_additional_nodes_exact(2);
-                let container = self
+                Self::prune_body_fallback_chrome(&mut runner.dom, copied_top);
+                runner.dom.reserve_additional_nodes_exact(2);
+                let container = runner
                     .dom
                     .create_html_element(Tag::Div)
                     .map_err(|_| Error::NoContent)?;
-                let children: SmallVec<[NodeId; 16]> = self.dom.children(copied_top).collect();
+                let children: SmallVec<[NodeId; 16]> = runner.dom.children(copied_top).collect();
                 for child in children {
-                    self.dom.append_child(container, child)
+                    runner.dom.append_child(container, child)
                 }
-                self.dom.append_child(copied_top, container);
-                self.dom.append_child(self.dom.root(), container);
-                self.dom.detach(copied_top);
+                runner.dom.append_child(copied_top, container);
+                let fragment_root = runner.dom.root();
+                runner.dom.append_child(fragment_root, container);
+                runner.dom.detach(copied_top);
                 (container, container)
             } else if !selection.branches.is_empty() {
-                let container = self
-                    .create_container(copied_siblings[0], &copied_siblings)
-                    .ok_or(Error::NoContent)?;
+                let container =
+                    Self::create_container(&mut runner.dom, copied_siblings[0], &copied_siblings)
+                        .ok_or(Error::NoContent)?;
                 (container, container)
             } else {
-                if rename_top && matches!(self.dom.tag(copied_top), Some(Tag::Article | Tag::Main))
+                if rename_top
+                    && matches!(runner.dom.tag(copied_top), Some(Tag::Article | Tag::Main))
                 {
-                    self.dom.rename_html(copied_top, Tag::Div);
-                    self.dom.remove_attr(copied_top, AttrName::ItemProp);
+                    runner.dom.rename_html(copied_top, Tag::Div);
+                    runner.dom.remove_attr(copied_top, AttrName::ItemProp);
                 }
-                let content_id = self
-                    .create_container(copied_top, &copied_siblings)
-                    .unwrap_or(copied_top);
+                let content_id =
+                    Self::create_container(&mut runner.dom, copied_top, &copied_siblings)
+                        .unwrap_or(copied_top);
                 (copied_top, content_id)
             };
             let synthetic = selection.node == body || !selection.branches.is_empty();
             if let Some(lead_media) = lead_media
                 && !source_siblings.contains(&lead_media)
-                && let Some(first_child) = self.dom.first_child(content_id)
+                && let Some(first_child) = runner.dom.first_child(content_id)
             {
-                let copied_lead = self
+                let copied_lead = runner
                     .dom
-                    .import_subtree(&source_dom, lead_media)
+                    .import_subtree(&runner.source.extractor.dom, lead_media)
                     .map_err(|_| Error::NoContent)?;
-                self.dom.append_child(self.dom.root(), copied_lead);
-                self.dom.insert_before(first_child, copied_lead);
+                let fragment_root = runner.dom.root();
+                runner.dom.append_child(fragment_root, copied_lead);
+                runner.dom.insert_before(first_child, copied_lead);
             }
-            let fragment_title_snapshot =
-                self.dom.element_descendants_snapshot_with_depth(content_id);
+            let fragment_title_snapshot = runner
+                .dom
+                .element_descendants_snapshot_with_depth(content_id);
             let fragment_title_plan = title_heading_plan(
-                &self.dom,
+                &runner.dom,
                 SourceElements::Snapshot(&fragment_title_snapshot),
-                &self.page_title,
-                &self.structured_title,
-                self.metadata.site_name.as_deref(),
-                self.source_uri.as_ref(),
+                &runner.source.extractor.page_title,
+                &runner.source.extractor.structured_title,
+                runner.source.extractor.metadata.site_name.as_deref(),
+                runner.source.extractor.source_uri.as_ref(),
             );
-            remove_title_brand_headings(&mut self.dom, content_id, &fragment_title_plan);
-
-            self.page_direction = source_direction.clone();
+            remove_title_brand_headings(&mut runner.dom, content_id, &fragment_title_plan);
 
             // Cleanup owns a compact copy of the selected region. The source
             // DOM remains available for a retry and is never affected by an
@@ -1324,53 +1364,68 @@ impl<'a> ContentExtractor<'a> {
             if let Some(footnote_definitions) = footnote_definitions.as_ref() {
                 adopt_external_footnotes(
                     footnote_definitions,
-                    &source_dom,
-                    &mut self.dom,
+                    &runner.source.extractor.dom,
+                    &mut runner.dom,
                     content_id,
                 );
             }
-            self.node_data.clear();
-            self.node_data.enable_link_lengths();
+            runner.scratch.node_data.clear();
+            runner.scratch.node_data.enable_link_lengths();
 
             let _cleanup_phase = PhaseGuard::new(Phase::Cleanup);
-            let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
+            let shell_evidence = interactive_shell_evidence(&runner.dom, content_id);
             let video = regexps::VIDEOS.clone();
-            let (candidate_semantic_metrics, source_evidence) = self.prep_article(
-                content_id,
-                selection.node != body && strategy != ExtractionStrategy::BodyFallback,
-                &compile_context,
-                &video,
-                &mut text_buffer,
-                &mut cleaning_nodes,
-                &mut fragment_workspace,
-            );
+            let (candidate_semantic_metrics, source_evidence) =
+                runner.source.extractor.prep_article(
+                    &mut runner.dom,
+                    content_id,
+                    selection.node != body && strategy != ExtractionStrategy::BodyFallback,
+                    &compile_context,
+                    &video,
+                    &mut text_buffer,
+                    &mut runner.scratch.cleaning_nodes,
+                    &mut runner.scratch.node_data,
+                    &mut runner.scratch.workspace,
+                    &mut runner.cleanup_actions,
+                );
             if synthetic {
-                self.dom
+                runner
+                    .dom
                     .set_attr(content_id, AttrName::Id, "legible-content");
-                self.dom.set_attr(content_id, AttrName::Class, "page")
+                runner.dom.set_attr(content_id, AttrName::Class, "page")
             } else {
-                let w = self
+                let w = runner
                     .dom
                     .create_html_element(Tag::Div)
                     .map_err(|_| Error::NoContent)?;
-                self.dom.set_attr(w, AttrName::Id, "legible-content");
-                self.dom.set_attr(w, AttrName::Class, "page");
-                let children: SmallVec<[NodeId; 16]> = self.dom.children(content_id).collect();
+                runner.dom.set_attr(w, AttrName::Id, "legible-content");
+                runner.dom.set_attr(w, AttrName::Class, "page");
+                let children: SmallVec<[NodeId; 16]> = runner.dom.children(content_id).collect();
                 for x in children {
-                    self.dom.append_child(w, x)
+                    runner.dom.append_child(w, x)
                 }
-                self.dom.append_child(content_id, w)
+                runner.dom.append_child(content_id, w)
             }
-            let access_barrier = is_access_barrier(&self.dom, content_id);
-            let (mut source_facts, mut retained_stream) =
-                self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
-            crate::instrumentation::record_cleaned_nodes(self.dom.len());
-            fragment_workspace.invalidate();
-            self.capture_normalization_counts(content_id, &mut fragment_workspace);
+            let access_barrier = is_access_barrier(&runner.dom, content_id);
+            let (mut source_facts, mut retained_stream) = runner.source.extractor.final_cleanup(
+                &mut runner.dom,
+                content_id,
+                &source_evidence,
+                &mut runner.scratch.cleaning_nodes,
+                &mut runner.cleanup_actions,
+            );
+            crate::instrumentation::record_cleaned_nodes(runner.dom.len());
+            runner.scratch.workspace.invalidate();
+            runner.source.extractor.capture_normalization_counts(
+                &runner.dom,
+                content_id,
+                &mut runner.scratch.workspace,
+                &mut runner.normalization,
+            );
             #[cfg(feature = "bench-instrumentation")]
             drop(_cleanup_phase);
             if synthetic
-                && content_id != self.dom.root()
+                && content_id != runner.dom.root()
                 && let Some(retained_stream) = retained_stream.as_mut()
             {
                 retained_stream.prepend_root(content_id);
@@ -1380,19 +1435,19 @@ impl<'a> ContentExtractor<'a> {
             // it. This makes the fragment itself the final compiler input and
             // avoids copying it immediately before semantic compilation.
             if !synthetic {
-                let fragment_root = self.dom.root();
-                self.dom.move_children(content_id, fragment_root);
-                self.dom.detach(content_id);
+                let fragment_root = runner.dom.root();
+                runner.dom.move_children(content_id, fragment_root);
+                runner.dom.detach(content_id);
             }
-            let result_root = self.dom.root();
+            let result_root = runner.dom.root();
             if let Some(source_facts) = source_facts.as_mut() {
-                source_facts.rebase_root(&self.dom, result_root);
+                source_facts.rebase_root(&runner.dom, result_root);
             }
             let cleaned_analysis = retained_stream
                 .take()
                 .map(|stream| {
                     CleanedFragmentAnalysis::from_retained_stream(
-                        &self.dom,
+                        &runner.dom,
                         result_root,
                         stream,
                         Some(&source_evidence),
@@ -1405,7 +1460,7 @@ impl<'a> ContentExtractor<'a> {
             let result_document = if self.diagnostic_attempts.is_some() {
                 Some(
                     crate::document::compile_document(
-                        &self.dom,
+                        &runner.dom,
                         result_root,
                         &compile_context,
                         &crate::document::CompileInputs {
@@ -1428,7 +1483,7 @@ impl<'a> ContentExtractor<'a> {
                         source_dom_nodes: self.source_dom_nodes,
                         final_dom_nodes: {
                             crate::instrumentation::record_final_dom_node_scan();
-                            1 + self.dom.descendants(result_root).count()
+                            1 + runner.dom.descendants(result_root).count()
                         },
                         document_nodes: document.len(),
                         estimated_document_bytes: document.retained_bytes_estimate(),
@@ -1448,8 +1503,18 @@ impl<'a> ContentExtractor<'a> {
                     .and_then(|result| semantic_coverage(source, result))
             });
             let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
-                || is_application_shell_notice(&self.dom, result_root, result_metrics);
+                || is_application_shell_notice(&runner.dom, result_root, result_metrics);
             let incoherent_short = is_incoherent_short_result(result_metrics);
+            let AttemptRunner {
+                dom: attempt_dom,
+                scratch,
+                cleanup_actions,
+                normalization,
+                ..
+            } = runner;
+            attempt_scratch = scratch;
+            self.diagnostic_cleanup_actions = cleanup_actions.clone();
+            self.diagnostic_normalization = normalization;
             let attempt_source_metrics = if strategy == ExtractionStrategy::RelaxedVisibility {
                 relaxed_source_metrics
             } else {
@@ -1488,7 +1553,9 @@ impl<'a> ContentExtractor<'a> {
                 rejected_link_only_semantic_root: &mut rejected_link_only_semantic_root,
             });
             if verdict.accepted {
-                let excerpt = self.content_excerpt_if_needed(result_root);
+                self.page_direction = source_direction.clone();
+                self.page_byline = plan.byline.clone();
+                let excerpt = self.content_excerpt_if_needed(&attempt_dom, result_root);
                 self.record_attempt(
                     strategy,
                     root_info,
@@ -1501,12 +1568,11 @@ impl<'a> ContentExtractor<'a> {
                     verdict.acceptance_exception,
                     None,
                 );
-                let content = std::mem::replace(&mut self.dom, source_dom);
                 let document = if let Some(document) = result_document {
                     document
                 } else {
                     crate::document::compile_document_owned(
-                        content,
+                        attempt_dom,
                         result_root,
                         &compile_context,
                         crate::document::CompileInputs {
@@ -1548,8 +1614,8 @@ impl<'a> ContentExtractor<'a> {
                 result_metrics,
                 semantic_coverage.clone(),
                 representation,
-                self.diagnostic_cleanup_actions.clone(),
-                self.diagnostic_normalization,
+                cleanup_actions,
+                normalization,
                 access_barrier,
                 interactive_shell,
                 incoherent_short,
@@ -1562,7 +1628,7 @@ impl<'a> ContentExtractor<'a> {
             let may_have_a_later_duplicate =
                 strategy == ExtractionStrategy::Normal && structured_root.is_some();
             if can_be_best || may_have_a_later_duplicate {
-                cached.excerpt = self.content_excerpt_if_needed(result_root);
+                cached.excerpt = self.content_excerpt_if_needed(&attempt_dom, result_root);
                 let CleanedFragmentAnalysis {
                     retained_stream,
                     ordinary_plan,
@@ -1570,7 +1636,7 @@ impl<'a> ContentExtractor<'a> {
                     ..
                 } = cleaned_analysis;
                 cached.content = Some(FrozenContent {
-                    dom: std::mem::replace(&mut self.dom, source_dom),
+                    dom: attempt_dom,
                     source_facts,
                     source_evidence,
                     retained_stream: Some(retained_stream),
@@ -1578,7 +1644,7 @@ impl<'a> ContentExtractor<'a> {
                     ordinary_checked,
                 });
             } else {
-                self.dom = source_dom;
+                drop(attempt_dom);
             }
             physical_cache.insert(key.clone(), cached);
             if can_be_best {
@@ -1609,17 +1675,9 @@ impl<'a> ContentExtractor<'a> {
                         .and_then(|cached| cached.excerpt.clone()),
                     direction: source_direction.clone(),
                     strategy,
+                    byline: plan.byline.clone(),
                     diagnostic_index,
                 });
-                self.page_byline = None;
-                self.page_direction = None;
-                self.page_language = None;
-                self.node_data.clear();
-            } else {
-                self.page_byline = None;
-                self.page_direction = None;
-                self.page_language = None;
-                self.node_data.clear();
             }
         }
 
@@ -1628,6 +1686,7 @@ impl<'a> ContentExtractor<'a> {
             return Err(Error::NoContent);
         }
         self.page_direction = best.direction;
+        self.page_byline = best.byline;
         self.strategy = best.strategy;
         if let Some(index) = best.diagnostic_index
             && let Some(attempts) = self.diagnostic_attempts.as_mut()
@@ -2215,8 +2274,6 @@ impl<'a> ContentExtractor<'a> {
         if !source_metrics.has_meaningful_text() {
             return Err(Error::NoContent);
         }
-        Self::normalize_exact_root_structure(&mut self.dom, root, origin);
-
         if let Some(html) = anchors.html.filter(|&node| {
             self.dom.tag(node) == Some(Tag::Html) && self.dom.parent(node).is_some()
         }) {
@@ -2229,57 +2286,38 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let root_info = self.exact_root_info(&self.dom, root, origin);
-        let synthetic = root == body;
-        let (top_id, content_id) = if synthetic {
-            Self::prune_body_fallback_chrome(&mut self.dom, body);
-            self.dom.reserve_additional_nodes_exact(1);
-            let container = self
-                .dom
-                .create_html_element(Tag::Div)
-                .map_err(|_| Error::NoContent)?;
-            let children: SmallVec<[NodeId; 16]> = self.dom.children(body).collect();
-            for child in children {
-                self.dom.append_child(container, child);
-            }
-            self.dom.append_child(body, container);
-            initialize_node(
-                &self.dom,
-                container,
-                &mut self.node_data,
-                self.strategy.weight_classes(),
-            );
-            (container, container)
-        } else {
-            if !self.node_data.has(root) {
-                initialize_node(
-                    &self.dom,
-                    root,
-                    &mut self.node_data,
-                    self.strategy.weight_classes(),
-                );
-            }
-            (root, self.create_container(root, &[root]).unwrap_or(root))
-        };
-
-        if let Some(direction) = std::iter::once(top_id)
-            .chain(self.dom.ancestors(top_id))
-            .find_map(|node| self.dom.attr(node, AttrName::Dir))
-        {
-            self.page_direction = Some(direction.to_owned());
-        }
-
         #[cfg(feature = "bench-instrumentation")]
         drop(_root_selection_phase);
 
         let mut fragment = {
             let _phase = PhaseGuard::new(Phase::FragmentCopy);
             self.dom
-                .copy_subtree_as_fragment(content_id)
+                .copy_subtree_as_fragment(root)
                 .map_err(|_| Error::NoContent)?
         };
-        let content_id = fragment
+        let copied_root = fragment
             .first_child(fragment.root())
             .ok_or(Error::NoContent)?;
+        Self::normalize_exact_root_structure(&mut fragment, copied_root, origin);
+        let synthetic = root == body;
+        let (_top_id, content_id) = if synthetic {
+            Self::prune_body_fallback_chrome(&mut fragment, copied_root);
+            fragment.reserve_additional_nodes_exact(1);
+            let container = fragment
+                .create_html_element(Tag::Div)
+                .map_err(|_| Error::NoContent)?;
+            let children: SmallVec<[NodeId; 16]> = fragment.children(copied_root).collect();
+            for child in children {
+                fragment.append_child(container, child);
+            }
+            fragment.detach(copied_root);
+            fragment.append_child(fragment.root(), container);
+            (container, container)
+        } else {
+            let content_id = Self::create_container(&mut fragment, copied_root, &[copied_root])
+                .unwrap_or(copied_root);
+            (copied_root, content_id)
+        };
         let title_snapshot = fragment.element_descendants_snapshot_with_depth(fragment.root());
         let title_plan = title_heading_plan(
             &fragment,
@@ -2290,8 +2328,7 @@ impl<'a> ContentExtractor<'a> {
             self.source_uri.as_ref(),
         );
         let mut text_buffer = String::new();
-        let mut fragment_workspace = FragmentWorkspace::default();
-        self.prepare_exact_fragment(
+        let byline = self.prepare_exact_fragment(
             &mut fragment,
             content_id,
             origin,
@@ -2299,69 +2336,84 @@ impl<'a> ContentExtractor<'a> {
             &mut text_buffer,
         );
         remove_title_brand_headings(&mut fragment, content_id, &title_plan);
-        self.dom = fragment;
-        self.node_data.clear();
-        self.node_data.enable_link_lengths();
+        let mut runner = AttemptRunner::new(self, fragment, AttemptScratch::default());
+        runner.scratch.workspace.reset();
+        runner.scratch.node_data.enable_link_lengths();
 
         let _cleanup_phase = PhaseGuard::new(Phase::Cleanup);
-        let shell_evidence = interactive_shell_evidence(&self.dom, content_id);
+        let shell_evidence = interactive_shell_evidence(&runner.dom, content_id);
         let video = regexps::VIDEOS.clone();
-        let mut cleaning_nodes = Vec::new();
-        let (candidate_semantic_metrics, source_evidence) = self.prep_article(
+        let (candidate_semantic_metrics, source_evidence) = runner.source.extractor.prep_article(
+            &mut runner.dom,
             content_id,
             root != body,
             compile_context,
             &video,
             &mut text_buffer,
-            &mut cleaning_nodes,
-            &mut fragment_workspace,
+            &mut runner.scratch.cleaning_nodes,
+            &mut runner.scratch.node_data,
+            &mut runner.scratch.workspace,
+            &mut runner.cleanup_actions,
         );
         if synthetic {
-            self.dom
+            runner
+                .dom
                 .set_attr(content_id, AttrName::Id, "legible-content");
-            self.dom.set_attr(content_id, AttrName::Class, "page");
+            runner.dom.set_attr(content_id, AttrName::Class, "page");
         } else {
-            let wrapper = self
+            let wrapper = runner
                 .dom
                 .create_html_element(Tag::Div)
                 .map_err(|_| Error::NoContent)?;
-            self.dom.set_attr(wrapper, AttrName::Id, "legible-content");
-            self.dom.set_attr(wrapper, AttrName::Class, "page");
-            let children: SmallVec<[NodeId; 16]> = self.dom.children(content_id).collect();
+            runner
+                .dom
+                .set_attr(wrapper, AttrName::Id, "legible-content");
+            runner.dom.set_attr(wrapper, AttrName::Class, "page");
+            let children: SmallVec<[NodeId; 16]> = runner.dom.children(content_id).collect();
             for child in children {
-                self.dom.append_child(wrapper, child);
+                runner.dom.append_child(wrapper, child);
             }
-            self.dom.append_child(content_id, wrapper);
+            runner.dom.append_child(content_id, wrapper);
         }
 
-        let access_barrier = is_access_barrier(&self.dom, content_id);
-        let (mut source_facts, mut retained_stream) =
-            self.final_cleanup(content_id, &source_evidence, &mut cleaning_nodes);
-        crate::instrumentation::record_cleaned_nodes(self.dom.len());
-        fragment_workspace.invalidate();
-        self.capture_normalization_counts(content_id, &mut fragment_workspace);
+        let access_barrier = is_access_barrier(&runner.dom, content_id);
+        let (mut source_facts, mut retained_stream) = runner.source.extractor.final_cleanup(
+            &mut runner.dom,
+            content_id,
+            &source_evidence,
+            &mut runner.scratch.cleaning_nodes,
+            &mut runner.cleanup_actions,
+        );
+        crate::instrumentation::record_cleaned_nodes(runner.dom.len());
+        runner.scratch.workspace.invalidate();
+        runner.source.extractor.capture_normalization_counts(
+            &runner.dom,
+            content_id,
+            &mut runner.scratch.workspace,
+            &mut runner.normalization,
+        );
         #[cfg(feature = "bench-instrumentation")]
         drop(_cleanup_phase);
         if synthetic
-            && content_id != self.dom.root()
+            && content_id != runner.dom.root()
             && let Some(retained_stream) = retained_stream.as_mut()
         {
             retained_stream.prepend_root(content_id);
         }
         if !synthetic {
-            let fragment_root = self.dom.root();
-            self.dom.move_children(content_id, fragment_root);
-            self.dom.detach(content_id);
+            let fragment_root = runner.dom.root();
+            runner.dom.move_children(content_id, fragment_root);
+            runner.dom.detach(content_id);
         }
-        let result_root = self.dom.root();
+        let result_root = runner.dom.root();
         if let Some(source_facts) = source_facts.as_mut() {
-            source_facts.rebase_root(&self.dom, result_root);
+            source_facts.rebase_root(&runner.dom, result_root);
         }
         let cleaned_analysis = retained_stream
             .take()
             .map(|stream| {
                 CleanedFragmentAnalysis::from_retained_stream(
-                    &self.dom,
+                    &runner.dom,
                     result_root,
                     stream,
                     Some(&source_evidence),
@@ -2373,7 +2425,7 @@ impl<'a> ContentExtractor<'a> {
         let result_document = if self.diagnostic_attempts.is_some() {
             Some(
                 crate::document::compile_document(
-                    &self.dom,
+                    &runner.dom,
                     result_root,
                     compile_context,
                     &crate::document::CompileInputs {
@@ -2395,7 +2447,7 @@ impl<'a> ContentExtractor<'a> {
                 source_dom_nodes: self.source_dom_nodes,
                 final_dom_nodes: {
                     crate::instrumentation::record_final_dom_node_scan();
-                    1 + self.dom.descendants(result_root).count()
+                    1 + runner.dom.descendants(result_root).count()
                 },
                 document_nodes: document.len(),
                 estimated_document_bytes: document.retained_bytes_estimate(),
@@ -2417,8 +2469,17 @@ impl<'a> ContentExtractor<'a> {
         let quality = ExtractionQuality::new(source_metrics, result_metrics, root != body);
         let root_in_document_chrome = false;
         let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
-            || is_application_shell_notice(&self.dom, result_root, result_metrics);
+            || is_application_shell_notice(&runner.dom, result_root, result_metrics);
         let incoherent_short = is_incoherent_short_result(result_metrics);
+        let AttemptRunner {
+            dom: attempt_dom,
+            scratch: _,
+            cleanup_actions,
+            normalization,
+            ..
+        } = runner;
+        self.diagnostic_cleanup_actions = cleanup_actions;
+        self.diagnostic_normalization = normalization;
         let valid_result = result_metrics.has_meaningful_text();
         if !valid_result {
             self.record_attempt(
@@ -2445,7 +2506,8 @@ impl<'a> ContentExtractor<'a> {
             return Err(Error::NoContent);
         }
 
-        let excerpt = self.content_excerpt_if_needed(result_root);
+        self.page_byline = byline;
+        let excerpt = self.content_excerpt_if_needed(&attempt_dom, result_root);
         self.record_attempt(
             ExtractionStrategy::Normal,
             root_info,
@@ -2462,7 +2524,7 @@ impl<'a> ContentExtractor<'a> {
             document
         } else {
             crate::document::compile_document(
-                &self.dom,
+                &attempt_dom,
                 result_root,
                 compile_context,
                 &crate::document::CompileInputs {
@@ -2479,15 +2541,15 @@ impl<'a> ContentExtractor<'a> {
     }
 
     fn prepare_exact_fragment(
-        &mut self,
+        &self,
         dom: &mut Dom,
         root: NodeId,
         origin: ExactRootOrigin,
         title_plan: &TitleHeadingPlan,
         text_buffer: &mut String,
-    ) {
+    ) -> Option<String> {
         if origin != ExactRootOrigin::Caller {
-            return;
+            return None;
         }
         let snapshot = dom.element_descendants_snapshot_with_depth(root);
         let accessible_math = accessible_math_nodes(dom, &snapshot);
@@ -2495,6 +2557,7 @@ impl<'a> ContentExtractor<'a> {
         let retain_preferred_title =
             title_plan.preferred.is_some() && !title_plan.brand_headings.is_empty();
         let mut remove_title = !retain_preferred_title;
+        let mut byline = None;
         let mut excluded_depth = None;
         for &(node, depth) in &snapshot {
             if let Some(root_depth) = excluded_depth {
@@ -2510,9 +2573,9 @@ impl<'a> ContentExtractor<'a> {
                 excluded_depth = Some(depth);
                 continue;
             }
-            if self.page_byline.is_none() && !self.metadata.has_source_author {
+            if byline.is_none() && !self.metadata.has_source_author {
                 if is_valid_byline(dom, node, text_buffer) {
-                    self.page_byline = Some(
+                    byline = Some(
                         metadata::byline_name(dom, node)
                             .unwrap_or_else(|| get_inner_text(dom, node, text_buffer).to_owned()),
                     );
@@ -2541,6 +2604,7 @@ impl<'a> ContentExtractor<'a> {
                 excluded_depth = Some(depth);
             }
         }
+        byline
     }
 
     fn normalize_exact_root_structure(dom: &mut Dom, root: NodeId, origin: ExactRootOrigin) {
@@ -3190,6 +3254,7 @@ impl<'a> ContentExtractor<'a> {
     ) -> SmallVec<[RankedCandidate; 64]> {
         let snapshot = dom.element_descendants_snapshot_with_depth(dom.root());
         let body = dom.body().unwrap_or(dom.root());
+        let mut node_data = NodeStateStore::new();
         Self::rank_candidates_with_snapshot(
             dom,
             None,
@@ -3199,7 +3264,7 @@ impl<'a> ContentExtractor<'a> {
             candidates,
             readability_scores,
             excluded,
-            &mut self.node_data,
+            &mut node_data,
             self.strategy.weight_classes(),
             TOP_CANDIDATES,
             None,
@@ -3503,20 +3568,16 @@ impl<'a> ContentExtractor<'a> {
         }
         out
     }
-    fn create_container(&mut self, _top: NodeId, siblings: &[NodeId]) -> Option<NodeId> {
+    fn create_container(dom: &mut Dom, _top: NodeId, siblings: &[NodeId]) -> Option<NodeId> {
         let first = *siblings.first()?;
-        let tags: SmallVec<[Tag; 8]> = siblings
-            .iter()
-            .filter_map(|&node| self.dom.tag(node))
-            .collect();
+        let tags: SmallVec<[Tag; 8]> = siblings.iter().filter_map(|&node| dom.tag(node)).collect();
         let (common_table_wrapper, wrapper_count) = table_wrapper_plan(&tags, siblings.len());
 
         // Copied fragments are often exactly at capacity. Reserve only the
         // container and the table wrappers that this selection needs.
-        self.dom
-            .reserve_additional_nodes_exact(1usize.saturating_add(wrapper_count));
-        let container = self.dom.create_html_element(Tag::Div).ok()?;
-        self.dom.insert_before(first, container);
+        dom.reserve_additional_nodes_exact(1usize.saturating_add(wrapper_count));
+        let container = dom.create_html_element(Tag::Div).ok()?;
+        dom.insert_before(first, container);
 
         // A synthetic content boundary must not break the HTML table content
         // model. Keep one common wrapper when the selected siblings are rows,
@@ -3524,31 +3585,31 @@ impl<'a> ContentExtractor<'a> {
         // renamed to a div while it still contains cells.
         let table_parent = match common_table_wrapper {
             Some(CommonTableWrapper::Rows) => {
-                let table = self.dom.create_html_element(Tag::Table).ok()?;
-                let body = self.dom.create_html_element(Tag::Tbody).ok()?;
-                self.dom.append_child(container, table);
-                self.dom.append_child(table, body);
+                let table = dom.create_html_element(Tag::Table).ok()?;
+                let body = dom.create_html_element(Tag::Tbody).ok()?;
+                dom.append_child(container, table);
+                dom.append_child(table, body);
                 Some(body)
             }
             Some(CommonTableWrapper::Cells) => {
-                let table = self.dom.create_html_element(Tag::Table).ok()?;
-                let body = self.dom.create_html_element(Tag::Tbody).ok()?;
-                let row = self.dom.create_html_element(Tag::Tr).ok()?;
-                self.dom.append_child(container, table);
-                self.dom.append_child(table, body);
-                self.dom.append_child(body, row);
+                let table = dom.create_html_element(Tag::Table).ok()?;
+                let body = dom.create_html_element(Tag::Tbody).ok()?;
+                let row = dom.create_html_element(Tag::Tr).ok()?;
+                dom.append_child(container, table);
+                dom.append_child(table, body);
+                dom.append_child(body, row);
                 Some(row)
             }
             Some(CommonTableWrapper::Sections) => {
-                let table = self.dom.create_html_element(Tag::Table).ok()?;
-                self.dom.append_child(container, table);
+                let table = dom.create_html_element(Tag::Table).ok()?;
+                dom.append_child(container, table);
                 Some(table)
             }
             Some(CommonTableWrapper::Columns) => {
-                let table = self.dom.create_html_element(Tag::Table).ok()?;
-                let group = self.dom.create_html_element(Tag::Colgroup).ok()?;
-                self.dom.append_child(container, table);
-                self.dom.append_child(table, group);
+                let table = dom.create_html_element(Tag::Table).ok()?;
+                let group = dom.create_html_element(Tag::Colgroup).ok()?;
+                dom.append_child(container, table);
+                dom.append_child(table, group);
                 Some(group)
             }
             None => None,
@@ -3556,63 +3617,66 @@ impl<'a> ContentExtractor<'a> {
 
         for &node in siblings {
             if let Some(parent) = table_parent {
-                self.dom.append_child(parent, node);
+                dom.append_child(parent, node);
                 continue;
             }
-            if let Some(tag) = self.dom.tag(node) {
+            if let Some(tag) = dom.tag(node) {
                 let wrapper = match tag {
                     Tag::Tr => {
-                        let table = self.dom.create_html_element(Tag::Table).ok()?;
-                        let body = self.dom.create_html_element(Tag::Tbody).ok()?;
-                        self.dom.append_child(container, table);
-                        self.dom.append_child(table, body);
+                        let table = dom.create_html_element(Tag::Table).ok()?;
+                        let body = dom.create_html_element(Tag::Tbody).ok()?;
+                        dom.append_child(container, table);
+                        dom.append_child(table, body);
                         Some(body)
                     }
                     Tag::Td | Tag::Th => {
-                        let table = self.dom.create_html_element(Tag::Table).ok()?;
-                        let body = self.dom.create_html_element(Tag::Tbody).ok()?;
-                        let row = self.dom.create_html_element(Tag::Tr).ok()?;
-                        self.dom.append_child(container, table);
-                        self.dom.append_child(table, body);
-                        self.dom.append_child(body, row);
+                        let table = dom.create_html_element(Tag::Table).ok()?;
+                        let body = dom.create_html_element(Tag::Tbody).ok()?;
+                        let row = dom.create_html_element(Tag::Tr).ok()?;
+                        dom.append_child(container, table);
+                        dom.append_child(table, body);
+                        dom.append_child(body, row);
                         Some(row)
                     }
                     Tag::Caption | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead => {
-                        let table = self.dom.create_html_element(Tag::Table).ok()?;
-                        self.dom.append_child(container, table);
+                        let table = dom.create_html_element(Tag::Table).ok()?;
+                        dom.append_child(container, table);
                         Some(table)
                     }
                     Tag::Col => {
-                        let table = self.dom.create_html_element(Tag::Table).ok()?;
-                        let group = self.dom.create_html_element(Tag::Colgroup).ok()?;
-                        self.dom.append_child(container, table);
-                        self.dom.append_child(table, group);
+                        let table = dom.create_html_element(Tag::Table).ok()?;
+                        let group = dom.create_html_element(Tag::Colgroup).ok()?;
+                        dom.append_child(container, table);
+                        dom.append_child(table, group);
                         Some(group)
                     }
                     _ => None,
                 };
                 if let Some(wrapper) = wrapper {
-                    self.dom.append_child(wrapper, node);
+                    dom.append_child(wrapper, node);
                     continue;
                 }
                 if !is_alter_to_div_exception(tag) && tag != Tag::Table {
-                    self.dom.rename_html(node, Tag::Div)
+                    dom.rename_html(node, Tag::Div)
                 }
             }
-            self.dom.append_child(container, node)
+            dom.append_child(container, node)
         }
         Some(container)
     }
     #[allow(clippy::too_many_arguments)]
     fn prep_article(
-        &mut self,
+        &self,
+        dom: &mut Dom,
         root: NodeId,
         credible_semantic_candidate: bool,
         compile_context: &crate::document::CompileContext,
         video: &Regex,
         text_buffer: &mut String,
         nodes: &mut Vec<NodeId>,
+        node_data: &mut NodeStateStore,
         workspace: &mut FragmentWorkspace,
+        cleanup_actions: &mut Vec<CleanupActionInfo>,
     ) -> (
         Option<SemanticStructureCounts>,
         crate::document::SourceEvidence,
@@ -3620,35 +3684,41 @@ impl<'a> ContentExtractor<'a> {
         // Cleanup mutates only the compact selected fragment. Hard cleanup
         // removes executable and interactive markup. Heuristic cleanup needs
         // several agreeing clutter signals before it removes a subtree.
-        prepare_media_before_cleanup_in_workspace(&mut self.dom, root, workspace);
-        let before = self.diagnostic_element_count(root);
-        remove_decorative_media_before_cleanup_in_workspace(&mut self.dom, root, workspace);
-        self.record_cleanup_delta(CleanupActionKind::DecorativeMedia, before, root);
+        prepare_media_before_cleanup_in_workspace(dom, root, workspace);
+        let before = self.diagnostic_element_count(dom, root);
+        remove_decorative_media_before_cleanup_in_workspace(dom, root, workspace);
+        self.record_cleanup_delta(
+            dom,
+            cleanup_actions,
+            CleanupActionKind::DecorativeMedia,
+            before,
+            root,
+        );
         let mut semantic_gate = crate::document::SemanticGate::default();
         clean_styles_with_semantic_gate_in_workspace(
-            &mut self.dom,
+            dom,
             root,
             nodes,
             &mut semantic_gate,
             workspace,
         );
-        mark_data_tables_in_workspace(&self.dom, root, &mut self.node_data, nodes, workspace);
+        mark_data_tables_in_workspace(dom, root, node_data, nodes, workspace);
         for &node in nodes.iter() {
-            if self.node_data.is_data_table(node) == Some(true) {
+            if node_data.is_data_table(node) == Some(true) {
                 semantic_gate.add_data_table_node(node);
             }
         }
         let source_evidence = crate::document::SourceEvidence::analyze_with_gate_and_snapshot(
-            &self.dom,
+            dom,
             root,
-            &self.node_data,
+            node_data,
             semantic_gate,
             workspace.preorder(),
             workspace.elements_with_depth(),
         );
-        let before = self.diagnostic_element_count(root);
+        let before = self.diagnostic_element_count(dom, root);
         hard_cleanup_in_workspace(
-            &mut self.dom,
+            dom,
             root,
             video,
             self.strategy == ExtractionStrategy::RelaxedVisibility,
@@ -3656,7 +3726,13 @@ impl<'a> ContentExtractor<'a> {
             nodes,
             workspace,
         );
-        self.record_cleanup_delta(CleanupActionKind::HardCleanup, before, root);
+        self.record_cleanup_delta(
+            dom,
+            cleanup_actions,
+            CleanupActionKind::HardCleanup,
+            before,
+            root,
+        );
         // Semantic coverage starts after high-confidence removal of active,
         // hidden, and decorative source structures. It then measures what the
         // relevance cleanup retains from this credible selected candidate.
@@ -3666,7 +3742,7 @@ impl<'a> ContentExtractor<'a> {
             .filter(|_| credible_semantic_candidate)
             .and_then(|_| {
                 crate::document::compile_document(
-                    &self.dom,
+                    dom,
                     root,
                     compile_context,
                     &crate::document::CompileInputs {
@@ -3679,109 +3755,118 @@ impl<'a> ContentExtractor<'a> {
             });
         if self.page_kind.uses_article_cleanup() {
             if self.strategy.conditional_cleanup() {
-                let before = self.diagnostic_element_count(root);
+                let before = self.diagnostic_element_count(dom, root);
                 heuristic_cleanup_in_workspace(
-                    &mut self.dom,
+                    dom,
                     root,
                     self.page_kind,
-                    &mut self.node_data,
+                    node_data,
                     &source_evidence,
                     text_buffer,
                     nodes,
                     workspace,
                 );
-                self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
+                self.record_cleanup_delta(
+                    dom,
+                    cleanup_actions,
+                    CleanupActionKind::HeuristicCleanup,
+                    before,
+                    root,
+                );
             }
             // Global chrome is high-confidence cleanup. Apply it to every
             // extraction strategy, including broad and fallback attempts.
-            let before = self.diagnostic_element_count(root);
-            remove_global_chrome_in_workspace(
-                &mut self.dom,
+            let before = self.diagnostic_element_count(dom, root);
+            remove_global_chrome_in_workspace(dom, root, node_data, &source_evidence, workspace);
+            self.record_cleanup_delta(
+                dom,
+                cleanup_actions,
+                CleanupActionKind::HeuristicCleanup,
+                before,
                 root,
-                &mut self.node_data,
-                &source_evidence,
-                workspace,
             );
-            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
-            let before = self.diagnostic_element_count(root);
+            let before = self.diagnostic_element_count(dom, root);
             remove_inline_chrome_controls_in_workspace(
-                &mut self.dom,
+                dom,
                 root,
-                &mut self.node_data,
+                node_data,
                 &source_evidence,
                 workspace,
             );
-            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
-            let before = self.diagnostic_element_count(root);
+            self.record_cleanup_delta(
+                dom,
+                cleanup_actions,
+                CleanupActionKind::HeuristicCleanup,
+                before,
+                root,
+            );
+            let before = self.diagnostic_element_count(dom, root);
             remove_repeated_and_discussion_content_in_workspace(
-                &mut self.dom,
+                dom,
                 root,
                 self.page_kind,
-                &mut self.node_data,
+                node_data,
                 &source_evidence,
                 workspace,
             );
-            self.record_cleanup_delta(CleanupActionKind::HeuristicCleanup, before, root);
+            self.record_cleanup_delta(
+                dom,
+                cleanup_actions,
+                CleanupActionKind::HeuristicCleanup,
+                before,
+                root,
+            );
         }
 
         // Remove duplicate media and named placeholders. Keep all output
         // semantics in source form for the document compiler.
-        cleanup_selected_content_in_workspace(
-            &mut self.dom,
-            root,
-            nodes,
-            self.base_uri.is_some(),
-            workspace,
-        );
+        cleanup_selected_content_in_workspace(dom, root, nodes, self.base_uri.is_some(), workspace);
 
         // Single traversal collects both paragraphs and line breaks,
         // replacing two separate filters over `descendants`.
         let mut paragraphs = SmallVec::<[NodeId; 64]>::new();
         let mut breaks = SmallVec::<[NodeId; 32]>::new();
-        for id in self.dom.descendants(root) {
-            match self.dom.tag(id) {
+        for id in dom.descendants(root) {
+            match dom.tag(id) {
                 Some(Tag::P) => paragraphs.push(id),
                 Some(Tag::Br) => breaks.push(id),
                 _ => {}
             }
         }
         for paragraph in paragraphs {
-            let media = self.dom.descendants(paragraph).any(|node| {
+            let media = dom.descendants(paragraph).any(|node| {
                 matches!(
-                    self.dom.tag(node),
+                    dom.tag(node),
                     Some(Tag::Img | Tag::Embed | Tag::Object | Tag::Iframe)
                 ) || source_evidence.math(node)
                     || source_evidence.accessible_math(node)
             });
-            if !media && !has_non_empty_inner_text(&self.dom, paragraph) {
-                self.dom.detach(paragraph);
+            if !media && !has_non_empty_inner_text(dom, paragraph) {
+                dom.detach(paragraph);
             }
         }
         for line_break in breaks {
-            if crate::cleaning::next_non_whitespace_sibling(&self.dom, line_break)
-                .is_some_and(|node| self.dom.tag(node) == Some(Tag::P))
+            if crate::cleaning::next_non_whitespace_sibling(dom, line_break)
+                .is_some_and(|node| dom.tag(node) == Some(Tag::P))
             {
-                self.dom.detach(line_break);
+                dom.detach(line_break);
             }
         }
         (candidate_semantic_metrics, source_evidence)
     }
-    fn content_excerpt(&self, root: NodeId) -> Option<String> {
+    fn content_excerpt(&self, dom: &Dom, root: NodeId) -> Option<String> {
         crate::instrumentation::record_content_excerpt_scan();
         let mut buffer = String::new();
-        self.dom
-            .descendants(root)
-            .filter(|&node| self.dom.tag(node) == Some(Tag::P))
+        dom.descendants(root)
+            .filter(|&node| dom.tag(node) == Some(Tag::P))
             .filter(|&node| {
-                !self
-                    .dom
-                    .ancestors(node)
+                !dom.ancestors(node)
                     .take_while(|&ancestor| ancestor != root)
                     .any(|ancestor| {
-                        matches!(self.dom.tag(ancestor), Some(Tag::Aside | Tag::Nav))
+                        matches!(dom.tag(ancestor), Some(Tag::Aside | Tag::Nav))
                             || [AttrName::Class, AttrName::Id]
                                 .into_iter()
-                                .filter_map(|name| self.dom.attr(ancestor, name))
+                                .filter_map(|name| dom.attr(ancestor, name))
                                 .any(|value| {
                                     let value = value.to_ascii_lowercase();
                                     value.contains("hatnote")
@@ -3792,7 +3877,7 @@ impl<'a> ContentExtractor<'a> {
             })
             .find_map(|node| {
                 buffer.clear();
-                self.dom.append_text(node, &mut buffer);
+                dom.append_text(node, &mut buffer);
                 let trimmed = buffer.trim();
                 if trimmed.is_empty() {
                     None
@@ -3802,20 +3887,22 @@ impl<'a> ContentExtractor<'a> {
             })
     }
 
-    fn content_excerpt_if_needed(&self, root: NodeId) -> Option<String> {
+    fn content_excerpt_if_needed(&self, dom: &Dom, root: NodeId) -> Option<String> {
         if self.metadata.description.is_some() {
             return None;
         }
         // Final cleanup only detaches empty blocks, which this scan already
         // ignores. The retained root therefore preserves the excerpt source
         // point while letting rejected attempts skip the subtree scan.
-        self.content_excerpt(root)
+        self.content_excerpt(dom, root)
     }
     fn final_cleanup(
-        &mut self,
+        &self,
+        dom: &mut Dom,
         root: NodeId,
         evidence: &crate::document::SourceEvidence,
         nodes: &mut Vec<NodeId>,
+        cleanup_actions: &mut Vec<CleanupActionInfo>,
     ) -> (
         Option<crate::document::SemanticSourceFacts>,
         Option<crate::document::RetainedStream>,
@@ -3823,31 +3910,33 @@ impl<'a> ContentExtractor<'a> {
         // The compiler resolves URLs, drops source attributes, ignores comments,
         // and collapses transparent wrappers. Only relevance cleanup mutates the
         // selected DOM at this stage.
-        let before = self.diagnostic_element_count(root);
+        let before = self.diagnostic_element_count(dom, root);
         let mut source_facts = None;
-        let retained_stream = remove_empty_content_with_source_facts(
-            &mut self.dom,
+        let retained_stream =
+            remove_empty_content_with_source_facts(dom, root, nodes, &mut source_facts, evidence);
+        self.record_cleanup_delta(
+            dom,
+            cleanup_actions,
+            CleanupActionKind::FinalCleanup,
+            before,
             root,
-            nodes,
-            &mut source_facts,
-            evidence,
         );
-        self.record_cleanup_delta(CleanupActionKind::FinalCleanup, before, root);
         (source_facts, retained_stream)
     }
 
-    fn diagnostic_element_count(&self, root: NodeId) -> Option<usize> {
+    fn diagnostic_element_count(&self, dom: &Dom, root: NodeId) -> Option<usize> {
         self.diagnostic_attempts.as_ref()?;
         Some(
-            self.dom
-                .descendants(root)
-                .filter(|&node| self.dom.is_element(node))
+            dom.descendants(root)
+                .filter(|&node| dom.is_element(node))
                 .count(),
         )
     }
 
     fn record_cleanup_delta(
-        &mut self,
+        &self,
+        dom: &Dom,
+        actions: &mut Vec<CleanupActionInfo>,
         kind: CleanupActionKind,
         before: Option<usize>,
         root: NodeId,
@@ -3856,36 +3945,41 @@ impl<'a> ContentExtractor<'a> {
             return;
         };
         let removed_elements = before.saturating_sub(
-            self.dom
-                .descendants(root)
-                .filter(|&node| self.dom.is_element(node))
+            dom.descendants(root)
+                .filter(|&node| dom.is_element(node))
                 .count(),
         );
         if removed_elements > 0 {
-            self.diagnostic_cleanup_actions.push(CleanupActionInfo {
+            actions.push(CleanupActionInfo {
                 kind,
                 removed_elements,
             });
         }
     }
 
-    fn capture_normalization_counts(&mut self, root: NodeId, workspace: &mut FragmentWorkspace) {
+    fn capture_normalization_counts(
+        &self,
+        dom: &Dom,
+        root: NodeId,
+        workspace: &mut FragmentWorkspace,
+        normalization: &mut NormalizationCountsInfo,
+    ) {
         if self.diagnostic_attempts.is_none() {
             return;
         }
         workspace.ensure_snapshot(
-            &self.dom,
+            dom,
             root,
             crate::instrumentation::SnapshotKind::FinalNormalization,
         );
         let source_nodes = workspace.preorder();
         let (flattened_layout_tables, semantic_tables) =
-            crate::document::table_normalization_counts_for_nodes(&self.dom, root, source_nodes);
+            crate::document::table_normalization_counts_for_nodes(dom, root, source_nodes);
         let (footnote_references, footnote_definitions, math_expressions) =
-            crate::document::semantic_normalization_counts_for_nodes(&self.dom, root, source_nodes);
-        let mut counts = NormalizationCountsInfo {
+            crate::document::semantic_normalization_counts_for_nodes(dom, root, source_nodes);
+        *normalization = NormalizationCountsInfo {
             code_blocks: crate::document::source_code_block_count_for_nodes(
-                &self.dom,
+                dom,
                 root,
                 source_nodes,
             ),
@@ -3897,11 +3991,10 @@ impl<'a> ContentExtractor<'a> {
             ..NormalizationCountsInfo::default()
         };
         for &node in source_nodes.iter().skip(1) {
-            if self.dom.tag(node) == Some(Tag::Img) {
-                counts.images += 1;
+            if dom.tag(node) == Some(Tag::Img) {
+                normalization.images += 1;
             }
         }
-        self.diagnostic_normalization = counts;
     }
 }
 fn has_line_number_table_marker(dom: &Dom, root: NodeId) -> bool {
@@ -4661,7 +4754,8 @@ mod tests {
             .unwrap();
         let config = ExtractorConfig::default();
         let mut extractor = ContentExtractor::from_document(dom, None, &config);
-        let container = extractor.create_container(row, &[row]).unwrap();
+        let container =
+            ContentExtractor::create_container(&mut extractor.dom, row, &[row]).unwrap();
 
         for cell in extractor
             .dom

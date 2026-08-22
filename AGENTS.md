@@ -50,7 +50,7 @@ The extraction pipeline flows through these stages:
 | `budget.rs` | Public parser and structured-data resource budgets |
 | `page.rs` | `ExtractedPage` with lazy HTML/MD/text serialization |
 | `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
-| `extraction.rs` | Strategy retries, candidate selection, content consolidation |
+| `extraction.rs` | Source-session orchestration, per-attempt fragment execution, strategy retries, candidate selection, and content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `scoring.rs::ScoringView` | Sparse scoring tag, parent, wrapper, and paragraph projections over the immutable source DOM |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
@@ -123,6 +123,7 @@ These invariants are costly to violate:
 - **Render the tape sequentially.** Markdown, canonical HTML, and normalized text renderers must consume the event tape in source order. Do not add tree-link traversal, child collection, or task generation for ordinary rendering. Keep only small formatting and semantic context stacks.
 - **Use one canonical text arena.** Store semantic prose and inline-code text in one document-owned UTF-8 buffer with `TextRef` ranges. Do not add one owned heap string per semantic text leaf. Keep raw block-code payloads separate until measurements justify moving them.
 - **Reuse across retries.** Restore the prepared source DOM without parsing HTML again. Reuse source-only candidate, visibility, and title indexes across extraction retries. Keep the cleaning node snapshot and text buffers alive across retries and sequential mutation passes.
+- **Separate source and attempts.** Keep prepared source state stable and borrow it through a `SourceSession`. A physical `AttemptRunner` owns its copied fragment, mutable node state, cleanup workspace, and diagnostics. Rejected attempts are dropped without repurposing or restoring the source DOM.
 - **Reuse immutable source snapshots.** Share one source analysis preorder/depth snapshot with title planning, candidate context, structural features, table marking, and content hints. Cache body, HTML, and base handles only while their tree remains unchanged. Build a new snapshot after fragment mutation.
 - **Reserve small DOM extensions exactly.** A parsed or copied arena can be at full capacity. Reserve the known wrapper count before you add synthetic nodes. Do not double a large arena for a small set of wrappers.
 
