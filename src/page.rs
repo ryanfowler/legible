@@ -51,6 +51,9 @@ impl ExtractedPage {
     }
 
     /// Returns parsed JSON-LD items when the extractor retained them.
+    ///
+    /// The value is `None` when retention was disabled. It is `Some` with an
+    /// empty slice when retention was enabled but no valid items were found.
     pub fn structured_data(&self) -> Option<&[Value]> {
         self.structured_data.as_deref()
     }
@@ -213,13 +216,18 @@ impl ExtractedPage {
 }
 
 /// Configures HTML rendering for an [`ExtractedPage`].
+///
+/// Canonical HTML is safe by construction. The builder remains public for API
+/// compatibility and for symmetry with [`MarkdownBuilder`].
 pub struct HtmlBuilder<'a> {
     page: &'a ExtractedPage,
     sanitize: bool,
 }
 
 impl HtmlBuilder<'_> {
-    /// Retained for compatibility. Canonical semantic HTML is always safe by construction.
+    /// Retained for compatibility. This flag does not change the output.
+    ///
+    /// Canonical semantic HTML is always safe by construction.
     pub fn sanitize(mut self, enabled: bool) -> Self {
         self.sanitize = enabled;
         self
@@ -238,6 +246,9 @@ impl HtmlBuilder<'_> {
 }
 
 /// Configures Markdown rendering for an [`ExtractedPage`].
+///
+/// Links and images are included by default. The builder consumes itself when
+/// it renders the result.
 pub struct MarkdownBuilder<'a> {
     page: &'a ExtractedPage,
     links: bool,
