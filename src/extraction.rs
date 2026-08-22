@@ -16,7 +16,7 @@ use crate::diagnostics::{
     RootInfo, RootSelectionReasonInfo,
 };
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, ScoreStore, Tag};
-use crate::error::{Error, Result};
+use crate::error::{Error, ResourceLimitKind, Result};
 use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::instrumentation::{Phase, PhaseGuard};
 use crate::logging::debug_log;
@@ -719,13 +719,13 @@ impl<'a> ContentExtractor<'a> {
             self.structured_data = StructuredData::parse(&self.dom, &self.options.parse_budget)
                 .map_err(|error| match error {
                     metadata::StructuredDataError::Bytes { limit } => {
-                        Error::resource_limit("JSON-LD bytes", limit)
+                        Error::resource_limit(ResourceLimitKind::JsonLdBytes, limit)
                     }
                     metadata::StructuredDataError::Items { limit } => {
-                        Error::resource_limit("JSON-LD items", limit)
+                        Error::resource_limit(ResourceLimitKind::JsonLdItems, limit)
                     }
                     metadata::StructuredDataError::Depth { limit } => {
-                        Error::resource_limit("JSON-LD depth", limit)
+                        Error::resource_limit(ResourceLimitKind::JsonLdDepth, limit)
                     }
                 })?;
         }
