@@ -15,6 +15,105 @@ pub(crate) struct OrdinarySourcePlan {
     pub(crate) capacity: BuildCapacityPlan,
 }
 
+/// Accumulates the ordinary-source gate while a retained stream is consumed.
+/// The final cleanup profiler shares that traversal with result metrics.
+pub(crate) struct OrdinarySourceProfiler {
+    ancestors: Vec<(u32, bool, bool, bool, usize)>,
+    capacity: BuildCapacityPlan,
+    source_node_count: usize,
+    supported: bool,
+}
+
+impl OrdinarySourceProfiler {
+    pub(crate) fn new() -> Self {
+        Self {
+            ancestors: Vec::new(),
+            capacity: BuildCapacityPlan::default(),
+            source_node_count: 0,
+            supported: true,
+        }
+    }
+
+    pub(crate) fn observe(&mut self, dom: &Dom, entry: &super::RetainedEntry) {
+        if !self.supported {
+            return;
+        }
+        while self
+            .ancestors
+            .last()
+            .is_some_and(|&(depth, _, _, _, _)| depth >= entry.depth)
+        {
+            self.ancestors.pop();
+        }
+
+        self.source_node_count += 1;
+        let inside_code = self
+            .ancestors
+            .last()
+            .is_some_and(|&(_, _, value, _, _)| value);
+        let inside_pre = self
+            .ancestors
+            .last()
+            .is_some_and(|&(_, _, _, value, _)| value);
+        let semantic_depth = self
+            .ancestors
+            .last()
+            .map_or(0, |&(_, _, _, _, depth)| depth);
+        observe_capacity(
+            dom,
+            entry.node,
+            inside_code,
+            inside_pre,
+            semantic_depth,
+            &mut self.capacity,
+        );
+
+        if dom.text_node(entry.node).is_some() || dom.is_comment(entry.node) {
+            return;
+        }
+        let Some(tag) = dom.tag(entry.node) else {
+            self.supported = false;
+            return;
+        };
+        let inside_heading = self
+            .ancestors
+            .last()
+            .is_some_and(|&(_, value, _, _, _)| value);
+        if has_complex_tag(tag)
+            || has_complex_attributes(dom, entry.node)
+            || tag == Tag::A
+                && dom
+                    .attr(entry.node, AttrName::Href)
+                    .is_some_and(|value| value.trim().starts_with('#'))
+            || tag == Tag::Img
+                && (inside_heading
+                    || !simple_image_source(dom, entry.node)
+                    || super::math::class_is_semantic_evidence(dom, entry.node))
+        {
+            self.supported = false;
+            return;
+        }
+
+        self.ancestors.push((
+            entry.depth,
+            self.ancestors
+                .last()
+                .is_some_and(|&(_, value, _, _, _)| value)
+                || is_heading(tag),
+            inside_code || tag == Tag::Code,
+            inside_pre || tag == Tag::Pre,
+            semantic_depth.saturating_add(usize::from(is_capacity_container(tag))),
+        ));
+    }
+
+    pub(crate) fn finish(self) -> Option<OrdinarySourcePlan> {
+        self.supported.then_some(OrdinarySourcePlan {
+            source_node_count: self.source_node_count,
+            capacity: self.capacity,
+        })
+    }
+}
+
 /// Returns the source-node count when a fragment is safe to try on the ordinary path.
 ///
 /// This gate deliberately checks only broad source evidence. Structural
@@ -89,60 +188,11 @@ fn ordinary_source_gate_from_stream(
     dom: &Dom,
     stream: &RetainedStream,
 ) -> Option<OrdinarySourcePlan> {
-    let mut ancestors = Vec::<(u32, bool, bool, bool, usize)>::new();
-    let mut capacity = BuildCapacityPlan::default();
-    let mut source_node_count = 0;
+    let mut profiler = OrdinarySourceProfiler::new();
     for entry in stream.entries() {
-        let node = entry.node;
-        while ancestors
-            .last()
-            .is_some_and(|&(depth, _, _, _, _)| depth >= entry.depth)
-        {
-            ancestors.pop();
-        }
-
-        source_node_count += 1;
-        let inside_code = ancestors.last().is_some_and(|&(_, _, value, _, _)| value);
-        let inside_pre = ancestors.last().is_some_and(|&(_, _, _, value, _)| value);
-        let semantic_depth = ancestors.last().map_or(0, |&(_, _, _, _, depth)| depth);
-        observe_capacity(
-            dom,
-            node,
-            inside_code,
-            inside_pre,
-            semantic_depth,
-            &mut capacity,
-        );
-        if dom.text_node(node).is_some() || dom.is_comment(node) {
-            continue;
-        }
-        let tag = dom.tag(node)?;
-        let inside_heading = ancestors.last().is_some_and(|&(_, value, _, _, _)| value);
-        if has_complex_tag(tag)
-            || has_complex_attributes(dom, node)
-            || tag == Tag::A
-                && dom
-                    .attr(node, AttrName::Href)
-                    .is_some_and(|value| value.trim().starts_with('#'))
-            || tag == Tag::Img
-                && (inside_heading
-                    || !simple_image_source(dom, node)
-                    || super::math::class_is_semantic_evidence(dom, node))
-        {
-            return None;
-        }
-        ancestors.push((
-            entry.depth,
-            ancestors.last().is_some_and(|&(_, value, _, _, _)| value) || is_heading(tag),
-            inside_code || tag == Tag::Code,
-            inside_pre || tag == Tag::Pre,
-            semantic_depth.saturating_add(usize::from(is_capacity_container(tag))),
-        ));
+        profiler.observe(dom, entry);
     }
-    Some(OrdinarySourcePlan {
-        source_node_count,
-        capacity,
-    })
+    profiler.finish()
 }
 
 fn observe_capacity(

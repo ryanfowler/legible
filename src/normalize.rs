@@ -252,11 +252,6 @@ fn remove_empty_nodes(
     source_facts: &mut Option<crate::document::SemanticSourceFacts>,
     source_evidence: &crate::document::SourceEvidence,
 ) -> Option<crate::document::RetainedStream> {
-    // A source-fact snapshot already owns the source order used by complex
-    // lowering. Build a retained stream only when the ordinary path needs a
-    // source-order representation. Source facts may be created below for
-    // code-specific cleanup, so capture this decision first.
-    let build_retained_stream = source_facts.is_none();
     if let Some(source_facts) = source_facts.as_ref() {
         nodes.clear();
         nodes.extend(source_facts.nodes().iter().copied());
@@ -266,12 +261,11 @@ fn remove_empty_nodes(
     }
 
     // Build the retained stream before detach operations. It carries the
-    // source depth required by ordinary lowering, so final cleanup does not
-    // need a DOM-sized position index or a second topology reconstruction.
-    // Build the stream before detach operations when this path can use the
-    // ordinary compiler. Complex lowering can use source facts directly.
-    let mut retained_stream = build_retained_stream
-        .then(|| crate::document::RetainedStream::from_preorder(dom, root, nodes));
+    // source depth required by ordinary lowering and final-fragment analysis,
+    // so later stages do not rebuild the cleaned topology.
+    let mut retained_stream = Some(crate::document::RetainedStream::from_preorder(
+        dom, root, nodes,
+    ));
 
     // Whitespace-only syntax token elements contain significant code text.
     // Record code ancestry in one preorder pass so empty-node cleanup does not
