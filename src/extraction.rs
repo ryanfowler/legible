@@ -42,7 +42,7 @@ use crate::specialized::{self, DocumentContext};
 use crate::tokens::{has_any_token, has_token};
 use regex::Regex;
 use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use url::Url;
 
 pub(crate) struct ContentExtractor<'a> {
@@ -249,7 +249,7 @@ fn has_exact_single_paragraph_child(dom: &Dom, node: NodeId) -> bool {
 }
 
 struct BestAttempt {
-    physical_key: AttemptKey,
+    physical_attempt: PhysicalAttemptId,
     quality: ExtractionQuality,
     excerpt: Option<String>,
     direction: Option<String>,
@@ -349,11 +349,7 @@ struct AttemptPlan {
     visibility: VisibilityVariant,
     analysis_index: usize,
     selection: RootSelection,
-    source_siblings: SmallVec<[NodeId; 16]>,
-    top_id: NodeId,
-    synthetic: bool,
-    rename_top: bool,
-    lead_media: Option<NodeId>,
+    physical_attempt: PhysicalAttemptId,
     source_direction: Option<String>,
     root_info: Option<RootInfo>,
     root_in_document_chrome: bool,
@@ -361,11 +357,15 @@ struct AttemptPlan {
     semantic_root_complete_candidate: bool,
     semantic_root_boilerplate: bool,
     byline: Option<String>,
-    key: AttemptKey,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct AttemptKey {
+/// The complete identity of one physical fragment execution.
+///
+/// Two logical strategies may share an execution only when these fields are
+/// equal. Logical metadata such as direction, byline, root diagnostics, and
+/// acceptance policy is intentionally not part of this value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PhysicalPlan {
     source_roots: SmallVec<[NodeId; 16]>,
     selection_node: NodeId,
     top_id: NodeId,
@@ -375,7 +375,14 @@ struct AttemptKey {
     body_fallback: bool,
     rename_top: bool,
     lead_media: Option<NodeId>,
-    source_direction: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PhysicalAttemptId(usize);
+
+struct PhysicalAttempt {
+    plan: PhysicalPlan,
+    cached: Option<CachedPhysicalAttempt>,
 }
 
 struct CachedPhysicalAttempt {
@@ -513,6 +520,21 @@ impl ExtractionStrategy {
             self,
             Self::Normal | Self::StructuredDataHint | Self::RelaxedVisibility
         )
+    }
+
+    fn should_plan(
+        self,
+        source_metrics: ContentMetrics,
+        structured_root: Option<NodeId>,
+        has_relaxable_hidden_content: bool,
+    ) -> bool {
+        if self == Self::StructuredDataHint && structured_root.is_none() {
+            return false;
+        }
+        if self == Self::RelaxedVisibility && !has_relaxable_hidden_content {
+            return false;
+        }
+        self == Self::RelaxedVisibility || source_metrics.has_meaningful_text()
     }
 }
 struct ExtractedContent {
@@ -1048,72 +1070,26 @@ impl<'a> ContentExtractor<'a> {
             short_source_access_barrier,
         };
         let mut analysis_cache = AnalysisCache::default();
-        let mut physical_cache: HashMap<AttemptKey, CachedPhysicalAttempt> = HashMap::new();
-        let mut plans = Vec::new();
+        let mut physical_attempts = Vec::new();
+        let mut rejected_link_only_semantic_root = false;
         for strategy in ExtractionStrategy::ORDER {
-            if matches!(
-                strategy,
-                ExtractionStrategy::BroadContent | ExtractionStrategy::BodyFallback
+            if !strategy.should_plan(
+                source_metrics,
+                structured_root,
+                has_relaxable_hidden_content,
             ) {
-                continue;
-            }
-            if strategy == ExtractionStrategy::StructuredDataHint && structured_root.is_none() {
-                continue;
-            }
-            if strategy == ExtractionStrategy::RelaxedVisibility && !has_relaxable_hidden_content {
-                continue;
-            }
-            if strategy != ExtractionStrategy::RelaxedVisibility
-                && !source_metrics.has_meaningful_text()
-            {
                 continue;
             }
             self.strategy = strategy;
             crate::instrumentation::record_strategy(strategy as u8);
             crate::instrumentation::record_logical_attempt_plan();
-            let plan =
+            let (plan, physical_plan) =
                 self.build_attempt_plan(&ctx, strategy, &mut text_buffer, &mut analysis_cache)?;
-            plans.push(plan);
-        }
-
-        let mut plan_index = 0;
-        let mut broad_planned = false;
-        let mut body_planned = false;
-        let mut rejected_link_only_semantic_root = false;
-        while plan_index < plans.len() || !body_planned {
-            if plan_index == 2 && !broad_planned {
-                broad_planned = true;
-                if source_metrics.has_meaningful_text() {
-                    let broad = self.build_attempt_plan(
-                        &ctx,
-                        ExtractionStrategy::BroadContent,
-                        &mut text_buffer,
-                        &mut analysis_cache,
-                    )?;
-                    crate::instrumentation::record_strategy(ExtractionStrategy::BroadContent as u8);
-                    crate::instrumentation::record_logical_attempt_plan();
-                    plans.insert(plan_index, broad);
-                }
-            }
-            if plan_index == plans.len() {
-                if !source_metrics.has_meaningful_text() {
-                    break;
-                }
-                let body = self.build_attempt_plan(
-                    &ctx,
-                    ExtractionStrategy::BodyFallback,
-                    &mut text_buffer,
-                    &mut analysis_cache,
-                )?;
-                crate::instrumentation::record_strategy(ExtractionStrategy::BodyFallback as u8);
-                crate::instrumentation::record_logical_attempt_plan();
-                plans.push(body);
-                body_planned = true;
-            }
-            let plan = plans[plan_index].clone();
-            plan_index += 1;
+            let plan = Self::intern_physical_plan(plan, physical_plan, &mut physical_attempts);
             let strategy = plan.strategy;
             debug_assert_eq!(plan.visibility, strategy.visibility_variant());
+            let physical_attempt = plan.physical_attempt;
+            let physical_plan = physical_attempts[physical_attempt.0].plan.clone();
             let analysis_index = plan.analysis_index;
             self.strategy = strategy;
             self.diagnostic_cleanup_actions.clear();
@@ -1122,21 +1098,18 @@ impl<'a> ContentExtractor<'a> {
             let body = analysis.body;
             self.page_byline = plan.byline.clone();
             let selection = plan.selection.clone();
-            let source_siblings = plan.source_siblings.clone();
-            let top_id = plan.top_id;
-            let synthetic = plan.synthetic;
-            let rename_top = plan.rename_top;
-            let lead_media = plan.lead_media;
+            let source_siblings = physical_plan.source_roots.clone();
+            let top_id = physical_plan.top_id;
+            let synthetic = physical_plan.synthetic;
+            let rename_top = physical_plan.rename_top;
+            let lead_media = physical_plan.lead_media;
             let source_direction = plan.source_direction.clone();
             let root_info = plan.root_info.clone();
             let root_in_document_chrome = plan.root_in_document_chrome;
             let visibility_root_semantic = plan.visibility_root_semantic;
             let semantic_root_complete_candidate = plan.semantic_root_complete_candidate;
             let semantic_root_boilerplate = plan.semantic_root_boilerplate;
-            let key = plan.key.clone();
-            let cached_attempt = (strategy == ExtractionStrategy::StructuredDataHint)
-                .then(|| physical_cache.remove(&key))
-                .flatten();
+            let cached_attempt = physical_attempts[physical_attempt.0].cached.take();
             if let Some(mut cached) = cached_attempt {
                 crate::instrumentation::record_deduplicated_attempt();
                 self.diagnostic_cleanup_actions = cached.cleanup_actions.clone();
@@ -1234,12 +1207,12 @@ impl<'a> ContentExtractor<'a> {
                     false,
                     Some(rejection),
                 );
-                if verdict.valid_result
+                let can_be_best = verdict.valid_result
                     && verdict.visibility_improves
                     && self.best_attempt.as_ref().is_none_or(|best| {
                         quality.best_attempt_score() > best.quality.best_attempt_score()
-                    })
-                {
+                    });
+                if can_be_best {
                     if let Some(previous) = self
                         .best_attempt
                         .as_ref()
@@ -1250,7 +1223,7 @@ impl<'a> ContentExtractor<'a> {
                             Some(AttemptRejectionReason::Superseded);
                     }
                     self.best_attempt = Some(BestAttempt {
-                        physical_key: key.clone(),
+                        physical_attempt,
                         quality,
                         excerpt: cached.excerpt.take(),
                         direction: source_direction.clone(),
@@ -1258,10 +1231,8 @@ impl<'a> ContentExtractor<'a> {
                         byline: plan.byline.clone(),
                         diagnostic_index,
                     });
-                    physical_cache.insert(key, cached);
-                } else {
-                    physical_cache.insert(key, cached);
                 }
+                physical_attempts[physical_attempt.0].cached = Some(cached);
                 continue;
             }
             crate::instrumentation::record_physical_attempt_execution();
@@ -1625,28 +1596,23 @@ impl<'a> ContentExtractor<'a> {
                 && self.best_attempt.as_ref().is_none_or(|best| {
                     quality.best_attempt_score() > best.quality.best_attempt_score()
                 });
-            let may_have_a_later_duplicate =
-                strategy == ExtractionStrategy::Normal && structured_root.is_some();
-            if can_be_best || may_have_a_later_duplicate {
-                cached.excerpt = self.content_excerpt_if_needed(&attempt_dom, result_root);
-                let CleanedFragmentAnalysis {
-                    retained_stream,
-                    ordinary_plan,
-                    ordinary_checked,
-                    ..
-                } = cleaned_analysis;
-                cached.content = Some(FrozenContent {
-                    dom: attempt_dom,
-                    source_facts,
-                    source_evidence,
-                    retained_stream: Some(retained_stream),
-                    ordinary_plan,
-                    ordinary_checked,
-                });
-            } else {
-                drop(attempt_dom);
-            }
-            physical_cache.insert(key.clone(), cached);
+            cached.excerpt = self.content_excerpt_if_needed(&attempt_dom, result_root);
+            let CleanedFragmentAnalysis {
+                retained_stream,
+                ordinary_plan,
+                ordinary_checked,
+                ..
+            } = cleaned_analysis;
+            cached.content = Some(FrozenContent {
+                dom: attempt_dom,
+                source_facts,
+                source_evidence,
+                retained_stream: Some(retained_stream),
+                ordinary_plan,
+                ordinary_checked,
+            });
+            let excerpt = cached.excerpt.clone();
+            physical_attempts[physical_attempt.0].cached = Some(cached);
             if can_be_best {
                 if let Some(previous) = self
                     .best_attempt
@@ -1656,23 +1622,10 @@ impl<'a> ContentExtractor<'a> {
                 {
                     attempts[previous].rejection_reason = Some(AttemptRejectionReason::Superseded);
                 }
-                if let Some(previous_key) = self
-                    .best_attempt
-                    .as_ref()
-                    .map(|best| best.physical_key.clone())
-                    && !(previous_key.visibility == VisibilityVariant::Normal
-                        && previous_key.conditional_cleanup
-                        && !previous_key.body_fallback
-                        && structured_root.is_some())
-                {
-                    physical_cache.remove(&previous_key);
-                }
                 self.best_attempt = Some(BestAttempt {
-                    physical_key: key.clone(),
+                    physical_attempt,
                     quality,
-                    excerpt: physical_cache
-                        .get(&key)
-                        .and_then(|cached| cached.excerpt.clone()),
+                    excerpt,
                     direction: source_direction.clone(),
                     strategy,
                     byline: plan.byline.clone(),
@@ -1701,8 +1654,9 @@ impl<'a> ContentExtractor<'a> {
             retained_stream,
             ordinary_plan,
             ordinary_checked,
-        } = physical_cache
-            .remove(&best.physical_key)
+        } = physical_attempts[best.physical_attempt.0]
+            .cached
+            .take()
             .and_then(|cached| cached.content)
             .ok_or(Error::NoContent)?;
         let root = dom.root();
@@ -1725,13 +1679,42 @@ impl<'a> ContentExtractor<'a> {
         })
     }
 
+    fn intern_physical_plan(
+        mut plan: AttemptPlan,
+        physical_plan: PhysicalPlan,
+        physical_attempts: &mut Vec<PhysicalAttempt>,
+    ) -> AttemptPlan {
+        let physical_attempt = Self::physical_attempt_id(&physical_plan, physical_attempts);
+        plan.physical_attempt = physical_attempt;
+        plan
+    }
+
+    fn physical_attempt_id(
+        physical_plan: &PhysicalPlan,
+        physical_attempts: &mut Vec<PhysicalAttempt>,
+    ) -> PhysicalAttemptId {
+        if let Some(index) = physical_attempts
+            .iter()
+            .position(|attempt| attempt.plan == *physical_plan)
+        {
+            return PhysicalAttemptId(index);
+        }
+        let id = PhysicalAttemptId(physical_attempts.len());
+        crate::instrumentation::record_unique_attempt_plan(id.0 as u8);
+        physical_attempts.push(PhysicalAttempt {
+            plan: physical_plan.clone(),
+            cached: None,
+        });
+        id
+    }
+
     fn build_attempt_plan(
         &mut self,
         ctx: &PlanContext<'_>,
         strategy: ExtractionStrategy,
         text_buffer: &mut String,
         analysis_cache: &mut AnalysisCache,
-    ) -> Result<AttemptPlan> {
+    ) -> Result<(AttemptPlan, PhysicalPlan)> {
         let visibility = strategy.visibility_variant();
         let analysis_index = if let Some(index) = analysis_cache.find(visibility) {
             index
@@ -1739,7 +1722,6 @@ impl<'a> ContentExtractor<'a> {
             #[cfg(test)]
             record_generic_scoring_call();
             let analysis = self.build_scoring_analysis(ctx, visibility, text_buffer)?;
-            crate::instrumentation::record_unique_attempt_plan(visibility as u8);
             analysis_cache.variants.push((visibility, analysis));
             analysis_cache.variants.len() - 1
         };
@@ -1973,7 +1955,7 @@ impl<'a> ContentExtractor<'a> {
                 .copied()
                 .unwrap_or(false)
         });
-        let key = AttemptKey {
+        let physical_plan = PhysicalPlan {
             source_roots: source_siblings.clone(),
             selection_node: selection.node,
             top_id,
@@ -1983,18 +1965,13 @@ impl<'a> ContentExtractor<'a> {
             body_fallback: strategy == ExtractionStrategy::BodyFallback,
             rename_top,
             lead_media,
-            source_direction: source_direction.clone(),
         };
         let plan = AttemptPlan {
             strategy,
             visibility,
             analysis_index,
             selection,
-            source_siblings,
-            top_id,
-            synthetic,
-            rename_top,
-            lead_media,
+            physical_attempt: PhysicalAttemptId(usize::MAX),
             source_direction,
             root_info,
             root_in_document_chrome,
@@ -2002,12 +1979,11 @@ impl<'a> ContentExtractor<'a> {
             semantic_root_complete_candidate,
             semantic_root_boilerplate,
             byline: discovery.byline.clone(),
-            key,
         };
         analysis_cache.variants[analysis_index]
             .1
             .restore_scores(strategy.weight_classes(), scores);
-        Ok(plan)
+        Ok((plan, physical_plan))
     }
 
     fn prepare_unweighted_scoring(
@@ -4575,8 +4551,8 @@ mod tests {
     }
 
     #[test]
-    fn physical_attempt_keys_include_cleanup_visibility_and_boundaries() {
-        let base = AttemptKey {
+    fn physical_plans_include_cleanup_visibility_and_boundaries() {
+        let base = PhysicalPlan {
             source_roots: SmallVec::from_slice(&[NodeId(1), NodeId(2)]),
             selection_node: NodeId(1),
             top_id: NodeId(1),
@@ -4586,8 +4562,13 @@ mod tests {
             body_fallback: false,
             rename_top: false,
             lead_media: None,
-            source_direction: Some("ltr".to_owned()),
         };
+
+        let mut physical_attempts = Vec::new();
+        let first = ContentExtractor::physical_attempt_id(&base, &mut physical_attempts);
+        let equivalent = ContentExtractor::physical_attempt_id(&base, &mut physical_attempts);
+        assert_eq!(first, equivalent);
+        assert_eq!(physical_attempts.len(), 1);
 
         let mut cleanup = base.clone();
         cleanup.conditional_cleanup = false;
@@ -4600,6 +4581,21 @@ mod tests {
         let mut boundary = base.clone();
         boundary.synthetic = true;
         assert_ne!(base, boundary);
+    }
+
+    #[test]
+    fn logical_strategy_order_keeps_fallbacks_declarative() {
+        assert_eq!(
+            ExtractionStrategy::ORDER,
+            [
+                ExtractionStrategy::Normal,
+                ExtractionStrategy::RelaxedCleanup,
+                ExtractionStrategy::BroadContent,
+                ExtractionStrategy::StructuredDataHint,
+                ExtractionStrategy::RelaxedVisibility,
+                ExtractionStrategy::BodyFallback,
+            ]
+        );
     }
 
     #[test]
