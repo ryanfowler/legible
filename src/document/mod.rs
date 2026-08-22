@@ -73,6 +73,15 @@ pub(crate) fn selected_image_sources_for_cleanup(
     let analysis = images::analyze(dom, nodes, None);
     analysis.into_sources(dom.len())
 }
+
+pub(crate) fn selected_image_sources_for_cleanup_excluding(
+    dom: &crate::dom::Dom,
+    nodes: &[crate::dom::NodeId],
+    excluded: &[bool],
+) -> Vec<Option<Box<str>>> {
+    let analysis = images::analyze_excluding(dom, nodes, excluded, None);
+    analysis.into_sources(dom.len())
+}
 pub(crate) use ordinary::{OrdinarySourcePlan, OrdinarySourceProfiler};
 pub(crate) use retained::{RetainedEntry, RetainedStream};
 pub(crate) use stats::DocumentStats;

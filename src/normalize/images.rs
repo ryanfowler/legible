@@ -849,7 +849,7 @@ fn decorative_image_name(dom: &Dom, node: NodeId) -> bool {
 #[cfg(test)]
 pub(super) fn remove_duplicates(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
     let source_nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    remove_duplicates_with_source_nodes(dom, root, &source_nodes, nodes);
+    remove_duplicates_with_source_nodes(dom, root, &source_nodes, nodes, &[]);
 }
 
 pub(super) fn remove_duplicates_with_source_nodes(
@@ -857,14 +857,22 @@ pub(super) fn remove_duplicates_with_source_nodes(
     root: NodeId,
     source_nodes: &[NodeId],
     nodes: &mut Vec<NodeId>,
+    pending_detaches: &[bool],
 ) {
-    let selected_sources = crate::document::selected_image_sources_for_cleanup(dom, source_nodes);
+    let selected_sources = if pending_detaches.is_empty() {
+        crate::document::selected_image_sources_for_cleanup(dom, source_nodes)
+    } else {
+        crate::document::selected_image_sources_for_cleanup_excluding(
+            dom,
+            source_nodes,
+            pending_detaches,
+        )
+    };
     nodes.clear();
-    nodes.extend(
-        dom.descendants(root)
-            .filter(|&node| dom.tag(node) == Some(Tag::Img)),
-    );
-    deduplicate(dom, nodes, &selected_sources);
+    nodes.extend(dom.descendants(root).filter(|&node| {
+        dom.tag(node) == Some(Tag::Img) && !is_pending_detach(node, pending_detaches)
+    }));
+    deduplicate(dom, nodes, &selected_sources, pending_detaches);
 
     // An unresolved placeholder has no visual content. Accessible text or a
     // sole figure caption can still make the image meaningful.
@@ -877,6 +885,10 @@ pub(super) fn remove_duplicates_with_source_nodes(
             dom.detach(image);
         }
     }
+}
+
+fn is_pending_detach(node: NodeId, pending_detaches: &[bool]) -> bool {
+    pending_detaches.get(node.index()).copied().unwrap_or(false)
 }
 
 fn has_image_source_evidence(dom: &Dom, image: NodeId) -> bool {
@@ -1080,7 +1092,12 @@ fn candidate_is_better(candidate: &SrcsetCandidate<'_>, current: &SrcsetCandidat
     }
 }
 
-fn deduplicate(dom: &mut Dom, nodes: &[NodeId], selected_sources: &[Option<Box<str>>]) {
+fn deduplicate(
+    dom: &mut Dom,
+    nodes: &[NodeId],
+    selected_sources: &[Option<Box<str>>],
+    pending_detaches: &[bool],
+) {
     // Adjacent wrappers are strong hydration evidence. The pair must also
     // share a source, a meaningful description plus quality evidence, or a
     // lightbox destination.
@@ -1088,15 +1105,19 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId], selected_sources: &[Option<Box<s
         if dom.parent(image).is_none() {
             continue;
         }
-        let current_container = image_group_container(dom, image);
-        let Some(previous_container) = previous_element_sibling(dom, current_container) else {
+        let current_container = image_group_container(dom, image, pending_detaches);
+        let Some(previous_container) =
+            previous_element_sibling_skipping(dom, current_container, pending_detaches)
+        else {
             continue;
         };
-        let Some(previous_image) = single_media_image(dom, previous_container) else {
+        let Some(previous_image) = single_media_image(dom, previous_container, pending_detaches)
+        else {
             continue;
         };
-        let previous_removal = media_group_removal(dom, previous_container, previous_image);
-        let current_removal = media_group_removal(dom, current_container, image);
+        let previous_removal =
+            media_group_removal(dom, previous_container, previous_image, pending_detaches);
+        let current_removal = media_group_removal(dom, current_container, image, pending_detaches);
         if !likely_duplicate(dom, previous_image, image, selected_sources) {
             continue;
         }
@@ -1124,15 +1145,19 @@ fn deduplicate(dom: &mut Dom, nodes: &[NodeId], selected_sources: &[Option<Box<s
     for figure in figures {
         let images: SmallVec<[NodeId; 4]> = dom
             .descendants(figure)
-            .filter(|&node| dom.tag(node) == Some(Tag::Img) && dom.parent(node).is_some())
+            .filter(|&node| {
+                dom.tag(node) == Some(Tag::Img)
+                    && dom.parent(node).is_some()
+                    && !is_pending_detach(node, pending_detaches)
+            })
             .collect();
         if images.len() != 2 || !likely_duplicate(dom, images[0], images[1], selected_sources) {
             continue;
         }
         let remove = if better_image(dom, images[0], images[1]) {
-            image_container_within(dom, images[0], figure)
+            image_container_within(dom, images[0], figure, pending_detaches)
         } else {
-            image_container_within(dom, images[1], figure)
+            image_container_within(dom, images[1], figure, pending_detaches)
         };
         dom.detach(remove);
     }
@@ -1226,10 +1251,10 @@ fn responsive_quality(dom: &Dom, image: NodeId) -> Option<(u8, u32)> {
         })
 }
 
-fn image_container(dom: &Dom, image: NodeId) -> NodeId {
+fn image_container(dom: &Dom, image: NodeId, pending_detaches: &[bool]) -> NodeId {
     let mut container = image;
     for ancestor in dom.ancestors(image).take(3) {
-        if is_image_only_wrapper(dom, ancestor, image) {
+        if is_image_only_wrapper(dom, ancestor, image, pending_detaches) {
             container = ancestor;
         } else {
             break;
@@ -1238,95 +1263,113 @@ fn image_container(dom: &Dom, image: NodeId) -> NodeId {
     container
 }
 
-fn image_group_container(dom: &Dom, image: NodeId) -> NodeId {
+fn image_group_container(dom: &Dom, image: NodeId, pending_detaches: &[bool]) -> NodeId {
     if let Some(figure) = dom.ancestors(image).find(|&ancestor| {
         dom.tag(ancestor) == Some(Tag::Figure)
             && dom
                 .descendants(ancestor)
-                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .filter(|&node| {
+                    dom.tag(node) == Some(Tag::Img) && !is_pending_detach(node, pending_detaches)
+                })
                 .take(2)
                 .count()
                 == 1
     }) {
         return figure;
     }
-    image_container(dom, image)
+    image_container(dom, image, pending_detaches)
 }
 
-fn is_media_group_container(dom: &Dom, node: NodeId) -> bool {
+fn is_media_group_container(dom: &Dom, node: NodeId, pending_detaches: &[bool]) -> bool {
     if dom.tag(node) != Some(Tag::Figure)
         || dom
             .descendants(node)
-            .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img))
+            .filter(|&descendant| {
+                dom.tag(descendant) == Some(Tag::Img)
+                    && !is_pending_detach(descendant, pending_detaches)
+            })
             .take(2)
             .count()
             != 1
     {
         return false;
     }
-    dom.descendants(node).all(|descendant| {
-        if dom.text_node(descendant).is_some() {
-            return dom
+    dom.descendants(node)
+        .filter(|&descendant| !is_pending_detach(descendant, pending_detaches))
+        .all(|descendant| {
+            if dom.text_node(descendant).is_some() {
+                return dom
+                    .ancestors(descendant)
+                    .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figcaption));
+            }
+            let in_caption = dom
                 .ancestors(descendant)
                 .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figcaption));
-        }
-        let in_caption = dom
-            .ancestors(descendant)
-            .any(|ancestor| dom.tag(ancestor) == Some(Tag::Figcaption));
-        match dom.tag(descendant) {
-            Some(Tag::Img | Tag::Picture | Tag::Source | Tag::A | Tag::Div | Tag::Span) => true,
-            Some(Tag::Figcaption) => true,
-            Some(
-                Tag::B
-                | Tag::Br
-                | Tag::Code
-                | Tag::Em
-                | Tag::I
-                | Tag::Kbd
-                | Tag::Mark
-                | Tag::P
-                | Tag::Q
-                | Tag::Samp
-                | Tag::Small
-                | Tag::Strong
-                | Tag::Sub
-                | Tag::Sup
-                | Tag::U,
-            ) => in_caption,
-            _ => false,
-        }
-    })
+            match dom.tag(descendant) {
+                Some(Tag::Img | Tag::Picture | Tag::Source | Tag::A | Tag::Div | Tag::Span) => true,
+                Some(Tag::Figcaption) => true,
+                Some(
+                    Tag::B
+                    | Tag::Br
+                    | Tag::Code
+                    | Tag::Em
+                    | Tag::I
+                    | Tag::Kbd
+                    | Tag::Mark
+                    | Tag::P
+                    | Tag::Q
+                    | Tag::Samp
+                    | Tag::Small
+                    | Tag::Strong
+                    | Tag::Sub
+                    | Tag::Sup
+                    | Tag::U,
+                ) => in_caption,
+                _ => false,
+            }
+        })
 }
 
-fn media_group_removal(dom: &Dom, container: NodeId, image: NodeId) -> NodeId {
-    if is_media_group_container(dom, container) {
+fn media_group_removal(
+    dom: &Dom,
+    container: NodeId,
+    image: NodeId,
+    pending_detaches: &[bool],
+) -> NodeId {
+    if is_media_group_container(dom, container, pending_detaches) {
         container
     } else {
-        image_container(dom, image)
+        image_container(dom, image, pending_detaches)
     }
 }
 
-fn single_media_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
+fn single_media_image(dom: &Dom, node: NodeId, pending_detaches: &[bool]) -> Option<NodeId> {
     if dom.tag(node) == Some(Tag::Img) {
         return Some(node);
     }
     if matches!(dom.tag(node), Some(Tag::Figure | Tag::Picture)) {
-        let mut images = dom
-            .descendants(node)
-            .filter(|&descendant| dom.tag(descendant) == Some(Tag::Img));
+        let mut images = dom.descendants(node).filter(|&descendant| {
+            dom.tag(descendant) == Some(Tag::Img)
+                && !is_pending_detach(descendant, pending_detaches)
+        });
         let image = images.next()?;
         return images.next().is_none().then_some(image);
     }
-    single_image(dom, node)
+    single_image_with_mask(dom, node, pending_detaches)
 }
 
-fn image_container_within(dom: &Dom, image: NodeId, boundary: NodeId) -> NodeId {
+fn image_container_within(
+    dom: &Dom,
+    image: NodeId,
+    boundary: NodeId,
+    pending_detaches: &[bool],
+) -> NodeId {
     let mut container = image;
     for ancestor in dom.ancestors(image) {
         if ancestor == boundary {
             break;
         }
-        if is_image_only_wrapper(dom, ancestor, image) {
+        if is_image_only_wrapper(dom, ancestor, image, pending_detaches) {
             container = ancestor;
         } else {
             break;
@@ -1335,13 +1378,19 @@ fn image_container_within(dom: &Dom, image: NodeId, boundary: NodeId) -> NodeId 
     container
 }
 
-fn is_image_only_wrapper(dom: &Dom, wrapper: NodeId, image: NodeId) -> bool {
+fn is_image_only_wrapper(
+    dom: &Dom,
+    wrapper: NodeId,
+    image: NodeId,
+    pending_detaches: &[bool],
+) -> bool {
     matches!(
         dom.tag(wrapper),
         Some(Tag::A | Tag::Picture | Tag::Span | Tag::Div | Tag::P)
-    ) && single_image(dom, wrapper) == Some(image)
+    ) && single_image_with_mask(dom, wrapper, pending_detaches) == Some(image)
         && std::iter::once(wrapper)
             .chain(dom.descendants(wrapper))
+            .filter(|&node| !is_pending_detach(node, pending_detaches))
             .all(|node| {
                 dom.text_node(node)
                     .is_some_and(|text| text.trim().is_empty())
@@ -1359,6 +1408,25 @@ fn is_image_only_wrapper(dom: &Dom, wrapper: NodeId, image: NodeId) -> bool {
                         )
                     )
             })
+}
+
+fn single_image_with_mask(dom: &Dom, node: NodeId, pending_detaches: &[bool]) -> Option<NodeId> {
+    if dom.tag(node) == Some(Tag::Img) && !is_pending_detach(node, pending_detaches) {
+        return Some(node);
+    }
+    if dom
+        .descendants(node)
+        .filter(|&descendant| !is_pending_detach(descendant, pending_detaches))
+        .filter_map(|descendant| dom.text_node(descendant))
+        .any(|text| !text.trim().is_empty())
+    {
+        return None;
+    }
+    let mut images = dom.descendants(node).filter(|&descendant| {
+        dom.tag(descendant) == Some(Tag::Img) && !is_pending_detach(descendant, pending_detaches)
+    });
+    let image = images.next()?;
+    images.next().is_none().then_some(image)
 }
 
 fn lightbox_links_to(dom: &Dom, thumbnail: NodeId, full: NodeId) -> bool {
@@ -1660,6 +1728,28 @@ fn previous_element_sibling(dom: &Dom, node: NodeId) -> Option<NodeId> {
             return Some(candidate);
         }
         if dom
+            .text_node(candidate)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return None;
+        }
+        previous = dom.prev_sibling(candidate);
+    }
+    None
+}
+
+fn previous_element_sibling_skipping(
+    dom: &Dom,
+    node: NodeId,
+    pending_detaches: &[bool],
+) -> Option<NodeId> {
+    let mut previous = dom.prev_sibling(node);
+    while let Some(candidate) = previous {
+        if dom.is_element(candidate) {
+            if !is_pending_detach(candidate, pending_detaches) {
+                return Some(candidate);
+            }
+        } else if dom
             .text_node(candidate)
             .is_some_and(|text| !text.trim().is_empty())
         {
