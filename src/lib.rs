@@ -53,8 +53,7 @@
 //!
 //! [`ExtractedPage::html`] returns canonical semantic HTML. It cannot contain source
 //! scripts, event handlers, arbitrary attributes, or unsupported URI schemes.
-//! [`ExtractedPage::safe_html`] is an alias for the same output. Markdown output
-//! contains no raw HTML.
+//! Markdown output contains no raw HTML.
 
 mod budget;
 mod candidate;

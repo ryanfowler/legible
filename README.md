@@ -172,8 +172,7 @@ The representation can change without a public API change.
 
 `page.markdown()` includes links and images. `page.html()` returns canonical
 semantic HTML. It contains no source scripts, event handlers, arbitrary source
-attributes, or unsupported URI schemes. `page.safe_html()` is a compatibility
-alias for `page.html()`.
+attributes, or unsupported URI schemes.
 
 `page.text()` returns normalized plain text. Repeated output calls are
 deterministic. Rendering is lazy, so Legible does not create all output formats
@@ -248,8 +247,7 @@ HTML body and does not know the transport status.
 
 `ExtractedPage::html()` returns canonical semantic HTML. The private semantic
 representation cannot contain active source elements, event handlers, arbitrary
-source attributes, or unsupported URI schemes. `ExtractedPage::safe_html()` is an
-alias for the same output.
+source attributes, or unsupported URI schemes.
 
 Markdown output contains no raw HTML. The semantic compiler rejects links and media
 that use unsupported URI schemes. Sanitize HTML that you create from other sources.
