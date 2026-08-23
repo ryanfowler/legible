@@ -15,11 +15,11 @@ import {
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repository = resolve(scriptDirectory, "../..");
-const defaultFixtureRoot = join(repository, "benchmarks/quality");
+const defaultFixtureRoot = join(repository, "evals/quality");
 const defaultOutputRoot = join(repository, "target/quality-comparison");
 
 function usage() {
-  return `usage: node scripts/compare-extractors/index.mjs [--all | --fixture ID] [options]
+  return `usage: node tools/extractor-eval/index.mjs [--all | --fixture ID] [options]
 
 Options:
   --all                 Run every discovered quality fixture (default).
@@ -28,6 +28,7 @@ Options:
   --output PATH         Write per-fixture artifacts and report.json here.
   --json PATH           Also write the aggregate JSON report to PATH.
   --summary PATH        Also write a compact Markdown summary to PATH.
+  --gate MODE           Fail for reliability errors from "legible" or "both" (default).
   --help                Show this help.
 
 DEFUDDLE_COMMAND and DEFUDDLE_ARGS can replace the pinned local Defuddle wrapper.`;
@@ -41,6 +42,7 @@ function parseArguments(arguments_) {
     outputRoot: defaultOutputRoot,
     jsonPath: null,
     summaryPath: null,
+    gate: "both",
   };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -69,6 +71,12 @@ function parseArguments(arguments_) {
         break;
       case "--summary":
         options.summaryPath = resolve(value());
+        break;
+      case "--gate":
+        options.gate = value();
+        if (!new Set(["legible", "both"]).has(options.gate)) {
+          throw new Error("--gate must be legible or both");
+        }
         break;
       case "--help":
       case "-h":
@@ -206,7 +214,7 @@ async function builtInDefuddleRunner() {
     ({ parseHTML } = await import("linkedom"));
   } catch (error) {
     throw new Error(
-      `Pinned Defuddle dependencies are not installed. Run npm --prefix scripts/compare-extractors ci. ${error.message}`,
+      `Pinned Defuddle dependencies are not installed. Run npm --prefix tools/extractor-eval ci. ${error.message}`,
     );
   }
   return async (fixture) => {
@@ -374,14 +382,12 @@ async function main() {
   console.log(formatHumanReport(report));
   console.log(`\nWrote comparison artifacts to ${options.outputRoot}`);
 
-  if (
-    results.some(
-      (result) =>
-        !result.legible.reliability_pass || !result.defuddle.reliability_pass,
-    )
-  ) {
-    process.exitCode = 1;
-  }
+  const reliabilityFailed = results.some(
+    (result) =>
+      !result.legible.reliability_pass ||
+      (options.gate === "both" && !result.defuddle.reliability_pass),
+  );
+  if (reliabilityFailed) process.exitCode = 1;
 }
 
 main().catch((error) => {

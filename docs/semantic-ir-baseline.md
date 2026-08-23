@@ -27,9 +27,9 @@ The raw `html()` shape was compatibility-sensitive. Unit tests required source a
 Run the corpus from the repository root:
 
 ```bash
-npm --prefix scripts/compare-extractors ci
+npm --prefix tools/extractor-eval ci
 cargo fetch
-node scripts/compare-extractors/index.mjs --all
+node tools/extractor-eval/index.mjs --all
 ```
 
 The 125-fixture report for the baseline revision is in `target/quality-comparison/report.json` after a local run. Keep the report as a CI or review artifact. Do not commit `target/`.
@@ -45,15 +45,15 @@ Rounded Legible results are:
 | Reference F1 | 0.98 |
 | Reliability | 0.98 |
 
-The checked-in historical comparison is `benchmarks/quality/BASELINE.md`.
+The checked-in historical comparison is `evals/quality/BASELINE.md`.
 
 ## Performance baseline
 
 Use the same machine, Rust toolchain, power mode, and background workload for both runs.
 
 ```bash
-cargo bench --bench extraction -- --save-baseline pre-ir
-cargo bench --bench extraction -- --baseline pre-ir
+cargo bench --bench pipeline -- --save-baseline pre-ir
+cargo bench --bench pipeline -- --baseline pre-ir
 ```
 
 Criterion stores the complete local baseline under `target/criterion`. Keep that directory as a local or CI artifact. The benchmark procedure and regression limits are in `benches/README.md`.
@@ -96,17 +96,17 @@ The initial IR vocabulary comes from existing normalization and rendering behavi
 | Semantic area | Existing implementation evidence | Fixture evidence |
 | --- | --- | --- |
 | Paragraphs, headings, quotes, emphasis, strong text, links, breaks, and thematic breaks | `src/render/markdown.rs`, `src/render/text.rs`, `src/normalize/headings.rs` | General, Defuddle, Web, and Readability suites |
-| Ordered and unordered lists, including normalized ARIA lists | `src/normalize/lists.rs` | `tests/general/article-listing`, `tests/web/listings`, and specialized Hacker News fixtures |
-| Code blocks and inline code | `src/document/code.rs`, `src/normalize.rs` | `tests/general/code-heavy-docs`, `tests/general/standalone-code-breaks`, and `tests/defuddle/code-blocks` |
-| Data tables and normalized layout or listing tables | `src/document/tables.rs`, `src/normalize.rs` | `tests/general/recommended-data-table`, `tests/general/table-heavy-reference`, `tests/general/old-table-layout`, and `tests/defuddle/table-layout` |
-| Figures, captions, and images | `src/document/figures.rs`, `src/document/images.rs`, `src/normalize/images.rs` | `tests/general/figure-heavy`, `tests/general/figure-caption`, `tests/general/lazy-images`, `tests/defuddle/images`, and `tests/web/images` |
-| Footnote references and definitions | `src/document/footnotes.rs`, `src/document/compiler.rs` | `tests/general/footnotes`, `tests/defuddle/footnotes`, and `tests/web/footnotes` |
-| Inline and display math | `src/document/math.rs`, `src/normalize.rs` | `tests/defuddle/math`, `tests/web/math`, and Readability MathJax fixtures |
-| Callouts | `src/document/callouts.rs`, `src/document/compiler.rs` | `tests/web/docs/callout` and quality fixtures such as `docs-callout-types` |
+| Ordered and unordered lists, including normalized ARIA lists | `src/normalize/lists.rs` | `tests/fixtures/snapshots/general/article-listing`, `tests/fixtures/capabilities/listings`, and specialized Hacker News fixtures |
+| Code blocks and inline code | `src/document/code.rs`, `src/normalize.rs` | `tests/fixtures/snapshots/general/code-heavy-docs`, `tests/fixtures/snapshots/general/standalone-code-breaks`, and `tests/fixtures/snapshots/compatibility-defuddle/code-blocks` |
+| Data tables and normalized layout or listing tables | `src/document/tables.rs`, `src/normalize.rs` | `tests/fixtures/snapshots/general/recommended-data-table`, `tests/fixtures/snapshots/general/table-heavy-reference`, `tests/fixtures/snapshots/general/old-table-layout`, and `tests/fixtures/snapshots/compatibility-defuddle/table-layout` |
+| Figures, captions, and images | `src/document/figures.rs`, `src/document/images.rs`, `src/normalize/images.rs` | `tests/fixtures/snapshots/general/figure-heavy`, `tests/fixtures/snapshots/general/figure-caption`, `tests/fixtures/snapshots/general/lazy-images`, `tests/fixtures/snapshots/compatibility-defuddle/images`, and `tests/fixtures/capabilities/images` |
+| Footnote references and definitions | `src/document/footnotes.rs`, `src/document/compiler.rs` | `tests/fixtures/snapshots/general/footnotes`, `tests/fixtures/snapshots/compatibility-defuddle/footnotes`, and `tests/fixtures/capabilities/footnotes` |
+| Inline and display math | `src/document/math.rs`, `src/normalize.rs` | `tests/fixtures/snapshots/compatibility-defuddle/math`, `tests/fixtures/capabilities/math`, and Readability MathJax fixtures |
+| Callouts | `src/document/callouts.rs`, `src/document/compiler.rs` | `tests/fixtures/capabilities/docs/callout` and quality fixtures such as `docs-callout-types` |
 | Details and summaries | `src/document/compiler.rs`, `src/render/markdown.rs`, and `src/render/text.rs` | Readability `toc-missing` and focused IR tests. This distinction has limited exact-output coverage and remains provisional. |
 | Definition lists | `src/document/compiler.rs`, `src/render/markdown.rs`, and `src/normalize/lists.rs` | Quality fixture `docs-definition-list` and focused IR tests |
-| Meaningful media | `src/normalize/media.rs` | `tests/web/media` and the quality corpus media categories |
-| Discussions | Shared specialized discussion builder and adapters | `tests/general/barrier-discussion` and all 12 fixtures under `tests/specialized` |
+| Meaningful media | `src/normalize/media.rs` | `tests/fixtures/capabilities/media` and the quality corpus media categories |
+| Discussions | Shared specialized discussion builder and adapters | `tests/fixtures/snapshots/general/barrier-discussion` and all 12 fixtures under `tests/fixtures/snapshots/specialized` |
 
 The semantic IR also includes table spans and alignment because the previous DOM renderers retained that source meaning. It includes typed figures, footnotes, math, and callouts because normalization already identifies those concepts. It does not include arbitrary HTML elements, classes, IDs, styles, or attribute bags.
 
@@ -118,6 +118,6 @@ The current first-party extraction suites contain:
 - 11 Defuddle fixture categories;
 - 12 Web capability categories;
 - 12 specialized extraction fixtures;
-- Mozilla Readability compatibility fixtures under `tests/readability-js/test/test-pages`.
+- Mozilla Readability compatibility fixtures under `tests/fixtures/compatibility/readability/test/test-pages`.
 
 A unit test extracts every `source.html` below `tests/`. Every successful extraction compiles to the IR and passes IR validation. Fixtures with `expected.error` remain expected extraction failures.

@@ -53,27 +53,11 @@ markup5ever_rcdom = "0.39"
 pretty_assertions = "1.4"
 
 [[test]]
-name = "integration_tests"
+name = "fixture_tests"
 harness = false
 
 [[test]]
-name = "general_tests"
-harness = false
-
-[[test]]
-name = "web_tests"
-harness = false
-
-[[test]]
-name = "defuddle_tests"
-harness = false
-
-[[test]]
-name = "specialized_tests"
-harness = false
-
-[[bench]]
-name = "extraction"
+name = "readability_compat_tests"
 harness = false
 
 [[bench]]
@@ -81,5 +65,9 @@ name = "smoke"
 harness = false
 
 [[bench]]
-name = "real_world"
+name = "pipeline"
+harness = false
+
+[[bench]]
+name = "corpus"
 harness = false

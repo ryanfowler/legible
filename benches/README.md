@@ -16,13 +16,13 @@ The full suite is intentionally slower. Run it for focused performance work,
 baseline updates, or before changing a performance-sensitive implementation:
 
 ```bash
-cargo bench --bench extraction
+cargo bench --bench pipeline
 ```
 
 Run the real-world fixture benchmarks with one command:
 
 ```bash
-cargo bench --bench real_world
+cargo bench --bench corpus
 ```
 
 This target measures `medium-2`, `ars-1`, `heise`, `nytimes-5`, `wikipedia-2`,
@@ -73,7 +73,7 @@ The full suite measures these workloads:
 - steady-state lazy Markdown, text, and HTML rendering (text statistics are prewarmed)
 - deeply nested parser input
 
-See `benches/complex-temporary-storage.md` for the storage inventory and the
+See `benches/baselines/complex-temporary-storage.md` for the storage inventory and the
 final complex-compiler benchmark measurements.
 
 The `ordinary-inline` workload uses repeated article sections with `strong`, `em`,
@@ -96,8 +96,8 @@ compatibility fixtures.
 Criterion stores local baselines in `target/criterion`. Use a named baseline before a substantial pipeline change:
 
 ```bash
-cargo bench --bench extraction -- --save-baseline main
-cargo bench --bench extraction -- --baseline main
+cargo bench --bench pipeline -- --save-baseline main
+cargo bench --bench pipeline -- --baseline main
 ```
 
 ## Guardrails
@@ -113,4 +113,4 @@ Use the same machine, Rust toolchain, and power mode for comparisons.
 - Extraction benchmarks print an `extraction-representation/...` line from opt-in diagnostics. It reports source DOM nodes, the actual selected and cleaned DOM nodes, semantic item counts, and estimated retained bytes for the same input.
 - A normalization change must not add a repeated full-document scan for each code block, equation, table, or image.
 
-Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline. The current baseline at revision `499e09f3bf2e53164321e991254b9ff124cccb59` is recorded in `benches/private-ir-baseline.md`. The latest raw HTML to Markdown comparison is recorded in `benches/raw-html-markdown-optimization.md`.
+Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline. The current baseline at revision `499e09f3bf2e53164321e991254b9ff124cccb59` is recorded in `benches/baselines/private-ir-baseline.md`. The latest raw HTML to Markdown comparison is recorded in `benches/baselines/raw-html-markdown-optimization.md`.

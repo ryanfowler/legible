@@ -6,7 +6,7 @@ import { discoverFixtures } from "./lib.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const fixtures = discoverFixtures(
-  resolve(scriptDirectory, "../../benchmarks/quality"),
+  resolve(scriptDirectory, "../../evals/quality"),
 );
 
 function fixtureIds(prefix) {
@@ -15,7 +15,7 @@ function fixtureIds(prefix) {
     .map((fixture) => fixture.manifest.id);
 }
 
-test("keeps the discussion benchmark batch complete", () => {
+test("keeps the discussion evaluation batch complete", () => {
   const discussion = fixtures.filter(
     (fixture) =>
       fixture.manifest.id.startsWith("discussion-") ||
@@ -53,7 +53,7 @@ test("keeps the discussion benchmark batch complete", () => {
   }
 });
 
-test("keeps the application and responsive benchmark batch complete", () => {
+test("keeps the application and responsive evaluation batch complete", () => {
   const application = fixtures
     .filter(
       (fixture) =>
@@ -68,11 +68,11 @@ test("keeps the application and responsive benchmark batch complete", () => {
   assert.ok(application.includes("app-template-content"));
 });
 
-test("keeps the media benchmark batch complete", () => {
+test("keeps the media evaluation batch complete", () => {
   assert.ok(fixtureIds("media-").length >= 16);
 });
 
-test("keeps the metadata conflict benchmark batch complete", () => {
+test("keeps the metadata conflict evaluation batch complete", () => {
   const metadata = fixtures.filter((fixture) =>
     fixture.manifest.id.startsWith("metadata-"),
   );

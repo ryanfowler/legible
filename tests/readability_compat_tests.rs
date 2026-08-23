@@ -351,7 +351,7 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
 
     let page = extract(&source_html, Some("http://fakehost/test/page.html"))?;
     let snapshots: HashMap<String, ExpectedMetadata> =
-        serde_json::from_str(include_str!("metadata-snapshots.json"))?;
+        serde_json::from_str(include_str!("readability_metadata_snapshots.json"))?;
     let case = test_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -383,5 +383,5 @@ fn run_test_case(source_path: &Path) -> datatest_stable::Result<()> {
 }
 
 datatest_stable::harness! {
-    { test = run_test_case, root = "tests/readability-js/test/test-pages", pattern = r".*/source\.html$" },
+    { test = run_test_case, root = "tests/fixtures/compatibility/readability/test/test-pages", pattern = r".*/source\.html$" },
 }

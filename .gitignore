@@ -3,4 +3,4 @@
 /Cargo.lock
 /CLAUDE.md
 target
-/scripts/compare-extractors/node_modules
+/tools/extractor-eval/node_modules

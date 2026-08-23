@@ -593,7 +593,9 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
             .diagnostics(true)
             .build()
             .extract(
-                include_str!("../tests/specialized/hacker-news-listing/source.html"),
+                include_str!(
+                    "../tests/fixtures/snapshots/specialized/hacker-news-listing/source.html"
+                ),
                 Some("https://news.ycombinator.com/"),
             )
             .unwrap();
