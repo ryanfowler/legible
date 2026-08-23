@@ -1,5 +1,7 @@
 #[cfg(test)]
 use super::DocumentNodeId;
+use std::fmt;
+
 use super::{Document, SemanticItemView as Item, SemanticKind as OwnedSemanticKind};
 
 /// Structural measurements collected while semantic operations are emitted.
@@ -157,15 +159,33 @@ pub(crate) fn walk_text(
     capacity: Option<usize>,
     collect_stats: bool,
 ) -> (Option<String>, TextStats) {
-    walk_text_range(
+    let output = capacity.map(String::with_capacity).map(TextOutput::string);
+    let (text, stats, _) = walk_text_range_with_output(
         document,
         0,
         document.operations().len(),
         block_newlines,
         preserve_line_breaks,
-        capacity,
+        output,
         collect_stats,
-    )
+    );
+    (text, stats)
+}
+
+pub(crate) fn write_document_text(
+    document: &Document,
+    writer: &mut impl fmt::Write,
+) -> (fmt::Result, TextStats) {
+    let (_, stats, error) = walk_text_range_with_output(
+        document,
+        0,
+        document.operations().len(),
+        false,
+        false,
+        Some(TextOutput::writer(writer)),
+        true,
+    );
+    (error.map_or(Ok(()), Err), stats)
 }
 
 pub(crate) fn render_document_text(document: &Document, capacity: usize) -> String {
@@ -189,6 +209,7 @@ pub(crate) fn render_node_text(document: &Document, root: DocumentNodeId) -> Str
     .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn walk_text_range(
     document: &Document,
     start: usize,
@@ -198,12 +219,34 @@ fn walk_text_range(
     capacity: Option<usize>,
     collect_stats: bool,
 ) -> (Option<String>, TextStats) {
+    let output = capacity.map(String::with_capacity).map(TextOutput::string);
+    let (text, stats, _) = walk_text_range_with_output(
+        document,
+        start,
+        end,
+        block_newlines,
+        preserve_line_breaks,
+        output,
+        collect_stats,
+    );
+    (text, stats)
+}
+
+fn walk_text_range_with_output<'writer>(
+    document: &Document,
+    start: usize,
+    end: usize,
+    block_newlines: bool,
+    preserve_line_breaks: bool,
+    output: Option<TextOutput<'writer>>,
+    collect_stats: bool,
+) -> (Option<String>, TextStats, Option<fmt::Error>) {
     let block = if block_newlines {
         Separator::Newline
     } else {
         Separator::Space
     };
-    let mut output = NormalizedOutput::new(capacity, collect_stats);
+    let mut output = NormalizedOutput::with_output(output, collect_stats);
     let mut index = start;
     while index < end {
         let Some(operation) = document.operations().get(index).copied() else {
@@ -387,9 +430,71 @@ impl LinkOutput {
     }
 }
 
-#[derive(Default)]
-struct NormalizedOutput {
-    output: Option<String>,
+enum TextTarget<'writer> {
+    String(String),
+    Writer(&'writer mut dyn fmt::Write),
+}
+
+struct TextOutput<'writer> {
+    target: TextTarget<'writer>,
+    error: Option<fmt::Error>,
+}
+
+impl<'writer> TextOutput<'writer> {
+    fn string(value: String) -> Self {
+        Self {
+            target: TextTarget::String(value),
+            error: None,
+        }
+    }
+
+    fn writer<W: fmt::Write>(writer: &'writer mut W) -> Self {
+        Self {
+            target: TextTarget::Writer(writer),
+            error: None,
+        }
+    }
+
+    fn push_str(&mut self, value: &str) {
+        match &mut self.target {
+            TextTarget::String(output) => output.push_str(value),
+            TextTarget::Writer(writer) => {
+                if self.error.is_none()
+                    && let Err(error) = writer.write_str(value)
+                {
+                    self.error = Some(error);
+                }
+            }
+        }
+    }
+
+    fn push(&mut self, value: char) {
+        match &mut self.target {
+            TextTarget::String(output) => output.push(value),
+            TextTarget::Writer(writer) => {
+                if self.error.is_none()
+                    && let Err(error) = writer.write_char(value)
+                {
+                    self.error = Some(error);
+                }
+            }
+        }
+    }
+
+    fn error(&self) -> Option<fmt::Error> {
+        self.error
+    }
+
+    fn into_string(self) -> Option<String> {
+        match self.target {
+            TextTarget::String(output) => Some(output),
+            TextTarget::Writer(_) => None,
+        }
+    }
+}
+
+struct NormalizedOutput<'writer> {
+    output: Option<TextOutput<'writer>>,
     collect_stats: bool,
     pending: Separator,
     character_count: usize,
@@ -403,12 +508,21 @@ struct NormalizedOutput {
     digit_chars: usize,
 }
 
-impl NormalizedOutput {
-    fn new(capacity: Option<usize>, collect_stats: bool) -> Self {
+impl<'writer> NormalizedOutput<'writer> {
+    fn with_output(output: Option<TextOutput<'writer>>, collect_stats: bool) -> Self {
         Self {
-            output: capacity.map(String::with_capacity),
+            output,
             collect_stats,
-            ..Self::default()
+            pending: Separator::None,
+            character_count: 0,
+            word_count: 0,
+            in_word: false,
+            link_output: None,
+            link_text_length: 0,
+            weighted_link_text_length: 0.0,
+            has_alphanumeric_text: false,
+            alphabetic_chars: 0,
+            digit_chars: 0,
         }
     }
 
@@ -601,9 +715,11 @@ impl NormalizedOutput {
         self.pending = Separator::None;
     }
 
-    fn finish(self) -> (Option<String>, TextStats) {
+    fn finish(self) -> (Option<String>, TextStats, Option<fmt::Error>) {
+        let error = self.output.as_ref().and_then(TextOutput::error);
+        let output = self.output.and_then(TextOutput::into_string);
         (
-            self.output,
+            output,
             TextStats {
                 text_length: self.character_count,
                 word_count: self.word_count,
@@ -617,6 +733,7 @@ impl NormalizedOutput {
                 alphabetic_chars: self.alphabetic_chars,
                 digit_chars: self.digit_chars,
             },
+            error,
         )
     }
 }

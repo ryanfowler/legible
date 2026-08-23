@@ -1,9 +1,53 @@
 //! The extracted page and lazy output builders.
 
+use std::{fmt, io};
+
 use crate::diagnostics::ExtractionDiagnostics;
 use crate::document::Document;
 use crate::metadata::{Metadata, MetadataDiagnostics};
 use serde_json::Value;
+
+struct IoFmtWriter<'a, W: ?Sized> {
+    writer: &'a mut W,
+    error: Option<io::Error>,
+}
+
+impl<'a, W: io::Write + ?Sized> IoFmtWriter<'a, W> {
+    fn new(writer: &'a mut W) -> Self {
+        Self {
+            writer,
+            error: None,
+        }
+    }
+
+    fn finish(self, result: fmt::Result) -> io::Result<()> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+
+        result.map_err(|_| io::Error::other("rendering failed"))
+    }
+}
+
+impl<W: io::Write + ?Sized> fmt::Write for IoFmtWriter<'_, W> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.error.is_some() {
+            return Err(fmt::Error);
+        }
+
+        if let Err(error) = self.writer.write_all(value.as_bytes()) {
+            self.error = Some(error);
+            return Err(fmt::Error);
+        }
+
+        Ok(())
+    }
+
+    fn write_char(&mut self, value: char) -> fmt::Result {
+        let mut buffer = [0; 4];
+        self.write_str(value.encode_utf8(&mut buffer))
+    }
+}
 
 /// Relevant page content and metadata.
 ///
@@ -63,6 +107,24 @@ impl ExtractedPage {
         self.markdown_builder().render()
     }
 
+    /// Writes the extracted content as CommonMark.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
+    pub fn write_markdown<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        self.markdown_builder().write(writer)
+    }
+
+    /// Writes the extracted content as CommonMark to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
+    pub fn write_markdown_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.markdown_builder().write(&mut adapter);
+        adapter.finish(result)
+    }
+
     /// Returns a Markdown output builder.
     pub fn markdown_builder(&self) -> MarkdownBuilder<'_> {
         MarkdownBuilder {
@@ -79,12 +141,50 @@ impl ExtractedPage {
         self.document.text()
     }
 
+    /// Writes the extracted content as normalized plain text.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
+    pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        self.document.write_text(writer)
+    }
+
+    /// Writes the extracted content as normalized plain text to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
+    pub fn write_text_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.write_text(&mut adapter);
+        adapter.finish(result)
+    }
+
     /// Renders the extracted content as canonical semantic HTML.
     ///
     /// The private semantic representation cannot contain active source elements,
     /// arbitrary attributes, or unsupported URI schemes.
     pub fn html(&self) -> String {
         self.html_builder().render()
+    }
+
+    /// Writes the extracted content as canonical semantic HTML.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
+    pub fn write_html<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        self.html_builder().write(writer)
+    }
+
+    /// Writes the extracted content as canonical semantic HTML to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
+    pub fn write_html_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.html_builder().write(&mut adapter);
+        adapter.finish(result)
     }
 
     /// Returns an HTML output builder.
@@ -223,6 +323,23 @@ impl HtmlBuilder<'_> {
             self.page.document.output_capacity_hint(),
         )
     }
+
+    /// Writes canonical semantic HTML to `writer`.
+    pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        crate::render::html::write_html(&self.page.document, writer)
+    }
+
+    /// Writes canonical semantic HTML to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
+    pub fn write_io<W: io::Write>(self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.write(&mut adapter);
+        adapter.finish(result)
+    }
 }
 
 /// Configures Markdown rendering for an [`ExtractedPage`].
@@ -261,10 +378,36 @@ impl MarkdownBuilder<'_> {
             },
         )
     }
+
+    /// Writes the configured Markdown output to `writer`.
+    pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        crate::render::markdown::write_markdown(
+            &self.page.document,
+            writer,
+            crate::render::markdown::MarkdownConfig {
+                links: self.links,
+                images: self.images,
+            },
+        )
+    }
+
+    /// Writes the configured Markdown output to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
+    pub fn write_io<W: io::Write>(self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.write(&mut adapter);
+        adapter.finish(result)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{fmt, io};
+
     use crate::extract;
 
     #[test]
@@ -281,6 +424,159 @@ mod tests {
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
         assert_eq!(page.image_count(), 1);
+    }
+
+    #[test]
+    fn write_methods_match_string_methods() {
+        let page = extract(
+            "<main><p>Hello <a href='/world'>world</a>.</p><img src='image.png' alt='Image'></main>",
+            Some("https://example.com/page"),
+        )
+        .unwrap();
+
+        let mut markdown = String::new();
+        page.write_markdown(&mut markdown).unwrap();
+        assert_eq!(markdown, page.markdown());
+
+        let mut text = String::new();
+        page.write_text(&mut text).unwrap();
+        assert_eq!(text, page.text());
+
+        let mut html = String::new();
+        page.write_html(&mut html).unwrap();
+        assert_eq!(html, page.html());
+
+        let mut configured = String::new();
+        page.markdown_builder()
+            .links(false)
+            .images(false)
+            .write(&mut configured)
+            .unwrap();
+        assert_eq!(
+            configured,
+            page.markdown_builder().links(false).images(false).render()
+        );
+
+        let mut markdown = Vec::new();
+        page.write_markdown_io(&mut markdown).unwrap();
+        assert_eq!(markdown, page.markdown().as_bytes());
+
+        let mut text = Vec::new();
+        page.write_text_io(&mut text).unwrap();
+        assert_eq!(text, page.text().as_bytes());
+
+        let mut html = Vec::new();
+        page.write_html_io(&mut html).unwrap();
+        assert_eq!(html, page.html().as_bytes());
+
+        let mut configured = Vec::new();
+        page.markdown_builder()
+            .links(false)
+            .images(false)
+            .write_io(&mut configured)
+            .unwrap();
+        assert_eq!(
+            configured,
+            page.markdown_builder()
+                .links(false)
+                .images(false)
+                .render()
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn write_methods_return_writer_errors() {
+        struct FailingWriter;
+
+        impl fmt::Write for FailingWriter {
+            fn write_str(&mut self, _: &str) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+
+        let page = extract("<main><p>Content</p></main>", None).unwrap();
+        assert!(page.write_markdown(&mut FailingWriter).is_err());
+        assert!(page.write_text(&mut FailingWriter).is_err());
+        assert!(page.write_html(&mut FailingWriter).is_err());
+    }
+
+    #[test]
+    fn io_write_methods_return_io_errors() {
+        struct FailingWriter;
+
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "test error"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let page = extract("<main><p>Content</p></main>", None).unwrap();
+
+        let error = page.write_markdown_io(&mut FailingWriter).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+        let error = page.write_text_io(&mut FailingWriter).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+        let error = page.write_html_io(&mut FailingWriter).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+        let error = page
+            .markdown_builder()
+            .write_io(&mut FailingWriter)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn write_methods_send_output_in_multiple_writes() {
+        struct CountingWriter {
+            output: String,
+            writes: usize,
+        }
+
+        impl fmt::Write for CountingWriter {
+            fn write_str(&mut self, value: &str) -> fmt::Result {
+                self.writes += 1;
+                self.output.push_str(value);
+                Ok(())
+            }
+        }
+
+        let page = extract(
+            "<main><p>First paragraph.</p><p>Second paragraph.</p></main>",
+            None,
+        )
+        .unwrap();
+
+        let mut markdown = CountingWriter {
+            output: String::new(),
+            writes: 0,
+        };
+        page.write_markdown(&mut markdown).unwrap();
+        assert_eq!(markdown.output, page.markdown());
+        assert!(markdown.writes > 1);
+
+        let mut html = CountingWriter {
+            output: String::new(),
+            writes: 0,
+        };
+        page.write_html(&mut html).unwrap();
+        assert_eq!(html.output, page.html());
+        assert!(html.writes > 1);
+
+        let mut text = CountingWriter {
+            output: String::new(),
+            writes: 0,
+        };
+        page.write_text(&mut text).unwrap();
+        assert_eq!(text.output, page.text());
+        assert!(text.writes > 1);
     }
 
     #[test]

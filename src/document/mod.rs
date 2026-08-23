@@ -304,6 +304,12 @@ impl Document {
         text.unwrap_or_default()
     }
 
+    pub(crate) fn write_text(&self, writer: &mut impl std::fmt::Write) -> std::fmt::Result {
+        let (result, text_stats) = stats::write_document_text(self, writer);
+        let _ = self.text_stats.set(text_stats);
+        result
+    }
+
     /// Returns the number of characters in [`Self::text`].
     pub fn text_length(&self) -> usize {
         self.stats().text_length

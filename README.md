@@ -178,6 +178,30 @@ attributes, or unsupported URI schemes.
 deterministic. Rendering is lazy, so Legible does not create all output formats
 unless you request them.
 
+Use `write_markdown`, `write_html`, or `write_text` when an API accepts a
+`std::fmt::Write` value. These methods return `fmt::Result` and write directly
+to the provided value. They do not create a complete intermediate output
+`String`.
+
+```rust
+# let page = legible::extract("<main><p>Text</p></main>", None).unwrap();
+use std::fmt::Write;
+
+let mut output = String::new();
+page.write_markdown(&mut output).unwrap();
+```
+
+Use `write_markdown_io`, `write_html_io`, or `write_text_io` when an API accepts
+a `std::io::Write` value. These methods write UTF-8 bytes directly and return
+`std::io::Result<()>`. The builder methods named `write_io` provide the same output
+configuration as the `fmt::Write` methods.
+
+```rust
+# let page = legible::extract("<main><p>Text</p></main>", None).unwrap();
+let mut output = std::io::BufWriter::new(std::fs::File::create("output.md").unwrap());
+page.write_markdown_io(&mut output).unwrap();
+```
+
 ## Render Markdown
 
 `page.markdown()` includes links and images. Use the builder to change these settings.
