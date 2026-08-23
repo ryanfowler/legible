@@ -137,6 +137,23 @@ fn table_wrapper_plan(tags: &[Tag], sibling_count: usize) -> (Option<CommonTable
     (common, node_count)
 }
 
+fn selection_has_single_table_cell(dom: &Dom, nodes: &[NodeId]) -> bool {
+    let mut cells = 0_usize;
+    for &node in nodes {
+        cells += usize::from(matches!(dom.tag(node), Some(Tag::Td | Tag::Th)));
+        if cells > 1 {
+            return false;
+        }
+        for descendant in dom.table_descendants(node) {
+            cells += usize::from(matches!(dom.tag(descendant), Some(Tag::Td | Tag::Th)));
+            if cells > 1 {
+                return false;
+            }
+        }
+    }
+    cells == 1
+}
+
 #[derive(Default)]
 struct TitleHeadingPlan {
     preferred: Option<NodeId>,
@@ -981,8 +998,8 @@ impl<'a> ContentExtractor<'a> {
         if !source_metrics.has_meaningful_text() && !relaxed_source_metrics.has_meaningful_text() {
             return Err(Error::NoContent);
         }
-        let short_source_access_barrier = (source_metrics.word_count <= 60
-            || source_metrics.text_chars <= 400)
+        let short_source_access_barrier = (source_metrics.word_count <= 200
+            || source_metrics.text_chars <= 1_200)
             && is_access_barrier_prepared(&self.dom, &prepared_source, body);
         let substantial_hidden_gain = relaxed_source_metrics.text_chars
             >= source_metrics.text_chars.saturating_mul(2)
@@ -3548,6 +3565,12 @@ impl<'a> ContentExtractor<'a> {
         let first = *siblings.first()?;
         let tags: SmallVec<[Tag; 8]> = siblings.iter().filter_map(|&node| dom.tag(node)).collect();
         let (common_table_wrapper, wrapper_count) = table_wrapper_plan(&tags, siblings.len());
+        let has_table_boundary = common_table_wrapper.is_some()
+            || tags
+                .iter()
+                .any(|tag| matches!(tag, Tag::Tr | Tag::Td | Tag::Th));
+        let single_cell_boundary =
+            has_table_boundary && selection_has_single_table_cell(dom, siblings);
 
         // Copied fragments are often exactly at capacity. Reserve only the
         // container and the table wrappers that this selection needs.
@@ -3562,6 +3585,10 @@ impl<'a> ContentExtractor<'a> {
         let table_parent = match common_table_wrapper {
             Some(CommonTableWrapper::Rows) => {
                 let table = dom.create_html_element(Tag::Table).ok()?;
+                if single_cell_boundary {
+                    dom.set_attr(table, AttrName::Role, "presentation");
+                    dom.set_attr(table, AttrName::DataTable, "0");
+                }
                 let body = dom.create_html_element(Tag::Tbody).ok()?;
                 dom.append_child(container, table);
                 dom.append_child(table, body);
@@ -3569,6 +3596,10 @@ impl<'a> ContentExtractor<'a> {
             }
             Some(CommonTableWrapper::Cells) => {
                 let table = dom.create_html_element(Tag::Table).ok()?;
+                if single_cell_boundary {
+                    dom.set_attr(table, AttrName::Role, "presentation");
+                    dom.set_attr(table, AttrName::DataTable, "0");
+                }
                 let body = dom.create_html_element(Tag::Tbody).ok()?;
                 let row = dom.create_html_element(Tag::Tr).ok()?;
                 dom.append_child(container, table);
@@ -3578,6 +3609,10 @@ impl<'a> ContentExtractor<'a> {
             }
             Some(CommonTableWrapper::Sections) => {
                 let table = dom.create_html_element(Tag::Table).ok()?;
+                if single_cell_boundary {
+                    dom.set_attr(table, AttrName::Role, "presentation");
+                    dom.set_attr(table, AttrName::DataTable, "0");
+                }
                 dom.append_child(container, table);
                 Some(table)
             }
@@ -3600,6 +3635,10 @@ impl<'a> ContentExtractor<'a> {
                 let wrapper = match tag {
                     Tag::Tr => {
                         let table = dom.create_html_element(Tag::Table).ok()?;
+                        if single_cell_boundary {
+                            dom.set_attr(table, AttrName::Role, "presentation");
+                            dom.set_attr(table, AttrName::DataTable, "0");
+                        }
                         let body = dom.create_html_element(Tag::Tbody).ok()?;
                         dom.append_child(container, table);
                         dom.append_child(table, body);
@@ -3607,6 +3646,10 @@ impl<'a> ContentExtractor<'a> {
                     }
                     Tag::Td | Tag::Th => {
                         let table = dom.create_html_element(Tag::Table).ok()?;
+                        if single_cell_boundary {
+                            dom.set_attr(table, AttrName::Role, "presentation");
+                            dom.set_attr(table, AttrName::DataTable, "0");
+                        }
                         let body = dom.create_html_element(Tag::Tbody).ok()?;
                         let row = dom.create_html_element(Tag::Tr).ok()?;
                         dom.append_child(container, table);
@@ -4780,6 +4823,55 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_single_cell_boundary_is_presentational() {
+        let dom = Dom::parse_document(
+            "<body><table><tr><td><h2>First card</h2><p>Useful card text.</p></td></tr></table></body>",
+        )
+        .unwrap();
+        let cell = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Td))
+            .unwrap();
+        let config = ExtractorConfig::default();
+        let mut extractor = ContentExtractor::from_document(dom, None, &config);
+        let container =
+            ContentExtractor::create_container(&mut extractor.dom, cell, &[cell]).unwrap();
+        let table = extractor
+            .dom
+            .descendants(container)
+            .find(|&node| extractor.dom.tag(node) == Some(Tag::Table))
+            .unwrap();
+        assert_eq!(
+            extractor.dom.attr(table, AttrName::Role),
+            Some("presentation")
+        );
+        assert_eq!(extractor.dom.attr(table, AttrName::DataTable), Some("0"));
+    }
+
+    #[test]
+    fn synthetic_mixed_multi_cell_boundary_keeps_data_semantics() {
+        let mut dom = Dom::parse_document(
+            "<body><table><tr><td>First value</td><td>Second value</td></tr></table><p>Context</p></body>",
+        )
+        .unwrap();
+        let cells: SmallVec<[NodeId; 8]> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Td))
+            .collect();
+        let context = dom.first_descendant_by_tag(dom.root(), Tag::P).unwrap();
+        let siblings = [cells[0], context, cells[1]];
+        let container = ContentExtractor::create_container(&mut dom, cells[0], &siblings).unwrap();
+
+        for table in dom
+            .descendants(container)
+            .filter(|&node| dom.tag(node) == Some(Tag::Table))
+        {
+            assert_ne!(dom.attr(table, AttrName::Role), Some("presentation"));
+            assert_ne!(dom.attr(table, AttrName::DataTable), Some("0"));
+        }
+    }
+
+    #[test]
     fn synthetic_container_counts_only_required_table_wrappers() {
         assert_eq!(table_wrapper_plan(&[Tag::P; 64], 64).1, 0);
         assert_eq!(table_wrapper_plan(&[Tag::Tr; 64], 64).1, 2);
@@ -5038,6 +5130,25 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         );
         let page = crate::extract(&html, None).unwrap();
         assert_eq!(page.text(), "Short visible answer.");
+    }
+
+    #[test]
+    fn access_notices_and_unresolved_shells_have_no_content() {
+        let machine_denial = r#"<body><main><h1>Access Issue Help</h1>
+            <p>You are seeing this page because our security systems detected unusual activity on this connection. To regain access, contact support and quote the reference number below so the team can identify this request.</p>
+            <p>The security service uses the reference number to find the request log. You are not authorized to access the requested page or view the requested document. Reference Number: abc-123.</p>
+            <p>If you contact support, include the time of the request, the browser name, the network address, and this reference number. The support team can then review the blocked request.</p></main></body>"#;
+        let script_notice =
+            "<body><main><p>Please enable JS and disable any ad blocker</p></main></body>";
+        let unresolved_selector = r#"<body><main><h1>Choose a system</h1><p>Loading systems...</p>
+            <button>Previous</button><button>Next</button><p>Use the arrows to rotate.</p></main></body>"#;
+
+        for html in [machine_denial, script_notice, unresolved_selector] {
+            assert!(
+                matches!(crate::extract(html, None), Err(Error::NoContent)),
+                "{html}"
+            );
+        }
     }
 
     #[test]

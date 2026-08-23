@@ -1345,6 +1345,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     // Count links once. The byte index saturates at 255. All cleanup
     // classifiers use threshold checks, and the main classifier gets a useful
     // count instead of the old per-subtree rescans.
+    let mut responsive_view_count = 0_u8;
     {
         let snapshot = workspace.elements_with_depth();
         populate_heuristic_aggregates(
@@ -1360,6 +1361,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         );
         let mut table_depths = SmallVec::<[u32; 8]>::new();
         for &(node, depth) in snapshot {
+            responsive_view_count = responsive_view_count
+                .saturating_add(u8::from(responsive_visibility(dom, node).is_some()));
             while table_depths
                 .last()
                 .is_some_and(|&table_depth| table_depth >= depth)
@@ -1401,7 +1404,14 @@ pub(crate) fn heuristic_cleanup_in_workspace(
 
     let changed = {
         let snapshot = workspace.elements_with_depth();
-        remove_explicit_peripheral_sections(dom, root, snapshot, link_counts, store)
+        remove_explicit_peripheral_sections(
+            dom,
+            root,
+            snapshot,
+            link_counts,
+            store,
+            responsive_view_count >= 2,
+        )
     };
     if changed {
         workspace.invalidate();
@@ -3559,6 +3569,7 @@ fn remove_explicit_peripheral_sections(
     snapshot: &[(NodeId, u32)],
     link_counts: &[u8],
     store: &mut crate::dom::NodeStateStore,
+    has_responsive_pair: bool,
 ) -> bool {
     let terminal_related = snapshot
         .iter()
@@ -3566,9 +3577,12 @@ fn remove_explicit_peripheral_sections(
         .rev()
         .find_map(|(index, &(node, _))| {
             let name = node_name(dom, node);
-            (name.contains("related")
-                && contains_any(&name, &["articles", "cards", "grid", "stories"])
-                && related_heading_signal_in(dom, node) == RelatedHeadingSignal::Strong
+            let strong_heading =
+                related_heading_signal_in(dom, node) == RelatedHeadingSignal::Strong;
+            let explicit_name = name.contains("related")
+                && contains_any(&name, &["articles", "cards", "grid", "stories"]);
+            (strong_heading
+                && (explicit_name || has_repeated_link_cards(dom, node))
                 && link_counts[node.index()] >= 3
                 && near_content_end(dom, node, root, store))
             .then_some((index, node))
@@ -3639,7 +3653,13 @@ fn remove_explicit_peripheral_sections(
                 related_index > index
                     && starts_terminal_peripheral_sequence(dom, node, related_node, root, store)
             });
-        let related_cards = terminal_related.is_some_and(|(_, related_node)| related_node == node);
+        let related_cards = terminal_related.is_some_and(|(_, related_node)| {
+            related_node == node
+                || related_heading_signal_in(dom, node) == RelatedHeadingSignal::Strong
+                    && link_counts[node.index()] >= 2
+                    && has_repeated_link_cards(dom, node)
+                    && starts_terminal_peripheral_sequence(dom, node, related_node, root, store)
+        });
         let audio_controls = audio_player
             && stats.text_length < 500
             && (audio || action_link)
@@ -3676,7 +3696,141 @@ fn remove_explicit_peripheral_sections(
             detached_depth = Some(depth);
         }
     }
+    let responsive_changed =
+        has_responsive_pair && remove_responsive_duplicate_views(dom, snapshot, store);
+    changed | responsive_changed
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResponsiveVisibility {
+    Narrow,
+    Wide,
+}
+
+fn responsive_visibility(dom: &Dom, node: NodeId) -> Option<ResponsiveVisibility> {
+    let class = dom.attr(node, AttrName::Class)?;
+    let mut hidden = false;
+    let mut narrow_hidden = false;
+    let mut wide_display = false;
+    for token in class.split_ascii_whitespace() {
+        hidden |= token == "hidden";
+        narrow_hidden |= responsive_variant(token, ":hidden");
+        wide_display |= [":block", ":table", ":flex", ":grid"]
+            .iter()
+            .any(|suffix| responsive_variant(token, suffix));
+    }
+    if hidden && wide_display {
+        Some(ResponsiveVisibility::Wide)
+    } else if narrow_hidden && !hidden {
+        Some(ResponsiveVisibility::Narrow)
+    } else {
+        None
+    }
+}
+
+fn responsive_variant(token: &str, suffix: &str) -> bool {
+    token.strip_suffix(suffix).is_some_and(|prefix| {
+        matches!(prefix, "sm" | "md" | "lg" | "xl" | "2xl")
+            || prefix.starts_with("min-[")
+            || prefix.starts_with("max-[")
+    })
+}
+
+fn next_element_sibling(dom: &Dom, node: NodeId) -> Option<NodeId> {
+    let mut sibling = dom.next_sibling(node);
+    while let Some(candidate) = sibling {
+        if dom.is_element(candidate) {
+            return Some(candidate);
+        }
+        sibling = dom.next_sibling(candidate);
+    }
+    None
+}
+
+fn remove_responsive_duplicate_views(
+    dom: &mut Dom,
+    snapshot: &[(NodeId, u32)],
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let mut changed = false;
+    for &(first, _) in snapshot {
+        if dom.parent(first).is_none() {
+            continue;
+        }
+        let Some(first_visibility) = responsive_visibility(dom, first) else {
+            continue;
+        };
+        let Some(second) = next_element_sibling(dom, first) else {
+            continue;
+        };
+        let Some(second_visibility) = responsive_visibility(dom, second) else {
+            continue;
+        };
+        if first_visibility == second_visibility {
+            continue;
+        }
+        let (alternate, table_view) = if dom.any_descendant_by_tags(first, &[Tag::Table])
+            && !dom.any_descendant_by_tags(second, &[Tag::Table])
+        {
+            (second, first)
+        } else if dom.any_descendant_by_tags(second, &[Tag::Table])
+            && !dom.any_descendant_by_tags(first, &[Tag::Table])
+        {
+            (first, second)
+        } else {
+            continue;
+        };
+        if !responsive_table_matches_alternate(dom, table_view, alternate) {
+            continue;
+        }
+        detach_and_invalidate_stats(dom, alternate, store);
+        changed = true;
+    }
     changed
+}
+
+fn responsive_table_matches_alternate(dom: &Dom, table_view: NodeId, alternate: NodeId) -> bool {
+    let Some(table) = dom
+        .descendants(table_view)
+        .find(|&node| dom.tag(node) == Some(Tag::Table))
+    else {
+        return false;
+    };
+    let mut keys = SmallVec::<[String; 6]>::new();
+    let mut text = String::new();
+    for row in dom
+        .table_descendants(table)
+        .into_iter()
+        .filter(|&node| dom.tag(node) == Some(Tag::Tr))
+    {
+        if dom
+            .element_children(row)
+            .any(|cell| dom.tag(cell) == Some(Tag::Th))
+        {
+            continue;
+        }
+        let Some(cell) = dom
+            .element_children(row)
+            .find(|&cell| dom.tag(cell) == Some(Tag::Td))
+        else {
+            continue;
+        };
+        text.clear();
+        dom.append_normalized_text_limited(cell, &mut text, 80);
+        let key = text.trim();
+        if key.chars().count() >= 3 && !keys.iter().any(|known| known == key) {
+            keys.push(key.to_owned());
+        }
+        if keys.len() == 6 {
+            break;
+        }
+    }
+    if keys.len() < 4 {
+        return false;
+    }
+    text.clear();
+    dom.append_normalized_text_limited(alternate, &mut text, 8_192);
+    keys.iter().all(|key| text.contains(key))
 }
 
 fn starts_terminal_peripheral_sequence(
@@ -4050,10 +4204,16 @@ struct PeripheralMetrics<'a> {
 }
 
 fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
-    if !matches!(
+    let named_section_title =
+        contains_any(&node_name(dom, node), &["section-title", "sectiontitle"]);
+    let semantic_heading = matches!(
         dom.tag(node),
         Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-    ) {
+    ) || dom
+        .attr(node, AttrName::Role)
+        .is_some_and(|role| has_token(role, "heading"))
+        || named_section_title;
+    if !semantic_heading {
         return RelatedHeadingSignal::None;
     }
     let mut text = String::new();
@@ -5708,6 +5868,58 @@ mod tests {
         ] {
             assert!(!text.contains(clutter), "retained {clutter}: {text}");
         }
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_consecutive_terminal_recommendation_sections() {
+        let text = clean_fragment(
+            r#"<article><p>The report explains the measured result and its effect in enough detail for readers to understand the complete finding.</p>
+            <section><h2>Related</h2><div class="cards"><a href="/one"><img src="one.jpg" alt="One"><h3>First related report</h3><p>A short summary.</p></a><a href="/two"><img src="two.jpg" alt="Two"><h3>Second related report</h3><p>Another summary.</p></a></div></section>
+            <section><h2>More from the publisher</h2><div class="cards"><a href="/three"><img src="three.jpg" alt="Three"><h3>Third report</h3><p>A short summary.</p></a><a href="/four"><img src="four.jpg" alt="Four"><h3>Fourth report</h3><p>Another summary.</p></a><a href="/five"><img src="five.jpg" alt="Five"><h3>Fifth report</h3><p>A final summary.</p></a></div></section></article>"#,
+        );
+        assert!(text.contains("measured result"), "{text}");
+        for clutter in ["First related report", "Third report", "Fifth report"] {
+            assert!(!text.contains(clutter), "retained {clutter}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_prefers_a_table_over_its_responsive_card_duplicate() {
+        let text = clean_fragment(
+            r#"<main><p>The benchmark compares the validated result for each model.</p><div>
+            <div class="md:hidden"><article>1 Alpha Model 2,700</article><article>2 Beta Model 2,800</article><article>3 Gamma Model 2,900</article><article>4 Delta Model 3,000</article></div>
+            <div class="hidden overflow-x-auto md:block"><table><thead><tr><th>Model</th><th>Record</th></tr></thead><tbody><tr><td>Alpha Model</td><td>2,700</td></tr><tr><td>Beta Model</td><td>2,800</td></tr><tr><td>Gamma Model</td><td>2,900</td></tr><tr><td>Delta Model</td><td>3,000</td></tr></tbody></table></div>
+            </div></main>"#,
+        );
+        assert!(text.contains("benchmark compares"), "{text}");
+        for model in ["Alpha Model", "Beta Model", "Gamma Model", "Delta Model"] {
+            assert_eq!(text.matches(model).count(), 1, "{model}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_distinct_responsive_views() {
+        let text = clean_fragment(
+            r#"<main><p>The report contains two useful views.</p><div><div class="md:hidden"><p>A compact explanation for small screens remains useful.</p></div><div class="hidden md:block"><table><thead><tr><th>Model</th><th>Record</th></tr></thead><tbody><tr><td>Alpha</td><td>1</td></tr><tr><td>Beta</td><td>2</td></tr><tr><td>Gamma</td><td>3</td></tr><tr><td>Delta</td><td>4</td></tr></tbody></table></div></div></main>"#,
+        );
+        assert!(text.contains("compact explanation"), "{text}");
+        assert!(text.contains("Alpha"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_does_not_treat_interaction_states_as_breakpoints() {
+        let dom = Dom::parse_fragment(
+            r#"<div><div class="hover:hidden">Interactive card</div><div class="hidden hover:block">Interactive table</div></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let variants: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.attr(node, AttrName::Class).is_some())
+            .collect();
+
+        assert!(responsive_visibility(&dom, variants[0]).is_none());
+        assert!(responsive_visibility(&dom, variants[1]).is_none());
     }
 
     #[test]

@@ -1034,9 +1034,16 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
     let request_identifier = text.contains("request id")
         || text.contains("client ip")
         || text.contains("incident id")
+        || text.contains("reference number")
+        || text.contains("ref id")
         || text.contains("identifiant de requete")
         || text.contains("adresse ip")
         || text.contains("identifiant d'incident");
+    let unusual_activity_denial = (text.contains("security systems")
+        && text.contains("unusual activity"))
+        || text.contains("unusual activity on this connection");
+    let direct_unusual_denial =
+        text.contains("you are seeing this page because") && text.contains("to regain access");
     let machine_denial = automated
         && (request_identifier
             || text.contains("access denied")
@@ -1061,6 +1068,7 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
 
     machine_denial && strong_denial_heading
         || explicit_machine_denial
+        || unusual_activity_denial && direct_unusual_denial && request_identifier && denial_support
         || strong_denial_heading && denial_support
         || exact_gate_heading && action > 0
         || heading_gate && structural_gate
@@ -1072,37 +1080,49 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
 pub(crate) struct InteractiveShellEvidence {
     controls: usize,
     data_structure: bool,
+    unresolved_loading: bool,
 }
 
 /// Collects source structure used to recognize an application shell.
 /// Extraction does not execute the client code that would populate such a page.
 pub(crate) fn interactive_shell_evidence(dom: &Dom, root: NodeId) -> InteractiveShellEvidence {
     crate::instrumentation::record_source_full_scan();
-    let controls = std::iter::once(root)
-        .chain(dom.descendants(root))
-        .filter(|&node| {
-            matches!(
-                dom.tag(node),
-                Some(
-                    Tag::Button
-                        | Tag::Input
-                        | Tag::Select
-                        | Tag::Textarea
-                        | Tag::Form
-                        | Tag::Datalist
-                )
+    let mut controls = 0;
+    let mut data_structure = false;
+    let mut loading_placeholder = false;
+    let mut selection_prompt = false;
+    for node in std::iter::once(root).chain(dom.descendants(root)) {
+        controls += usize::from(matches!(
+            dom.tag(node),
+            Some(
+                Tag::Button | Tag::Input | Tag::Select | Tag::Textarea | Tag::Form | Tag::Datalist
             )
-        })
-        .count();
-    let data_structure = dom.descendants(root).any(|node| {
-        matches!(
+        ));
+        data_structure |= matches!(
             dom.tag(node),
             Some(Tag::Table | Tag::Pre | Tag::Dl | Tag::Ol | Tag::Ul)
-        )
-    });
+        );
+        loading_placeholder |= dom.text_node(node).is_some_and(|text| {
+            let text = text.trim();
+            text.len() >= 7
+                && text
+                    .get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("loading"))
+                && text.split_ascii_whitespace().count() <= 3
+                && (text.ends_with('.') || text.ends_with('…'))
+        });
+        selection_prompt |= dom.text_node(node).is_some_and(|text| {
+            let text = text.trim();
+            ["choose a ", "select a "].iter().any(|prefix| {
+                text.get(..prefix.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+            })
+        });
+    }
     InteractiveShellEvidence {
         controls,
         data_structure,
+        unresolved_loading: loading_placeholder && selection_prompt,
     }
 }
 
@@ -1112,7 +1132,15 @@ pub(crate) fn is_interactive_shell(
     metrics: ContentMetrics,
     evidence: InteractiveShellEvidence,
 ) -> bool {
-    if metrics.word_count > 20 || metrics.paragraph_count > 0 || metrics.heading_count > 0 {
+    let (word_limit, paragraph_limit) = if evidence.unresolved_loading {
+        (30, 3)
+    } else {
+        (20, 0)
+    };
+    if metrics.word_count > word_limit
+        || metrics.heading_count > 1
+        || metrics.paragraph_count > paragraph_limit
+    {
         return false;
     }
     evidence.controls >= 2 && !evidence.data_structure
@@ -1126,20 +1154,26 @@ pub(crate) fn is_application_shell_notice(
     root: NodeId,
     metrics: ContentMetrics,
 ) -> bool {
-    if metrics.word_count > 20 || metrics.paragraph_count > 1 || metrics.text_chars > 200 {
+    if metrics.word_count > 20 || metrics.paragraph_count > 4 || metrics.text_chars > 200 {
         return false;
     }
     let mut text = String::new();
     get_normalized_inner_text(dom, root, &mut text);
     text.make_ascii_lowercase();
-    [
+    let conventional_notice = [
         "enable javascript to continue",
-        "please enable javascript",
         "javascript is required to continue",
         "javascript must be enabled",
     ]
     .iter()
-    .any(|phrase| text.contains(phrase))
+    .any(|phrase| text.contains(phrase));
+    let terse_browser_notice = metrics.word_count <= 10
+        && metrics.paragraph_count <= 1
+        && (text.starts_with("please enable javascript")
+            || text.starts_with("please enable js") && text.contains("disable any ad blocker"));
+    let unresolved_carousel = text.contains("loading systems")
+        && (text.contains("choose a system") || text.contains("use the arrows"));
+    conventional_notice || terse_browser_notice || unresolved_carousel
 }
 
 /// Rejects semantic roots whose visible content is only a repeated link list.
@@ -1604,6 +1638,95 @@ mod tests {
         )
         .unwrap();
         assert!(is_access_barrier(&forbidden, forbidden.body().unwrap()));
+
+        let unusual_activity = Dom::parse_document(
+            r#"<body><main><h1>Access Issue Help</h1><p>You are seeing this page because our security systems have detected some unusual activity on this connection. To regain access, contact support and quote the reference number below.</p><p>You are not authorized to access this content. Reference Number: abc-123.</p></main></body>"#,
+        )
+        .unwrap();
+        assert!(is_access_barrier(
+            &unusual_activity,
+            unusual_activity.body().unwrap()
+        ));
+
+        let incident_article = Dom::parse_document(
+            r#"<body><article><h1>Unusual account activity</h1><p>This guide explains how security systems detect unusual activity and how a support reference number helps diagnose a request.</p><p>The article describes authorization checks, incident response, and recovery steps for administrators.</p></article></body>"#,
+        )
+        .unwrap();
+        assert!(!is_access_barrier(
+            &incident_article,
+            incident_article.body().unwrap()
+        ));
+
+        let troubleshooting_article = Dom::parse_document(
+            r#"<body><article><h1>How to regain access after unusual activity</h1><p>This guide explains why security systems report unusual activity and attach a reference number to a blocked request.</p><p>An administrator who is not authorized to access this content can use the reference number to audit the authorization policy, correct the account, and regain access.</p></article></body>"#,
+        )
+        .unwrap();
+        assert!(!is_access_barrier(
+            &troubleshooting_article,
+            troubleshooting_article.body().unwrap()
+        ));
+    }
+
+    #[test]
+    fn classifies_short_application_shells() {
+        let js_notice = Dom::parse_fragment(
+            "<main><p>Please enable JS and disable any ad blocker</p></main>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = js_notice.root();
+        assert!(is_application_shell_notice(
+            &js_notice,
+            root,
+            ContentMetrics::measure(&js_notice, root)
+        ));
+
+        let carousel = Dom::parse_fragment(
+            "<main><h1>Choose a System</h1><p>Loading systems…</p><p>Use the arrows to rotate.</p></main>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = carousel.root();
+        assert!(is_application_shell_notice(
+            &carousel,
+            root,
+            ContentMetrics::measure(&carousel, root)
+        ));
+
+        let browser_guide = Dom::parse_fragment(
+            "<article><p>Enable JS for the live example.</p><p>Disable any ad blocker only when it blocks the test server.</p></article>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = browser_guide.root();
+        assert!(!is_application_shell_notice(
+            &browser_guide,
+            root,
+            ContentMetrics::measure(&browser_guide, root)
+        ));
+
+        let loading = Dom::parse_fragment(
+            "<main><h1>Choose a System</h1><button>Previous</button><p>Loading systems…</p><button>Next</button></main>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = loading.root();
+        let metrics = ContentMetrics::measure(&loading, root);
+        assert!(is_interactive_shell(
+            metrics,
+            interactive_shell_evidence(&loading, root)
+        ));
+
+        let document = Dom::parse_fragment(
+            "<main><h1>Dataset browser</h1><p>Loading the dataset...</p><p>Use Previous and Next to inspect each documented result.</p><button>Previous</button><button>Next</button></main>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = document.root();
+        assert!(!is_interactive_shell(
+            ContentMetrics::measure(&document, root),
+            interactive_shell_evidence(&document, root)
+        ));
     }
 
     #[test]
