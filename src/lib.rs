@@ -96,7 +96,7 @@ pub use metadata::{
     Metadata, MetadataDiagnostics, MetadataFieldDiagnostics, MetadataListFieldDiagnostics,
     MetadataSource, MetadataValue,
 };
-pub use page::{ExtractedPage, HtmlBuilder, MarkdownBuilder};
+pub use page::{ExtractedContent, ExtractedPage, ExtractedPageParts, HtmlBuilder, MarkdownBuilder};
 
 #[cfg(feature = "bench-instrumentation")]
 pub use instrumentation::{

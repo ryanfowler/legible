@@ -55,10 +55,32 @@ impl<W: io::Write + ?Sized> fmt::Write for IoFmtWriter<'_, W> {
 /// Calling a render method more than once produces the same output.
 pub struct ExtractedPage {
     metadata: Metadata,
-    document: Document,
+    content: ExtractedContent,
     diagnostics: Option<ExtractionDiagnostics>,
     metadata_diagnostics: Option<MetadataDiagnostics>,
     structured_data: Option<Vec<Value>>,
+}
+
+/// Independently owned parts of an extracted page.
+pub struct ExtractedPageParts {
+    /// Discovered page metadata.
+    pub metadata: Metadata,
+    /// Extraction diagnostics when the extractor enabled them.
+    pub diagnostics: Option<ExtractionDiagnostics>,
+    /// Metadata provenance when the extractor enabled it.
+    pub metadata_diagnostics: Option<MetadataDiagnostics>,
+    /// Parsed JSON-LD items when the extractor retained them.
+    pub structured_data: Option<Vec<Value>>,
+    /// Extracted semantic content.
+    pub content: ExtractedContent,
+}
+
+/// Extracted semantic content with lazy rendering and metrics.
+///
+/// This value owns the private semantic representation. It does not borrow the
+/// page metadata or diagnostics.
+pub struct ExtractedContent {
+    document: Document,
 }
 
 impl ExtractedPage {
@@ -72,7 +94,7 @@ impl ExtractedPage {
     ) -> Self {
         Self {
             metadata,
-            document,
+            content: ExtractedContent { document },
             diagnostics,
             metadata_diagnostics,
             structured_data,
@@ -87,6 +109,22 @@ impl ExtractedPage {
     /// Consumes the page and returns its metadata.
     pub fn into_metadata(self) -> Metadata {
         self.metadata
+    }
+
+    /// Returns the extracted semantic content.
+    pub fn content(&self) -> &ExtractedContent {
+        &self.content
+    }
+
+    /// Consumes the page and returns its independently owned parts.
+    pub fn into_parts(self) -> ExtractedPageParts {
+        ExtractedPageParts {
+            metadata: self.metadata,
+            diagnostics: self.diagnostics,
+            metadata_diagnostics: self.metadata_diagnostics,
+            structured_data: self.structured_data,
+            content: self.content,
+        }
     }
 
     /// Returns extraction diagnostics when the extractor enabled them.
@@ -133,7 +171,7 @@ impl ExtractedPage {
     /// Returns a Markdown output builder.
     pub fn markdown_builder(&self) -> MarkdownBuilder<'_> {
         MarkdownBuilder {
-            page: self,
+            document: &self.content.document,
             links: true,
             images: true,
         }
@@ -143,7 +181,7 @@ impl ExtractedPage {
     pub fn text(&self) -> String {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        self.document.text()
+        self.content.document.text()
     }
 
     /// Writes the extracted content as normalized plain text.
@@ -153,7 +191,7 @@ impl ExtractedPage {
     pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        self.document.write_text(writer)
+        self.content.document.write_text(writer)
     }
 
     /// Writes the extracted content as normalized plain text to an I/O writer.
@@ -194,15 +232,202 @@ impl ExtractedPage {
 
     /// Returns an HTML output builder.
     pub fn html_builder(&self) -> HtmlBuilder<'_> {
-        HtmlBuilder { page: self }
+        HtmlBuilder {
+            document: &self.content.document,
+        }
     }
 
     /// Returns the number of words in the normalized extracted text.
     pub fn word_count(&self) -> usize {
-        self.document.word_count()
+        self.content.document.word_count()
     }
 
     /// Returns the number of characters in the normalized extracted text.
+    pub fn text_length(&self) -> usize {
+        self.content.document.text_length()
+    }
+
+    /// Returns the number of characters contributed by link content.
+    pub fn link_text_length(&self) -> usize {
+        self.content.document.link_text_length()
+    }
+
+    /// Returns the fraction of normalized text contributed by links.
+    pub fn link_density(&self) -> f64 {
+        self.content.document.link_density()
+    }
+
+    /// Returns the number of semantic paragraphs.
+    pub fn paragraph_count(&self) -> usize {
+        self.content.document.paragraph_count()
+    }
+
+    /// Returns the number of semantic headings.
+    pub fn heading_count(&self) -> usize {
+        self.content.document.heading_count()
+    }
+
+    /// Returns the number of semantic list items.
+    pub fn list_item_count(&self) -> usize {
+        self.content.document.list_item_count()
+    }
+
+    /// Returns the number of semantic code blocks.
+    pub fn code_block_count(&self) -> usize {
+        self.content.document.code_block_count()
+    }
+
+    /// Returns the number of semantic data tables.
+    pub fn table_count(&self) -> usize {
+        self.content.document.table_count()
+    }
+
+    /// Returns the number of semantic figures.
+    pub fn figure_count(&self) -> usize {
+        self.content.document.figure_count()
+    }
+
+    /// Returns the number of semantic images.
+    pub fn image_count(&self) -> usize {
+        self.content.document.image_count()
+    }
+
+    /// Returns the number of footnote references.
+    pub fn footnote_reference_count(&self) -> usize {
+        self.content.document.footnote_reference_count()
+    }
+
+    /// Returns the number of footnote definitions.
+    pub fn footnote_definition_count(&self) -> usize {
+        self.content.document.footnote_definition_count()
+    }
+
+    /// Returns the number of math expressions.
+    pub fn math_count(&self) -> usize {
+        self.content.document.math_count()
+    }
+
+    /// Returns the number of blocks with useful structural evidence.
+    pub fn structured_block_count(&self) -> usize {
+        self.content.document.structured_block_count()
+    }
+
+    /// Returns whether normalized text contains an alphanumeric character.
+    pub fn has_alphanumeric_text(&self) -> bool {
+        self.content.document.stats().has_alphanumeric_text
+    }
+
+    /// Returns the number of alphabetic characters in normalized text.
+    pub fn alphabetic_chars(&self) -> usize {
+        self.content.document.stats().alphabetic_chars
+    }
+
+    /// Returns the number of numeric characters in normalized text.
+    pub fn digit_chars(&self) -> usize {
+        self.content.document.stats().digit_chars
+    }
+
+    /// Returns whether the result contains contextual semantic structure.
+    pub fn has_contextual_structure(&self) -> bool {
+        self.content.document.has_contextual_structure()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_node_count(&self) -> usize {
+        self.content.document.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_retained_bytes(&self) -> usize {
+        self.content.document.retained_bytes_estimate()
+    }
+
+    /// Checks private semantic representation invariants for fuzz testing.
+    #[doc(hidden)]
+    #[cfg(feature = "fuzzing")]
+    pub fn validate_document(&self) -> bool {
+        self.content.document.validate().is_ok()
+    }
+}
+
+impl ExtractedContent {
+    /// Renders the content as CommonMark.
+    pub fn markdown(&self) -> String {
+        self.markdown_builder().render()
+    }
+
+    /// Writes the content as CommonMark.
+    pub fn write_markdown<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        self.markdown_builder().write(writer)
+    }
+
+    /// Writes the content as CommonMark to an I/O writer.
+    pub fn write_markdown_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.markdown_builder().write(&mut adapter);
+        adapter.finish(result)
+    }
+
+    /// Returns a Markdown output builder.
+    pub fn markdown_builder(&self) -> MarkdownBuilder<'_> {
+        MarkdownBuilder {
+            document: &self.document,
+            links: true,
+            images: true,
+        }
+    }
+
+    /// Renders the content as normalized plain text.
+    pub fn text(&self) -> String {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        self.document.text()
+    }
+
+    /// Writes the content as normalized plain text.
+    pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        let _phase =
+            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
+        self.document.write_text(writer)
+    }
+
+    /// Writes the content as normalized plain text to an I/O writer.
+    pub fn write_text_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.write_text(&mut adapter);
+        adapter.finish(result)
+    }
+
+    /// Renders the content as canonical semantic HTML.
+    pub fn html(&self) -> String {
+        self.html_builder().render()
+    }
+
+    /// Writes the content as canonical semantic HTML.
+    pub fn write_html<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        self.html_builder().write(writer)
+    }
+
+    /// Writes the content as canonical semantic HTML to an I/O writer.
+    pub fn write_html_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let mut adapter = IoFmtWriter::new(writer);
+        let result = self.html_builder().write(&mut adapter);
+        adapter.finish(result)
+    }
+
+    /// Returns an HTML output builder.
+    pub fn html_builder(&self) -> HtmlBuilder<'_> {
+        HtmlBuilder {
+            document: &self.document,
+        }
+    }
+
+    /// Returns the number of words in the normalized content text.
+    pub fn word_count(&self) -> usize {
+        self.document.word_count()
+    }
+
+    /// Returns the number of characters in the normalized content text.
     pub fn text_length(&self) -> usize {
         self.document.text_length()
     }
@@ -287,19 +512,9 @@ impl ExtractedPage {
         self.document.stats().digit_chars
     }
 
-    /// Returns whether the result contains contextual semantic structure.
+    /// Returns whether the content contains contextual semantic structure.
     pub fn has_contextual_structure(&self) -> bool {
         self.document.has_contextual_structure()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn semantic_node_count(&self) -> usize {
-        self.document.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn semantic_retained_bytes(&self) -> usize {
-        self.document.retained_bytes_estimate()
     }
 
     /// Checks private semantic representation invariants for fuzz testing.
@@ -310,12 +525,12 @@ impl ExtractedPage {
     }
 }
 
-/// Configures HTML rendering for an [`ExtractedPage`].
+/// Configures HTML rendering for extracted content.
 ///
 /// Canonical HTML is safe by construction. The builder remains public for API
 /// compatibility and for symmetry with [`MarkdownBuilder`].
 pub struct HtmlBuilder<'a> {
-    page: &'a ExtractedPage,
+    document: &'a Document,
 }
 
 impl HtmlBuilder<'_> {
@@ -323,17 +538,14 @@ impl HtmlBuilder<'_> {
     pub fn render(self) -> String {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        crate::render::html::render_html(
-            &self.page.document,
-            self.page.document.output_capacity_hint(),
-        )
+        crate::render::html::render_html(self.document, self.document.output_capacity_hint())
     }
 
     /// Writes canonical semantic HTML to `writer`.
     pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
-        crate::render::html::write_html(&self.page.document, writer)
+        crate::render::html::write_html(self.document, writer)
     }
 
     /// Writes canonical semantic HTML to an I/O writer.
@@ -347,12 +559,12 @@ impl HtmlBuilder<'_> {
     }
 }
 
-/// Configures Markdown rendering for an [`ExtractedPage`].
+/// Configures Markdown rendering for extracted content.
 ///
 /// Links and images are included by default. The builder consumes itself when
 /// it renders the result.
 pub struct MarkdownBuilder<'a> {
-    page: &'a ExtractedPage,
+    document: &'a Document,
     links: bool,
     images: bool,
 }
@@ -375,8 +587,8 @@ impl MarkdownBuilder<'_> {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::markdown::render_markdown(
-            &self.page.document,
-            self.page.document.output_capacity_hint(),
+            self.document,
+            self.document.output_capacity_hint(),
             crate::render::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
@@ -389,7 +601,7 @@ impl MarkdownBuilder<'_> {
         let _phase =
             crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::markdown::write_markdown(
-            &self.page.document,
+            self.document,
             writer,
             crate::render::markdown::MarkdownConfig {
                 links: self.links,
@@ -429,6 +641,25 @@ mod tests {
         assert_eq!(page.text_length(), page.text().chars().count());
         assert_eq!(page.word_count(), 2);
         assert_eq!(page.image_count(), 1);
+    }
+
+    #[test]
+    fn into_parts_separates_owned_results() {
+        let page = extract(
+            "<html><head><title>Page title</title></head><body><main><h1>Page title</h1><p>This page has enough meaningful content for extraction. It explains the subject with clear details and useful context for every reader.</p></main></body></html>",
+            None,
+        )
+        .unwrap();
+
+        let parts: crate::ExtractedPageParts = page.into_parts();
+
+        assert!(parts.diagnostics.is_none());
+        assert!(parts.metadata_diagnostics.is_none());
+        assert!(parts.structured_data.is_none());
+        let _metadata = parts.metadata;
+        let content: crate::ExtractedContent = parts.content;
+        assert!(content.markdown().contains("enough meaningful content"));
+        assert!(content.word_count() > 10);
     }
 
     #[test]
@@ -588,27 +819,27 @@ mod tests {
     fn first_markdown_render_does_not_initialize_stats() {
         let page = extract("<main><p>Markdown output.</p></main>", None).unwrap();
 
-        assert!(!page.document.stats_initialized());
+        assert!(!page.content.document.stats_initialized());
         assert_eq!(page.markdown(), "Markdown output.\n");
-        assert!(!page.document.stats_initialized());
+        assert!(!page.content.document.stats_initialized());
     }
 
     #[test]
     fn first_html_render_does_not_initialize_stats() {
         let page = extract("<main><p>HTML output.</p></main>", None).unwrap();
 
-        assert!(!page.document.stats_initialized());
+        assert!(!page.content.document.stats_initialized());
         assert_eq!(page.html(), "<div><p>HTML output.</p></div>");
-        assert!(!page.document.stats_initialized());
+        assert!(!page.content.document.stats_initialized());
     }
 
     #[test]
     fn first_text_render_initializes_stats_during_the_text_walk() {
         let page = extract("<main><p>Text output.</p></main>", None).unwrap();
 
-        assert!(!page.document.stats_initialized());
+        assert!(!page.content.document.stats_initialized());
         assert_eq!(page.text(), "Text output.");
-        assert!(page.document.stats_initialized());
+        assert!(page.content.document.stats_initialized());
         assert_eq!(page.text_length(), 12);
         assert_eq!(page.word_count(), 2);
     }
@@ -626,9 +857,9 @@ mod tests {
     fn semantic_metrics_are_cached_on_the_document() {
         let page = extract("<main><p>Markdown only output.</p></main>", None).unwrap();
 
-        let before = page.document.stats();
+        let before = page.content.document.stats();
         assert!(page.markdown().contains("Markdown only output."));
-        assert_eq!(page.document.stats(), before);
+        assert_eq!(page.content.document.stats(), before);
         assert_eq!(page.word_count(), 3);
     }
 
@@ -680,9 +911,9 @@ mod tests {
         let page = extract(&html, None).unwrap();
 
         assert!(
-            page.document.len() < 10,
+            page.content.document.len() < 10,
             "retained {} semantic nodes",
-            page.document.len()
+            page.content.document.len()
         );
         assert!(page.text().contains("relevant page content"));
     }
