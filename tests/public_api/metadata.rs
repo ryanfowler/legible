@@ -55,6 +55,26 @@ fn resolves_rich_metadata_through_the_public_api() {
 }
 
 #[test]
+fn moves_metadata_out_of_the_extracted_page() {
+    let html = format!(
+        r#"<html><head><title>Owned metadata</title>
+        <meta name="author" content="Ada Lovelace">
+        </head><body><main><h1>Owned metadata</h1><p>{CONTENT}</p></main></body></html>"#
+    );
+
+    let page = extract(&html, None).unwrap();
+    let markdown = page.markdown();
+    let metadata = page.into_metadata();
+
+    let title: Option<String> = metadata.title;
+    let authors: Vec<String> = metadata.authors;
+
+    assert!(markdown.contains(CONTENT));
+    assert_eq!(title.as_deref(), Some("Owned metadata"));
+    assert_eq!(authors, ["Ada Lovelace"]);
+}
+
+#[test]
 fn keeps_source_url_fallbacks_separate_from_the_base_element() {
     let with_relative_canonical = format!(
         r#"<html><head><base href="https://cdn.example.net/assets/"><link rel="canonical" href="page"></head><body><main><p>{CONTENT}</p></main></body></html>"#

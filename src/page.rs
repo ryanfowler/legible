@@ -84,6 +84,11 @@ impl ExtractedPage {
         &self.metadata
     }
 
+    /// Consumes the page and returns its metadata.
+    pub fn into_metadata(self) -> Metadata {
+        self.metadata
+    }
+
     /// Returns extraction diagnostics when the extractor enabled them.
     pub fn diagnostics(&self) -> Option<&ExtractionDiagnostics> {
         self.diagnostics.as_ref()
