@@ -168,6 +168,11 @@ println!("{} images", page.image_count());
 # Ok::<(), legible::Error>(())
 ```
 
+Use `page.into_parts()` when each result needs a separate owner. The returned
+`ExtractedPageParts` contains the metadata, diagnostics, structured data, and
+`ExtractedContent`. The content value provides the same render and metric
+methods as `ExtractedPage`.
+
 The representation can change without a public API change.
 
 `page.markdown()` includes links and images. `page.html()` returns canonical
