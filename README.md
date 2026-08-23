@@ -304,28 +304,35 @@ that use unsupported URI schemes. Sanitize HTML that you create from other sourc
 
 Legible does not fetch URLs.
 
-## Regression fixtures
+## Tests and evaluations
 
-`tests/general/` contains exact Markdown fixtures. `tests/web/` contains capability
-fixtures with semantic assertions in `expected.json`. Add focused positive and
-negative cases for each extraction heuristic.
+`tests/fixtures/snapshots/` contains exact Markdown and error fixtures.
+`tests/fixtures/capabilities/` contains focused semantic assertions. Run both
+repository fixture types with:
+
+```bash
+cargo test --test fixture_tests
+```
+
+The Mozilla corpus has a separate tolerant compatibility runner. See
+`tests/README.md` for all test suites and guidance for new cases.
 
 Install and run the optional quality comparison tool with:
 
 ```bash
-npm --prefix scripts/compare-extractors ci
+npm --prefix tools/extractor-eval ci
 cargo fetch
-node scripts/compare-extractors/index.mjs --all
+node tools/extractor-eval/index.mjs --all
 ```
 
 The tool compares Legible with pinned third-party extractors against independent
-quality fixtures. See `benchmarks/quality/README.md` for the fixture format and
-`scripts/compare-extractors/README.md` for runner options.
+quality fixtures. See `evals/quality/README.md` for the fixture format and
+`tools/extractor-eval/README.md` for runner options.
 
 Run the compatibility performance suite with:
 
 ```bash
-cargo bench --bench extraction
+cargo bench --bench pipeline
 ```
 
 See `benches/README.md` for workloads, baseline commands, and performance guardrails.

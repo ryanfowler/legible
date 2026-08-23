@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ryanfowler/legible/benchmarks/quality/schema.json",
+  "$id": "https://github.com/ryanfowler/legible/evals/quality/schema.json",
   "title": "Legible extraction quality fixture",
   "type": "object",
   "additionalProperties": false,

@@ -7,7 +7,7 @@ import { performance } from "node:perf_hooks";
 
 const directory = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const repository = resolve(directory, "../..");
-const defaultRoot = join(repository, "tests/readability-js/test/test-pages");
+const defaultRoot = join(repository, "tests/fixtures/compatibility/readability/test/test-pages");
 const args = process.argv.slice(2);
 const worker = args[0] === "--worker";
 const mode = worker ? args[1] : null;

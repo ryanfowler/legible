@@ -7,8 +7,8 @@ The source revision is `499e09f3bf2e53164321e991254b9ff124cccb59`.
 
 - Machine: `DO-Premium-Intel`, 4 vCPUs, x86_64 Linux 7.0.0-27-generic
 - Rust: `rustc 1.97.1 (8bab26f4f 2026-07-14)`
-- Initial benchmark command: `cargo bench --bench extraction -- --save-baseline before-task`
-- Current benchmark command: `cargo bench --bench extraction -- lower_retained_fragment --noplot`
+- Initial benchmark command: `cargo bench --bench pipeline -- --save-baseline before-task`
+- Current benchmark command: `cargo bench --bench pipeline -- lower_retained_fragment --noplot`
 - Criterion baseline: `target/criterion/**/before-task`
 
 Absolute times are specific to this machine. Use the Criterion baseline for
@@ -108,7 +108,7 @@ with the retained semantic representation.
 The complete current harness was saved with:
 
 ```text
-cargo bench --bench extraction -- --save-baseline task-0
+cargo bench --bench pipeline -- --save-baseline task-0
 ```
 
 The Criterion artifact is `target/criterion/**/task-0`. The following medians

@@ -23,5 +23,5 @@ The top-level directories identify the likely owner of a failure:
 Run all fixtures with:
 
 ```bash
-cargo test --test defuddle_tests
+cargo test --test fixture_tests compatibility-defuddle
 ```

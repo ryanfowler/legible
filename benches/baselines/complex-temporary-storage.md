@@ -4,8 +4,8 @@ This note records the storage review for the private semantic compiler.
 Run the measurements with:
 
 ```bash
-cargo bench --bench extraction -- complex_pages --baseline before-task
-cargo bench --bench extraction -- lower_retained_fragment --baseline before-task
+cargo bench --bench pipeline -- complex_pages --baseline before-task
+cargo bench --bench pipeline -- lower_retained_fragment --baseline before-task
 ```
 
 The lowering command prints `complex-storage/...` lines. These lines report

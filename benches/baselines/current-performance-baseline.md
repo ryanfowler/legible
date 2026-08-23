@@ -6,7 +6,7 @@ This file records the baseline used for the extraction measurement work.
 - OS: Darwin 25.6.0, arm64
 - Rust: `rustc 1.97.1 (8bab26f4f 2026-07-14)`
 - Implementation-start revision: `87f604d2fe0b094bfdc3fec6c24fda27a13586a3`
-- Benchmark command: `cargo bench --bench extraction -- --save-baseline m01-current`
+- Benchmark command: `cargo bench --bench pipeline -- --save-baseline m01-current`
 - Criterion baseline: `target/criterion/**/m01-current`
 
 Criterion medians are in nanoseconds. The values are point estimates from the

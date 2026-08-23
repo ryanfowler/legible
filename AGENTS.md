@@ -12,11 +12,11 @@ cargo fmt              # Format code - run after making changes
 cargo clippy           # Run linter - address all warnings after making changes
 cargo doc --open       # Generate and view documentation
 cargo bench --bench smoke      # Run the quick performance smoke benchmarks
-cargo bench --bench extraction # Run the full compatibility performance suite
-cargo bench --bench real_world # Run the Mozilla Readability real-world fixtures
+cargo bench --bench pipeline # Run the full compatibility performance suite
+cargo bench --bench corpus # Run the Mozilla Readability real-world fixtures
 cargo +nightly fuzz run <target> # Run a fuzz target (requires nightly + cargo-fuzz)
 prettier -w .          # Format other files
-node scripts/compare-extractors/performance.mjs  # Compare extractors
+node tools/extractor-eval/performance.mjs  # Compare extractors
 ```
 
 ## Design Philosophy
@@ -148,9 +148,9 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 
 ## Testing
 
-`tests/general/` is the authoritative Markdown fixture suite. Each fixture has `source.html` and `expected.md`. It can also have `metadata.json`. Use `expected.error` for a fixture that must fail with a named public error variant. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. `tests/defuddle/` contains exact Markdown compatibility fixtures. Each fixture has `source.html` and `expected.md`. A fixture can also have `metadata.json`. The top-level fixture directory identifies the likely owning pipeline layer. `tests/web/` contains capability fixtures with semantic assertions in `expected.json`. Add positive and negative capability cases without making every output an exact snapshot. Mozilla's Readability.js suite in `tests/readability-js/` remains an article regression suite.
+`tests/fixture_tests.rs` is the shared repository fixture harness. Exact snapshots are under `tests/fixtures/snapshots/`. A snapshot has `source.html` and either `expected.md` or `expected.error`. It can also have `metadata.json` and `url.txt`. Set `LEGIBLE_UPDATE_FIXTURES=1` when you intentionally update snapshots. The `general`, `specialized`, and `compatibility-defuddle` directories record provenance, not different test contracts. Capability fixtures are under `tests/fixtures/capabilities/`. They use `expected.json` for focused semantic assertions. Add positive and negative capability cases without making every output an exact snapshot. The Mozilla Readability corpus under `tests/fixtures/compatibility/readability/` has a separate tolerant compatibility harness. See `tests/README.md` for suite selection.
 
-`benchmarks/quality/` contains independent extraction-quality fixtures. Install dependencies with `npm --prefix scripts/compare-extractors ci` and `cargo fetch`. Run all quality fixtures with `node scripts/compare-extractors/index.mjs --all`, or use `--fixture <id>` for one case. The runner invokes Cargo offline. Third-party extractor output is comparison data, not ground truth.
+`evals/quality/` contains independent extraction-quality evaluations. Install dependencies with `npm --prefix tools/extractor-eval ci` and `cargo fetch`. Run all quality fixtures with `node tools/extractor-eval/index.mjs --all`, or use `--fixture <id>` for one case. The runner invokes Cargo offline. Third-party extractor output is comparison data, not ground truth.
 
 Default extraction must return `Error::NoContent` for empty, head-only, and image-only documents.
 
@@ -197,14 +197,15 @@ feature is disabled by default, and default builds keep the measurement calls
 empty.
 
 Do not run the full benchmark suite for every change. Run
-`cargo bench --bench extraction` for performance-sensitive work, baseline
+`cargo bench --bench pipeline` for performance-sensitive work, baseline
 updates, or when a change affects a workload that the smoke set does not cover.
-Use the full suite's focused Criterion filter when possible. The extraction suite
+Use the full suite's focused Criterion filter when possible. The pipeline suite
 separates extraction, retained-fragment lowering, end-to-end Markdown, and lazy
-Markdown/HTML/text rendering. See `benches/README.md` for workload coverage,
-baseline commands, and regression guardrails. The baseline at the private-IR
-migration starting revision is recorded in `benches/private-ir-baseline.md`.
+Markdown/HTML/text rendering. Run `cargo bench --bench corpus` for fixed
+real-world fixtures. See `benches/README.md` for workload coverage, baseline
+commands, and regression guardrails. Historical measurements are under
+`benches/baselines/`.
 
-`benches/extraction.rs` covers generated compatibility workloads, large real fixtures, lazy renderers, and deeply nested parser input.
+`benches/pipeline.rs` covers generated compatibility workloads, large fixtures, lazy renderers, and deeply nested parser input.
 
 Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text, cached candidate statistics, and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. The parser must keep its default zero-budget path free of depth bookkeeping and repeated interior-mutability checks. The semantic compiler skips multiline and media separator passes when their source evidence is absent. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.

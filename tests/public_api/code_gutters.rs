@@ -24,9 +24,9 @@ fn fenced_blocks(markdown: &str) -> Vec<String> {
 #[test]
 fn strips_line_number_gutters_from_imported_highlighter_fixtures() {
     let fixtures = [
-        "tests/defuddle/code-blocks/chroma-linenums",
-        "tests/defuddle/code-blocks/pygments-lineno",
-        "tests/defuddle/code-blocks/rouge-linenums",
+        "tests/fixtures/snapshots/compatibility-defuddle/code-blocks/chroma-linenums",
+        "tests/fixtures/snapshots/compatibility-defuddle/code-blocks/pygments-lineno",
+        "tests/fixtures/snapshots/compatibility-defuddle/code-blocks/rouge-linenums",
     ];
 
     for directory in fixtures {

@@ -1,10 +1,10 @@
 # Benchmark fixtures
 
 Most HTML snapshots come from Mozilla Readability's test-page corpus. This
-repository also uses those snapshots in `tests/readability-js/test/test-pages/`.
+repository also uses those snapshots in `tests/fixtures/compatibility/readability/test/test-pages/`.
 
 The `readability-js/` directory contains the source snapshots used by the
-real-world benchmark target:
+fixed corpus benchmark target:
 
 - `medium-2`
 - `ars-1`

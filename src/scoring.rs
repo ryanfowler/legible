@@ -3555,7 +3555,7 @@ mod tests {
     #[test]
     fn projected_fragment_preserves_mintlify_source_order() {
         let dom = Dom::parse_document(include_str!(
-            "../tests/defuddle/code-blocks/mintlify/source.html"
+            "../tests/fixtures/snapshots/compatibility-defuddle/code-blocks/mintlify/source.html"
         ))
         .unwrap();
         let source = SourceAnalysis::build(&dom);

@@ -4,7 +4,7 @@
 
 - Machine: Linux `dev`, x86_64, 4 vCPUs
 - Rust: `rustc 1.97.1`
-- Command: `cargo bench --bench real_world -- --noplot --sample-size 10`
+- Command: `cargo bench --bench corpus -- --noplot --sample-size 10`
 - Baseline: the same command before this change
 - Values: Criterion median, milliseconds
 
@@ -51,7 +51,7 @@ bytes by 4.1%.
 
 - Machine: Linux `dev`, x86_64, 16 logical CPUs
 - Rust: `rustc 1.97.1`
-- Command: `cargo bench --bench real_world -- --noplot --sample-size 10`
+- Command: `cargo bench --bench corpus -- --noplot --sample-size 10`
 - Baseline: `aff80a3`, measured before the follow-up changes
 - Values: Criterion median, milliseconds
 
@@ -82,7 +82,7 @@ within measurement noise. The retained semantic representation did not grow.
 
 - Machine: Linux `dev`, x86_64
 - Rust: `rustc 1.97.1`
-- Command: `cargo bench --bench real_world -- --noplot --sample-size 10`
+- Command: `cargo bench --bench corpus -- --noplot --sample-size 10`
 - Profile: `perf record -F 999 -g` on the Guardian fixture
 
 The profile showed that image-role matching rescanned the same context once for
@@ -111,7 +111,7 @@ live bytes unchanged on this run.
 
 - Machine: Linux `dev`, x86_64
 - Rust: `rustc 1.97.1`
-- Command: `cargo bench --bench real_world -- --noplot --sample-size 10 markdown`
+- Command: `cargo bench --bench corpus -- --noplot --sample-size 10 markdown`
 - Baseline: the fresh measurement before the combined optimization series
 - Values: Criterion median, milliseconds
 
@@ -151,7 +151,7 @@ used 20,819,120 live bytes.
 
 - Machine: Linux `dev`, x86_64
 - Rust: `rustc 1.97.1`
-- Command: `cargo bench --bench real_world -- 'mozilla_readability_markdown' --noplot`
+- Command: `cargo bench --bench corpus -- 'mozilla_readability_markdown' --noplot`
 - Measurement: 30 Criterion samples per fixture; the repository benchmark was restored to 10 samples after measurement
 - Values: Criterion median, milliseconds
 
@@ -185,7 +185,7 @@ than the 100,573,277-byte and 425,731-event reference report.
 
 - Machine: Linux `dev`, x86_64
 - Rust: `rustc 1.97.1`
-- Command: `cargo bench --bench real_world -- 'mozilla_readability_markdown' --noplot`
+- Command: `cargo bench --bench corpus -- 'mozilla_readability_markdown' --noplot`
 - Measurement: 30 Criterion samples per fixture; the repository benchmark was restored to 10 samples after measurement
 - Values: Criterion median, milliseconds
 
@@ -220,7 +220,7 @@ and **18,695,952** for the large ordinary-inline workload.
 
 - Machine: macOS arm64 (Apple M2 Pro, 12 logical CPUs), AC power
 - Rust: `rustc 1.98.0`
-- Command: `cargo bench --bench real_world -- 'mozilla_readability_markdown' --noplot --baseline ac-start`
+- Command: `cargo bench --bench corpus -- 'mozilla_readability_markdown' --noplot --baseline ac-start`
 - Baseline: the parent revision on the same machine, saved as `ac-start`
 - Values: Criterion median, milliseconds. Sample size is the repository default of 10.
 

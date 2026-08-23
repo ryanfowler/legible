@@ -4518,7 +4518,9 @@ mod tests {
         crate::Extractor::builder()
             .build()
             .extract(
-                include_str!("../tests/specialized/hacker-news-listing/source.html"),
+                include_str!(
+                    "../tests/fixtures/snapshots/specialized/hacker-news-listing/source.html"
+                ),
                 Some("https://news.ycombinator.com/"),
             )
             .unwrap();
@@ -5427,7 +5429,9 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
             .diagnostics(true)
             .build()
             .extract(
-                include_str!("../tests/specialized/hacker-news-listing/source.html"),
+                include_str!(
+                    "../tests/fixtures/snapshots/specialized/hacker-news-listing/source.html"
+                ),
                 Some("https://news.ycombinator.com/"),
             )
             .unwrap();

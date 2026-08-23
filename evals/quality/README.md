@@ -1,13 +1,13 @@
-# Extraction quality benchmark
+# Extraction quality evaluation
 
-This benchmark measures extraction quality against independent fixture expectations. It does not treat Defuddle output as ground truth. The runner scores Legible and Defuddle against the same requirements.
+This evaluation measures extraction quality against independent fixture expectations. It does not treat Defuddle output as ground truth. The runner scores Legible and Defuddle against the same requirements.
 
 ## Fixture layout
 
 Each fixture uses this layout:
 
 ```text
-benchmarks/quality/<fixture-id>/
+evals/quality/<fixture-id>/
   source.html
   manifest.json
   reference.md       # optional
@@ -39,13 +39,13 @@ The report keeps each dimension separate:
 
 The report also records words, links, link density, headings, images, code blocks, tables, lists, footnotes, math, and known junk phrases. Legible results also record candidate-to-result semantic coverage when the selected candidate has strong structural evidence. The semantic coverage record names each category and gives its source count, result count, and bounded ratio. This value is diagnostic data. It does not affect extraction acceptance.
 
-Performance remains separate from quality. Use `cargo bench --bench extraction` for extraction and lazy-renderer performance.
+Performance remains separate from quality. Use `cargo bench --bench pipeline` for extraction and lazy-renderer performance.
 
 ## Corpus categories
 
 The schema supports news, blogs, essays, technical and API documentation, code-heavy pages, reference and academic pages, data tables, link indexes, legacy HTML, recipes, discussions, social threads, product support, modern application markup, inline peripheral UI, responsive duplicates, math, and media embeds.
 
-The committed corpus includes these curated batches:
+The committed corpus contains 134 fixtures. It includes these curated batches:
 
 - 27 article and essay cases cover news, blogs, long-form essays, multi-author reports, images, sidebars, newsletters, related stories, promotions, footnotes, and an access-barrier shell.
 - 31 documentation and technical cases cover language and API references, code-heavy guides, callouts, source-present tabs, navigation trees, indexes, version selectors, and tables.
@@ -67,33 +67,33 @@ All cases in these batches use original, minimized content written for this repo
 7. Add `metadata.json` only for clear normalized values.
 8. Explain the failure and its value in `notes`.
 9. Run the focused fixture before changing extraction code.
-10. Run the full benchmark and repository checks after the change.
+10. Run the full evaluation and repository checks after the change.
 
 Do not copy a third-party page when its license does not allow redistribution. Use a minimized reproduction or a local ignored corpus instead. Never commit private content or credentials.
 
-## Run the benchmark
+## Run the evaluation
 
 Install the pinned local tools once:
 
 ```bash
-npm --prefix scripts/compare-extractors ci
+npm --prefix tools/extractor-eval ci
 cargo fetch
 ```
 
 Then run one fixture or all fixtures:
 
 ```bash
-node scripts/compare-extractors/index.mjs --fixture technical-doc
-node scripts/compare-extractors/index.mjs --all
-node scripts/compare-extractors/index.mjs --all --json target/quality-report.json
-node scripts/compare-extractors/index.mjs --all --summary benchmarks/quality/BASELINE.md
+node tools/extractor-eval/index.mjs --fixture technical-doc
+node tools/extractor-eval/index.mjs --all
+node tools/extractor-eval/index.mjs --all --json target/quality-report.json
+node tools/extractor-eval/index.mjs --all --summary evals/quality/BASELINE.md
 ```
 
 Use `--summary` to write a compact category-level baseline. The summary includes
 the fixture count, extractor revisions, quality dimensions, and reliability. It
 does not include large per-fixture artifacts.
 
-The runner invokes Cargo with `--offline`. After the Node and Rust dependencies are present, a benchmark run uses no network access.
+The runner invokes Cargo with `--offline`. After the Node and Rust dependencies are present, an evaluation run uses no network access.
 
 Use the JSON report to inspect low semantic coverage:
 
@@ -101,6 +101,6 @@ Use the JSON report to inspect low semantic coverage:
 jq -r '.results[] | select(.legible.semantic_coverage != null and .legible.semantic_coverage.score < 1) | [.fixture, .legible.semantic_coverage] | @json' target/quality-report.json
 ```
 
-The initial calibration used all 125 fixtures. It excluded high-confidence decorative and active content before it measured the selected candidate. It also required at least three source headings and three source list items. These limits removed false warnings from avatar, logo, newsletter, and duplicate-title fixtures. Named code, table, footnote, and math fixtures kept full coverage. Examples include `code-heavy-line-numbers`, `article-results-table`, and `essay-footnotes`. Do not make this score an acceptance signal until a later corpus review finds a stable threshold and a real extraction improvement.
+The initial calibration used the first 125 fixtures. It excluded high-confidence decorative and active content before it measured the selected candidate. It also required at least three source headings and three source list items. These limits removed false warnings from avatar, logo, newsletter, and duplicate-title fixtures. Named code, table, footnote, and math fixtures kept full coverage. Examples include `code-heavy-line-numbers`, `article-results-table`, and `essay-footnotes`. Do not make this score an acceptance signal until a later corpus review finds a stable threshold and a real extraction improvement.
 
 The runner exits with a nonzero status when either extractor has a reliability failure. This rule also applies to an intentional comparator difference. For example, Legible correctly returns `NoContent` for the access-barrier shell, but the pinned Defuddle comparator returns the gate prompt. Inspect `report.json` to distinguish a Legible failure from a recorded comparator failure.

@@ -37,7 +37,7 @@ const JUNK_PHRASES = [
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const manifestSchema = JSON.parse(
   readFileSync(
-    resolve(scriptDirectory, "../../benchmarks/quality/schema.json"),
+    resolve(scriptDirectory, "../../evals/quality/schema.json"),
     "utf8",
   ),
 );
