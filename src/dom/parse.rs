@@ -11,13 +11,16 @@ use std::cell::{Cell, RefCell};
 use tendril::{StrTendril, TendrilSink};
 
 #[derive(Debug, Clone)]
-struct OwnedElemName(QualName);
+struct OwnedElemName {
+    ns: html5ever::Namespace,
+    local: html5ever::LocalName,
+}
 impl ElemName for OwnedElemName {
     fn ns(&self) -> &html5ever::Namespace {
-        &self.0.ns
+        &self.ns
     }
     fn local_name(&self) -> &html5ever::LocalName {
-        &self.0.local
+        &self.local
     }
 }
 
@@ -338,13 +341,17 @@ impl TreeSink for DomSink {
         self.dom.borrow().root()
     }
     fn elem_name<'a>(&'a self, target: &'a NodeId) -> OwnedElemName {
-        let name = self
-            .dom
-            .borrow()
-            .qual_name(*target)
-            .cloned()
-            .unwrap_or_else(|| QualName::new(None, html5ever::ns!(html), "div".into()));
-        OwnedElemName(name)
+        let dom = self.dom.borrow();
+        if let Some(name) = dom.qual_name(*target) {
+            return OwnedElemName {
+                ns: name.ns.clone(),
+                local: name.local.clone(),
+            };
+        }
+        OwnedElemName {
+            ns: html5ever::ns!(html),
+            local: "div".into(),
+        }
     }
     #[inline]
     fn create_element(

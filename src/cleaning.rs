@@ -32,6 +32,7 @@ pub(crate) struct FragmentWorkspace {
     snapshot_root: Option<NodeId>,
     preorder: Vec<NodeId>,
     elements_with_depth: Vec<(NodeId, u32)>,
+    snapshot_stack: Vec<(NodeId, u32)>,
     scratch_u32: Vec<u32>,
     scratch_bytes: Vec<u8>,
     scratch_bits: Vec<bool>,
@@ -56,6 +57,7 @@ impl FragmentWorkspace {
         self.invalidate();
         self.preorder.clear();
         self.elements_with_depth.clear();
+        self.snapshot_stack.clear();
         self.scratch_u32.clear();
         self.scratch_bytes.clear();
         self.scratch_bits.clear();
@@ -85,18 +87,18 @@ impl FragmentWorkspace {
             return;
         };
 
-        let mut pending = Vec::<(NodeId, u32)>::new();
-        pending.push((first_child, 1));
-        while let Some((node, depth)) = pending.pop() {
+        self.snapshot_stack.clear();
+        self.snapshot_stack.push((first_child, 1));
+        while let Some((node, depth)) = self.snapshot_stack.pop() {
             self.preorder.push(node);
             if dom.is_element(node) {
                 self.elements_with_depth.push((node, depth));
             }
             if let Some(sibling) = dom.next_sibling(node) {
-                pending.push((sibling, depth));
+                self.snapshot_stack.push((sibling, depth));
             }
             if let Some(child) = dom.first_child(node) {
-                pending.push((child, depth.saturating_add(1)));
+                self.snapshot_stack.push((child, depth.saturating_add(1)));
             }
         }
         self.snapshot_epoch = Some(self.mutation_epoch);
@@ -2136,9 +2138,26 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
     if page_kind != PageKind::Discussion {
         let aggregates = chrome_aggregates(dom, snapshot);
         let mut remove = vec![false; dom.len()];
+        let mut text = String::new();
         for &(node, _) in snapshot {
             if node == root
                 || dom.parent(node).is_none()
+                || !matches!(
+                    dom.tag(node),
+                    Some(
+                        Tag::Article
+                            | Tag::Aside
+                            | Tag::Div
+                            | Tag::Footer
+                            | Tag::Header
+                            | Tag::Main
+                            | Tag::Nav
+                            | Tag::Ol
+                            | Tag::P
+                            | Tag::Section
+                            | Tag::Ul
+                    )
+                )
                 || is_protected_content(dom, node, evidence)
             {
                 continue;
@@ -2147,7 +2166,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
             if stats.text_length == 0 || stats.text_length >= 900 {
                 continue;
             }
-            let mut text = String::new();
+            text.clear();
             append_bounded_text(dom, node, 96, &mut text);
             text.make_ascii_lowercase();
             if is_terminal_peripheral_region(
@@ -2663,7 +2682,6 @@ fn is_terminal_peripheral_region(
         name,
         text,
     } = signals;
-    let link_density = get_link_density_cached(dom, node, stats.text_length, store);
     let named = contains_any(
         name,
         &[
@@ -2696,6 +2714,7 @@ fn is_terminal_peripheral_region(
     if !(named || labelled || footer) {
         return false;
     }
+    let link_density = get_link_density_cached(dom, node, stats.text_length, store);
     if is_inside_article_container(dom, node) && has_meaningful_region_content(dom, node) {
         return false;
     }
