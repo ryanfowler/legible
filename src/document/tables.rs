@@ -14,6 +14,7 @@ struct CellFacts {
     has_content: bool,
     meaningful: bool,
     block_rich: bool,
+    has_nested_table: bool,
     text_length: usize,
     phrasing: bool,
     rank: Option<u32>,
@@ -362,6 +363,7 @@ fn analyze_cell(
         let tag = dom.tag(node);
         facts.has_content |= tag == Some(Tag::Table);
         facts.meaningful |= matches!(tag, Some(Tag::Img | Tag::Picture | Tag::Audio | Tag::Video));
+        facts.has_nested_table |= tag == Some(Tag::Table);
         facts.block_rich |= matches!(
             tag,
             Some(
@@ -710,6 +712,8 @@ fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
     let mut cell_count = 0_usize;
     let mut max_columns = 0_u32;
     let mut block_rich_cells = 0_usize;
+    let mut nested_table_cells = 0_usize;
+    let mut linked_cells = 0_usize;
     let mut long_prose_cells = 0_usize;
     for &row in rows {
         let cells = analysis.cells(row);
@@ -724,13 +728,20 @@ fn is_layout_table(dom: &Dom, table: NodeId, analysis: &TableAnalysis) -> bool {
         for &cell in cells {
             let facts = analysis.cell(cell).unwrap_or_default();
             block_rich_cells += usize::from(facts.block_rich);
+            nested_table_cells += usize::from(facts.has_nested_table);
+            linked_cells += usize::from(facts.has_content_link);
             long_prose_cells += usize::from(facts.text_length >= 160);
         }
     }
 
     let layout_shape =
         rows.len() == 1 || max_columns <= 1 || block_rich_cells > 0 || long_prose_cells > 0;
-    cell_count == 1 || has_layout_name(dom, table) && layout_shape
+    let block_rich_single_row = rows.len() == 1
+        && max_columns <= 4
+        && !super::code::has_table_highlighter_evidence(dom, table)
+        && (nested_table_cells > 0
+            || block_rich_cells == cell_count && linked_cells == cell_count && cell_count >= 2);
+    cell_count == 1 || has_layout_name(dom, table) && layout_shape || block_rich_single_row
 }
 
 fn has_layout_name(dom: &Dom, table: NodeId) -> bool {
@@ -826,4 +837,60 @@ fn separator_replacement(
 
 fn is_control_separator_character(character: char) -> bool {
     matches!(character, '|' | '·' | '-' | '–' | '—' | '•')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TableAnalysis, TableKind};
+    use crate::dom::{Dom, Tag};
+
+    #[test]
+    fn classifies_a_block_rich_single_row_table_as_layout() {
+        let dom = Dom::parse_fragment(
+            "<table><tr><td><h2>First card</h2><p><a href='/first'>A substantial linked explanation for readers.</a></p></td><td><h2>Second card</h2><p><a href='/second'>Another substantial linked explanation.</a></p></td></tr></table>",
+            Tag::Div,
+        )
+        .unwrap();
+        let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+        let analysis = TableAnalysis::analyze_candidates(&dom, &[table]);
+        assert_eq!(analysis.kind(table), TableKind::Layout);
+    }
+
+    #[test]
+    fn keeps_an_explicit_single_row_data_table() {
+        let dom = Dom::parse_fragment(
+            "<table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody><tr><td>Result</td><td>A long explanatory value that remains part of this data record.</td></tr></tbody></table>",
+            Tag::Div,
+        )
+        .unwrap();
+        let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+        let analysis = TableAnalysis::analyze_candidates(&dom, &[table]);
+        assert_eq!(analysis.kind(table), TableKind::Data);
+    }
+
+    #[test]
+    fn keeps_a_block_rich_highlighter_table_structured() {
+        let dom = Dom::parse_fragment(
+            r#"<table><tr><td class="line-number-gutter"><div>1</div><div>2</div></td><td class="vendor-syntax-highlighter-code"><div>{</div><div>"value": 1</div><div>}</div></td></tr></table>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+        let analysis = TableAnalysis::analyze_candidates(&dom, &[table]);
+
+        assert_eq!(analysis.kind(table), TableKind::Data);
+    }
+
+    #[test]
+    fn keeps_an_unmarked_single_record_table_as_data() {
+        let dom = Dom::parse_fragment(
+            "<table><tr><td><p>Current state</p><p>Additional note</p></td><td><p>The service is active and the record remains available.</p></td></tr></table>",
+            Tag::Div,
+        )
+        .unwrap();
+        let table = dom.first_descendant_by_tag(dom.root(), Tag::Table).unwrap();
+        let analysis = TableAnalysis::analyze_candidates(&dom, &[table]);
+
+        assert_eq!(analysis.kind(table), TableKind::Data);
+    }
 }

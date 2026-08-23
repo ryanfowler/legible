@@ -348,6 +348,32 @@ fn has_line_number_table_class(dom: &Dom, table: NodeId) -> bool {
         })
 }
 
+/// Returns true when a table contains strong syntax-highlighter markers.
+pub(super) fn has_table_highlighter_evidence(dom: &Dom, table: NodeId) -> bool {
+    has_line_number_table_class(dom, table)
+        || dom.table_descendants(table).into_iter().any(|node| {
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|attribute| dom.attr(node, attribute))
+                .flat_map(str::split_whitespace)
+                .any(|token| {
+                    let token = token.to_ascii_lowercase();
+                    token.contains("syntax-highlighter")
+                        || token_is_one_of(
+                            &token,
+                            &[
+                                "codehilite",
+                                "highlighttable",
+                                "linenos",
+                                "rouge-gutter",
+                                "gutter",
+                                "line-number-gutter",
+                            ],
+                        )
+                })
+        })
+}
+
 fn is_gutter_pre(dom: &Dom, pre: NodeId) -> bool {
     has_line_number_marker(dom, pre)
         || dom.ancestors(pre).any(|ancestor| {
