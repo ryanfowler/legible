@@ -967,10 +967,16 @@ fn lower_complex_document(
         let parent_is_block_group = scope
             .parent
             .is_some_and(|parent| builder.is_block_group(parent));
+        let parent_is_heading = scope
+            .parent
+            .is_some_and(|parent| builder.is_heading(parent));
+        let parent_allows_transparent_block = parent_is_block_group || parent_is_heading;
         let semantic = if let Some(level) = facts.heading_level(node) {
             if !facts.heading_has_meaningful_content(node) {
                 None
-            } else if facts.has_block_descendant(node) {
+            } else if facts.has_block_descendant(node)
+                && !has_transparent_heading_block_wrapper(dom, node)
+            {
                 Some(SemanticKind::BlockGroup)
             } else {
                 Some(SemanticKind::Heading { level })
@@ -993,6 +999,7 @@ fn lower_complex_document(
         } else {
             match tag {
                 Tag::Caption if scope.table.is_some() => Some(SemanticKind::TableCaption),
+                Tag::P if parent_is_heading => None,
                 Tag::P if facts.has_block_descendant(node) => Some(SemanticKind::BlockGroup),
                 Tag::P | Tag::Address | Tag::Caption => Some(SemanticKind::Paragraph),
                 Tag::Blockquote => dom
@@ -1055,7 +1062,7 @@ fn lower_complex_document(
                 }
                 _ if is_block_tag(tag)
                     && !(matches!(tag, Tag::Div | Tag::Section)
-                        && parent_is_block_group
+                        && parent_allows_transparent_block
                         && has_single_content_child(dom, node)) =>
                 {
                     Some(SemanticKind::BlockGroup)
@@ -1586,6 +1593,43 @@ pub(super) fn has_single_content_child(dom: &Dom, node: NodeId) -> bool {
     count == 1
 }
 
+fn has_transparent_heading_block_wrapper(dom: &Dom, heading: NodeId) -> bool {
+    let mut wrapper = None;
+    for descendant in dom.descendants(heading) {
+        let Some(tag) = dom.tag(descendant) else {
+            continue;
+        };
+        if !is_block_tag(tag) {
+            continue;
+        }
+        if dom
+            .ancestors(descendant)
+            .take_while(|&node| node != heading)
+            .any(|ancestor| {
+                dom.tag(ancestor) == Some(Tag::A)
+                    && dom.attr(ancestor, AttrName::Href).is_some_and(|href| {
+                        href.strip_prefix('#').is_some_and(|fragment| {
+                            !fragment.is_empty()
+                                && dom
+                                    .attr(heading, AttrName::Id)
+                                    .is_some_and(|id| id == fragment)
+                        })
+                    })
+            })
+        {
+            continue;
+        }
+        if !matches!(tag, Tag::Div | Tag::P)
+            || dom.parent(descendant) != Some(heading)
+            || wrapper.is_some()
+        {
+            return false;
+        }
+        wrapper = Some(descendant);
+    }
+    wrapper.is_some()
+}
+
 pub(super) fn is_block_tag(tag: Tag) -> bool {
     matches!(
         tag,
@@ -2093,6 +2137,48 @@ mod tests {
                 "    Text(\"Read the guide\")\n",
             )
         );
+    }
+
+    #[test]
+    fn preserves_a_heading_with_one_transparent_block_wrapper() {
+        let document = compile(
+            r##"<h2 id="wrapped"><div>Wrapped heading</div><a class="header-anchor" href="#wrapped"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54"></path></svg></a></h2><p>Body.</p>"##,
+            None,
+        );
+        assert_eq!(
+            document.debug_tape(),
+            concat!(
+                "Heading(level=2)\n",
+                "  Text(\"Wrapped heading\")\n",
+                "Paragraph\n",
+                "  Text(\"Body.\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn preserves_a_heading_with_a_paragraph_wrapper() {
+        let document = compile(
+            r##"<h2 id="wrapped"><p>Wrapped <a href="/detail">heading</a></p><a href="#wrapped">#</a></h2><p>Body.</p>"##,
+            None,
+        );
+        assert_eq!(
+            document.debug_tape(),
+            concat!(
+                "Heading(level=2)\n",
+                "  Text(\"Wrapped \")\n",
+                "  Link(destination=\"/detail\", title=None)\n",
+                "    Text(\"heading\")\n",
+                "Paragraph\n",
+                "  Text(\"Body.\")\n",
+            )
+        );
+    }
+
+    #[test]
+    fn downgrades_a_heading_with_multiple_block_children() {
+        let document = compile("<h2><div>One</div><div>Two</div></h2>", None);
+        assert!(!document.debug_tape().contains("Heading(level=2)"));
     }
 
     #[test]

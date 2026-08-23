@@ -19,6 +19,19 @@ fn article(target_bytes: usize) -> String {
     html
 }
 
+fn discussion(reply_count: usize) -> String {
+    let mut html = String::from(
+        r#"<!doctype html><html><body><main><div class="h-entry"><span role="heading" aria-level="1"><a class="u-url" href="/topic">Benchmark discussion</a></span><a class="user_is_author">Author</a></div><div class="story_text"><p>The primary post explains the benchmark discussion workload.</p></div><ol class="comments">"#,
+    );
+    for index in 0..reply_count {
+        html.push_str(&format!(
+            r#"<li><div class="comment" data-shortid="reply-{index}"><div class="byline"><a>User {index}</a><time>Today</time></div><div class="comment_text"><p>Reply {index} contains representative discussion text for extraction.</p></div></div></li>"#,
+        ));
+    }
+    html.push_str("</ol></main></body></html>");
+    html
+}
+
 fn bench_smoke(c: &mut Criterion) {
     let mut group = c.benchmark_group("smoke");
     // These settings keep the development check short. Use the full extraction
@@ -54,6 +67,16 @@ fn bench_smoke(c: &mut Criterion) {
     group.bench_function("large-render-markdown", |b| {
         b.iter(|| black_box(page.markdown()))
     });
+
+    let html = discussion(250);
+    group.throughput(Throughput::Bytes(html.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::from_parameter("discussion-250-extract"),
+        &html,
+        |b, html| {
+            b.iter(|| black_box(extract(black_box(html), Some("https://example.com")).unwrap()))
+        },
+    );
 
     group.finish();
 }

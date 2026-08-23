@@ -72,6 +72,7 @@ The extraction pipeline flows through these stages:
 | `prepared.rs` | Unified immutable source analysis with preorder intervals, anchors, visibility metrics, lexical facts, source signals, and base candidates |
 | `specialized/` | Internal registry and extractors for non-article page structures |
 | `specialized/discussion.rs` | Shared canonical HTML builder for primary posts, reply metadata, and nested discussions |
+| `specialized/generic_discussion.rs` | Conservative structural adapter for static discussion pages with stable entry and reply markers |
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
 | `render/markdown.rs` / `render/html.rs` / `document/stats.rs` | Stack-safe Markdown and HTML renderers plus normalized text rendering from the semantic document |

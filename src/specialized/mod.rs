@@ -3,6 +3,7 @@
 mod ai_conversation;
 mod discourse;
 mod discussion;
+mod generic_discussion;
 mod github;
 mod hacker_news;
 mod reddit;
@@ -32,11 +33,12 @@ trait SpecializedExtractor: Sync {
     fn extract(&self, context: &DocumentContext<'_>) -> Option<SpecializedResult>;
 }
 
-static EXTRACTORS: [&dyn SpecializedExtractor; 5] = [
+static EXTRACTORS: [&dyn SpecializedExtractor; 6] = [
     &hacker_news::HackerNewsExtractor,
     &github::GitHubExtractor,
     &discourse::DiscourseExtractor,
     &reddit::RedditExtractor,
+    &generic_discussion::GenericDiscussionExtractor,
     &ai_conversation::AiConversationExtractor,
 ];
 
@@ -99,6 +101,8 @@ fn has_specialized_node_marker(dom: &Dom, node: NodeId) -> bool {
                     "link",
                     "linklisting",
                     "nestedlisting",
+                    "comment_text",
+                    "story_text",
                     "title",
                 ],
             );

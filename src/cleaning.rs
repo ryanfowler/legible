@@ -1566,6 +1566,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             at_end,
             short,
         };
+        if at_start && has_compact_content_identity(dom, node, links) {
+            continue;
+        }
         let related = is_related_content(dom, node, &metrics);
 
         let social_name = contains_any(name, &["share", "social", "sharedaddy"]);
@@ -2028,6 +2031,9 @@ pub(crate) fn remove_global_chrome_in_workspace(
             at_end,
             adjacent_content,
         };
+        if leading_frame_position && has_compact_content_identity(dom, node, links) {
+            continue;
+        }
         let leading_metadata = is_leading_metadata(dom, node, &metrics, dominant_content_sibling);
         let leading_frame = is_leading_page_frame(
             dom,
@@ -2174,6 +2180,21 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
             }
             let stats = get_or_compute_stats(dom, node, store);
             if stats.text_length == 0 || stats.text_length >= 900 {
+                continue;
+            }
+            if near_content_start(dom, node, root, store)
+                && has_compact_content_identity(
+                    dom,
+                    node,
+                    usize::from(aggregates[node.index()].link_count),
+                )
+            {
+                continue;
+            }
+            if is_explicit_terminal_promotion(dom, node, aggregates[node.index()].link_count)
+                && near_terminal_peripheral_end(dom, node, root, store)
+            {
+                remove[node.index()] = true;
                 continue;
             }
             text.clear();
@@ -2711,6 +2732,7 @@ fn is_terminal_peripheral_region(
     let labelled = starts_with_any(
         text,
         &[
+            "here's a preview of a related post",
             "next post",
             "previous post",
             "read more",
@@ -2738,6 +2760,7 @@ fn is_terminal_peripheral_region(
     let link_cluster = links > 0 && link_density >= 0.15;
     if links == 0
         && stats.sentence_end_count > 0
+        && !labelled
         && !name.contains("newsletter")
         && !name.contains("comments")
     {
@@ -3319,6 +3342,31 @@ fn is_leading_page_frame(
         && (metrics.link_density >= 0.2 || metrics.links >= 5)
 }
 
+fn has_compact_content_identity(dom: &Dom, node: NodeId, links: usize) -> bool {
+    if links > 5 {
+        return false;
+    }
+    let mut has_heading = false;
+    let mut has_described_image = false;
+    let mut has_summary = false;
+    for descendant in std::iter::once(node).chain(dom.descendants(node)).take(128) {
+        has_heading |= matches!(dom.tag(descendant), Some(Tag::H1 | Tag::H2));
+        has_described_image |= dom.tag(descendant) == Some(Tag::Img)
+            && dom
+                .attr_by_local_name(descendant, "alt")
+                .is_some_and(|alt| !alt.trim().is_empty());
+        if dom.tag(descendant) == Some(Tag::P) {
+            let mut text = String::new();
+            dom.append_normalized_text_limited(descendant, &mut text, 281);
+            has_summary |= (10..=280).contains(&text.trim().chars().count());
+        }
+        if has_summary && (has_heading || has_described_image) {
+            return true;
+        }
+    }
+    has_summary && (has_heading || has_described_image)
+}
+
 fn is_content_relative_navigation(dom: &Dom, node: NodeId) -> bool {
     let name = node_name(dom, node);
     name.split(|character: char| !character.is_ascii_alphanumeric())
@@ -3525,6 +3573,8 @@ fn is_footer_identity_text(text: &str) -> bool {
     let ui_label = equals_any_ascii_case_insensitive(
         text,
         &[
+            "about",
+            "about me",
             "home",
             "privacy",
             "privacy policy",
@@ -4061,9 +4111,18 @@ fn remove_direct_peripheral_siblings(
     let mut seen = vec![false; dom.len()];
     seen[root.index()] = true;
     let mut parents = vec![root];
+    for child in dom.element_children(root) {
+        if matches!(dom.tag(child), Some(Tag::Article | Tag::Main))
+            && !std::mem::replace(&mut seen[child.index()], true)
+        {
+            parents.push(child);
+        }
+    }
     for &(node, _) in snapshot {
         if (related_heading_signal(dom, node) == RelatedHeadingSignal::Strong
-            || dom.tag(node) == Some(Tag::Form))
+            || dom.tag(node) == Some(Tag::Form)
+            || is_terminal_sequence_candidate(dom, node)
+                && terminal_sequence_score(dom, node, link_counts[node.index()]) > 0)
             && let Some(parent) = dom.parent(node)
             && !std::mem::replace(&mut seen[parent.index()], true)
         {
@@ -4084,6 +4143,27 @@ fn remove_direct_peripheral_siblings(
         changed |= remove_direct_peripheral_children(dom, parent, link_counts, store, evidence);
     }
     changed
+}
+
+fn is_terminal_sequence_candidate(dom: &Dom, node: NodeId) -> bool {
+    if matches!(dom.tag(node), Some(Tag::Footer | Tag::Form | Tag::Nav)) {
+        return true;
+    }
+    matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+        && contains_any(
+            &node_name(dom, node),
+            &[
+                "banner",
+                "keep-reading",
+                "keep_reading",
+                "newsletter",
+                "post-footer",
+                "promotion",
+                "recommendation",
+                "related",
+                "subscribe",
+            ],
+        )
 }
 
 fn remove_direct_peripheral_children(
@@ -4163,6 +4243,8 @@ fn remove_direct_peripheral_children(
         }
     }
 
+    mark_terminal_peripheral_sequence(dom, &children, link_counts, store, evidence, &mut remove);
+
     let mut changed = false;
     for (&node, remove) in children.iter().zip(remove) {
         if remove && dom.parent(node).is_some() {
@@ -4180,6 +4262,151 @@ fn remove_direct_peripheral_children(
         }
     }
     changed
+}
+
+fn mark_terminal_peripheral_sequence(
+    dom: &Dom,
+    children: &[NodeId],
+    link_counts: &[u8],
+    store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
+    remove: &mut [bool],
+) {
+    let mut start = children.len();
+    let mut signal_nodes = 0_u8;
+    let mut saw_signal = false;
+    let mut explicit_promotion = false;
+    for (index, &child) in children.iter().enumerate().rev() {
+        let child_promotion =
+            is_explicit_terminal_promotion(dom, child, link_counts[child.index()]);
+        let meaningful_region = is_content_relative_navigation(dom, child)
+            || is_inside_article_container(dom, child)
+                && has_meaningful_region_content(dom, child)
+                && !child_promotion;
+        if is_protected_content(dom, child, evidence) || meaningful_region {
+            break;
+        }
+        let child_score = terminal_sequence_score(dom, child, link_counts[child.index()]);
+        if child_score > 0 {
+            signal_nodes = signal_nodes.saturating_add(1);
+            explicit_promotion |= child_promotion;
+            saw_signal = true;
+            start = index;
+        } else if terminal_sequence_bridge(dom, child, store) {
+            if saw_signal {
+                start = index;
+            }
+        } else {
+            break;
+        }
+    }
+    if signal_nodes < 2 && !explicit_promotion || start == 0 || start == children.len() {
+        return;
+    }
+    let preceding_text = children[..start]
+        .iter()
+        .map(|&node| get_or_compute_stats(dom, node, store).text_length as usize)
+        .sum::<usize>();
+    if preceding_text < 300 {
+        return;
+    }
+    remove[start..].fill(true);
+}
+
+fn is_explicit_terminal_promotion(dom: &Dom, node: NodeId, links: u8) -> bool {
+    if links < 2
+        || !std::iter::once(node)
+            .chain(dom.descendants(node))
+            .any(|descendant| {
+                contains_any(
+                    &node_name(dom, descendant),
+                    &["banner", "promo", "promotion"],
+                )
+            })
+        || !dom
+            .descendants(node)
+            .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Img | Tag::Table)))
+    {
+        return false;
+    }
+    let mut text = String::new();
+    dom.append_normalized_text_limited(node, &mut text, 160);
+    text.make_ascii_lowercase();
+    starts_with_any(
+        text.trim(),
+        &["our products", "sponsored", "try my ", "try our "],
+    )
+}
+
+fn terminal_sequence_score(dom: &Dom, node: NodeId, links: u8) -> u8 {
+    let mut score = u8::from(matches!(
+        dom.tag(node),
+        Some(Tag::Footer | Tag::Nav | Tag::Form)
+    ));
+    let name = node_name(dom, node);
+    if contains_any(
+        &name,
+        &[
+            "article-footer",
+            "banner",
+            "keep-reading",
+            "keep_reading",
+            "newsletter",
+            "post-footer",
+            "promotion",
+            "recommendation",
+            "related",
+            "subscribe",
+        ],
+    ) {
+        score = score.saturating_add(1);
+    }
+    let mut text = String::new();
+    dom.append_normalized_text_limited(node, &mut text, 240);
+    text.make_ascii_lowercase();
+    let text = text.trim();
+    if starts_with_any(
+        text,
+        &[
+            "continue reading",
+            "get new posts",
+            "here's a preview of a related post",
+            "more from ",
+            "other posts",
+            "preview of a related post",
+            "read next",
+            "related posts",
+            "related stories",
+            "subscribe",
+            "try my software",
+            "you may also like",
+        ],
+    ) || text.contains("posts you might find similar")
+    {
+        score = score.saturating_add(1);
+    }
+    if links > 0
+        && (dom.tag(node) == Some(Tag::Blockquote) && text.contains("continue reading")
+            || (name.contains("banner") || text.starts_with("try my software"))
+                && dom
+                    .descendants(node)
+                    .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Img | Tag::Table))))
+    {
+        score = score.saturating_add(1);
+    }
+    score
+}
+
+fn terminal_sequence_bridge(
+    dom: &Dom,
+    node: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    if dom.tag(node) == Some(Tag::Hr) {
+        return true;
+    }
+    let stats = get_or_compute_stats(dom, node, store);
+    stats.text_length == 0
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -5841,9 +6068,70 @@ mod tests {
     }
 
     #[test]
+    fn global_chrome_keeps_a_compact_readme_identity_block() {
+        let text = clean_fragment(
+            r#"<article><div align="center"><a href="/logo"><img src="logo.png" alt="Project logo"></a><p>A compact tool for useful work.</p><p><a href="/start">Quick Start</a> · <a href="/guide">Guide</a> · <a href="/chat">Chat</a></p></div><hr><p>The project documentation explains the implementation and gives enough useful detail for readers.</p><p>A second paragraph describes how to install, configure, and validate the complete tool.</p></article>"#,
+        );
+
+        assert!(text.contains("compact tool"), "{text}");
+        assert!(text.contains("Quick Start"), "{text}");
+    }
+
+    #[test]
+    fn terminal_peripheral_sequence_removes_weak_sibling_blocks() {
+        let text = clean_fragment(
+            r#"<article><h1>Measured extraction results</h1><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><p>The next section records the observed behavior for all tested documents. It keeps the source facts, the measured values, and the limits of the evaluation so the conclusion remains useful.</p><hr><p>Subscribe to get new posts by email.</p><p>Preview of a related post</p><div class="related-card"><a href="/next">Continue reading another report</a></div><footer><a href="/about">About</a></footer></article>"#,
+        );
+
+        assert!(text.contains("observed behavior"), "{text}");
+        assert!(!text.contains("Subscribe"), "{text}");
+        assert!(!text.contains("Continue reading"), "{text}");
+        assert!(!text.contains("About"), "{text}");
+    }
+
+    #[test]
+    fn terminal_peripheral_sequence_keeps_a_single_related_reference() {
+        let text = clean_fragment(
+            r#"<article><h1>Measured extraction results</h1><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><p>The next section records the observed behavior for all tested documents. It keeps the source facts, the measured values, and the limits of the evaluation so the conclusion remains useful.</p><p>Related work: <a href="/prior">the prior analysis</a> supplies the baseline for this result.</p></article>"#,
+        );
+
+        assert!(text.contains("Related work"), "{text}");
+        assert!(text.contains("prior analysis"), "{text}");
+    }
+
+    #[test]
+    fn terminal_peripheral_sequence_keeps_linked_concluding_prose() {
+        let text = clean_fragment(
+            r#"<article><h1>Measured extraction results</h1><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><p>The next section records the observed behavior for all tested documents. It keeps the source facts, the measured values, and the limits of the evaluation so the conclusion remains useful.</p><p>The complete source remains in the <a href="/archive">public archive</a>.</p><footer class="post-footer"><a href="/about">About</a></footer></article>"#,
+        );
+
+        assert!(text.contains("complete source remains"), "{text}");
+        assert!(text.contains("public archive"), "{text}");
+    }
+
+    #[test]
+    fn terminal_peripheral_sequence_keeps_content_navigation_and_footer() {
+        let text = clean_fragment(
+            r##"<article><h1>Measured extraction results</h1><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><p>The next section records the observed behavior for all tested documents. It keeps the source facts, the measured values, and the limits of the evaluation so the conclusion remains useful.</p><nav class="hlist"><a href="#method">Method</a><a href="#results">Results</a><a href="#limits">Limits</a></nav><footer class="related post-footer"><p>The source material remains available under the <a href="/license">project license</a>, with notes that explain the collection method and its limits.</p></footer></article>"##,
+        );
+
+        assert!(text.contains("Method"), "{text}");
+        assert!(text.contains("source material remains available"), "{text}");
+    }
+
+    #[test]
+    fn repeated_cleanup_keeps_an_inline_terminal_about_link() {
+        let text = clean_fragment(
+            r#"<article><h1>Profile links in prose</h1><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><p>The final paragraph tells readers where they can learn <a href="/author">About me</a>.</p></article>"#,
+        );
+
+        assert!(text.contains("About me"), "{text}");
+    }
+
+    #[test]
     fn global_chrome_keeps_meaningful_terminal_article_prose() {
         let text = clean_fragment(
-            r#"<article><p>The report explains how the implementation processes each record and validates the final result.</p><p>The method repeats the operation with stable inputs so another operator can verify the result.</p><footer><p>The source material remains available under the <a href="/license">project license</a>. Read the <a href="/sources">source notes</a> for the collection method and the limits that apply to this published result.</p></footer></article>"#,
+            r#"<article><p>The report explains how the implementation processes each record and validates the final result.</p><p>The method repeats the operation with stable inputs so another operator can verify the result.</p><footer class="related post-footer"><p>The source material remains available under the <a href="/license">project license</a>. Read the <a href="/sources">source notes</a> for the collection method and the limits that apply to this published result.</p></footer></article>"#,
         );
 
         assert!(text.contains("source material remains available"), "{text}");
