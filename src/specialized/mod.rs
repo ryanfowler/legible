@@ -7,7 +7,7 @@ mod github;
 mod hacker_news;
 mod reddit;
 
-use crate::dom::{Dom, NodeId};
+use crate::dom::{AttrName, Dom, NodeId};
 use crate::page_kind::PageKind;
 use crate::tokens::{any_token_contains, has_any_token, has_token};
 use url::Url;
@@ -66,56 +66,61 @@ fn has_specialized_signature(context: &DocumentContext<'_>) -> bool {
     if context.source_uri.is_some_and(is_ai_share_url) {
         return true;
     }
-    context.dom.descendants(context.dom.root()).any(|node| {
-        let id = context.dom.attr(node, crate::dom::AttrName::Id);
-        if id == Some("siteTable") || id == Some("hnmain") {
-            return true;
+    context
+        .dom
+        .descendants(context.dom.root())
+        .any(|node| has_specialized_node_marker(context.dom, node))
+}
+
+/// Checks all specialized attributes in one pass. Most source elements have
+/// zero or one attribute. Repeated named lookups made ordinary pages scan the
+/// same short attribute list up to seven times per element.
+fn has_specialized_node_marker(dom: &Dom, node: NodeId) -> bool {
+    dom.attrs(node).iter().any(|attribute| {
+        let value = attribute.value.as_ref();
+        if attribute.is_named(AttrName::Id) {
+            return matches!(value, "siteTable" | "hnmain");
         }
-        context
-            .dom
-            .attr(node, crate::dom::AttrName::Class)
-            .is_some_and(|classes| {
-                has_any_token(
-                    classes,
-                    &[
-                        "athing",
-                        "comtr",
-                        "js-issue-title",
-                        "js-comment-body",
-                        "comment-body",
-                        "markdown-body",
-                        "review-comment-contents",
-                        "topic-post",
-                        "cooked",
-                        "discourse-application",
-                        "thing",
-                        "link",
-                        "linklisting",
-                        "nestedlisting",
-                        "title",
-                    ],
-                )
-            })
-            || context
-                .dom
-                .attr_by_local_name(node, "data-turbo-body")
-                .is_some()
-            || context
-                .dom
-                .attr_by_local_name(node, "data-testid")
-                .is_some()
-            || context
-                .dom
-                .attr_by_local_name(node, "data-post-id")
-                .is_some()
-            || context
-                .dom
-                .attr_by_local_name(node, "data-discourse-base-url")
-                .is_some()
-            || context
-                .dom
-                .attr_by_local_name(node, "data-fullname")
-                .is_some()
+        if attribute.is_named(AttrName::Class) {
+            return has_any_token(
+                value,
+                &[
+                    "athing",
+                    "comtr",
+                    "js-issue-title",
+                    "js-comment-body",
+                    "comment-body",
+                    "markdown-body",
+                    "review-comment-contents",
+                    "topic-post",
+                    "cooked",
+                    "discourse-application",
+                    "thing",
+                    "link",
+                    "linklisting",
+                    "nestedlisting",
+                    "title",
+                ],
+            );
+        }
+        let name = attribute.name.local.as_ref();
+        matches!(
+            name,
+            "data-turbo-body"
+                | "data-testid"
+                | "data-post-id"
+                | "data-discourse-base-url"
+                | "data-fullname"
+        ) || name.bytes().any(|byte| byte.is_ascii_uppercase())
+            && [
+                "data-turbo-body",
+                "data-testid",
+                "data-post-id",
+                "data-discourse-base-url",
+                "data-fullname",
+            ]
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
     })
 }
 

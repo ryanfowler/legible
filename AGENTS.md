@@ -78,7 +78,7 @@ The extraction pipeline flows through these stages:
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `scan.rs` | Word-at-a-time ASCII whitespace scanners with scalar small-input fast paths |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
-| `dom/parse.rs` | Parser-only poisoned TreeSink and in-work resource budget enforcement |
+| `dom/parse.rs` | Parser-only poisoned TreeSink, compact owned element-name callbacks, and in-work resource budget enforcement |
 | `dom/traversal.rs` | Iterative DOM-preorder snapshots and cached document anchors for immutable source phases |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
 
@@ -208,4 +208,4 @@ commands, and regression guardrails. Historical measurements are under
 
 `benches/pipeline.rs` covers generated compatibility workloads, large fixtures, lazy renderers, and deeply nested parser input.
 
-Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text, cached candidate statistics, and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. The parser must keep its default zero-budget path free of depth bookkeeping and repeated interior-mutability checks. The semantic compiler skips multiline and media separator passes when their source evidence is absent. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.
+Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text, cached candidate statistics, and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. The parser must keep its default zero-budget path free of depth bookkeeping and repeated interior-mutability checks. Parser element-name callbacks must clone only the namespace and local name. Do not clone the unused prefix. The semantic compiler skips multiline and media separator passes when their source evidence is absent. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.
