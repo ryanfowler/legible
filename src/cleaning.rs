@@ -15,7 +15,6 @@ use crate::tokens::{has_any_token, has_token};
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -1177,6 +1176,7 @@ pub(crate) fn hard_cleanup_in_workspace(
             // Keep only the semantic state. The retained control is disabled,
             // so extracted HTML cannot change the source checklist.
             dom.remove_attr(node, AttrName::Other);
+            dom.remove_lookup_only_attrs(node);
             dom.remove_attrs(
                 node,
                 &[
@@ -5422,7 +5422,38 @@ fn near_content_start(
     }
 }
 
-fn node_name<'a>(dom: &'a Dom, node: NodeId) -> Cow<'a, str> {
+enum NodeName<'a> {
+    Borrowed(&'a str),
+    Owned(SmallVec<[u8; 64]>),
+}
+
+impl NodeName<'_> {
+    #[inline]
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => std::str::from_utf8(value).expect("node names remain UTF-8"),
+        }
+    }
+}
+
+impl AsRef<str> for NodeName<'_> {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::ops::Deref for NodeName<'_> {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+fn node_name<'a>(dom: &'a Dom, node: NodeId) -> NodeName<'a> {
     let tag_name = (dom.tag(node) == Some(Tag::Other))
         .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
         .flatten();
@@ -5435,25 +5466,27 @@ fn node_name<'a>(dom: &'a Dom, node: NodeId) -> Cow<'a, str> {
         single = Some(part);
     }
     if count == 0 {
-        return Cow::Borrowed("");
+        return NodeName::Borrowed("");
     }
     if count == 1
         && let Some(part) = single
         && part.is_ascii()
         && part.bytes().all(|byte| !byte.is_ascii_uppercase())
     {
-        return Cow::Borrowed(part);
+        return NodeName::Borrowed(part);
     }
 
-    let mut value = String::new();
+    // Names are usually short. Keep the joined, lower-case value inline so
+    // repeated cleanup classifiers do not allocate one String per node.
+    let mut value = SmallVec::<[u8; 64]>::new();
     for (index, part) in [tag_name, class, id].into_iter().flatten().enumerate() {
         if index > 0 {
-            value.push(' ');
+            value.push(b' ');
         }
-        value.push_str(part);
+        value.extend_from_slice(part.as_bytes());
     }
     value.make_ascii_lowercase();
-    Cow::Owned(value)
+    NodeName::Owned(value)
 }
 
 fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
@@ -5999,7 +6032,7 @@ mod tests {
     #[test]
     fn hard_cleanup_preserves_only_content_checkboxes() {
         let mut dom = Dom::parse_fragment(
-            r#"<ul><li><label><input class="control" onclick="bad()" type="checkbox" checked> Done</label></li><li><form><input type="checkbox"> Option</form></li></ul><form><input type="checkbox"><button>Search</button></form>"#,
+            r#"<ul><li><label><input class="control" onclick="bad()" alt="bad" action="bad" aria-level="2" data-type="bad" data-footnote="bad" type="checkbox" checked> Done</label></li><li><form><input type="checkbox"> Option</form></li></ul><form><input type="checkbox"><button>Search</button></form>"#,
             Tag::Div,
         )
         .unwrap();
@@ -6021,7 +6054,16 @@ mod tests {
         assert!(dom.has_attr(inputs[0], AttrName::Checked));
         assert!(dom.has_attr(inputs[0], AttrName::Disabled));
         assert_eq!(dom.attr(inputs[0], AttrName::Class), None);
-        assert_eq!(dom.attr_by_local_name(inputs[0], "onclick"), None);
+        for name in [
+            "onclick",
+            "alt",
+            "action",
+            "aria-level",
+            "data-type",
+            "data-footnote",
+        ] {
+            assert_eq!(dom.attr_by_local_name(inputs[0], name), None, "{name}");
+        }
     }
 
     #[test]

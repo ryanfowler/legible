@@ -1,8 +1,11 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum AttrName {
+    Action,
     Align,
+    Alt,
     AriaHidden,
     AriaLabel,
+    AriaLevel,
     AriaModal,
     Background,
     BgColor,
@@ -14,6 +17,7 @@ pub(crate) enum AttrName {
     ColSpan,
     Content,
     DataCallout,
+    DataCalloutLegacy,
     DataCodeLanguage,
     DataLegibleAuthor,
     DataLegibleBody,
@@ -25,8 +29,13 @@ pub(crate) enum AttrName {
     DataLegibleReplyBody,
     DataLegibleReplyMeta,
     DataFootnote,
+    DataFootnoteLegacy,
     DataFootnoteRef,
+    DataFootnoteRefLegacy,
     DataFootnotes,
+    DataFootnotesLegacy,
+    DataFn,
+    DataType,
     DataLang,
     DataLanguage,
     DataLatex,
@@ -36,6 +45,8 @@ pub(crate) enum AttrName {
     DataTable,
     Dir,
     Disabled,
+    Encoding,
+    For,
     Frame,
     Height,
     Hidden,
@@ -46,12 +57,14 @@ pub(crate) enum AttrName {
     Lang,
     Language,
     Name,
+    Open,
     Poster,
     Property,
     Rel,
     Role,
     RowSpan,
     Rules,
+    Separators,
     Src,
     Srcset,
     Start,
@@ -77,9 +90,12 @@ impl AttrName {
     #[inline]
     fn from_lowercase(s: &str) -> Self {
         match s {
+            "action" => Self::Action,
             "align" => Self::Align,
+            "alt" => Self::Alt,
             "aria-hidden" => Self::AriaHidden,
             "aria-label" => Self::AriaLabel,
+            "aria-level" => Self::AriaLevel,
             "aria-modal" => Self::AriaModal,
             "background" => Self::Background,
             "bgcolor" => Self::BgColor,
@@ -91,6 +107,7 @@ impl AttrName {
             "colspan" => Self::ColSpan,
             "content" => Self::Content,
             "data-legible-callout" => Self::DataCallout,
+            "data-callout" => Self::DataCalloutLegacy,
             "data-code-language" => Self::DataCodeLanguage,
             "data-legible-author" => Self::DataLegibleAuthor,
             "data-legible-body" => Self::DataLegibleBody,
@@ -102,8 +119,13 @@ impl AttrName {
             "data-legible-reply-body" => Self::DataLegibleReplyBody,
             "data-legible-reply-meta" => Self::DataLegibleReplyMeta,
             "data-legible-footnote" => Self::DataFootnote,
+            "data-footnote" => Self::DataFootnoteLegacy,
             "data-legible-footnote-ref" => Self::DataFootnoteRef,
+            "data-footnote-ref" => Self::DataFootnoteRefLegacy,
             "data-legible-footnotes" => Self::DataFootnotes,
+            "data-footnotes" => Self::DataFootnotesLegacy,
+            "data-fn" => Self::DataFn,
+            "data-type" => Self::DataType,
             "data-lang" => Self::DataLang,
             "data-language" => Self::DataLanguage,
             "data-latex" => Self::DataLatex,
@@ -113,6 +135,8 @@ impl AttrName {
             "datatable" => Self::DataTable,
             "dir" => Self::Dir,
             "disabled" => Self::Disabled,
+            "encoding" => Self::Encoding,
+            "for" => Self::For,
             "frame" => Self::Frame,
             "height" => Self::Height,
             "hidden" => Self::Hidden,
@@ -123,12 +147,14 @@ impl AttrName {
             "lang" => Self::Lang,
             "language" => Self::Language,
             "name" => Self::Name,
+            "open" => Self::Open,
             "poster" => Self::Poster,
             "property" => Self::Property,
             "rel" => Self::Rel,
             "role" => Self::Role,
             "rowspan" => Self::RowSpan,
             "rules" => Self::Rules,
+            "separators" => Self::Separators,
             "src" => Self::Src,
             "srcset" => Self::Srcset,
             "start" => Self::Start,
@@ -142,11 +168,35 @@ impl AttrName {
             _ => Self::Other,
         }
     }
+    /// Returns whether this kind exists only to accelerate dynamic local-name
+    /// lookups. These names remain non-semantic for cleanup purposes.
+    pub(crate) const fn is_lookup_only(self) -> bool {
+        matches!(
+            self,
+            Self::Action
+                | Self::Alt
+                | Self::AriaLevel
+                | Self::DataCalloutLegacy
+                | Self::DataFootnoteLegacy
+                | Self::DataFootnoteRefLegacy
+                | Self::DataFootnotesLegacy
+                | Self::DataFn
+                | Self::DataType
+                | Self::Encoding
+                | Self::For
+                | Self::Open
+                | Self::Separators
+        )
+    }
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Action => "action",
             Self::Align => "align",
+            Self::Alt => "alt",
             Self::AriaHidden => "aria-hidden",
             Self::AriaLabel => "aria-label",
+            Self::AriaLevel => "aria-level",
             Self::AriaModal => "aria-modal",
             Self::Background => "background",
             Self::BgColor => "bgcolor",
@@ -158,6 +208,7 @@ impl AttrName {
             Self::ColSpan => "colspan",
             Self::Content => "content",
             Self::DataCallout => "data-legible-callout",
+            Self::DataCalloutLegacy => "data-callout",
             Self::DataCodeLanguage => "data-code-language",
             Self::DataLegibleAuthor => "data-legible-author",
             Self::DataLegibleBody => "data-legible-body",
@@ -169,8 +220,13 @@ impl AttrName {
             Self::DataLegibleReplyBody => "data-legible-reply-body",
             Self::DataLegibleReplyMeta => "data-legible-reply-meta",
             Self::DataFootnote => "data-legible-footnote",
+            Self::DataFootnoteLegacy => "data-footnote",
             Self::DataFootnoteRef => "data-legible-footnote-ref",
+            Self::DataFootnoteRefLegacy => "data-footnote-ref",
             Self::DataFootnotes => "data-legible-footnotes",
+            Self::DataFootnotesLegacy => "data-footnotes",
+            Self::DataFn => "data-fn",
+            Self::DataType => "data-type",
             Self::DataLang => "data-lang",
             Self::DataLanguage => "data-language",
             Self::DataLatex => "data-latex",
@@ -180,6 +236,8 @@ impl AttrName {
             Self::DataTable => "datatable",
             Self::Dir => "dir",
             Self::Disabled => "disabled",
+            Self::Encoding => "encoding",
+            Self::For => "for",
             Self::Frame => "frame",
             Self::Height => "height",
             Self::Hidden => "hidden",
@@ -190,12 +248,14 @@ impl AttrName {
             Self::Lang => "lang",
             Self::Language => "language",
             Self::Name => "name",
+            Self::Open => "open",
             Self::Poster => "poster",
             Self::Property => "property",
             Self::Rel => "rel",
             Self::Role => "role",
             Self::RowSpan => "rowspan",
             Self::Rules => "rules",
+            Self::Separators => "separators",
             Self::Src => "src",
             Self::Srcset => "srcset",
             Self::Start => "start",
@@ -240,5 +300,10 @@ impl Attribute {
     #[inline]
     pub(crate) fn is_named(&self, name: AttrName) -> bool {
         self.kind == name
+    }
+
+    #[inline]
+    pub(crate) fn is_lookup_only(&self) -> bool {
+        self.kind.is_lookup_only()
     }
 }

@@ -194,6 +194,16 @@ impl Dom {
             e.attrs.retain(|attribute| !attribute.is_named(name));
         }
     }
+
+    /// Removes attributes that have a typed lookup key but no semantic output
+    /// meaning. Keep this separate from `remove_attr(Other)`: lookup keys are
+    /// an internal performance detail, not a cleanup policy.
+    pub(crate) fn remove_lookup_only_attrs(&mut self, node: NodeId) {
+        if let NodeData::Element(e) = &mut self.node_mut(node).data {
+            e.attrs.retain(|attribute| !attribute.is_lookup_only());
+        }
+    }
+
     pub(crate) fn remove_attrs(&mut self, node: NodeId, names: &[AttrName]) {
         if let NodeData::Element(e) = &mut self.node_mut(node).data {
             e.attrs
