@@ -1131,8 +1131,16 @@ impl<'writer> Output<'writer> {
             return;
         }
         self.flush_pending_newlines();
-        let value = std::mem::take(&mut self.value);
-        self.write_str(&value);
+        // Keep the line buffer allocation. The renderer flushes many short
+        // lines, and replacing the String here forced the next line to grow
+        // from zero capacity. This is especially costly for generated lists
+        // and ordinary article pages.
+        if self.error.is_none()
+            && let Err(error) = self.writer.write_str(&self.value)
+        {
+            self.error = Some(error);
+        }
+        self.value.clear();
         self.has_output = true;
     }
 
@@ -1208,6 +1216,48 @@ impl<'writer> Output<'writer> {
     }
 
     fn ascii_text(&mut self, text: &str, next_text_char: Option<char>) {
+        // Once ordinary prose has established a non-special line state, most
+        // text leaves only need whitespace collapsing. Copy those words as
+        // slices instead of visiting every byte through the escape state
+        // machine. Keep the stateful path for Markdown-sensitive text and
+        // inline boundaries.
+        if matches!(self.line_text_state, LineTextState::Other)
+            && !self.inline_boundary
+            && self.first_unopened_marker == self.markers.len()
+            && !text.as_bytes().iter().any(|byte| {
+                matches!(
+                    byte,
+                    b'!' | b'\\' | b'`' | b'*' | b'_' | b'[' | b']' | b'<' | b'>' | b'|'
+                )
+            })
+        {
+            let bytes = text.as_bytes();
+            if bytes.first().is_some_and(u8::is_ascii_whitespace) {
+                self.pending_space |= !self.line_start;
+            }
+            let mut words = text.split_ascii_whitespace();
+            if let Some(first) = words.next() {
+                self.flush_space();
+                self.mark_list_item_content();
+                self.value.push_str(first);
+                for word in words {
+                    self.value.push(' ');
+                    self.value.push_str(word);
+                }
+                self.last_text_char = text
+                    .as_bytes()
+                    .iter()
+                    .rev()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    .copied()
+                    .map(char::from);
+            }
+            if text.as_bytes().last().is_some_and(u8::is_ascii_whitespace) {
+                self.pending_space |= !self.line_start;
+            }
+            return;
+        }
+
         let bytes = text.as_bytes();
         let mut index = 0;
         let mut prepared = false;
@@ -1411,6 +1461,40 @@ impl<'writer> Output<'writer> {
     }
 
     fn destination(&mut self, value: &str) {
+        if value.is_ascii() {
+            let bytes = value.as_bytes();
+            if !bytes.iter().any(|byte| {
+                matches!(
+                    byte,
+                    b'\\' | b'(' | b')' | b' ' | b'\n' | b'\r' | b'\t' | b'<' | b'>'
+                )
+            }) {
+                self.value.push_str(value);
+                return;
+            }
+            let mut start = 0;
+            for (index, &byte) in bytes.iter().enumerate() {
+                let replacement = match byte {
+                    b'\\' => Some("\\\\"),
+                    b'(' => Some("\\("),
+                    b')' => Some("\\)"),
+                    b' ' => Some("%20"),
+                    b'\n' => Some("%0A"),
+                    b'\r' => Some("%0D"),
+                    b'\t' => Some("%09"),
+                    b'<' => Some("%3C"),
+                    b'>' => Some("%3E"),
+                    _ => None,
+                };
+                if let Some(replacement) = replacement {
+                    self.value.push_str(&value[start..index]);
+                    self.value.push_str(replacement);
+                    start = index + 1;
+                }
+            }
+            self.value.push_str(&value[start..]);
+            return;
+        }
         for ch in value.chars() {
             match ch {
                 '\\' | '(' | ')' => {
@@ -1429,6 +1513,17 @@ impl<'writer> Output<'writer> {
     }
 
     fn link_title(&mut self, value: &str) {
+        if value.is_ascii() && !value.bytes().any(|byte| matches!(byte, b'\\' | b'"')) {
+            let mut first = true;
+            for word in value.split_ascii_whitespace() {
+                if !first {
+                    self.value.push(' ');
+                }
+                self.value.push_str(word);
+                first = false;
+            }
+            return;
+        }
         let mut pending_space = false;
         for ch in value.chars() {
             if ch.is_whitespace() {
@@ -1751,8 +1846,8 @@ fn is_word_like(value: char) -> bool {
 mod tests {
     use super::*;
     use crate::document::{
-        CodeBlock, Image, List, ListKind, MathFormat, MathValue, SemanticKind as Item,
-        SemanticTapeBuilder, Table, TableCell, TaskMarker,
+        CodeBlock, Image, List, ListKind, MathFormat, MathValue, Media, MediaKind,
+        SemanticKind as Item, SemanticTapeBuilder, Table, TableCell, TaskMarker,
     };
 
     #[test]
@@ -1817,6 +1912,47 @@ mod tests {
         assert_eq!(
             render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default()),
             "![](diagram.png)\n"
+        );
+    }
+
+    #[test]
+    fn ascii_text_after_media_keeps_list_item_content_state() {
+        let mut builder = SemanticTapeBuilder::with_capacity(10);
+        let list = builder
+            .emit(
+                None,
+                Item::List(List {
+                    kind: ListKind::Unordered,
+                    start: None,
+                }),
+            )
+            .unwrap();
+        let item = builder.emit(Some(list), Item::ListItem).unwrap();
+        builder
+            .emit(
+                Some(item),
+                Item::Media(Media {
+                    kind: MediaKind::Video,
+                    source: "movie.mp4".into(),
+                    title: Some("Video".into()),
+                }),
+            )
+            .unwrap();
+        let first = builder.emit(Some(item), Item::Paragraph).unwrap();
+        builder.append_prose(Some(first), " first").unwrap();
+        builder.close(first).unwrap();
+        let second = builder.emit(Some(item), Item::Paragraph).unwrap();
+        builder.append_prose(Some(second), "second").unwrap();
+        builder.close(second).unwrap();
+        builder.close(item).unwrap();
+        builder.close(list).unwrap();
+        let trailing = builder.emit(None, Item::Paragraph).unwrap();
+        builder.append_prose(Some(trailing), "next").unwrap();
+        builder.close(trailing).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default()),
+            "- [Video](movie.mp4) first\n\n  second\n\nnext\n"
         );
     }
 
