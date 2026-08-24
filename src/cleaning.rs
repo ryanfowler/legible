@@ -4431,15 +4431,28 @@ struct PeripheralMetrics<'a> {
 }
 
 fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
-    let named_section_title =
-        contains_any(&node_name(dom, node), &["section-title", "sectiontitle"]);
-    let semantic_heading = matches!(
+    // Heading tags and ARIA headings are common. Do not assemble the
+    // lower-cased tag/class/id name for every ordinary element just to learn
+    // that it is not a heading. This matters on repaired documents with many
+    // nested wrappers.
+    let tag_heading = matches!(
         dom.tag(node),
         Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-    ) || dom
+    );
+    let aria_heading = dom
         .attr(node, AttrName::Role)
-        .is_some_and(|role| has_token(role, "heading"))
-        || named_section_title;
+        .is_some_and(|role| has_token(role, "heading"));
+    let named_section_title = if tag_heading || aria_heading {
+        false
+    } else if dom.attr(node, AttrName::Class).is_some()
+        || dom.attr(node, AttrName::Id).is_some()
+        || dom.tag(node) == Some(Tag::Other)
+    {
+        contains_any(&node_name(dom, node), &["section-title", "sectiontitle"])
+    } else {
+        false
+    };
+    let semantic_heading = tag_heading || aria_heading || named_section_title;
     if !semantic_heading {
         return RelatedHeadingSignal::None;
     }
