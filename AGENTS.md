@@ -208,8 +208,7 @@ Use the full suite's focused Criterion filter when possible. The pipeline suite
 separates extraction, retained-fragment lowering, end-to-end Markdown, and lazy
 Markdown/HTML/text rendering. Run `cargo bench --bench corpus` for fixed
 real-world fixtures. See `benches/README.md` for workload coverage, baseline
-commands, and regression guardrails. Historical measurements are under
-`benches/baselines/`.
+commands, and regression guardrails.
 
 `benches/pipeline.rs` covers generated compatibility workloads, large fixtures, lazy renderers, and deeply nested parser input.
 

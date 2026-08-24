@@ -74,9 +74,6 @@ The full suite measures these workloads:
 - steady-state lazy Markdown, text, and HTML rendering (text statistics are prewarmed)
 - deeply nested parser input
 
-See `benches/baselines/complex-temporary-storage.md` for the storage inventory and the
-final complex-compiler benchmark measurements.
-
 The `ordinary-inline` workload uses repeated article sections with `strong`, `em`,
 links, inline `code`, native lists, blockquotes, simple image figures,
 `details`/`summary`, and definition lists. It avoids tables, footnotes, math,
@@ -114,4 +111,4 @@ Use the same machine, Rust toolchain, and power mode for comparisons.
 - Extraction benchmarks print an `extraction-representation/...` line from opt-in diagnostics. It reports source DOM nodes, the actual selected and cleaned DOM nodes, semantic item counts, and estimated retained bytes for the same input.
 - A normalization change must not add a repeated full-document scan for each code block, equation, table, or image.
 
-Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline. The current baseline at revision `499e09f3bf2e53164321e991254b9ff124cccb59` is recorded in `benches/baselines/private-ir-baseline.md`. The latest raw HTML to Markdown comparison is recorded in `benches/baselines/raw-html-markdown-optimization.md`.
+Absolute time limits are not stable across machines. Keep Criterion reports or CI benchmark artifacts when a change intentionally adjusts a baseline.
