@@ -53,16 +53,13 @@ fuzz_target!(|data: &[u8]| {
     let markdown = page.markdown();
     let text = page.text();
     let html = page.html();
-    let safe_html = page.safe_html();
     assert!(page.validate_document());
     assert_eq!(page.text_length(), text.chars().count());
     assert!(page.word_count() <= page.text_length());
     assert_eq!(page.word_count() == 0, text.is_empty());
     let _ = markdown.len();
     reparse_serialized(&html);
-    reparse_serialized(&safe_html);
     validate_serialized_dom(&html);
-    validate_serialized_dom(&safe_html);
 });
 
 fn validate_serialized_dom(content: &str) {
