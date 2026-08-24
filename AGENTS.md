@@ -147,7 +147,7 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 ## Documentation
 
 - Keep `README.md` and the public Rust API docs consistent.
-- State that `ExtractedPage::html()` is canonical semantic HTML. `safe_html()` is a compatibility alias for the same output.
+- State that `ExtractedPage::html()` is canonical semantic HTML.
 - Write all documentation and explanatory text in ASD-STE100 Simplified Technical English. Use short sentences, active voice, and consistent terms.
 
 ## Testing

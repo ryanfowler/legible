@@ -13,14 +13,14 @@ At the recorded pre-IR baseline, `ExtractedPage` retained a compact cleaned DOM 
 - `markdown()` returned CommonMark and GFM output. It did not emit raw HTML. It filtered unsupported link and image URI schemes.
 - `text()` returned normalized plain text. `text_length()` counted its Unicode scalar values. `word_count()` used the same normalized DOM walk.
 - `html()` returned extracted markup from the retained DOM. It was not sanitized.
-- `safe_html()` copied and sanitized the retained fragment before it rendered HTML.
+- A separate sanitized HTML method copied the retained fragment before it rendered HTML.
 - Repeated render calls were deterministic.
 
-The raw `html()` shape was compatibility-sensitive. Unit tests required source attributes to remain in `html()` while `safe_html()` removed active content. The semantic renderer migration deliberately replaced this contract.
+The raw `html()` shape was compatibility-sensitive. Unit tests required source attributes to remain in `html()` while the sanitized output removed active content. The semantic renderer migration deliberately replaced this contract.
 
 ## Current migration status
 
-`ExtractedPage` now retains only a private semantic representation. The final normalized compact DOM fragment is compiled once and then dropped. Markdown, normalized text, and canonical semantic HTML render lazily from that representation. `safe_html()` is a compatibility alias for canonical `html()` output.
+`ExtractedPage` now retains only a private semantic representation. The final normalized compact DOM fragment is compiled once and then dropped. Markdown, normalized text, and canonical semantic HTML render lazily from that representation.
 
 ## Quality baseline
 
