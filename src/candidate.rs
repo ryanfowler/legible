@@ -854,6 +854,17 @@ pub(crate) fn select_content_root<'a>(
             && !candidates
                 .get(selected)
                 .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
+            && let Some(boundary) = indexed_section_boundary(dom, candidates, selected, body)
+        {
+            selected = boundary;
+            branches.clear();
+            reason = RootSelectionReason::CompleteAncestor;
+        }
+
+        if branches.is_empty()
+            && !candidates
+                .get(selected)
+                .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
             && let Some(boundary) =
                 complete_semantic_boundary(dom, candidates, ranked, selected, body)
         {
@@ -1116,6 +1127,90 @@ fn more_specific_candidate(
         })
         .min_by_key(|(_, chars)| *chars)
         .map(|(node, _)| node)
+}
+
+/// Promotes a subsection when a local document index shows that the selected
+/// node is only one part of a larger coherent document.
+fn indexed_section_boundary(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    selected: NodeId,
+    body: NodeId,
+) -> Option<NodeId> {
+    let selected_features = candidates.get(selected)?.features;
+    let body_chars = candidates
+        .get(body)
+        .map_or(0, |candidate| candidate.features.text_chars);
+    let index = dom
+        .descendants(body)
+        .find(|&node| is_document_index(dom, node))?;
+
+    dom.ancestors(selected).take(8).find(|&ancestor| {
+        ancestor != body
+            && (ancestor == index || is_descendant_of(dom, index, ancestor))
+            && candidates.get(ancestor).is_some_and(|candidate| {
+                let features = candidate.features;
+                features.text_chars >= 600
+                    && features.word_count >= 60
+                    && features.paragraph_count >= 3
+                    && features.heading_count >= 3
+                    && features.link_density <= 0.4
+                    && u64::from(selected_features.text_chars).saturating_mul(100)
+                        <= u64::from(features.text_chars).saturating_mul(70)
+                    && (body_chars == 0
+                        || u64::from(features.text_chars).saturating_mul(100)
+                            >= u64::from(body_chars).saturating_mul(50))
+            })
+    })
+}
+
+fn is_document_index(dom: &Dom, node: NodeId) -> bool {
+    let labelled = dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
+        ["contents", "on this page", "table of contents", "toc"]
+            .iter()
+            .any(|value| label.trim().eq_ignore_ascii_case(value))
+    });
+    let named = [AttrName::Id, AttrName::Class].iter().any(|&attribute| {
+        dom.attr(node, attribute).is_some_and(|name| {
+            ["docs-toc", "table-of-contents", "table_of_contents", "toc"]
+                .iter()
+                .any(|value| {
+                    name.split_ascii_whitespace()
+                        .any(|token| token.eq_ignore_ascii_case(value))
+                })
+        })
+    });
+    let role = dom
+        .attr(node, AttrName::Role)
+        .is_some_and(|roles| matches_role(roles, "doc-toc"));
+    let inspect_heading = !labelled && !named && !role && dom.tag(node) == Some(Tag::Nav);
+    if !labelled && !named && !role && !inspect_heading {
+        return false;
+    }
+    let mut heading = false;
+    let mut fragment_links = 0_u8;
+    for descendant in dom.descendants(node).take(256) {
+        let tag = dom.tag(descendant);
+        if tag == Some(Tag::A)
+            && dom
+                .attr(descendant, AttrName::Href)
+                .is_some_and(|href| href.trim_start().starts_with('#'))
+        {
+            fragment_links = fragment_links.saturating_add(1);
+        } else if inspect_heading
+            && matches!(tag, Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6))
+        {
+            let mut text = String::new();
+            dom.append_normalized_text_limited(descendant, &mut text, 64);
+            heading = ["contents", "on this page", "table of contents"]
+                .iter()
+                .any(|value| text.trim().eq_ignore_ascii_case(value));
+        }
+        if fragment_links >= 3 && (labelled || named || role || heading) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns a semantic boundary that contains a complete document even when
@@ -2453,6 +2548,77 @@ mod tests {
             [],
         );
         assert_eq!(selected.node, complete);
+    }
+
+    #[test]
+    fn root_selection_uses_a_document_index_to_restore_sibling_sections() {
+        let dom = Dom::parse_document(
+            r##"<body><div id="document"><nav aria-label="On this page"><a href="#one">One</a><a href="#two">Two</a><a href="#three">Three</a></nav><section><h2 id="one">One</h2><p>First section.</p></section><section><h2 id="two">Two</h2><p>Second section.</p></section><section><h2 id="three">Three</h2><div id="focused"><p>Large code-heavy final section.</p><pre>example()</pre></div></section></div></body>"##,
+        )
+        .unwrap();
+        let document = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("document"))
+            .unwrap();
+        let focused = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("focused"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(document, 60.0);
+        candidates.add_readability(focused, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == body)
+            .unwrap()
+            .features
+            .text_chars = 1_000;
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == document)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 900,
+            word_count: 180,
+            paragraph_count: 4,
+            heading_count: 3,
+            link_density: 0.05,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == focused)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 300,
+            word_count: 60,
+            paragraph_count: 2,
+            code_block_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[
+                RankedCandidate {
+                    node: focused,
+                    score: 100.0,
+                    order: 0,
+                },
+                RankedCandidate {
+                    node: document,
+                    score: 60.0,
+                    order: 1,
+                },
+            ],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, document);
+        assert_eq!(selected.reason, RootSelectionReason::CompleteAncestor);
     }
 
     #[test]

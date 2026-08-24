@@ -344,6 +344,10 @@ impl SemanticTapeBuilder {
         self.operation_kind(node) == Some(OperationKind::BlockGroup)
     }
 
+    pub(crate) fn is_heading(&self, node: DocumentNodeId) -> bool {
+        self.operation_kind(node) == Some(OperationKind::Heading)
+    }
+
     pub(crate) fn is_list(&self, node: DocumentNodeId) -> bool {
         self.operation_kind(node) == Some(OperationKind::List)
     }
