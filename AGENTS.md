@@ -179,6 +179,8 @@ let markdown = page.markdown();
 
 `ExtractedPage` also provides `write_markdown`, `write_html`, and `write_text` methods. These methods write output to a `std::fmt::Write` value and return `std::fmt::Result`. The page also provides `write_markdown_io`, `write_html_io`, and `write_text_io` methods for `std::io::Write` values. These methods return `std::io::Result<()>`. The Markdown and HTML builders provide matching `write` and `write_io` methods.
 
+`MarkdownBuilder::max_line_width` sets a preferred Markdown source-line width. The default does not wrap lines. The renderer wraps prose at whitespace. It keeps atomic Markdown content and structural lines intact.
+
 `ExtractedPage::into_parts` returns independently owned metadata, diagnostics, structured data, and `ExtractedContent`. `ExtractedContent` provides the same lazy output and metric methods as `ExtractedPage`.
 
 ## Fuzzing

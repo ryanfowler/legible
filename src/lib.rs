@@ -41,6 +41,7 @@
 //!     .markdown_builder()
 //!     .links(true)
 //!     .images(false)
+//!     .max_line_width(80)
 //!     .render();
 //! # Ok::<(), legible::Error>(())
 //! ```
