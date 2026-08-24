@@ -209,7 +209,8 @@ page.write_markdown_io(&mut output).unwrap();
 
 ## Render Markdown
 
-`page.markdown()` includes links and images. Use the builder to change these settings.
+`page.markdown()` includes links and images. It does not wrap lines. Use the
+builder to change these settings.
 
 ```rust
 # let page = legible::extract("<main><p>Text</p></main>", None)?;
@@ -217,9 +218,14 @@ let markdown = page
     .markdown_builder()
     .links(false)
     .images(false)
+    .max_line_width(80)
     .render();
 # Ok::<(), legible::Error>(())
 ```
+
+The line width is a preferred maximum. The renderer wraps prose at whitespace.
+It keeps URLs, code spans, code blocks, headings, math blocks, and tables intact.
+These items can exceed the selected width.
 
 ## Supported pages
 

@@ -15,6 +15,7 @@ use smallvec::SmallVec;
 pub(crate) struct MarkdownConfig {
     pub(crate) links: bool,
     pub(crate) images: bool,
+    pub(crate) max_line_width: Option<usize>,
 }
 
 impl Default for MarkdownConfig {
@@ -22,6 +23,7 @@ impl Default for MarkdownConfig {
         Self {
             links: true,
             images: true,
+            max_line_width: None,
         }
     }
 }
@@ -95,6 +97,7 @@ struct MarkdownRenderer<'document, 'writer> {
     frames: Vec<Frame>,
     list_depth: usize,
     table_depth: usize,
+    heading_depth: usize,
     config: MarkdownConfig,
 }
 
@@ -106,10 +109,11 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
     ) -> Self {
         Self {
             document,
-            out: Output::new(writer),
+            out: Output::new(writer, config.max_line_width),
             frames: Vec::with_capacity(32),
             list_depth: 0,
             table_depth: 0,
+            heading_depth: 0,
             config,
         }
     }
@@ -160,11 +164,14 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
                 let next = needs_next_text_char(text)
                     .then(|| self.next_text_char(index))
                     .flatten();
-                self.out.text(text, next);
+                let allow_wrap = self.allow_prose_wrap();
+                self.out.text(text, next, allow_wrap);
             }
             Item::Heading { level } => {
+                self.heading_depth += 1;
                 if !self.visible(operation) {
                     if !self.config.images {
+                        self.heading_depth -= 1;
                         return Some(end.saturating_add(1));
                     }
                     self.push_frame(index, kind, CloseAction::None);
@@ -248,17 +255,23 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             Item::Strong => self.format(index, kind, operation, "**"),
             Item::Emphasis => self.format(index, kind, operation, "*"),
             Item::Strikethrough => self.format(index, kind, operation, "~~"),
-            Item::InlineCode(text) => self.code_span(text),
+            Item::InlineCode(text) => self.code_span(text, self.allow_prose_wrap()),
             Item::CodeBlock(code) => self.code_block(code.language(), code.text()),
             Item::Link(link) => {
                 if self.config.links {
                     self.out.mark_inline_boundary();
-                    self.out.open_link();
+                    let allow_wrap = self.allow_prose_wrap();
+                    let closing_width = if self.out.wrapping_enabled(allow_wrap) {
+                        link_closing_width(link)
+                    } else {
+                        0
+                    };
+                    self.out.open_link(closing_width);
                 }
                 self.push_frame(index, kind, CloseAction::Link(self.config.links));
                 let _ = link;
             }
-            Item::Image(image) if self.config.images => self.image(image),
+            Item::Image(image) if self.config.images => self.image(image, self.allow_prose_wrap()),
             Item::Image(_) => {}
             Item::List(list) => self.list(index, kind, list.kind, list.start),
             Item::ListItem => self.list_item(index, kind),
@@ -270,7 +283,9 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
                 }
                 self.push_frame(index, kind, CloseAction::None);
             }
-            Item::FootnoteReference(id) => self.footnote_reference(id),
+            Item::FootnoteReference(id) => {
+                self.footnote_reference(id, self.allow_prose_wrap());
+            }
             Item::FootnoteDefinition(id) => {
                 let Some(label) = self.document.footnote_label(id) else {
                     return Some(end.saturating_add(1));
@@ -283,19 +298,30 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
                 self.push_frame(index, kind, CloseAction::Footnote);
             }
             Item::TaskMarker(_) => {}
-            Item::InlineMath(math) => self.math(math.source(), false),
-            Item::DisplayMath(math) => self.math(math.source(), true),
+            Item::InlineMath(math) => self.math(math.source(), false, self.allow_prose_wrap()),
+            Item::DisplayMath(math) => self.math(math.source(), true, false),
             Item::Media(media) => {
                 let title = media.title().unwrap_or(media.source());
                 if self.config.links {
+                    let allow_wrap = self.allow_prose_wrap();
+                    if self.out.wrapping_enabled(allow_wrap) {
+                        self.out.wrap_before_atomic(
+                            label_width(title, false)
+                                .saturating_add(destination_width(media.source()))
+                                .saturating_add(5),
+                            allow_wrap,
+                        );
+                    }
                     self.out.markup("[");
                     self.out.label(title);
                     self.out.markup("](");
                     self.out.destination(media.source());
                     self.out.markup(")");
                 } else {
-                    self.out.text(title, None);
+                    let allow_wrap = self.allow_prose_wrap();
+                    self.out.text(title, None, allow_wrap);
                 }
+                self.out.mark_line_content();
             }
             Item::Invalid => {}
         }
@@ -308,6 +334,9 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             return;
         };
         debug_assert_eq!(frame.index, opening);
+        if frame.kind == OperationKind::Heading {
+            self.heading_depth -= 1;
+        }
         match frame.close {
             CloseAction::None => {}
             CloseAction::Block => self.out.newline(),
@@ -395,6 +424,10 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
         flags & HAS_VISIBLE_TEXT != 0 || self.config.images && flags & HAS_VISIBLE_IMAGE != 0
     }
 
+    fn allow_prose_wrap(&self) -> bool {
+        self.table_depth == 0 && self.heading_depth == 0
+    }
+
     fn next_text_char(&self, index: usize) -> Option<char> {
         let mut nested = 0usize;
         let mut next = index.saturating_add(1);
@@ -441,18 +474,27 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
         self.push_frame(index, kind, CloseAction::Marker(marker));
     }
 
-    fn code_span(&mut self, text: &str) {
+    fn code_span(&mut self, text: &str, allow_wrap: bool) {
         let table_text = (self.table_depth == 1).then(|| text.replace('|', "\\|"));
         let text = table_text.as_deref().unwrap_or(text);
         let mut scan = CollapsedText::default();
         scan.scan(text);
         let fence = scan.longest_backtick_run + 1;
         let pad = scan.starts_with_backtick || scan.ends_with_backtick;
-        self.out.mark_list_item_content();
         if scan.has_content {
             self.out.mark_inline_boundary();
             self.out.prepare_inline_boundary(scan.first_char);
         }
+        if self.out.wrapping_enabled(allow_wrap) {
+            self.out.wrap_before_atomic(
+                fence
+                    .saturating_mul(2)
+                    .saturating_add(collapsed_text_width(text))
+                    .saturating_add(usize::from(pad) * 2),
+                allow_wrap,
+            );
+        }
+        self.out.mark_list_item_content();
         self.out.markup_repeat(char::from(96), fence);
         if pad {
             self.out.verbatim(" ");
@@ -460,8 +502,10 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
         let mut writer = CollapsedTextWriter::default();
         self.out.begin_verbatim();
         writer.write(&mut self.out.value, text);
+        self.out.track_width(writer.written_width);
         if writer.empty && writer.pending_whitespace {
             self.out.value.push(' ');
+            self.out.track_width(1);
         }
         if pad {
             self.out.verbatim(" ");
@@ -471,6 +515,7 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             self.out.last_text_char = writer.last_char;
             self.out.mark_inline_boundary();
         }
+        self.out.mark_line_content();
     }
 
     fn code_block(&mut self, language: Option<&str>, text: &str) {
@@ -491,7 +536,19 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
         self.out.newline();
     }
 
-    fn image(&mut self, image: &crate::document::Image) {
+    fn image(&mut self, image: &crate::document::Image, allow_wrap: bool) {
+        if self.out.wrapping_enabled(allow_wrap) {
+            let title_width = image
+                .title()
+                .map_or(0, |title| link_title_width(title).saturating_add(3));
+            self.out.wrap_before_atomic(
+                label_width(image.alt(), false)
+                    .saturating_add(destination_width(image.source()))
+                    .saturating_add(title_width)
+                    .saturating_add(5),
+                allow_wrap,
+            );
+        }
         self.out.mark_list_item_content();
         self.out.markup("![");
         if self.table_depth == 1 {
@@ -507,9 +564,10 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             self.out.markup("\"");
         }
         self.out.markup(")");
+        self.out.mark_line_content();
     }
 
-    fn math(&mut self, source: &str, block: bool) {
+    fn math(&mut self, source: &str, block: bool, allow_wrap: bool) {
         let source = escape_math_source(source.trim());
         if block {
             self.out.ensure_blank_line();
@@ -520,9 +578,14 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             self.out.markup("$$");
             self.out.newline();
         } else {
+            if self.out.wrapping_enabled(allow_wrap) {
+                self.out
+                    .wrap_before_atomic(source.chars().count().saturating_add(2), allow_wrap);
+            }
             self.out.markup("$");
             self.out.verbatim(&source);
             self.out.markup("$");
+            self.out.mark_line_content();
         }
     }
 
@@ -564,17 +627,12 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
                 width
             }
         };
-        if let Some((checked, label)) = self
+        let task = self
             .task_marker(index)
-            .map(|(checked, label)| (checked, label.map(str::to_owned)))
-        {
-            self.out.markup(if checked { "[x]" } else { "[ ]" });
+            .map(|(checked, label)| (checked, label.map(str::to_owned)));
+        if let Some((checked, _)) = &task {
+            self.out.markup(if *checked { "[x]" } else { "[ ]" });
             self.out.pending_space = true;
-            if !self.list_item_has_text(index)
-                && let Some(label) = label
-            {
-                self.out.text(&label, None);
-            }
             indent += 4;
         }
         self.out.begin_list_item_content();
@@ -582,6 +640,12 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             width: indent,
             has_content: false,
         });
+        if !self.list_item_has_text(index)
+            && let Some((_, Some(label))) = task
+        {
+            let allow_wrap = self.allow_prose_wrap();
+            self.out.text(&label, None, allow_wrap);
+        }
         self.push_frame(index, kind, CloseAction::ListItem);
     }
 
@@ -622,7 +686,7 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
         row.cells += 1;
         if self.table_cell_requires_flattening(index) {
             let text = self.flatten_table_cell(index);
-            self.out.text(text.trim(), None);
+            self.out.text(text.trim(), None, false);
             return true;
         }
         false
@@ -917,11 +981,16 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
         }
     }
 
-    fn footnote_reference(&mut self, id: FootnoteId) {
+    fn footnote_reference(&mut self, id: FootnoteId, allow_wrap: bool) {
         if let Some(label) = self.document.footnote_label(id) {
+            if self.out.wrapping_enabled(allow_wrap) {
+                self.out
+                    .wrap_before_atomic(footnote_label_width(label).saturating_add(3), allow_wrap);
+            }
             self.out.markup("[^");
             self.out.footnote_label(label);
             self.out.markup("]");
+            self.out.mark_line_content();
         }
     }
 
@@ -1055,6 +1124,11 @@ struct Output<'writer> {
     first_unopened_marker: usize,
     line_text_state: LineTextState,
     hash_run_start: Option<usize>,
+    max_line_width: Option<usize>,
+    line_width: usize,
+    line_has_content: bool,
+    pending_marker_width: usize,
+    closing_marker_width: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1075,11 +1149,12 @@ enum Prefix {
 
 struct Marker {
     value: &'static str,
+    closing_width: usize,
     opened: bool,
 }
 
 impl<'writer> Output<'writer> {
-    fn new<W: fmt::Write>(writer: &'writer mut W) -> Self {
+    fn new<W: fmt::Write>(writer: &'writer mut W, max_line_width: Option<usize>) -> Self {
         Self {
             writer,
             value: String::with_capacity(512),
@@ -1096,6 +1171,11 @@ impl<'writer> Output<'writer> {
             first_unopened_marker: 0,
             line_text_state: LineTextState::Start,
             hash_run_start: None,
+            max_line_width,
+            line_width: 0,
+            line_has_content: false,
+            pending_marker_width: 0,
+            closing_marker_width: 0,
         }
     }
 
@@ -1116,6 +1196,24 @@ impl<'writer> Output<'writer> {
             && let Err(error) = self.writer.write_str(value)
         {
             self.error = Some(error);
+        }
+    }
+
+    fn buffer_str(&mut self, value: &str) {
+        self.value.push_str(value);
+        if self.max_line_width.is_some() {
+            self.line_width += value.chars().count();
+        }
+    }
+
+    fn buffer_char(&mut self, value: char) {
+        self.value.push(value);
+        self.track_width(1);
+    }
+
+    fn track_width(&mut self, width: usize) {
+        if self.max_line_width.is_some() {
+            self.line_width += width;
         }
     }
 
@@ -1141,11 +1239,17 @@ impl<'writer> Output<'writer> {
             self.error = Some(error);
         }
         self.value.clear();
+        self.line_width = 0;
+        self.line_has_content = false;
         self.has_output = true;
     }
 
     fn has_current_line_content(&self) -> bool {
         !self.line_start
+    }
+
+    fn wrapping_enabled(&self, allow_wrap: bool) -> bool {
+        allow_wrap && self.max_line_width.is_some()
     }
 
     fn prefix(&mut self) {
@@ -1155,10 +1259,23 @@ impl<'writer> Output<'writer> {
         self.flush_pending_newlines();
         for prefix in &self.prefixes {
             match prefix {
-                Prefix::Quote => self.value.push_str("> "),
-                Prefix::Indent(width) => self.value.extend(std::iter::repeat_n(' ', *width)),
+                Prefix::Quote => {
+                    self.value.push_str("> ");
+                    if self.max_line_width.is_some() {
+                        self.line_width += 2;
+                    }
+                }
+                Prefix::Indent(width) => {
+                    self.value.extend(std::iter::repeat_n(' ', *width));
+                    if self.max_line_width.is_some() {
+                        self.line_width += width;
+                    }
+                }
                 Prefix::ListItem { width, .. } => {
                     self.value.extend(std::iter::repeat_n(' ', *width));
+                    if self.max_line_width.is_some() {
+                        self.line_width += width;
+                    }
                 }
             }
         }
@@ -1169,13 +1286,14 @@ impl<'writer> Output<'writer> {
     fn flush_space(&mut self) {
         if self.pending_space && !self.line_start {
             self.value.push(' ');
+            self.track_width(1);
         }
         self.pending_space = false;
     }
 
-    fn text(&mut self, text: &str, next_text_char: Option<char>) {
+    fn text(&mut self, text: &str, next_text_char: Option<char>, allow_wrap: bool) {
         if text.is_ascii() {
-            self.ascii_text(text, next_text_char);
+            self.ascii_text(text, next_text_char, allow_wrap);
             return;
         }
 
@@ -1195,7 +1313,11 @@ impl<'writer> Output<'writer> {
             if matches!(self.line_text_state, LineTextState::Hashes(_)) && ch != '#' {
                 self.resolve_hash_run(false);
             }
-            if prepared {
+            if self.wrapping_enabled(allow_wrap) {
+                self.prepare_inline_boundary(Some(ch));
+            }
+            self.wrap_before_word(&text[index..], allow_wrap);
+            if prepared && !self.line_start {
                 self.flush_space();
             } else {
                 self.prepare_text(ch);
@@ -1208,20 +1330,23 @@ impl<'writer> Output<'writer> {
             }
             if escape {
                 self.value.push('\\');
+                self.track_width(1);
             }
             self.value.push(ch);
+            self.track_width(1);
             self.last_text_char = Some(ch);
             self.advance_line_text_state(ch);
         }
     }
 
-    fn ascii_text(&mut self, text: &str, next_text_char: Option<char>) {
+    fn ascii_text(&mut self, text: &str, next_text_char: Option<char>, allow_wrap: bool) {
         // Once ordinary prose has established a non-special line state, most
         // text leaves only need whitespace collapsing. Copy those words as
         // slices instead of visiting every byte through the escape state
         // machine. Keep the stateful path for Markdown-sensitive text and
         // inline boundaries.
-        if matches!(self.line_text_state, LineTextState::Other)
+        if self.max_line_width.is_none()
+            && matches!(self.line_text_state, LineTextState::Other)
             && !self.inline_boundary
             && self.first_unopened_marker == self.markers.len()
             && !text.as_bytes().iter().any(|byte| {
@@ -1280,7 +1405,11 @@ impl<'writer> Output<'writer> {
                 self.resolve_hash_run(false);
             }
 
-            if prepared {
+            if self.wrapping_enabled(allow_wrap) {
+                self.prepare_inline_boundary(Some(bytes[index] as char));
+            }
+            self.wrap_before_word(&text[index..], allow_wrap);
+            if prepared && !self.line_start {
                 self.flush_space();
             } else {
                 self.prepare_text(bytes[index] as char);
@@ -1288,6 +1417,49 @@ impl<'writer> Output<'writer> {
             }
             self.ascii_text_run(text, &mut index, next_text_char);
         }
+    }
+
+    /// Starts a continuation line before the next prose word when it fits on
+    /// neither the current source line nor a safe Markdown boundary. Inline
+    /// constructs can cross this soft break. Atomic constructs, such as link
+    /// destinations and code spans, stay intact.
+    fn wrap_before_word(&mut self, text: &str, allow_wrap: bool) {
+        let Some(maximum) = self.max_line_width.filter(|_| allow_wrap) else {
+            return;
+        };
+        if !self.pending_space || !self.line_has_content {
+            return;
+        }
+
+        let word_width = text
+            .chars()
+            .take_while(|character| !character.is_whitespace())
+            .map(|character| 1 + usize::from(markdown_escape(character)))
+            .sum::<usize>();
+        self.wrap_before_width(word_width, maximum);
+    }
+
+    fn wrap_before_width(&mut self, content_width: usize, maximum: usize) {
+        if self
+            .line_width
+            .saturating_add(1)
+            .saturating_add(self.pending_marker_width)
+            .saturating_add(content_width)
+            .saturating_add(self.closing_marker_width)
+            > maximum
+        {
+            self.newline();
+        }
+    }
+
+    fn wrap_before_atomic(&mut self, content_width: usize, allow_wrap: bool) {
+        let Some(maximum) = self.max_line_width.filter(|_| allow_wrap) else {
+            return;
+        };
+        if !self.pending_space || !self.line_has_content {
+            return;
+        }
+        self.wrap_before_width(content_width, maximum);
     }
 
     /// Writes one non-whitespace run and leaves `index` at its end.
@@ -1311,6 +1483,7 @@ impl<'writer> Output<'writer> {
                 }
                 if start != *index {
                     self.value.push_str(&text[start..*index]);
+                    self.track_width(*index - start);
                     self.last_text_char = Some(bytes[*index - 1] as char);
                     continue;
                 }
@@ -1323,8 +1496,10 @@ impl<'writer> Output<'writer> {
             }
             if escape {
                 self.value.push('\\');
+                self.track_width(1);
             }
             self.value.push(byte as char);
+            self.track_width(1);
             self.last_text_char = Some(byte as char);
             self.advance_line_text_state(byte as char);
             *index += 1;
@@ -1337,6 +1512,7 @@ impl<'writer> Output<'writer> {
         self.flush_space();
         self.open_pending_markers();
         self.mark_list_item_content();
+        self.mark_line_content();
     }
 
     fn prepare_inline_boundary(&mut self, first: Option<char>) {
@@ -1357,6 +1533,10 @@ impl<'writer> Output<'writer> {
 
     fn mark_inline_boundary(&mut self) {
         self.inline_boundary = true;
+    }
+
+    fn mark_line_content(&mut self) {
+        self.line_has_content = true;
     }
 
     fn should_escape_char(&self, ch: char, remaining: &str, next_text_char: Option<char>) -> bool {
@@ -1412,6 +1592,7 @@ impl<'writer> Output<'writer> {
         };
         if escape && matches!(self.line_text_state, LineTextState::Hashes(count) if count <= 6) {
             self.value.insert(start, '\\');
+            self.track_width(1);
         }
     }
 
@@ -1419,14 +1600,14 @@ impl<'writer> Output<'writer> {
         for ch in text.chars() {
             if ch.is_whitespace() {
                 if !self.value.ends_with(' ') {
-                    self.value.push(' ');
+                    self.buffer_char(' ');
                 }
                 continue;
             }
             if matches!(ch, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>') {
-                self.value.push('\\');
+                self.buffer_char('\\');
             }
-            self.value.push(ch);
+            self.buffer_char(ch);
         }
     }
 
@@ -1434,14 +1615,14 @@ impl<'writer> Output<'writer> {
         for ch in text.chars() {
             if ch.is_whitespace() {
                 if !self.value.ends_with(' ') {
-                    self.value.push(' ');
+                    self.buffer_char(' ');
                 }
                 continue;
             }
             if matches!(ch, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|') {
-                self.value.push('\\');
+                self.buffer_char('\\');
             }
-            self.value.push(ch);
+            self.buffer_char(ch);
         }
     }
 
@@ -1449,13 +1630,13 @@ impl<'writer> Output<'writer> {
         for ch in text.chars() {
             if ch.is_whitespace() {
                 if !self.value.ends_with(' ') {
-                    self.value.push(' ');
+                    self.buffer_char(' ');
                 }
             } else {
                 if matches!(ch, '\\' | ']') {
-                    self.value.push('\\');
+                    self.buffer_char('\\');
                 }
-                self.value.push(ch);
+                self.buffer_char(ch);
             }
         }
     }
@@ -1469,7 +1650,7 @@ impl<'writer> Output<'writer> {
                     b'\\' | b'(' | b')' | b' ' | b'\n' | b'\r' | b'\t' | b'<' | b'>'
                 )
             }) {
-                self.value.push_str(value);
+                self.buffer_str(value);
                 return;
             }
             let mut start = 0;
@@ -1487,27 +1668,27 @@ impl<'writer> Output<'writer> {
                     _ => None,
                 };
                 if let Some(replacement) = replacement {
-                    self.value.push_str(&value[start..index]);
-                    self.value.push_str(replacement);
+                    self.buffer_str(&value[start..index]);
+                    self.buffer_str(replacement);
                     start = index + 1;
                 }
             }
-            self.value.push_str(&value[start..]);
+            self.buffer_str(&value[start..]);
             return;
         }
         for ch in value.chars() {
             match ch {
                 '\\' | '(' | ')' => {
-                    self.value.push('\\');
-                    self.value.push(ch);
+                    self.buffer_char('\\');
+                    self.buffer_char(ch);
                 }
-                ' ' => self.value.push_str("%20"),
-                '\n' => self.value.push_str("%0A"),
-                '\r' => self.value.push_str("%0D"),
-                '\t' => self.value.push_str("%09"),
-                '<' => self.value.push_str("%3C"),
-                '>' => self.value.push_str("%3E"),
-                _ => self.value.push(ch),
+                ' ' => self.buffer_str("%20"),
+                '\n' => self.buffer_str("%0A"),
+                '\r' => self.buffer_str("%0D"),
+                '\t' => self.buffer_str("%09"),
+                '<' => self.buffer_str("%3C"),
+                '>' => self.buffer_str("%3E"),
+                _ => self.buffer_char(ch),
             }
         }
     }
@@ -1517,9 +1698,9 @@ impl<'writer> Output<'writer> {
             let mut first = true;
             for word in value.split_ascii_whitespace() {
                 if !first {
-                    self.value.push(' ');
+                    self.buffer_char(' ');
                 }
-                self.value.push_str(word);
+                self.buffer_str(word);
                 first = false;
             }
             return;
@@ -1531,24 +1712,25 @@ impl<'writer> Output<'writer> {
                 continue;
             }
             if pending_space {
-                self.value.push(' ');
+                self.buffer_char(' ');
                 pending_space = false;
             }
             if matches!(ch, '\\' | '"') {
-                self.value.push('\\');
+                self.buffer_char('\\');
             }
-            self.value.push(ch);
+            self.buffer_char(ch);
         }
     }
 
     fn markup(&mut self, value: &str) {
         self.prepare_markup();
-        self.value.push_str(value);
+        self.buffer_str(value);
     }
 
     fn markup_repeat(&mut self, value: char, count: usize) {
         self.prepare_markup();
         self.value.extend(std::iter::repeat_n(value, count));
+        self.track_width(count);
     }
 
     fn markup_number(&mut self, value: i32) {
@@ -1556,6 +1738,7 @@ impl<'writer> Output<'writer> {
 
         self.prepare_markup();
         write!(self.value, "{value}").expect("writing to a String cannot fail");
+        self.track_width(decimal_len(value));
     }
 
     fn prepare_markup(&mut self) {
@@ -1567,14 +1750,24 @@ impl<'writer> Output<'writer> {
     }
 
     fn open_marker(&mut self, value: &'static str) {
+        let closing_width = self.max_line_width.map_or(0, |_| value.len());
+        self.open_marker_with_closing_width(value, closing_width);
+    }
+
+    fn open_marker_with_closing_width(&mut self, value: &'static str, closing_width: usize) {
         self.resolve_hash_run(false);
+        if self.max_line_width.is_some() {
+            self.pending_marker_width += value.len();
+            self.closing_marker_width += closing_width;
+        }
         self.markers.push(Marker {
             value,
+            closing_width,
             opened: false,
         });
     }
 
-    fn open_link(&mut self) {
+    fn open_link(&mut self, closing_width: usize) {
         if self.last_text_char == Some('!') && !self.pending_space && self.value.ends_with('!') {
             let bang_index = self.value.len() - 1;
             let backslashes = self.value[..bang_index]
@@ -1584,9 +1777,10 @@ impl<'writer> Output<'writer> {
                 .count();
             if backslashes % 2 == 0 {
                 self.value.insert(bang_index, '\\');
+                self.track_width(1);
             }
         }
-        self.open_marker("[");
+        self.open_marker_with_closing_width("[", closing_width);
     }
 
     fn begin_list_item_content(&mut self) {
@@ -1596,6 +1790,11 @@ impl<'writer> Output<'writer> {
     fn open_pending_markers(&mut self) {
         while let Some(marker) = self.markers.get_mut(self.first_unopened_marker) {
             self.value.push_str(marker.value);
+            let width = marker.value.len();
+            if self.max_line_width.is_some() {
+                self.line_width += width;
+                self.pending_marker_width -= width;
+            }
             marker.opened = true;
             self.first_unopened_marker += 1;
             self.line_text_state = LineTextState::Other;
@@ -1606,8 +1805,15 @@ impl<'writer> Output<'writer> {
         let marker = self.markers.pop().expect("marker close without an open");
         self.first_unopened_marker = self.first_unopened_marker.min(self.markers.len());
         debug_assert_eq!(marker.value, opening);
+        if self.max_line_width.is_some() {
+            self.closing_marker_width -= marker.closing_width;
+        }
         if marker.opened {
-            self.value.push_str(closing);
+            self.buffer_str(closing);
+        } else {
+            if self.max_line_width.is_some() {
+                self.pending_marker_width -= opening.len();
+            }
         }
         marker.opened
     }
@@ -1622,7 +1828,7 @@ impl<'writer> Output<'writer> {
         for part in value.split_inclusive('\n') {
             self.prefix();
             let line = part.strip_suffix('\n').unwrap_or(part);
-            self.value.push_str(line);
+            self.buffer_str(line);
             if part.ends_with('\n') {
                 self.flush_line();
                 self.pending_newlines += 1;
@@ -1639,20 +1845,38 @@ impl<'writer> Output<'writer> {
         self.inline_boundary = false;
         if self.line_start {
             let prefix_start = self.value.len();
+            let prefix_width = self.line_width;
             for prefix in &self.prefixes {
                 match prefix {
-                    Prefix::Quote => self.value.push_str("> "),
-                    Prefix::Indent(width) => self.value.extend(std::iter::repeat_n(' ', *width)),
+                    Prefix::Quote => {
+                        self.value.push_str("> ");
+                        if self.max_line_width.is_some() {
+                            self.line_width += 2;
+                        }
+                    }
+                    Prefix::Indent(width) => {
+                        self.value.extend(std::iter::repeat_n(' ', *width));
+                        if self.max_line_width.is_some() {
+                            self.line_width += width;
+                        }
+                    }
                     Prefix::ListItem { width, .. } => {
                         self.value.extend(std::iter::repeat_n(' ', *width));
+                        if self.max_line_width.is_some() {
+                            self.line_width += width;
+                        }
                     }
                 }
             }
             while self.value.ends_with(' ') {
                 self.value.pop();
+                if self.max_line_width.is_some() {
+                    self.line_width -= 1;
+                }
             }
             if !self.value[prefix_start..].contains('>') {
                 self.value.truncate(prefix_start);
+                self.line_width = prefix_width;
             }
         }
         self.flush_line();
@@ -1696,7 +1920,7 @@ impl<'writer> Output<'writer> {
         self.resolve_hash_run(true);
         self.pending_space = false;
         self.prefix();
-        self.value.push_str("  ");
+        self.buffer_str("  ");
         self.flush_line();
         self.pending_newlines = 1;
         self.line_start = true;
@@ -1803,6 +2027,7 @@ struct CollapsedTextWriter {
     empty: bool,
     pending_whitespace: bool,
     last_char: Option<char>,
+    written_width: usize,
 }
 
 impl Default for CollapsedTextWriter {
@@ -1811,6 +2036,7 @@ impl Default for CollapsedTextWriter {
             empty: true,
             pending_whitespace: false,
             last_char: None,
+            written_width: 0,
         }
     }
 }
@@ -1824,8 +2050,10 @@ impl CollapsedTextWriter {
             }
             if self.pending_whitespace {
                 out.push(' ');
+                self.written_width += 1;
             }
             out.push(ch);
+            self.written_width += 1;
             self.empty = false;
             self.last_char = Some(ch);
             self.pending_whitespace = false;
@@ -1838,6 +2066,107 @@ fn decimal_len(value: i32) -> usize {
     value.ilog10() as usize + 1
 }
 
+fn collapsed_text_width(value: &str) -> usize {
+    let mut width = 0usize;
+    let mut pending_space = false;
+    let mut has_content = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+        } else {
+            width = width.saturating_add(usize::from(pending_space) + 1);
+            pending_space = false;
+            has_content = true;
+        }
+    }
+    if !has_content && pending_space {
+        1
+    } else {
+        width
+    }
+}
+
+fn label_width(value: &str, escape_pipe: bool) -> usize {
+    let mut width = 0usize;
+    let mut previous_was_space = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            if !previous_was_space {
+                width += 1;
+                previous_was_space = true;
+            }
+            continue;
+        }
+        let escaped = matches!(character, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>')
+            || escape_pipe && character == '|';
+        width += 1 + usize::from(escaped);
+        previous_was_space = false;
+    }
+    width
+}
+
+fn destination_width(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| match character {
+            '\\' | '(' | ')' => 2,
+            ' ' | '\n' | '\r' | '\t' | '<' | '>' => 3,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn link_title_width(value: &str) -> usize {
+    if value.is_ascii() {
+        let words_width = value.split_ascii_whitespace().map(str::len).sum::<usize>();
+        let spaces = value.split_ascii_whitespace().count().saturating_sub(1);
+        return words_width
+            + spaces
+            + value
+                .bytes()
+                .filter(|byte| matches!(byte, b'\\' | b'"'))
+                .count();
+    }
+
+    let mut width = 0usize;
+    let mut pending_space = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        width += usize::from(pending_space) + 1 + usize::from(matches!(character, '\\' | '"'));
+        pending_space = false;
+    }
+    width
+}
+
+fn link_closing_width(link: &crate::document::Link) -> usize {
+    destination_width(link.destination())
+        .saturating_add(
+            link.title()
+                .map_or(0, |title| link_title_width(title).saturating_add(3)),
+        )
+        .saturating_add(3)
+}
+
+fn footnote_label_width(value: &str) -> usize {
+    let mut width = 0usize;
+    let mut previous_was_space = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            if !previous_was_space {
+                width += 1;
+                previous_was_space = true;
+            }
+        } else {
+            width += 1 + usize::from(matches!(character, '\\' | ']'));
+            previous_was_space = false;
+        }
+    }
+    width
+}
+
 fn is_word_like(value: char) -> bool {
     value.is_alphanumeric()
 }
@@ -1846,9 +2175,411 @@ fn is_word_like(value: char) -> bool {
 mod tests {
     use super::*;
     use crate::document::{
-        CodeBlock, Image, List, ListKind, MathFormat, MathValue, Media, MediaKind,
+        CodeBlock, Image, Link, List, ListKind, MathFormat, MathValue, Media, MediaKind,
         SemanticKind as Item, SemanticTapeBuilder, Table, TableCell, TaskMarker,
     };
+
+    fn wrapped(width: usize) -> MarkdownConfig {
+        MarkdownConfig {
+            max_line_width: Some(width),
+            ..MarkdownConfig::default()
+        }
+    }
+
+    #[test]
+    fn wraps_prose_at_word_boundaries() {
+        let mut builder = SemanticTapeBuilder::with_capacity(2);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(paragraph), "Alpha beta gamma delta epsilon zeta.")
+            .unwrap();
+        builder.close(paragraph).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(18)),
+            "Alpha beta gamma\ndelta epsilon\nzeta.\n"
+        );
+    }
+
+    #[test]
+    fn wrapped_list_items_keep_their_continuation_prefix() {
+        let mut builder = SemanticTapeBuilder::with_capacity(3);
+        let list = builder
+            .emit(
+                None,
+                Item::List(List {
+                    kind: ListKind::Unordered,
+                    start: None,
+                }),
+            )
+            .unwrap();
+        let item = builder.emit(Some(list), Item::ListItem).unwrap();
+        builder
+            .append_prose(Some(item), "Alpha beta gamma delta")
+            .unwrap();
+        builder.close(item).unwrap();
+        builder.close(list).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(12)),
+            "- Alpha beta\n  gamma\n  delta\n"
+        );
+    }
+
+    #[test]
+    fn wrapped_task_fallback_labels_keep_their_continuation_prefix() {
+        let mut builder = SemanticTapeBuilder::with_capacity(3);
+        let list = builder
+            .emit(
+                None,
+                Item::List(List {
+                    kind: ListKind::Unordered,
+                    start: None,
+                }),
+            )
+            .unwrap();
+        let item = builder.emit(Some(list), Item::ListItem).unwrap();
+        builder
+            .emit(
+                Some(item),
+                Item::TaskMarker(TaskMarker {
+                    checked: false,
+                    fallback_label: Some("Alpha beta gamma".into()),
+                }),
+            )
+            .unwrap();
+        builder.close(item).unwrap();
+        builder.close(list).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(12)),
+            "- [ ] Alpha\n      beta\n      gamma\n"
+        );
+    }
+
+    #[test]
+    fn wrapping_counts_characters_and_preserves_inline_markers() {
+        let mut builder = SemanticTapeBuilder::with_capacity(4);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "你好 世界 ").unwrap();
+        let strong = builder.emit(Some(paragraph), Item::Strong).unwrap();
+        builder.append_prose(Some(strong), "alpha beta").unwrap();
+        builder.close(strong).unwrap();
+        builder.close(paragraph).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(10)),
+            "你好 世界\n**alpha\nbeta**\n"
+        );
+    }
+
+    #[test]
+    fn generated_inline_spaces_are_wrap_opportunities() {
+        let mut builder = SemanticTapeBuilder::with_capacity(17);
+
+        let code_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(code_paragraph), "123456789")
+            .unwrap();
+        builder
+            .append_inline_code(Some(code_paragraph), "x")
+            .unwrap();
+        builder.close(code_paragraph).unwrap();
+
+        let strong_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(strong_paragraph), "123456789")
+            .unwrap();
+        let strong = builder.emit(Some(strong_paragraph), Item::Strong).unwrap();
+        builder.append_prose(Some(strong), "x").unwrap();
+        builder.close(strong).unwrap();
+        builder.close(strong_paragraph).unwrap();
+
+        let link_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(link_paragraph), "123456789")
+            .unwrap();
+        let link = builder
+            .emit(
+                Some(link_paragraph),
+                Item::Link(Link {
+                    destination: "u".into(),
+                    title: None,
+                    fragment_only: false,
+                }),
+            )
+            .unwrap();
+        builder.append_prose(Some(link), "x").unwrap();
+        builder.close(link).unwrap();
+        builder.close(link_paragraph).unwrap();
+
+        let multiword_link_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(multiword_link_paragraph), "12345 ")
+            .unwrap();
+        let multiword_link = builder
+            .emit(
+                Some(multiword_link_paragraph),
+                Item::Link(Link {
+                    destination: "u".into(),
+                    title: None,
+                    fragment_only: false,
+                }),
+            )
+            .unwrap();
+        builder
+            .append_prose(Some(multiword_link), "alpha beta")
+            .unwrap();
+        builder.close(multiword_link).unwrap();
+        builder.close(multiword_link_paragraph).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(10)),
+            "123456789\n`x`\n\n123456789\n**x**\n\n123456789\n[x](u)\n\n12345\n[alpha\nbeta](u)\n"
+        );
+    }
+
+    #[test]
+    fn atomic_inline_content_moves_to_a_continuation_line() {
+        let mut builder = SemanticTapeBuilder::with_capacity(14);
+        let footnote_id = FootnoteId::from_index(0).unwrap();
+
+        let reference_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(reference_paragraph), "123456789 ")
+            .unwrap();
+        builder
+            .emit(
+                Some(reference_paragraph),
+                Item::FootnoteReference(footnote_id),
+            )
+            .unwrap();
+        builder.close(reference_paragraph).unwrap();
+
+        let math_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(math_paragraph), "123456789 ")
+            .unwrap();
+        builder
+            .emit(
+                Some(math_paragraph),
+                Item::InlineMath(MathValue {
+                    source: "x".into(),
+                    format: MathFormat::Tex,
+                    fallback_text: None,
+                }),
+            )
+            .unwrap();
+        builder.close(math_paragraph).unwrap();
+
+        let media_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(media_paragraph), "123456789 ")
+            .unwrap();
+        builder
+            .emit(
+                Some(media_paragraph),
+                Item::Media(Media {
+                    kind: MediaKind::Video,
+                    source: "v".into(),
+                    title: Some("V".into()),
+                }),
+            )
+            .unwrap();
+        builder.close(media_paragraph).unwrap();
+
+        let definition = builder
+            .emit(None, Item::FootnoteDefinition(footnote_id))
+            .unwrap();
+        builder
+            .define_footnote(footnote_id, "n", definition)
+            .unwrap();
+        builder.append_prose(Some(definition), "Note").unwrap();
+        builder.close(definition).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(10)),
+            "123456789\n[^n]\n\n123456789\n$x$\n\n123456789\n[V](v)\n\n[^n]: Note\n"
+        );
+    }
+
+    #[test]
+    fn inline_code_prediction_counts_collapsed_leading_space() {
+        let mut builder = SemanticTapeBuilder::with_capacity(2);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "123456 ").unwrap();
+        builder.append_inline_code(Some(paragraph), " x").unwrap();
+        builder.close(paragraph).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(10)),
+            "123456\n` x`\n"
+        );
+    }
+
+    #[test]
+    fn prose_wraps_after_syntax_only_inline_content() {
+        let mut builder = SemanticTapeBuilder::with_capacity(14);
+
+        let image_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .emit(
+                Some(image_paragraph),
+                Item::Image(Image {
+                    source: "u".into(),
+                    alt: "x".into(),
+                    title: None,
+                    width: None,
+                    height: None,
+                }),
+            )
+            .unwrap();
+        builder
+            .append_prose(Some(image_paragraph), " word")
+            .unwrap();
+        builder.close(image_paragraph).unwrap();
+
+        let footnote_id = FootnoteId::from_index(0).unwrap();
+        let footnote_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .emit(
+                Some(footnote_paragraph),
+                Item::FootnoteReference(footnote_id),
+            )
+            .unwrap();
+        builder
+            .append_prose(Some(footnote_paragraph), " word")
+            .unwrap();
+        builder.close(footnote_paragraph).unwrap();
+
+        let math_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .emit(
+                Some(math_paragraph),
+                Item::InlineMath(MathValue {
+                    source: "x".into(),
+                    format: MathFormat::Tex,
+                    fallback_text: None,
+                }),
+            )
+            .unwrap();
+        builder.append_prose(Some(math_paragraph), " word").unwrap();
+        builder.close(math_paragraph).unwrap();
+
+        let media_paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .emit(
+                Some(media_paragraph),
+                Item::Media(Media {
+                    kind: MediaKind::Video,
+                    source: "v".into(),
+                    title: Some("V".into()),
+                }),
+            )
+            .unwrap();
+        builder
+            .append_prose(Some(media_paragraph), " word")
+            .unwrap();
+        builder.close(media_paragraph).unwrap();
+
+        let definition = builder
+            .emit(None, Item::FootnoteDefinition(footnote_id))
+            .unwrap();
+        builder
+            .define_footnote(footnote_id, "n", definition)
+            .unwrap();
+        builder.append_prose(Some(definition), "Note").unwrap();
+        builder.close(definition).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(7)),
+            "![x](u)\nword\n\n[^n]\nword\n\n$x$\nword\n\n[V](v)\nword\n\n[^n]: Note\n"
+        );
+    }
+
+    #[test]
+    fn image_wrap_prediction_uses_emitted_markdown_width() {
+        let mut builder = SemanticTapeBuilder::with_capacity(3);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder
+            .append_prose(Some(paragraph), "1234567890 ")
+            .unwrap();
+        builder
+            .emit(
+                Some(paragraph),
+                Item::Image(Image {
+                    source: "a(b) c".into(),
+                    alt: "*x*".into(),
+                    title: Some("say \"hi\"".into()),
+                    width: None,
+                    height: None,
+                }),
+            )
+            .unwrap();
+        builder.close(paragraph).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(33)),
+            "1234567890\n![\\*x\\*](a\\(b\\)%20c \"say \\\"hi\\\"\")\n"
+        );
+    }
+
+    #[test]
+    fn wrapping_keeps_atomic_and_structural_lines_intact() {
+        let mut builder = SemanticTapeBuilder::with_capacity(11);
+        let heading = builder.emit(None, Item::Heading { level: 2 }).unwrap();
+        builder
+            .append_prose(Some(heading), "A heading stays on one source line")
+            .unwrap();
+        builder.close(heading).unwrap();
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "Lead text ").unwrap();
+        builder
+            .append_inline_code(Some(paragraph), "an atomic code span")
+            .unwrap();
+        builder.close(paragraph).unwrap();
+        builder
+            .emit(
+                None,
+                Item::CodeBlock(CodeBlock {
+                    language: None,
+                    text: "a code block line that stays intact".into(),
+                }),
+            )
+            .unwrap();
+
+        let table = builder
+            .emit(
+                None,
+                Item::Table(Table {
+                    column_count: Some(1),
+                }),
+            )
+            .unwrap();
+        let row = builder.emit(Some(table), Item::TableRow).unwrap();
+        let cell = builder
+            .emit(
+                Some(row),
+                Item::TableCell(TableCell {
+                    header: false,
+                    colspan: 1,
+                    rowspan: 1,
+                    alignment: None,
+                }),
+            )
+            .unwrap();
+        builder
+            .append_prose(Some(cell), "a table cell that stays intact")
+            .unwrap();
+        builder.close(cell).unwrap();
+        builder.close(row).unwrap();
+        builder.close(table).unwrap();
+
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(10)),
+            "## A heading stays on one source line\n\nLead text\n`an atomic code span`\n\n```\na code block line that stays intact\n```\n\n| a table cell that stays intact |\n| --- |\n"
+        );
+    }
 
     #[test]
     fn semantic_code_chooses_safe_delimiters() {
@@ -2263,8 +2994,11 @@ mod tests {
             builder.close(formatting).unwrap();
         }
         builder.close(paragraph).unwrap();
-        let markdown = render_markdown(&builder.finish().unwrap(), 0, MarkdownConfig::default());
+        let document = builder.finish().unwrap();
+        let markdown = render_markdown(&document, 0, MarkdownConfig::default());
         assert!(markdown.contains("end"));
+        let wrapped_markdown = render_markdown(&document, 0, wrapped(80));
+        assert!(wrapped_markdown.contains("end"));
     }
 
     #[test]

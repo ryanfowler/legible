@@ -174,6 +174,7 @@ impl ExtractedPage {
             document: &self.content.document,
             links: true,
             images: true,
+            max_line_width: None,
         }
     }
 
@@ -374,6 +375,7 @@ impl ExtractedContent {
             document: &self.document,
             links: true,
             images: true,
+            max_line_width: None,
         }
     }
 
@@ -561,12 +563,13 @@ impl HtmlBuilder<'_> {
 
 /// Configures Markdown rendering for extracted content.
 ///
-/// Links and images are included by default. The builder consumes itself when
-/// it renders the result.
+/// Links and images are included by default. Line wrapping is disabled by
+/// default. The builder consumes itself when it renders the result.
 pub struct MarkdownBuilder<'a> {
     document: &'a Document,
     links: bool,
     images: bool,
+    max_line_width: Option<usize>,
 }
 
 impl MarkdownBuilder<'_> {
@@ -582,6 +585,19 @@ impl MarkdownBuilder<'_> {
         self
     }
 
+    /// Sets the preferred maximum width of Markdown source lines.
+    ///
+    /// The renderer wraps prose at whitespace. It preserves the prefixes for
+    /// lists, quotes, and footnotes. It does not split atomic Markdown content,
+    /// such as URLs and code spans. It also does not wrap code blocks, math
+    /// blocks, headings, or tables. These items can exceed the selected width.
+    ///
+    /// A width of `0` disables wrapping.
+    pub fn max_line_width(mut self, width: usize) -> Self {
+        self.max_line_width = (width > 0).then_some(width);
+        self
+    }
+
     /// Renders the configured Markdown output.
     pub fn render(self) -> String {
         let _phase =
@@ -592,6 +608,7 @@ impl MarkdownBuilder<'_> {
             crate::render::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
+                max_line_width: self.max_line_width,
             },
         )
     }
@@ -606,6 +623,7 @@ impl MarkdownBuilder<'_> {
             crate::render::markdown::MarkdownConfig {
                 links: self.links,
                 images: self.images,
+                max_line_width: self.max_line_width,
             },
         )
     }
@@ -888,6 +906,40 @@ mod tests {
         assert!(markdown.contains("Hello world."));
         assert!(!markdown.contains("]("));
         assert!(!markdown.contains("!["));
+    }
+
+    #[test]
+    fn markdown_builder_controls_line_width_for_all_writer_types() {
+        let page = extract(
+            "<main><p>Alpha beta gamma delta epsilon zeta.</p></main>",
+            None,
+        )
+        .unwrap();
+        let expected = "Alpha beta gamma\ndelta epsilon\nzeta.\n";
+
+        assert_eq!(
+            page.markdown_builder().max_line_width(18).render(),
+            expected
+        );
+
+        let mut formatted = String::new();
+        page.markdown_builder()
+            .max_line_width(18)
+            .write(&mut formatted)
+            .unwrap();
+        assert_eq!(formatted, expected);
+
+        let mut bytes = Vec::new();
+        page.markdown_builder()
+            .max_line_width(18)
+            .write_io(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, expected.as_bytes());
+
+        assert_eq!(
+            page.markdown_builder().max_line_width(0).render(),
+            page.markdown()
+        );
     }
 
     #[test]
