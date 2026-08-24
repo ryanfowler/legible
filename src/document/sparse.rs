@@ -74,6 +74,7 @@ impl<T> SparseNodeValues<T> {
         self.entries.into_iter()
     }
 
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     pub(super) fn allocated_bytes(&self) -> usize {
         self.entries
@@ -154,6 +155,7 @@ impl SparseNodeSet {
         self.nodes.iter().copied()
     }
 
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     pub(super) fn allocated_bytes(&self) -> usize {
         self.nodes

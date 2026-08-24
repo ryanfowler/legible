@@ -341,6 +341,7 @@ struct ComplexSourceAnalysis {
 /// Capacity evidence for the analysis state held immediately before lowering.
 /// This is benchmark-only evidence. It excludes allocator metadata and the
 /// short-lived parser and cleanup buffers.
+// Used by the benchmark-only complex storage report.
 #[allow(dead_code)]
 pub(crate) struct ComplexStorageMetrics {
     pub(crate) source_nodes: usize,
@@ -350,6 +351,7 @@ pub(crate) struct ComplexStorageMetrics {
     pub(crate) sparse_bytes: usize,
 }
 
+// Used by the benchmark-only complex storage report.
 #[allow(dead_code)]
 pub(crate) fn complex_storage_metrics_for_benchmark(
     dom: &Dom,

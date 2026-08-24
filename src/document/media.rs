@@ -21,6 +21,7 @@ impl MediaAnalysis {
         self.items.is_empty()
     }
 
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.items.allocated_bytes()

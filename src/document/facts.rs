@@ -144,8 +144,10 @@ impl SemanticGate {
 /// valid while the fragment is reduced and compiled.
 #[derive(Default)]
 pub(crate) struct SourceEvidence {
+    #[cfg(test)]
     callout: Vec<u8>,
     callout_candidate: Vec<u8>,
+    #[cfg(test)]
     footnote: Vec<u8>,
     footnote_candidate: Vec<u8>,
     math: Vec<u8>,
@@ -458,8 +460,10 @@ impl SourceEvidence {
             }
         }
         Self {
+            #[cfg(test)]
             callout: node_mask(&callout, dom.len()),
             callout_candidate: node_mask(&callout_candidate, dom.len()),
+            #[cfg(test)]
             footnote: node_mask(&footnote, dom.len()),
             footnote_candidate: node_mask(&footnote_candidate, dom.len()),
             math: node_mask(&math, dom.len()),
@@ -470,7 +474,7 @@ impl SourceEvidence {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn callout(&self, node: NodeId) -> bool {
         mask_contains(&self.callout, node)
     }
@@ -479,7 +483,7 @@ impl SourceEvidence {
         mask_contains(&self.callout_candidate, node)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn footnote(&self, node: NodeId) -> bool {
         mask_contains(&self.footnote, node)
     }

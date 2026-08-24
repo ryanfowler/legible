@@ -13,6 +13,7 @@ pub(crate) struct RecognizedCallout {
 
 pub(crate) struct CalloutAnalysis {
     values: SparseNodeValues<RecognizedCallout>,
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     bounded_text_bytes: usize,
 }
@@ -83,6 +84,7 @@ impl CalloutAnalysis {
         self.values.get(node)
     }
 
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.values
