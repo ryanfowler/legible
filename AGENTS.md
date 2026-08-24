@@ -8,8 +8,10 @@ Guidance for AI agents editing this repository. Keep this file updated after cha
 cargo build            # Build the library
 cargo test             # Run all tests (includes Mozilla's readability test suite)
 cargo test test_name   # Run a specific test (test names are sanitized from test-pages directory names)
-cargo fmt              # Format code - run after making changes
+cargo fmt              # Format library code - run after making changes
+cargo fmt --manifest-path cli/Cargo.toml # Format the standalone CLI
 cargo clippy           # Run linter - address all warnings after making changes
+cargo clippy --manifest-path cli/Cargo.toml # Lint the standalone CLI
 cargo doc --open       # Generate and view documentation
 cargo bench --bench smoke      # Run the quick performance smoke benchmarks
 cargo bench --bench pipeline # Run the full compatibility performance suite
@@ -76,6 +78,7 @@ The extraction pipeline flows through these stages:
 | `specialized/ai_conversation.rs` | Static shared AI conversation adapter |
 | `specialized/discourse.rs` / `specialized/reddit.rs` | Static Discourse and old-Reddit discussion adapters |
 | `render/markdown.rs` / `render/html.rs` / `document/stats.rs` | Stack-safe Markdown and HTML renderers plus normalized text rendering from the semantic document |
+| `cli/` | Standalone HTTP(S) fetcher and Markdown command-line client |
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `scan.rs` | Word-at-a-time ASCII whitespace scanners with scalar small-input fast paths |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |

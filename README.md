@@ -297,6 +297,17 @@ fn report_error(error: Error) {
 Reject unsuccessful HTTP responses before extraction. Legible receives only the
 HTML body and does not know the transport status.
 
+## Command-line client
+
+The `cli/` package provides a `legible` executable. It fetches one HTTP or HTTPS
+URL, converts the response to UTF-8, and writes Markdown to standard output. The
+output starts with YAML frontmatter containing the available page metadata. The
+Markdown renderer uses the smaller of the terminal width and 100 columns.
+
+```bash
+cargo run --manifest-path cli/Cargo.toml -- https://example.com/article
+```
+
 ## Optional features
 
 - `tracing` emits debug events for extraction decisions. Add a `tracing` subscriber
