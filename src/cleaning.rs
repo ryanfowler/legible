@@ -105,7 +105,6 @@ impl FragmentWorkspace {
         crate::instrumentation::record_fragment_snapshot(kind, self.preorder.len(), false);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn preorder(&self) -> &[NodeId] {
         &self.preorder
     }
@@ -155,19 +154,19 @@ impl FragmentWorkspace {
         action(dom, &self.preorder, &self.scratch_bits)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn scratch_u32(&mut self, len: usize) -> &mut [u32] {
         self.scratch_u32.resize(len, 0);
         &mut self.scratch_u32[..len]
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn scratch_bytes(&mut self, len: usize) -> &mut [u8] {
         self.scratch_bytes.resize(len, 0);
         &mut self.scratch_bytes[..len]
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn scratch_bits(&mut self, len: usize) -> &mut [bool] {
         self.scratch_bits.resize(len, false);
         self.scratch_bits[..len].fill(false);

@@ -291,7 +291,7 @@ impl SourceAnalysis {
             .and_then(|position| self.entries.get(position))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn contains(&self, ancestor: NodeId, descendant: NodeId) -> bool {
         let Some(ancestor) = self.entry(ancestor) else {
             return false;
@@ -309,7 +309,7 @@ impl SourceAnalysis {
         Some(start..entry.subtree_end as usize)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn depth(&self, node: NodeId) -> Option<u32> {
         self.entry(node).map(|entry| entry.depth)
     }

@@ -24,15 +24,6 @@ impl MathAnalysis {
         Self::analyze_detected(dom, nodes, None)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn analyze_with_inventory(
-        dom: &Dom,
-        nodes: &[NodeId],
-        candidates: &[NodeId],
-    ) -> Self {
-        Self::analyze_with_inventory_and_evidence(dom, nodes, candidates, None)
-    }
-
     pub(crate) fn analyze_with_inventory_and_evidence(
         dom: &Dom,
         nodes: &[NodeId],
@@ -169,6 +160,7 @@ impl MathAnalysis {
         self.skipped.contains(node)
     }
 
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.values

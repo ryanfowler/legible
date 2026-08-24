@@ -59,7 +59,6 @@ pub(super) fn adjacent_lead_media(dom: &Dom, content_root: NodeId) -> Option<Nod
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(super) fn remove_decorative_media(dom: &mut Dom, root: NodeId) {
     let nodes = dom.element_descendants_snapshot_with_depth(root);
     let mut scratch = crate::cleaning::FragmentScratch {

@@ -222,16 +222,6 @@ pub(crate) fn semantic_normalization_counts_for_nodes(
     (references, definitions, expressions)
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn table_normalization_counts(
-    dom: &crate::dom::Dom,
-    root: crate::dom::NodeId,
-) -> (usize, usize) {
-    let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    table_normalization_counts_for_nodes(dom, root, &nodes)
-}
-
 pub(crate) fn table_normalization_counts_for_nodes(
     dom: &crate::dom::Dom,
     _root: crate::dom::NodeId,
@@ -631,11 +621,13 @@ impl Document {
             .saturating_add(self.semantic_string_bytes())
     }
 
+    // Used by the benchmark-only representation report.
     #[allow(dead_code)]
     pub(crate) fn operation_capacity(&self) -> usize {
         self.ops.capacity()
     }
 
+    // Used by the benchmark-only representation report.
     #[allow(dead_code)]
     pub(crate) fn end_capacity(&self) -> usize {
         self.ends.capacity()
@@ -650,6 +642,7 @@ impl Document {
         self.text_stats.get().is_some()
     }
 
+    // Used by the benchmark-only representation report.
     #[allow(dead_code)]
     pub(crate) fn node_slot_size() -> usize {
         std::mem::size_of::<EventOp>()
@@ -879,7 +872,6 @@ pub(crate) enum SemanticItemView<'a> {
     CodeBlock(&'a CodeBlock),
     List(&'a List),
     ListItem,
-    #[allow(dead_code)]
     Table(&'a Table),
     TableCaption,
     TableRow,
@@ -892,6 +884,8 @@ pub(crate) enum SemanticItemView<'a> {
     DefinitionList,
     DefinitionTerm,
     DefinitionDescription,
+    // The payload is used by debug tape output, but renderers only need the
+    // variant. Keep it available without making renderers inspect it.
     #[allow(dead_code)]
     Callout(&'a Callout),
     FootnoteDefinition(FootnoteId),

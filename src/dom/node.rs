@@ -1,10 +1,10 @@
-#![allow(dead_code)]
-
 use super::{AttrName, Attribute, NodeLink, Tag};
 use html5ever::QualName;
 use tendril::StrTendril;
 
 #[derive(Clone, Debug)]
+// Some parser node payloads are intentionally ignored after parsing.
+#[allow(dead_code)]
 pub(crate) enum NodeData {
     Document,
     Fragment,

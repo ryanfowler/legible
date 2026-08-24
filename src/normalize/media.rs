@@ -7,7 +7,6 @@ use crate::scoring::{has_hidden_utility_class, has_static_hidden_marker};
 /// after content selection. This pass only applies visibility and active
 /// object/embed policy while the source evidence is available.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(super) fn prepare(dom: &mut Dom, root: NodeId) {
     let nodes: Vec<_> = std::iter::once(root).chain(dom.descendants(root)).collect();
     let mut scratch = crate::cleaning::FragmentScratch {

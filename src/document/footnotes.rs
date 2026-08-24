@@ -264,6 +264,7 @@ impl FootnoteAnalysis {
         self.available.contains(label)
     }
 
+    // Used by the benchmark-only complex storage report.
     #[allow(dead_code)]
     pub(crate) fn storage_bytes(&self) -> usize {
         self.references
