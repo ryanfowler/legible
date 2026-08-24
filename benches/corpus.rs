@@ -71,6 +71,21 @@ fn bench_mozilla_readability_fixtures(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_mozilla_readability_html(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mozilla_readability_html");
+    group.sample_size(10);
+
+    for (name, html, url) in fixtures() {
+        let page = extract(html, Some(url)).unwrap();
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_function(BenchmarkId::from_parameter(name), |b| {
+            b.iter(|| black_box(page.html()))
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_mozilla_readability_markdown(c: &mut Criterion) {
     let mut group = c.benchmark_group("mozilla_readability_markdown");
     group.sample_size(10);
@@ -91,6 +106,7 @@ fn bench_mozilla_readability_markdown(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_mozilla_readability_fixtures,
+    bench_mozilla_readability_html,
     bench_mozilla_readability_markdown
 );
 criterion_main!(benches);

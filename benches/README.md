@@ -27,7 +27,8 @@ cargo bench --bench corpus
 
 This target measures `medium-2`, `ars-1`, `heise`, `nytimes-5`, `wikipedia-2`,
 `yahoo-2`, `buzzfeed-1`, `engadget`, `guardian-1`, and `go-net-http`. It
-measures extraction and the full raw HTML to Markdown path for each fixture.
+measures extraction, lazy canonical HTML rendering, and the full raw HTML to
+Markdown path for each fixture.
 
 ## Phase and allocation report
 

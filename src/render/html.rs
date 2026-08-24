@@ -369,27 +369,53 @@ fn open(output: &mut HtmlOutput<'_>, tag: &'static str) {
 }
 
 fn escape_text(output: &mut HtmlOutput<'_>, value: &str) {
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            _ => output.push(character),
-        }
+    if !value
+        .as_bytes()
+        .iter()
+        .any(|&byte| matches!(byte, b'&' | b'<' | b'>'))
+    {
+        output.push_str(value);
+        return;
     }
+    let mut start = 0;
+    for (index, character) in value.char_indices() {
+        let replacement = match character {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            _ => continue,
+        };
+        output.push_str(&value[start..index]);
+        output.push_str(replacement);
+        start = index + character.len_utf8();
+    }
+    output.push_str(&value[start..]);
 }
 
 fn escape_attribute(output: &mut HtmlOutput<'_>, value: &str) {
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            '\'' => output.push_str("&#39;"),
-            _ => output.push(character),
-        }
+    if !value
+        .as_bytes()
+        .iter()
+        .any(|&byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        output.push_str(value);
+        return;
     }
+    let mut start = 0;
+    for (index, character) in value.char_indices() {
+        let replacement = match character {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&#39;",
+            _ => continue,
+        };
+        output.push_str(&value[start..index]);
+        output.push_str(replacement);
+        start = index + character.len_utf8();
+    }
+    output.push_str(&value[start..]);
 }
 
 #[cfg(test)]
@@ -420,25 +446,27 @@ mod tests {
     fn semantic_values_are_escaped_in_canonical_html() {
         let mut builder = SemanticTapeBuilder::with_capacity(3);
         let paragraph = builder.emit(None, Item::Paragraph).unwrap();
-        builder.append_prose(Some(paragraph), "a < b & c").unwrap();
+        builder
+            .append_prose(Some(paragraph), "a < b & c > 世界")
+            .unwrap();
         let link = builder
             .emit(
                 Some(paragraph),
                 Item::Link(Link {
                     destination: "https://example.test/?a=1&b=2".into(),
-                    title: Some("a \"title\"".into()),
+                    title: Some("a \"title\" 'quote'".into()),
                     fragment_only: false,
                 }),
             )
             .unwrap();
-        builder.append_prose(Some(link), "link").unwrap();
+        builder.append_prose(Some(link), "link 世界").unwrap();
         builder.close(link).unwrap();
         builder.close(paragraph).unwrap();
         let document = builder.finish().unwrap();
         document.validate().unwrap();
         assert_eq!(
             render_html(&document, 0),
-            "<p>a &lt; b &amp; c<a href=\"https://example.test/?a=1&amp;b=2\" title=\"a &quot;title&quot;\">link</a></p>"
+            "<p>a &lt; b &amp; c &gt; 世界<a href=\"https://example.test/?a=1&amp;b=2\" title=\"a &quot;title&quot; &#39;quote&#39;\">link 世界</a></p>"
         );
     }
 }
