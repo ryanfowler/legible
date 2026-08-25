@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><title>steady-cache - npm</title><meta property="og:title" content="steady-cache"><meta name="description" content="A small cache with explicit expiry."></head><body>
+<header class="npm-header"><a href="/">npm</a><a href="/login">Sign Up</a><a href="/docs">Documentation</a></header>
+<main id="main"><div id="top"><h1>steady-cache</h1><p class="package-description">A small cache with explicit expiry and predictable invalidation.</p>
+  <ul role="tablist" aria-owns="tabpanel-readme"><li role="presentation"><a role="tab" href="?activeTab=readme">README</a></li></ul>
+  <section id="tabpanel-readme" role="tabpanel"><article><div id="readme">
+  <h2>Install</h2><pre><code>npm install steady-cache</code></pre>
+  <h2>Usage</h2><pre><code>const cache = new Cache({ ttl: 60 });
+cache.set('build', result);
+cache.get('build');</code></pre>
+  <p>The cache returns a value while its time-to-live remains valid. Call <code>clear()</code> after a deployment to remove old results.</p>
+  <h2>API</h2><ul><li><code>set(key, value)</code> stores a value.</li><li><code>get(key)</code> returns a current value.</li><li><code>clear()</code> removes all values.</li></ul>
+</div></article></section></div></main><aside role="button" aria-label="Showing weekly downloads"><h2>Weekly Downloads</h2><p>42,000</p><a href="/dependents">Dependents</a></aside><footer>Package license information</footer>
+</body></html>

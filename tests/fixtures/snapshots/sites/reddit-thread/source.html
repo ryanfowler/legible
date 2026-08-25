@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><title>How do you test a cache? : r/programming</title><meta property="og:title" content="How do you test a cache?"></head><body>
+<header><a href="/">Front page</a><a href="/r/programming">programming</a><a href="/login">Log in</a></header>
+<div id="siteTable">
+  <div class="thing link" data-fullname="t3_example">
+    <a class="title" href="/r/programming/comments/example">How do you test a cache?</a>
+    <div class="entry"><p class="tagline"><a class="author">Example Developer</a></p><div class="usertext-body"><div class="md"><p>What tests catch stale entries when a cache is shared by several workers?</p><p>I want to verify expiry, invalidation, and concurrent reads without making the test depend on timing.</p></div></div></div>
+  </div>
+  <div class="nestedlisting">
+    <div class="thing comment" data-fullname="t1_first"><div class="entry"><p class="tagline"><a class="author">Helpful Developer</a></p><div class="usertext-body"><div class="md"><p>Use a fake clock and an in-memory store. Advance the clock explicitly, then assert the value before and after expiry.</p></div></div></div></div>
+    <div class="thing comment" data-fullname="t1_second"><div class="entry"><p class="tagline"><a class="author">Second Developer</a></p><div class="usertext-body"><div class="md"><p>Also test that two workers observe the same version after invalidation.</p></div></div></div></div>
+  </div>
+</div>
+<aside class="sidebar"><h3>Popular communities</h3><a href="/r/rust">rust</a><a href="/r/webdev">web development</a></aside><footer>Terms and privacy</footer>
+</body></html>

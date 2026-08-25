@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><title>How should a cache key be designed? - Questions</title><meta name="description" content="A question about stable cache keys." /></head><body>
+<header><a href="/questions">Questions</a><a href="/users">Users</a><a href="/login">Log in</a></header>
+<main id="content">
+  <div class="question-header"><h1 class="fs-headline1">How should a cache key be designed?</h1><div class="tags"><a href="/tags/rust">rust</a><a href="/tags/caching">caching</a></div></div>
+  <article class="question js-question"><div class="s-prose js-post-body" itemprop="text"><p>How should a build tool design a cache key when source files and compiler options can change?</p><p>The key must be stable across machines but must not reuse an output after a compiler change.</p></div><div class="post-signature">asked by Example User</div></article>
+  <section id="answers"><h2>Answer</h2><article class="answer js-answer"><div class="s-prose js-post-body" itemprop="text"><p>Include a digest of the source inputs, compiler version, target platform, and relevant options.</p><pre><code>key = hash(source, compiler, target, options)</code></pre></div><div class="post-signature">answered by Another User</div></article></section>
+</main>
+<aside id="sidebar"><h3>Related questions</h3><a href="/q/1">Cache invalidation tips</a><a href="/q/2">Popular rust questions</a></aside>
+<footer>Community guidelines</footer>
+</body></html>

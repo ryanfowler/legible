@@ -20,10 +20,16 @@ cargo test --lib
 
 A snapshot fixture contains `source.html` and either `expected.md` or
 `expected.error`. It can also contain `metadata.json` and `url.txt`.
-`LEGIBLE_UPDATE_FIXTURES=1` updates snapshot Markdown.
+`LEGIBLE_UPDATE_FIXTURES=1` updates snapshot Markdown. The
+`snapshots/sites/` fixtures are minimized, original documents that model markup
+from Wikipedia, GitHub, Stack Overflow, MDN, Medium, Reddit, npm, and arXiv.
+They compare exact Markdown and metadata without copied third-party page text.
 
 A capability fixture contains `source.html` and `expected.json`. Use capability
-fixtures for extraction rules that permit more than one correct rendering.
+fixtures for extraction rules that permit more than one correct rendering. A
+`url.txt` file sets the source URL used for relative-link resolution; the test
+never fetches it. Use capability assertions for behavior that permits more
+than one correct rendering.
 
 ```bash
 cargo test --test fixture_tests
@@ -35,6 +41,7 @@ The snapshot directories record fixture provenance:
 - `general/` contains repository-owned extraction regressions.
 - `specialized/` contains recognized listing and discussion pages.
 - `compatibility-defuddle/` contains minimized Defuddle compatibility cases.
+- `sites/` contains minimized website-shape extraction cases with exact output.
 
 ## Readability compatibility
 
