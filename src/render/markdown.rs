@@ -98,6 +98,7 @@ struct MarkdownRenderer<'document, 'writer> {
     list_depth: usize,
     table_depth: usize,
     heading_depth: usize,
+    link_depth: usize,
     config: MarkdownConfig,
 }
 
@@ -114,6 +115,7 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             list_depth: 0,
             table_depth: 0,
             heading_depth: 0,
+            link_depth: 0,
             config,
         }
     }
@@ -259,14 +261,22 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
             Item::CodeBlock(code) => self.code_block(code.language(), code.text()),
             Item::Link(link) => {
                 if self.config.links {
-                    self.out.mark_inline_boundary();
+                    let visible = self.visible(operation);
                     let allow_wrap = self.allow_prose_wrap();
-                    let closing_width = if self.out.wrapping_enabled(allow_wrap) {
-                        link_closing_width(link)
-                    } else {
-                        0
-                    };
-                    self.out.open_link(closing_width);
+                    self.out.mark_inline_boundary();
+                    if visible && self.out.wrapping_enabled(allow_wrap) {
+                        // Inline boundaries can create a normalized space
+                        // between adjacent semantic leaves. Resolve that
+                        // boundary before deciding whether the atom fits.
+                        self.out
+                            .prepare_inline_boundary(self.first_link_char(index));
+                        self.out
+                            .wrap_before_atomic(self.link_width(index), allow_wrap);
+                    }
+                    // A link is one atomic Markdown construct. Do not allow
+                    // prose wrapping to place a soft break inside its label.
+                    self.out.open_link(0);
+                    self.link_depth += 1;
                 }
                 self.push_frame(index, kind, CloseAction::Link(self.config.links));
                 let _ = link;
@@ -349,6 +359,7 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
                 if !enabled {
                     return;
                 }
+                self.link_depth = self.link_depth.saturating_sub(1);
                 let Some(Item::Link(link)) = self.document.operation_view(opening) else {
                     return;
                 };
@@ -425,7 +436,136 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
     }
 
     fn allow_prose_wrap(&self) -> bool {
-        self.table_depth == 0 && self.heading_depth == 0
+        self.table_depth == 0 && self.heading_depth == 0 && self.link_depth == 0
+    }
+
+    /// Returns the width of a link as emitted on one Markdown source line.
+    ///
+    /// Link labels are inline content, but the complete link is atomic for
+    /// wrapping. Count the label's Markdown syntax so a link moves to the
+    /// next line when its complete form does not fit.
+    fn link_width(&self, index: usize) -> usize {
+        let Some(Item::Link(link)) = self.document.operation_view(index) else {
+            return 0;
+        };
+        let end = self.document.operation_end(index);
+        let mut label = LinkLabelWidth::default();
+        let mut cursor = index.saturating_add(1);
+        while cursor < end {
+            let Some(operation) = self.document.operations().get(cursor).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                let opening = self.document.operation_opening_index(operation);
+                let Some(opening_operation) = self.document.operations().get(opening).copied()
+                else {
+                    cursor += 1;
+                    continue;
+                };
+                if self.visible(opening_operation) {
+                    match opening_operation.kind() {
+                        OperationKind::Emphasis => label.marker(1),
+                        OperationKind::Strong => label.marker(2),
+                        OperationKind::Strikethrough => label.marker(2),
+                        _ => {}
+                    }
+                    if matches!(
+                        opening_operation.kind(),
+                        OperationKind::Emphasis
+                            | OperationKind::Strong
+                            | OperationKind::Strikethrough
+                    ) {
+                        label.mark_boundary();
+                    }
+                }
+                cursor += 1;
+                continue;
+            }
+            let Some(node) = self.document.operation_view(cursor) else {
+                cursor += 1;
+                continue;
+            };
+            match node {
+                Item::Text(text) => {
+                    let next = text
+                        .ends_with('!')
+                        .then(|| self.next_text_char(cursor))
+                        .flatten();
+                    label.text(text, next);
+                }
+                Item::Emphasis if self.visible(operation) => {
+                    label.marker(1);
+                    label.mark_boundary();
+                }
+                Item::Strong if self.visible(operation) => {
+                    label.marker(2);
+                    label.mark_boundary();
+                }
+                Item::Strikethrough if self.visible(operation) => {
+                    label.marker(2);
+                    label.mark_boundary();
+                }
+                Item::InlineCode(text) => label.code(text),
+                Item::Image(image) if self.config.images => label.atomic(image_width(image)),
+                Item::FootnoteReference(id) => {
+                    if let Some(label_text) = self.document.footnote_label(id) {
+                        label.atomic(footnote_label_width(label_text).saturating_add(3));
+                    }
+                }
+                Item::InlineMath(math) => label.atomic(math_width(math.source())),
+                Item::Media(media) if self.config.links => label.atomic(
+                    label_width(media.title().unwrap_or(media.source()), false)
+                        .saturating_add(destination_width(media.source()))
+                        .saturating_add(5),
+                ),
+                Item::Link(_) => {
+                    // Nested links are not valid CommonMark. If one reaches
+                    // the tape, count it as a single nested construct.
+                    label.atomic(self.link_width(cursor));
+                    label.mark_boundary();
+                    cursor = self.document.operation_end(cursor).saturating_add(1);
+                    continue;
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        1usize
+            .saturating_add(label.width)
+            .saturating_add(link_closing_width(link))
+    }
+
+    fn first_link_char(&self, index: usize) -> Option<char> {
+        let end = self.document.operation_end(index);
+        let mut cursor = index.saturating_add(1);
+        while cursor < end {
+            let Some(operation) = self.document.operations().get(cursor).copied() else {
+                break;
+            };
+            if operation.is_close() {
+                cursor += 1;
+                continue;
+            }
+            let Some(node) = self.document.operation_view(cursor) else {
+                cursor += 1;
+                continue;
+            };
+            let first = match node {
+                Item::Text(text) => text.chars().find(|character| !character.is_whitespace()),
+                Item::InlineCode(text) => text.chars().find(|character| !character.is_whitespace()),
+                Item::Image(_) if self.config.images => Some('!'),
+                Item::Image(_) => None,
+                Item::FootnoteReference(_) => Some('['),
+                Item::InlineMath(_) => Some('$'),
+                Item::Media(_) | Item::Link(_) => Some('['),
+                _ => None,
+            };
+            if first.is_some() {
+                return first;
+            }
+            cursor += 1;
+        }
+        None
     }
 
     fn next_text_char(&self, index: usize) -> Option<char> {
@@ -538,16 +678,7 @@ impl<'document, 'writer> MarkdownRenderer<'document, 'writer> {
 
     fn image(&mut self, image: &crate::document::Image, allow_wrap: bool) {
         if self.out.wrapping_enabled(allow_wrap) {
-            let title_width = image
-                .title()
-                .map_or(0, |title| link_title_width(title).saturating_add(3));
-            self.out.wrap_before_atomic(
-                label_width(image.alt(), false)
-                    .saturating_add(destination_width(image.source()))
-                    .saturating_add(title_width)
-                    .saturating_add(5),
-                allow_wrap,
-            );
+            self.out.wrap_before_atomic(image_width(image), allow_wrap);
         }
         self.out.mark_list_item_content();
         self.out.markup("![");
@@ -1421,8 +1552,8 @@ impl<'writer> Output<'writer> {
 
     /// Starts a continuation line before the next prose word when it fits on
     /// neither the current source line nor a safe Markdown boundary. Inline
-    /// constructs can cross this soft break. Atomic constructs, such as link
-    /// destinations and code spans, stay intact.
+    /// formatting can cross this soft break. Atomic constructs, such as links,
+    /// images, destinations, and code spans, stay intact.
     fn wrap_before_word(&mut self, text: &str, allow_wrap: bool) {
         let Some(maximum) = self.max_line_width.filter(|_| allow_wrap) else {
             return;
@@ -1986,6 +2117,95 @@ fn scan_longest_run(bytes: &[u8], needle: u8, longest: &mut usize, current: &mut
     }
 }
 
+#[derive(Default)]
+struct LinkLabelWidth {
+    width: usize,
+    pending_space: bool,
+    inline_boundary: bool,
+    last_text_char: Option<char>,
+}
+
+impl LinkLabelWidth {
+    fn flush_space(&mut self) {
+        if self.pending_space {
+            self.width += 1;
+            self.pending_space = false;
+        }
+    }
+
+    fn prepare_boundary(&mut self, first: Option<char>) {
+        if !self.inline_boundary {
+            return;
+        }
+        self.inline_boundary = false;
+        if self.pending_space {
+            return;
+        }
+        if let (Some(previous), Some(first)) = (self.last_text_char, first)
+            && is_word_like(previous)
+            && is_word_like(first)
+        {
+            self.pending_space = true;
+        }
+    }
+
+    fn mark_boundary(&mut self) {
+        self.inline_boundary = true;
+    }
+
+    fn text(&mut self, text: &str, next_text_char: Option<char>) {
+        let mut prepared = false;
+        for (index, character) in text.char_indices() {
+            if character.is_whitespace() {
+                self.pending_space = true;
+                continue;
+            }
+            if !prepared {
+                self.prepare_boundary(Some(character));
+                self.flush_space();
+                prepared = true;
+            } else {
+                self.flush_space();
+            }
+            let next = text[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .or(next_text_char);
+            self.width += 1 + usize::from(
+                markdown_escape(character) || (character == '!' && next == Some('[')),
+            );
+            self.last_text_char = Some(character);
+        }
+    }
+
+    fn code(&mut self, text: &str) {
+        let mut scan = CollapsedText::default();
+        scan.scan(text);
+        if scan.has_content {
+            self.mark_boundary();
+            self.prepare_boundary(scan.first_char);
+        }
+        self.flush_space();
+        self.width += code_span_width(text);
+        if scan.has_content {
+            self.last_text_char = text
+                .chars()
+                .rev()
+                .find(|character| !character.is_whitespace());
+            self.mark_boundary();
+        }
+    }
+
+    fn marker(&mut self, width: usize) {
+        self.width += width;
+    }
+
+    fn atomic(&mut self, width: usize) {
+        self.flush_space();
+        self.width += width;
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct CollapsedText {
     longest_backtick_run: usize,
@@ -2148,6 +2368,37 @@ fn link_closing_width(link: &crate::document::Link) -> usize {
                 .map_or(0, |title| link_title_width(title).saturating_add(3)),
         )
         .saturating_add(3)
+}
+
+fn image_width(image: &crate::document::Image) -> usize {
+    let title_width = image
+        .title()
+        .map_or(0, |title| link_title_width(title).saturating_add(3));
+    label_width(image.alt(), false)
+        .saturating_add(destination_width(image.source()))
+        .saturating_add(title_width)
+        .saturating_add(5)
+}
+
+fn code_span_width(text: &str) -> usize {
+    let mut scan = CollapsedText::default();
+    scan.scan(text);
+    let fence = scan.longest_backtick_run + 1;
+    fence
+        .saturating_mul(2)
+        .saturating_add(collapsed_text_width(text))
+        .saturating_add(usize::from(scan.starts_with_backtick || scan.ends_with_backtick) * 2)
+}
+
+fn math_width(source: &str) -> usize {
+    source.trim().chars().fold(2usize, |width, character| {
+        width.saturating_add(match character {
+            '&' => 5,
+            '<' | '>' => 4,
+            '$' => 2,
+            _ => 1,
+        })
+    })
 }
 
 fn footnote_label_width(value: &str) -> usize {
@@ -2335,7 +2586,163 @@ mod tests {
 
         assert_eq!(
             render_markdown(&builder.finish().unwrap(), 0, wrapped(10)),
-            "123456789\n`x`\n\n123456789\n**x**\n\n123456789\n[x](u)\n\n12345\n[alpha\nbeta](u)\n"
+            "123456789\n`x`\n\n123456789\n**x**\n\n123456789\n[x](u)\n\n12345\n[alpha beta](u)\n"
+        );
+    }
+
+    #[test]
+    fn link_width_includes_generated_spaces_and_escapes() {
+        let formatted = {
+            let mut builder = SemanticTapeBuilder::with_capacity(6);
+            let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+            builder.append_prose(Some(paragraph), "123456789").unwrap();
+            let link = builder
+                .emit(
+                    Some(paragraph),
+                    Item::Link(Link {
+                        destination: "u".into(),
+                        title: None,
+                        fragment_only: false,
+                    }),
+                )
+                .unwrap();
+            builder.append_prose(Some(link), "alpha").unwrap();
+            let strong = builder.emit(Some(link), Item::Strong).unwrap();
+            builder.append_prose(Some(strong), "beta").unwrap();
+            builder.close(strong).unwrap();
+            builder.close(link).unwrap();
+            builder.close(paragraph).unwrap();
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(28))
+        };
+
+        let code = {
+            let mut builder = SemanticTapeBuilder::with_capacity(5);
+            let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+            builder
+                .append_prose(Some(paragraph), "1234567890123")
+                .unwrap();
+            let link = builder
+                .emit(
+                    Some(paragraph),
+                    Item::Link(Link {
+                        destination: "u".into(),
+                        title: None,
+                        fragment_only: false,
+                    }),
+                )
+                .unwrap();
+            builder.append_prose(Some(link), "alpha").unwrap();
+            builder.append_inline_code(Some(link), "x").unwrap();
+            builder.close(link).unwrap();
+            builder.close(paragraph).unwrap();
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(27))
+        };
+
+        let escaped = {
+            let mut builder = SemanticTapeBuilder::with_capacity(5);
+            let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+            builder.append_prose(Some(paragraph), "123456789 ").unwrap();
+            let link = builder
+                .emit(
+                    Some(paragraph),
+                    Item::Link(Link {
+                        destination: "u".into(),
+                        title: None,
+                        fragment_only: false,
+                    }),
+                )
+                .unwrap();
+            builder.append_prose(Some(link), "!").unwrap();
+            builder.append_prose(Some(link), "[").unwrap();
+            builder.close(link).unwrap();
+            builder.close(paragraph).unwrap();
+            render_markdown(&builder.finish().unwrap(), 0, wrapped(18))
+        };
+
+        assert_eq!(formatted, "123456789\n[alpha **beta**](u)\n");
+        assert_eq!(code, "1234567890123\n[alpha `x`](u)\n");
+        assert_eq!(escaped, "123456789\n[\\!\\[](u)\n");
+    }
+
+    #[test]
+    fn disabled_images_do_not_hide_link_label_boundaries() {
+        let mut builder = SemanticTapeBuilder::with_capacity(5);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "12345").unwrap();
+        let link = builder
+            .emit(
+                Some(paragraph),
+                Item::Link(Link {
+                    destination: "u".into(),
+                    title: None,
+                    fragment_only: false,
+                }),
+            )
+            .unwrap();
+        builder
+            .emit(
+                Some(link),
+                Item::Image(Image {
+                    source: "image".into(),
+                    alt: "alt".into(),
+                    title: None,
+                    width: None,
+                    height: None,
+                }),
+            )
+            .unwrap();
+        builder.append_prose(Some(link), "alpha").unwrap();
+        builder.close(link).unwrap();
+        builder.close(paragraph).unwrap();
+
+        let config = MarkdownConfig {
+            images: false,
+            ..wrapped(20)
+        };
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, config),
+            "12345 [alpha](u)\n"
+        );
+    }
+
+    #[test]
+    fn invisible_links_preserve_surrounding_text_boundaries() {
+        let mut builder = SemanticTapeBuilder::with_capacity(5);
+        let paragraph = builder.emit(None, Item::Paragraph).unwrap();
+        builder.append_prose(Some(paragraph), "alpha").unwrap();
+        let link = builder
+            .emit(
+                Some(paragraph),
+                Item::Link(Link {
+                    destination: "u".into(),
+                    title: None,
+                    fragment_only: false,
+                }),
+            )
+            .unwrap();
+        builder
+            .emit(
+                Some(link),
+                Item::Image(Image {
+                    source: "image".into(),
+                    alt: "alt".into(),
+                    title: None,
+                    width: None,
+                    height: None,
+                }),
+            )
+            .unwrap();
+        builder.close(link).unwrap();
+        builder.append_prose(Some(paragraph), "beta").unwrap();
+        builder.close(paragraph).unwrap();
+
+        let config = MarkdownConfig {
+            images: false,
+            ..wrapped(20)
+        };
+        assert_eq!(
+            render_markdown(&builder.finish().unwrap(), 0, config),
+            "alpha beta\n"
         );
     }
 
