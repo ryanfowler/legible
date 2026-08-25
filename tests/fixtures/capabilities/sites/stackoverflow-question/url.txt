@@ -1,0 +1,1 @@
+https://stackoverflow.com/questions/123/how-should-a-cache-key-be-designed

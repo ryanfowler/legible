@@ -4090,6 +4090,8 @@ fn is_terminal_sequence_candidate(dom: &Dom, node: NodeId) -> bool {
                 "promotion",
                 "recommendation",
                 "related",
+                "navbox",
+                "portal",
                 "subscribe",
             ],
         )
@@ -4208,6 +4210,17 @@ fn mark_terminal_peripheral_sequence(
     for (index, &child) in children.iter().enumerate().rev() {
         let child_promotion =
             is_explicit_terminal_promotion(dom, child, link_counts[child.index()]);
+        if index + 1 == children.len()
+            && is_terminal_content_navigation(dom, child, link_counts[child.index()], store)
+            && children[..index]
+                .iter()
+                .map(|&node| get_or_compute_stats(dom, node, store).text_length as usize)
+                .sum::<usize>()
+                >= 200
+        {
+            remove[index] = true;
+            continue;
+        }
         let meaningful_region = is_content_relative_navigation(dom, child)
             || is_inside_article_container(dom, child)
                 && has_meaningful_region_content(dom, child)
@@ -4240,6 +4253,22 @@ fn mark_terminal_peripheral_sequence(
         return;
     }
     remove[start..].fill(true);
+}
+
+fn is_terminal_content_navigation(
+    dom: &Dom,
+    node: NodeId,
+    links: u8,
+    store: &mut crate::dom::NodeStateStore,
+) -> bool {
+    let named = node_name(dom, node)
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| matches!(token, "navbox" | "portal"));
+    if !named || links == 0 {
+        return false;
+    }
+    let stats = get_or_compute_stats(dom, node, store);
+    stats.text_length < 600 && get_link_density_cached(dom, node, stats.text_length, store) >= 0.35
 }
 
 fn is_explicit_terminal_promotion(dom: &Dom, node: NodeId, links: u8) -> bool {
@@ -4285,6 +4314,8 @@ fn terminal_sequence_score(dom: &Dom, node: NodeId, links: u8) -> u8 {
             "promotion",
             "recommendation",
             "related",
+            "navbox",
+            "portal",
             "subscribe",
         ],
     ) {

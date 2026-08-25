@@ -23,7 +23,13 @@ A snapshot fixture contains `source.html` and either `expected.md` or
 `LEGIBLE_UPDATE_FIXTURES=1` updates snapshot Markdown.
 
 A capability fixture contains `source.html` and `expected.json`. Use capability
-fixtures for extraction rules that permit more than one correct rendering.
+fixtures for extraction rules that permit more than one correct rendering. The
+`capabilities/sites/` fixtures are minimized, original documents that model
+markup from Wikipedia, GitHub, Stack Overflow, MDN, Medium, Reddit, npm, and
+arXiv. They do not contain copied third-party page text. A `url.txt` file sets
+the source URL used for relative-link resolution; the test never fetches it.
+Use `html_must_contain` and `html_must_not_contain` to check canonical HTML
+without requiring a complete output snapshot.
 
 ```bash
 cargo test --test fixture_tests

@@ -1,0 +1,10 @@
+{
+  "title": "How should a cache key be designed?",
+  "word_count_min": 45,
+  "must_contain": ["source files and compiler options", "digest of the source inputs", "compiler version"],
+  "must_not_contain": ["Related questions", "Cache invalidation tips", "Community guidelines"],
+  "html_must_contain": ["key = hash", "<h2>Answer</h2>"],
+  "html_must_not_contain": ["id=\"sidebar\""],
+  "headings_min": 1,
+  "code_blocks_min": 1
+}

@@ -33,6 +33,7 @@ struct ExpectedCapabilities {
     must_not_contain: Option<Vec<String>>,
     must_occur_once: Option<Vec<String>>,
     html_must_contain: Option<Vec<String>>,
+    html_must_not_contain: Option<Vec<String>>,
     headings_min: Option<usize>,
     images_min: Option<usize>,
     code_blocks_min: Option<usize>,
@@ -235,6 +236,11 @@ fn run_capability(source_path: &Path) -> datatest_stable::Result<()> {
     for text in expected.html_must_contain.unwrap_or_default() {
         if !html.contains(&text) {
             return Err(format!("HTML output does not contain {text:?}:\n{html}").into());
+        }
+    }
+    for text in expected.html_must_not_contain.unwrap_or_default() {
+        if html.contains(&text) {
+            return Err(format!("HTML output contains excluded {text:?}:\n{html}").into());
         }
     }
     for (minimum, actual, label) in [

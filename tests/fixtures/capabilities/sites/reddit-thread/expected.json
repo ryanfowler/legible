@@ -1,0 +1,9 @@
+{
+  "title": "How do you test a cache?",
+  "word_count_min": 35,
+  "must_contain": ["stale entries", "fake clock", "same version"],
+  "must_not_contain": ["Popular communities", "web development", "Terms and privacy", "Share Save Report"],
+  "html_must_contain": ["fake clock", "invalidation"],
+  "html_must_not_contain": ["sidebar", "post-actions"],
+  "headings_min": 1
+}

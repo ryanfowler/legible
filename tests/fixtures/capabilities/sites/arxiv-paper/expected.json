@@ -1,0 +1,10 @@
+{
+  "title": "Reliable queues in distributed systems",
+  "authors": ["Ada Example", "Lin Example"],
+  "word_count_min": 60,
+  "must_contain": ["preserve work", "explicit acknowledgements", "ordering within each partition"],
+  "must_not_contain": ["Download options", "Terms of use", "Login"],
+  "html_must_contain": ["<h2>Abstract</h2>", "<span class=\"math\">R=1-p</span>"],
+  "html_must_not_contain": ["metrics", "global-nav"],
+  "headings_min": 3
+}
