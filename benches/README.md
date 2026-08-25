@@ -30,31 +30,6 @@ This target measures `medium-2`, `ars-1`, `heise`, `nytimes-5`, `wikipedia-2`,
 measures extraction, lazy canonical HTML rendering, and the full raw HTML to
 Markdown path for each fixture.
 
-## Phase and allocation report
-
-Run the benchmark-only instrumentation report when you need phase, retry, clone,
-scan, capacity, or allocation data:
-
-```bash
-cargo run --release --bin extraction-report --features bench-instrumentation \
-  > target/extraction-report.txt
-```
-
-The report is separate from Criterion timing. It records parse, metadata,
-preparation, candidate discovery, scoring, root selection, fragment copy,
-cleanup, semantic compilation, and rendering durations. It also records
-allocation count, allocated bytes, peak live bytes, retained document bytes,
-DOM clone bytes, builder capacities, JSON-LD bytes, and strategy attempts.
-Builder capacity data also includes requested, final, and peak bytes, vector
-reallocations, maximum open depth, and severe shrink-copy bytes.
-Phase durations are inclusive when diagnostics compile rejected attempts.
-
-The `strategy/*` fixtures cover normal, retry, exact-root, and specialized
-extraction paths. Confirm the reported winner and evaluated attempts before
-comparing a new baseline.
-The allocator wrapper is defined by the reporting binary. The normal library
-build does not enable timing or allocation accounting.
-
 The full suite measures these workloads:
 
 - small, medium, and large prose extraction

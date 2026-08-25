@@ -495,7 +495,6 @@ impl ScoringView {
         source_roots: &[NodeId],
         excluded: &[bool],
     ) -> Result<Dom, DomError> {
-        crate::instrumentation::record_fragment_copy();
         #[cfg(test)]
         Dom::record_fragment_copy_for_test();
 

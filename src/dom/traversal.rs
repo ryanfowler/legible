@@ -198,7 +198,6 @@ impl Dom {
     /// The handles are valid only while the corresponding tree remains
     /// attached and its relevant nodes are not renamed or detached.
     pub(crate) fn document_anchors(&self) -> DocumentAnchors {
-        crate::instrumentation::record_source_full_scan();
         let root = self.root();
         let mut anchors = DocumentAnchors::new(root);
         for node in std::iter::once(root).chain(self.descendants(root)) {
@@ -213,8 +212,6 @@ impl Dom {
     /// returned snapshot lets mutation passes skip a removed subtree without
     /// walking the current ancestor chain of each descendant.
     pub(crate) fn element_descendants_snapshot_with_depth(&self, id: NodeId) -> Vec<(NodeId, u32)> {
-        crate::instrumentation::record_source_full_scan();
-        crate::instrumentation::record_source_element_snapshot();
         // Documents usually alternate elements and text nodes. Start near the
         // expected element count and grow once for markup-only documents.
         let mut out = Vec::with_capacity((self.len() / 2).max(16));
@@ -245,7 +242,6 @@ impl Dom {
     /// without changing the order or adding newly created nodes to the pass.
     #[cfg(test)]
     pub(crate) fn descendants_snapshot(&self, id: NodeId) -> Vec<NodeId> {
-        crate::instrumentation::record_source_full_scan();
         self.descendants(id).collect()
     }
     pub(crate) fn ancestors(&self, id: NodeId) -> Ancestors<'_> {

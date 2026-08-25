@@ -276,8 +276,6 @@ impl Dom {
         html: &str,
         budget: &ParseBudget,
     ) -> Result<Self, ParseError> {
-        let _phase = crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Parse);
-        crate::instrumentation::record_parse_call();
         parse_document(
             DomSink::new(false, node_capacity_hint(html), budget.clone()),
             opts(false),
@@ -285,8 +283,6 @@ impl Dom {
         .one(html)
     }
     pub(crate) fn parse_fragment(html: &str, context: Tag) -> Result<Self, DomError> {
-        let _phase = crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Parse);
-        crate::instrumentation::record_parse_call();
         let sink = DomSink::new(true, node_capacity_hint(html), ParseBudget::default());
         let context = QualName::new(
             None,

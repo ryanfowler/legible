@@ -143,9 +143,6 @@ impl SourceAnalysis {
     }
 
     pub(crate) fn build_with_semantic_counts(dom: &Dom, include_semantic_counts: bool) -> Self {
-        crate::instrumentation::record_source_full_scan();
-        crate::instrumentation::record_prepared_source_build();
-
         let mut entries = Vec::with_capacity(dom.len());
         let mut position_by_node = vec![NO_POSITION; dom.len()];
         let mut open: Vec<usize> = Vec::new();
@@ -274,7 +271,6 @@ impl SourceAnalysis {
                     include_semantic_counts,
                 );
         }
-        crate::instrumentation::record_prepared_source_entries(source.entries.len());
         source
     }
 

@@ -346,7 +346,6 @@ impl ContentMetrics {
     }
 
     fn measure_dom(dom: &Dom, root: NodeId) -> Self {
-        crate::instrumentation::record_source_full_scan();
         let mut store = NodeStateStore::new();
         store.enable_link_lengths();
         let text = get_or_compute_stats(dom, root, &mut store);
@@ -900,7 +899,6 @@ pub(crate) fn is_access_barrier_prepared(dom: &Dom, source: &SourceAnalysis, roo
 }
 
 fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysis>) -> bool {
-    crate::instrumentation::record_source_full_scan();
     let mut buffer = String::new();
     get_normalized_inner_text(dom, root, &mut buffer);
     normalize_barrier_text_in_place(&mut buffer);
@@ -1086,7 +1084,6 @@ pub(crate) struct InteractiveShellEvidence {
 /// Collects source structure used to recognize an application shell.
 /// Extraction does not execute the client code that would populate such a page.
 pub(crate) fn interactive_shell_evidence(dom: &Dom, root: NodeId) -> InteractiveShellEvidence {
-    crate::instrumentation::record_source_full_scan();
     let mut controls = 0;
     let mut data_structure = false;
     let mut loading_placeholder = false;

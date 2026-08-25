@@ -1,40 +1,12 @@
-#[cfg(feature = "bench-instrumentation")]
-use super::Attribute;
 use super::{AttrName, DomError, ElementData, Node, NodeData, NodeId, NodeLink, Tag};
 use html5ever::{LocalName, QualName, ns};
 use tendril::StrTendril;
 
-#[cfg_attr(not(feature = "bench-instrumentation"), derive(Clone))]
+#[derive(Clone)]
 pub(crate) struct Dom {
     pub(crate) nodes: Vec<Node>,
     pub(crate) root: NodeId,
     pub(crate) quirks_mode: html5ever::tree_builder::QuirksMode,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-impl Clone for Dom {
-    fn clone(&self) -> Self {
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            let bytes = self.nodes.capacity() * std::mem::size_of::<Node>()
-                + self
-                    .nodes
-                    .iter()
-                    .filter_map(|node| match &node.data {
-                        NodeData::Element(element) => {
-                            Some(element.attrs.capacity() * std::mem::size_of::<Attribute>())
-                        }
-                        _ => None,
-                    })
-                    .sum::<usize>();
-            crate::instrumentation::record_dom_clone(bytes);
-        }
-        Self {
-            nodes: self.nodes.clone(),
-            root: self.root,
-            quirks_mode: self.quirks_mode,
-        }
-    }
 }
 
 impl Dom {

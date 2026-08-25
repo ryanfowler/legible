@@ -118,12 +118,9 @@ impl StructuredData {
                     limit: json_depth_limit,
                 });
             }
-            crate::instrumentation::record_json_ld_bytes(content.len());
             let Ok(value) = serde_json::from_str::<Value>(content) else {
                 continue;
             };
-            #[cfg(feature = "bench-instrumentation")]
-            crate::instrumentation::record_json_ld_parsed_bytes(estimated_json_value_bytes(&value));
             collect_structured_items(&value, false, &mut items, budget.max_json_ld_items).map_err(
                 |_| StructuredDataError::Items {
                     limit: budget.max_json_ld_items,
@@ -229,39 +226,8 @@ impl StructuredData {
     }
 
     pub(crate) fn retained_items(&self) -> Vec<Value> {
-        let items = self.items.clone();
-        #[cfg(feature = "bench-instrumentation")]
-        crate::instrumentation::record_json_ld_retained_bytes(
-            items.iter().map(estimated_json_value_bytes).sum(),
-        );
-        items
+        self.items.clone()
     }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-fn estimated_json_value_bytes(value: &Value) -> usize {
-    let mut total = 0usize;
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        total = total.saturating_add(std::mem::size_of::<Value>());
-        match value {
-            Value::Null | Value::Bool(_) => {}
-            Value::Number(number) => {
-                total = total.saturating_add(number.to_string().len());
-            }
-            Value::String(text) => {
-                total = total.saturating_add(text.len());
-            }
-            Value::Array(values) => pending.extend(values.iter().rev()),
-            Value::Object(values) => {
-                for (key, value) in values.iter().rev() {
-                    total = total.saturating_add(key.len());
-                    pending.push(value);
-                }
-            }
-        }
-    }
-    total
 }
 
 fn script_text_bounded<'a>(
