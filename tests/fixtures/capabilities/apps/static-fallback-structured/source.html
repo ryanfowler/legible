@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Structured fallback article</title>
+    <meta property="og:type" content="article" />
+    <link rel="canonical" href="https://example.test/docs/page.html" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": "Structured fallback article",
+        "author": {"@type": "Person", "name": "Example Author"},
+        "articleBody": "The structured article body is the authoritative recovery text. It must remain available when the page also contains an unrelated static application fallback."
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="static-content" aria-hidden="true">
+      <h1>Unrelated static shell fallback</h1>
+      <p>This fallback belongs to the application shell and must not replace the structured article body.</p>
+      <p>The client application normally replaces this placeholder after it loads.</p>
+    </div>
+  </body>
+</html>

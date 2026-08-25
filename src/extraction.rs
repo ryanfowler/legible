@@ -308,6 +308,7 @@ struct AttemptPolicyInput<'a> {
 enum ExactRootOrigin {
     Caller,
     Specialized,
+    StaticFallback,
 }
 
 struct FrozenContent {
@@ -550,7 +551,9 @@ impl ExtractionStrategy {
         if self == Self::RelaxedVisibility && !has_relaxable_hidden_content {
             return false;
         }
-        self == Self::RelaxedVisibility || source_metrics.has_meaningful_text()
+        self == Self::RelaxedVisibility
+            || self == Self::StructuredDataHint && structured_root.is_some()
+            || source_metrics.has_meaningful_text()
     }
 }
 struct ExtractedContent {
@@ -981,23 +984,6 @@ impl<'a> ContentExtractor<'a> {
         if self.options.diagnostics {
             self.metadata_fallback_source_metrics = Some(source_metrics);
         }
-        let has_relaxable_hidden_content = prepared_source.has_relaxable_hidden_content(body);
-        let relaxed_source_metrics = prepared_source.relaxed_metrics.unwrap_or(source_metrics);
-        if !source_metrics.has_meaningful_text() && !relaxed_source_metrics.has_meaningful_text() {
-            return Err(Error::NoContent);
-        }
-        let short_source_access_barrier = (source_metrics.word_count <= 200
-            || source_metrics.text_chars <= 1_200)
-            && is_access_barrier_prepared(&self.dom, &prepared_source, body);
-        let substantial_hidden_gain = relaxed_source_metrics.text_chars
-            >= source_metrics.text_chars.saturating_mul(2)
-            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(1_000);
-        let visibility_recovery_needed = has_relaxable_hidden_content
-            && (source_metrics.word_count <= 30
-                || source_metrics.text_chars <= 200
-                || substantial_hidden_gain)
-            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_mul(2)
-            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(100);
         let structured_texts: Vec<_> = self
             .structured_data
             .primary_texts(&self.structured_title, self.source_uri.as_ref())
@@ -1009,6 +995,58 @@ impl<'a> ContentExtractor<'a> {
             &prepared_source,
             structured_text_refs.iter().copied(),
         );
+        let structured_content_usable = structured_root.is_some()
+            || !structured_texts.is_empty()
+                && self
+                    .structured_data
+                    .primary_item_matches(&self.structured_title, self.source_uri.as_ref());
+        let has_relaxable_hidden_content = prepared_source.has_relaxable_hidden_content(body);
+        let relaxed_source_metrics = prepared_source.relaxed_metrics.unwrap_or(source_metrics);
+        let source_is_short =
+            source_metrics.word_count <= 200 || source_metrics.text_chars <= 1_200;
+        let source_has_empty_shell_shape = !source_metrics.has_meaningful_text()
+            || source_metrics.word_count <= 5
+                && source_metrics.heading_count == 0
+                && source_metrics.paragraph_count <= 1;
+        let source_access_barrier = (source_is_short || source_has_empty_shell_shape)
+            && is_access_barrier_prepared(&self.dom, &prepared_source, body);
+        let short_source_access_barrier = source_is_short && source_access_barrier;
+        let source_looks_like_empty_shell =
+            source_has_empty_shell_shape || short_source_access_barrier;
+        let static_fallback_root = (source_looks_like_empty_shell && !source_access_barrier)
+            .then(|| prepared_source.static_fallback_root(&self.dom, body))
+            .flatten();
+        if !source_metrics.has_meaningful_text()
+            && !structured_content_usable
+            && let Some(root) = static_fallback_root
+        {
+            let compile_context = crate::document::CompileContext::new(
+                self.base_uri.clone(),
+                self.source_uri.as_ref(),
+            );
+            return self.extract_exact_root(
+                root,
+                ExactRootOrigin::StaticFallback,
+                &compile_context,
+                prepared_source.anchors,
+            );
+        }
+        if !source_metrics.has_meaningful_text()
+            && !relaxed_source_metrics.has_meaningful_text()
+            && structured_root.is_none()
+            && (structured_content_usable || static_fallback_root.is_none())
+        {
+            return Err(Error::NoContent);
+        }
+        let substantial_hidden_gain = relaxed_source_metrics.text_chars
+            >= source_metrics.text_chars.saturating_mul(2)
+            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(1_000);
+        let visibility_recovery_needed = has_relaxable_hidden_content
+            && (source_metrics.word_count <= 30
+                || source_metrics.text_chars <= 200
+                || substantial_hidden_gain)
+            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_mul(2)
+            && relaxed_source_metrics.text_chars >= source_metrics.text_chars.saturating_add(100);
         let document_evidence = DocumentEvidence {
             title_chars: u16::try_from(self.page_title.chars().count().min(usize::from(u16::MAX)))
                 .unwrap_or(u16::MAX),
@@ -1461,8 +1499,14 @@ impl<'a> ContentExtractor<'a> {
                     .as_ref()
                     .and_then(|result| semantic_coverage(source, result))
             });
+            let static_fallback_shell = static_fallback_root.is_some()
+                && structured_root != Some(selection.node)
+                && source_looks_like_empty_shell
+                && result_metrics.word_count <= 20
+                && result_metrics.paragraph_count <= 1;
             let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
-                || is_application_shell_notice(&runner.dom, result_root, result_metrics);
+                || is_application_shell_notice(&runner.dom, result_root, result_metrics)
+                || static_fallback_shell;
             let incoherent_short = is_incoherent_short_result(result_metrics);
             let AttemptRunner {
                 dom: attempt_dom,
@@ -1622,6 +1666,21 @@ impl<'a> ContentExtractor<'a> {
             }
         }
 
+        if let Some(root) = static_fallback_root
+            && !structured_content_usable
+            && self
+                .best_attempt
+                .as_ref()
+                .is_none_or(|best| best.quality.is_suspiciously_small())
+        {
+            self.best_attempt.take();
+            return self.extract_exact_root(
+                root,
+                ExactRootOrigin::StaticFallback,
+                &compile_context,
+                prepared_source.anchors,
+            );
+        }
         let best = self.best_attempt.take().ok_or(Error::NoContent)?;
         if !best.quality.is_good() && best.quality.is_suspiciously_small() {
             return Err(Error::NoContent);
@@ -2222,7 +2281,7 @@ impl<'a> ContentExtractor<'a> {
         if !self.dom.is_element(root) || !root_attached {
             return Err(match origin {
                 ExactRootOrigin::Caller => Error::ContentRootNotFound,
-                ExactRootOrigin::Specialized => Error::NoContent,
+                ExactRootOrigin::Specialized | ExactRootOrigin::StaticFallback => Error::NoContent,
             });
         }
 
@@ -2251,6 +2310,12 @@ impl<'a> ContentExtractor<'a> {
         let copied_root = fragment
             .first_child(fragment.root())
             .ok_or(Error::NoContent)?;
+        if origin == ExactRootOrigin::StaticFallback {
+            // The fallback is hidden from assistive technology because the
+            // application normally replaces it. The empty-shell path has no
+            // replacement, so make only this selected root extractable.
+            fragment.remove_attr(copied_root, AttrName::AriaHidden);
+        }
         Self::normalize_exact_root_structure(&mut fragment, copied_root, origin);
         let synthetic = root == body;
         let (_top_id, content_id) = if synthetic {
@@ -2560,7 +2625,7 @@ impl<'a> ContentExtractor<'a> {
                     wrap_exact_phrasing_content_in_p(dom, root);
                 }
             }
-            ExactRootOrigin::Specialized => {
+            ExactRootOrigin::Specialized | ExactRootOrigin::StaticFallback => {
                 let nodes = dom.element_descendants_snapshot_with_depth(root);
                 for &(node, _) in &nodes {
                     if node == root
@@ -2598,7 +2663,7 @@ impl<'a> ContentExtractor<'a> {
             selection_reason: RootSelectionReason::SpecificChild.into(),
             candidate_sources: match origin {
                 ExactRootOrigin::Caller => vec![CandidateSourceInfo::CallerHint],
-                ExactRootOrigin::Specialized => Vec::new(),
+                ExactRootOrigin::Specialized | ExactRootOrigin::StaticFallback => Vec::new(),
             },
         })
     }
@@ -2956,6 +3021,34 @@ impl<'a> ContentExtractor<'a> {
         let mut paragraphs = vec![0_u8; self.dom.len()];
         let mut structured = vec![false; self.dom.len()];
         let mut allowed = vec![false; self.dom.len()];
+        let has_opacity_hidden_content = prepared_source.elements().any(|entry| {
+            entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                && self
+                    .dom
+                    .attr(entry.node, AttrName::Style)
+                    .is_some_and(has_opacity_only_hidden_style)
+        });
+        let primary_region = if has_opacity_hidden_content {
+            let mut primary_region = vec![false; self.dom.len()];
+            let mut primary_path = Vec::new();
+            for entry in prepared_source.elements() {
+                while primary_path
+                    .last()
+                    .is_some_and(|&depth| depth >= entry.depth)
+                {
+                    primary_path.pop();
+                }
+                let in_primary_region =
+                    !primary_path.is_empty() || entry.flags.contains(SourceFlags::PRIMARY_REGION);
+                primary_region[entry.node.index()] = in_primary_region;
+                if in_primary_region {
+                    primary_path.push(entry.depth);
+                }
+            }
+            Some(primary_region)
+        } else {
+            None
+        };
         for entry in prepared_source.elements().rev() {
             let node = entry.node;
             let tag = self.dom.tag(node);
@@ -2970,9 +3063,21 @@ impl<'a> ContentExtractor<'a> {
                     .min(2);
                 structured[node.index()] |= structured[child.index()];
             }
-            let authoritative = entry.flags.contains(SourceFlags::PRIMARY_REGION);
-            allowed[node.index()] =
-                authoritative || paragraphs[node.index()] >= 2 || structured[node.index()];
+            let authoritative_root = entry.flags.contains(SourceFlags::PRIMARY_REGION);
+            let animation_content = entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                && !entry.flags.contains(SourceFlags::MODAL_DIALOG)
+                && self
+                    .dom
+                    .attr(node, AttrName::Style)
+                    .is_some_and(has_opacity_only_hidden_style)
+                && paragraphs[node.index()] >= 1
+                && primary_region
+                    .as_ref()
+                    .is_some_and(|primary| primary[node.index()]);
+            allowed[node.index()] = authoritative_root
+                || animation_content
+                || paragraphs[node.index()] >= 2
+                || structured[node.index()];
         }
         allowed
     }

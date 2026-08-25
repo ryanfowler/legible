@@ -190,7 +190,11 @@ impl StructuredData {
         })
     }
 
-    fn primary_item_matches(&self, document_title: &str, source_url: Option<&Url>) -> bool {
+    pub(crate) fn primary_item_matches(
+        &self,
+        document_title: &str,
+        source_url: Option<&Url>,
+    ) -> bool {
         let Some(item) = primary_hint_item(self, document_title, source_url) else {
             return false;
         };

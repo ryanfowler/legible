@@ -1,0 +1,8 @@
+{
+  "title": "Static fallback application",
+  "word_count_min": 25,
+  "must_contain": [
+    "server-rendered explanation",
+    "useful next steps"
+  ]
+}

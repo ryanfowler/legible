@@ -1,0 +1,8 @@
+{
+  "word_count_min": 45,
+  "must_contain": [
+    "roles change as the system scales",
+    "affiliation affects how teams share evidence",
+    "part of the article, not contributor metadata"
+  ]
+}
