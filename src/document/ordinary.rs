@@ -11,6 +11,8 @@ use super::{
 use crate::dom::{AttrName, Dom, NodeId, Tag};
 
 pub(crate) struct OrdinarySourcePlan {
+    /// Source-node count for the test-only sizing entry points.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) source_node_count: usize,
     pub(crate) capacity: BuildCapacityPlan,
 }
@@ -651,7 +653,6 @@ pub(super) fn compile_with_retained_capacity_plan(
 
     macro_rules! requires_complex {
         () => {{
-            builder.record_abandoned_attempt();
             return Err(CompileError::RequiresComplex);
         }};
     }

@@ -312,8 +312,6 @@ cargo run --manifest-path cli/Cargo.toml -- https://example.com/article
 
 - `tracing` emits debug events for extraction decisions. Add a `tracing` subscriber
   in your application to collect them.
-- `bench-instrumentation` exposes phase timings and allocation counters for
-  benchmark work. It adds measurement state and is not needed for normal use.
 
 ## Security
 

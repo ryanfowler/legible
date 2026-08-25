@@ -30,7 +30,6 @@ lto = "fat"
 [features]
 default = []
 fuzzing = []
-bench-instrumentation = []
 tracing = ["dep:tracing"]
 
 [dependencies]

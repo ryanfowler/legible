@@ -63,26 +63,17 @@ impl FragmentWorkspace {
     }
 
     /// Returns one DOM-preorder snapshot for the current fragment version.
-    pub(crate) fn ensure_snapshot(
-        &mut self,
-        dom: &Dom,
-        root: NodeId,
-        kind: crate::instrumentation::SnapshotKind,
-    ) {
+    pub(crate) fn ensure_snapshot(&mut self, dom: &Dom, root: NodeId) {
         if self.snapshot_epoch == Some(self.mutation_epoch) && self.snapshot_root == Some(root) {
-            crate::instrumentation::record_fragment_snapshot(kind, self.preorder.len(), true);
             return;
         }
 
-        crate::instrumentation::record_source_full_scan();
-        crate::instrumentation::record_source_element_snapshot();
         self.preorder.clear();
         self.elements_with_depth.clear();
         self.preorder.push(root);
         let Some(first_child) = dom.first_child(root) else {
             self.snapshot_epoch = Some(self.mutation_epoch);
             self.snapshot_root = Some(root);
-            crate::instrumentation::record_fragment_snapshot(kind, self.preorder.len(), false);
             return;
         };
 
@@ -102,7 +93,6 @@ impl FragmentWorkspace {
         }
         self.snapshot_epoch = Some(self.mutation_epoch);
         self.snapshot_root = Some(root);
-        crate::instrumentation::record_fragment_snapshot(kind, self.preorder.len(), false);
     }
 
     pub(crate) fn preorder(&self) -> &[NodeId] {
@@ -329,11 +319,7 @@ pub(crate) fn clean_styles_with_semantic_gate_in_workspace(
     workspace: &mut FragmentWorkspace,
 ) {
     nodes.clear();
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::StyleCleanup,
-    );
+    workspace.ensure_snapshot(dom, root);
     nodes.push(root);
     nodes.extend(
         workspace
@@ -489,11 +475,7 @@ pub(crate) fn mark_data_tables_in_workspace(
     nodes: &mut Vec<NodeId>,
     workspace: &mut FragmentWorkspace,
 ) {
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::TableClassification,
-    );
+    workspace.ensure_snapshot(dom, root);
     mark_data_tables_from_snapshot(dom, root, workspace.elements_with_depth(), store, nodes);
 }
 
@@ -1088,7 +1070,7 @@ pub(crate) fn hard_cleanup_in_workspace(
     workspace: &mut FragmentWorkspace,
 ) {
     nodes.clear();
-    workspace.ensure_snapshot(dom, root, crate::instrumentation::SnapshotKind::HardCleanup);
+    workspace.ensure_snapshot(dom, root);
     nodes.extend(
         workspace
             .elements_with_depth()
@@ -1319,11 +1301,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     workspace: &mut FragmentWorkspace,
 ) {
     nodes.clear();
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::HeuristicInitial,
-    );
+    workspace.ensure_snapshot(dom, root);
     let mut scratch = workspace.take_scratch();
     scratch.bytes.resize(dom.len(), 0);
     scratch.bytes.fill(0);
@@ -1414,19 +1392,11 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     };
     if changed {
         workspace.invalidate();
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::HeuristicAfterExplicit,
-        );
+        workspace.ensure_snapshot(dom, root);
         populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
     let changed = {
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::HeuristicBeforeTaxonomy,
-        );
+        workspace.ensure_snapshot(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_terminal_taxonomy_before_footnotes(dom, root, snapshot, link_counts, store)
     };
@@ -1434,40 +1404,24 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         workspace.invalidate();
     }
     let changed = {
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::HeuristicBeforeJob,
-        );
+        workspace.ensure_snapshot(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_job_company_profiles(dom, root, page_kind, snapshot, store)
     };
     if changed {
         workspace.invalidate();
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::HeuristicAfterJob,
-        );
+        workspace.ensure_snapshot(dom, root);
         populate_heuristic_link_counts(dom, workspace.elements_with_depth(), link_counts);
     }
     let changed = {
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::HeuristicBeforeDirect,
-        );
+        workspace.ensure_snapshot(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_direct_peripheral_siblings(dom, root, snapshot, link_counts, store, evidence)
     };
     if changed {
         workspace.invalidate();
     }
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::HeuristicFinal,
-    );
+    workspace.ensure_snapshot(dom, root);
     let snapshot = workspace.elements_with_depth();
     populate_heuristic_aggregates(
         dom,
@@ -1756,11 +1710,7 @@ pub(crate) fn remove_inline_chrome_controls_in_workspace(
     evidence: &crate::document::SourceEvidence,
     workspace: &mut FragmentWorkspace,
 ) -> bool {
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::InlineChrome,
-    );
+    workspace.ensure_snapshot(dom, root);
     let snapshot = workspace.elements_with_depth();
     let mut remove = vec![false; dom.len()];
     let mut text = String::new();
@@ -1905,11 +1855,7 @@ pub(crate) fn remove_global_chrome_in_workspace(
     evidence: &crate::document::SourceEvidence,
     workspace: &mut FragmentWorkspace,
 ) -> bool {
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::GlobalChrome,
-    );
+    workspace.ensure_snapshot(dom, root);
     if workspace.elements_with_depth().is_empty() {
         return false;
     }
@@ -2095,11 +2041,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
     evidence: &crate::document::SourceEvidence,
     workspace: &mut FragmentWorkspace,
 ) -> bool {
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::RepeatedInitial,
-    );
+    workspace.ensure_snapshot(dom, root);
     let snapshot = workspace.elements_with_depth();
     if snapshot.is_empty() {
         return false;
@@ -2141,11 +2083,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
         }
         if changed {
             workspace.invalidate();
-            workspace.ensure_snapshot(
-                dom,
-                root,
-                crate::instrumentation::SnapshotKind::RepeatedAfterComments,
-            );
+            workspace.ensure_snapshot(dom, root);
         }
     }
 
@@ -2226,11 +2164,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
         }
         if changed {
             workspace.invalidate();
-            workspace.ensure_snapshot(
-                dom,
-                root,
-                crate::instrumentation::SnapshotKind::RepeatedAfterChrome,
-            );
+            workspace.ensure_snapshot(dom, root);
         }
     }
 
@@ -2292,11 +2226,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
         }
         if changed {
             workspace.invalidate();
-            workspace.ensure_snapshot(
-                dom,
-                root,
-                crate::instrumentation::SnapshotKind::RepeatedAfterLinks,
-            );
+            workspace.ensure_snapshot(dom, root);
         }
     }
 
@@ -5086,11 +5016,7 @@ fn remove_contextual_boilerplate_in_workspace(
     nodes: &mut Vec<NodeId>,
     workspace: &mut FragmentWorkspace,
 ) {
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::FinalNormalization,
-    );
+    workspace.ensure_snapshot(dom, root);
     let snapshot = workspace.elements_with_depth();
     let mut has_nested_boundary = vec![false; dom.len()];
     for &(node, _) in snapshot.iter().rev() {
@@ -5622,28 +5548,16 @@ mod tests {
         let paragraph = dom.first_descendant_by_tag(section, Tag::P).unwrap();
         let mut workspace = FragmentWorkspace::default();
 
-        workspace.ensure_snapshot(
-            &dom,
-            section,
-            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-        );
+        workspace.ensure_snapshot(&dom, section);
         assert_eq!(workspace.preorder()[0], section);
         assert_eq!(workspace.elements_with_depth().len(), 3);
         let first_capacity = workspace.elements_with_depth().as_ptr();
-        workspace.ensure_snapshot(
-            &dom,
-            section,
-            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-        );
+        workspace.ensure_snapshot(&dom, section);
         assert_eq!(workspace.elements_with_depth().as_ptr(), first_capacity);
 
         dom.detach(paragraph);
         workspace.invalidate();
-        workspace.ensure_snapshot(
-            &dom,
-            section,
-            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-        );
+        workspace.ensure_snapshot(&dom, section);
         assert!(
             !workspace
                 .elements_with_depth()

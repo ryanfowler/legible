@@ -58,36 +58,6 @@ impl BuildCapacityPlan {
     fn operation_capacity(self) -> usize {
         self.semantic_nodes.saturating_add(self.containers)
     }
-
-    #[cfg(feature = "bench-instrumentation")]
-    fn payload_capacity_bytes(self) -> usize {
-        self.text_refs
-            .saturating_mul(size_of::<TextRef>())
-            .saturating_add(self.code_blocks.saturating_mul(size_of::<CodeBlock>()))
-            .saturating_add(self.links.saturating_mul(size_of::<Link>()))
-            .saturating_add(self.images.saturating_mul(size_of::<Image>()))
-            .saturating_add(self.lists.saturating_mul(size_of::<List>()))
-            .saturating_add(self.tables.saturating_mul(size_of::<Table>()))
-            .saturating_add(self.table_cells.saturating_mul(size_of::<TableCell>()))
-            .saturating_add(self.callouts.saturating_mul(size_of::<Callout>()))
-            .saturating_add(self.task_markers.saturating_mul(size_of::<TaskMarker>()))
-            .saturating_add(self.math_values.saturating_mul(size_of::<MathValue>()))
-            .saturating_add(self.media.saturating_mul(size_of::<Media>()))
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    fn requested_bytes(self) -> usize {
-        self.operation_capacity()
-            .saturating_mul(size_of::<EventOp>() + size_of::<u32>())
-            .saturating_add(self.max_depth.saturating_mul(size_of::<OpenFrame>()))
-            .saturating_add(self.text_bytes)
-            .saturating_add(self.payload_capacity_bytes())
-            .saturating_add(self.footnotes.saturating_mul(size_of::<FootnoteRecord>()))
-            .saturating_add(
-                self.footnotes
-                    .saturating_mul(size_of::<(FootnoteId, usize)>()),
-            )
-    }
 }
 
 pub(crate) struct SemanticTapeBuilder {
@@ -103,10 +73,6 @@ pub(crate) struct SemanticTapeBuilder {
     node_count: usize,
     output_capacity_hint: usize,
     compile_stats: CompileStats,
-    #[cfg(feature = "bench-instrumentation")]
-    plan: BuildCapacityPlan,
-    #[cfg(feature = "bench-instrumentation")]
-    metrics_recorded: bool,
     metrics: BuilderMetrics,
 }
 
@@ -117,17 +83,6 @@ struct OpenFrame {
     pending_space: bool,
 }
 
-#[cfg(feature = "bench-instrumentation")]
-#[derive(Default)]
-struct BuilderMetrics {
-    reallocations: usize,
-    max_open_depth: usize,
-    shrink_bytes: usize,
-    #[cfg(test)]
-    limits: BuilderLimits,
-}
-
-#[cfg(not(feature = "bench-instrumentation"))]
 #[derive(Default)]
 struct BuilderMetrics {
     #[cfg(test)]
@@ -173,10 +128,6 @@ impl SemanticTapeBuilder {
             node_count: 0,
             output_capacity_hint: 0,
             compile_stats: CompileStats::default(),
-            #[cfg(feature = "bench-instrumentation")]
-            plan,
-            #[cfg(feature = "bench-instrumentation")]
-            metrics_recorded: false,
             metrics: BuilderMetrics::default(),
         }
     }
@@ -186,15 +137,6 @@ impl SemanticTapeBuilder {
         let mut builder = Self::with_plan(plan);
         builder.metrics.limits = limits;
         builder
-    }
-
-    /// Records an attempt that stops before a document can be finished.
-    pub(crate) fn record_abandoned_attempt(&mut self) {
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            let peak_bytes = self.capacity_bytes();
-            self.record_capacity_metrics(peak_bytes);
-        }
     }
 
     /// Emits one semantic item to the private tape.
@@ -228,7 +170,7 @@ impl SemanticTapeBuilder {
             self.append_pending_separator(parent)?;
         }
         let value = self.append_text(value)?;
-        let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics)?;
+        let payload = push_payload(&mut self.payloads.text_refs, value, &self.metrics)?;
         self.append_operation(parent, OperationKind::InlineCode, payload, 0)
     }
 
@@ -289,17 +231,13 @@ impl SemanticTapeBuilder {
             self.compile_stats.non_empty_table_cell_count += 1;
         }
         self.ops[node.index()].flags = flags;
-        push_tracked(
-            &mut self.ops,
-            EventOp {
-                payload: node.0,
-                aux: 0,
-                opcode: operation.opcode | OP_CLOSE,
-                flags,
-            },
-            &mut self.metrics,
-        );
-        push_tracked(&mut self.ends, 0, &mut self.metrics);
+        self.ops.push(EventOp {
+            payload: node.0,
+            aux: 0,
+            opcode: operation.opcode | OP_CLOSE,
+            flags,
+        });
+        self.ends.push(0);
         self.ends[node.index()] = close;
         if let Some(parent) = self.open.last_mut() {
             parent.flags |= flags;
@@ -320,23 +258,13 @@ impl SemanticTapeBuilder {
             return Err(BuildError::InvalidParent);
         }
         let index = self.footnotes.len();
-        let previous_capacity = self.footnote_index.capacity();
         self.footnote_index.insert(id, index);
-        note_reallocation(
-            &mut self.metrics,
-            previous_capacity,
-            self.footnote_index.capacity(),
-        );
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(label.len());
-        push_tracked(
-            &mut self.footnotes,
-            FootnoteRecord {
-                id,
-                label: label.into(),
-                node,
-            },
-            &mut self.metrics,
-        );
+        self.footnotes.push(FootnoteRecord {
+            id,
+            label: label.into(),
+            node,
+        });
         Ok(())
     }
 
@@ -390,27 +318,22 @@ impl SemanticTapeBuilder {
         if !self.open.is_empty() {
             return Err(BuildError::InvalidParent);
         }
-        #[cfg(feature = "bench-instrumentation")]
-        let peak_capacity_bytes = self.capacity_bytes();
         self.compile_stats.semantic_text_bytes = self.text.len();
-        compact_excess_capacity(&mut self.ops, &mut self.metrics);
-        compact_excess_capacity(&mut self.ends, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.text_refs, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.code_blocks, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.links, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.images, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.lists, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.tables, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.table_cells, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.callouts, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.task_markers, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.math_values, &mut self.metrics);
-        compact_excess_capacity(&mut self.payloads.media, &mut self.metrics);
-        compact_excess_capacity(&mut self.footnotes, &mut self.metrics);
-        compact_excess_string(&mut self.text, &mut self.metrics);
-
-        #[cfg(feature = "bench-instrumentation")]
-        self.record_capacity_metrics(peak_capacity_bytes);
+        compact_excess_capacity(&mut self.ops);
+        compact_excess_capacity(&mut self.ends);
+        compact_excess_capacity(&mut self.payloads.text_refs);
+        compact_excess_capacity(&mut self.payloads.code_blocks);
+        compact_excess_capacity(&mut self.payloads.links);
+        compact_excess_capacity(&mut self.payloads.images);
+        compact_excess_capacity(&mut self.payloads.lists);
+        compact_excess_capacity(&mut self.payloads.tables);
+        compact_excess_capacity(&mut self.payloads.table_cells);
+        compact_excess_capacity(&mut self.payloads.callouts);
+        compact_excess_capacity(&mut self.payloads.task_markers);
+        compact_excess_capacity(&mut self.payloads.math_values);
+        compact_excess_capacity(&mut self.payloads.media);
+        compact_excess_capacity(&mut self.footnotes);
+        compact_excess_string(&mut self.text);
 
         let mut footnotes = self.footnotes;
         if footnotes
@@ -458,25 +381,25 @@ impl SemanticTapeBuilder {
             SemanticKind::BlockQuote => (OperationKind::BlockQuote, 0, 0),
             SemanticKind::CodeBlock(value) => (
                 OperationKind::CodeBlock,
-                push_payload(&mut self.payloads.code_blocks, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.code_blocks, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::List(value) => (
                 OperationKind::List,
-                push_payload(&mut self.payloads.lists, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.lists, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::ListItem => (OperationKind::ListItem, 0, 0),
             SemanticKind::Table(value) => (
                 OperationKind::Table,
-                push_payload(&mut self.payloads.tables, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.tables, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::TableCaption => (OperationKind::TableCaption, 0, 0),
             SemanticKind::TableRow => (OperationKind::TableRow, 0, 0),
             SemanticKind::TableCell(value) => (
                 OperationKind::TableCell,
-                push_payload(&mut self.payloads.table_cells, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.table_cells, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::Figure => (OperationKind::Figure, 0, 0),
@@ -489,7 +412,7 @@ impl SemanticTapeBuilder {
             SemanticKind::DefinitionDescription => (OperationKind::DefinitionDescription, 0, 0),
             SemanticKind::Callout(value) => (
                 OperationKind::Callout,
-                push_payload(&mut self.payloads.callouts, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.callouts, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::FootnoteDefinition(id) => (OperationKind::FootnoteDefinition, id.0, 0),
@@ -498,34 +421,34 @@ impl SemanticTapeBuilder {
             SemanticKind::Strikethrough => (OperationKind::Strikethrough, 0, 0),
             SemanticKind::Link(value) => (
                 OperationKind::Link,
-                push_payload(&mut self.payloads.links, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.links, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::Image(value) => (
                 OperationKind::Image,
-                push_payload(&mut self.payloads.images, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.images, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::HardBreak => (OperationKind::HardBreak, 0, 0),
             SemanticKind::FootnoteReference(id) => (OperationKind::FootnoteReference, id.0, 0),
             SemanticKind::TaskMarker(value) => (
                 OperationKind::TaskMarker,
-                push_payload(&mut self.payloads.task_markers, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.task_markers, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::InlineMath(value) => (
                 OperationKind::InlineMath,
-                push_payload(&mut self.payloads.math_values, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.math_values, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::DisplayMath(value) => (
                 OperationKind::DisplayMath,
-                push_payload(&mut self.payloads.math_values, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.math_values, value, &self.metrics)?,
                 0,
             ),
             SemanticKind::Media(value) => (
                 OperationKind::Media,
-                push_payload(&mut self.payloads.media, value, &mut self.metrics)?,
+                push_payload(&mut self.payloads.media, value, &self.metrics)?,
                 0,
             ),
         };
@@ -557,21 +480,14 @@ impl SemanticTapeBuilder {
         let index = u32::try_from(self.ops.len()).map_err(|_| BuildError::CapacityExceeded)?;
         let id = DocumentNodeId(index);
         let flags = known_flags.unwrap_or_else(|| self.operation_visibility(operation, payload));
-        push_tracked(
-            &mut self.ops,
-            EventOp {
-                payload,
-                aux,
-                opcode: operation as u8,
-                flags,
-            },
-            &mut self.metrics,
-        );
-        push_tracked(
-            &mut self.ends,
-            if operation.is_container() { 0 } else { index },
-            &mut self.metrics,
-        );
+        self.ops.push(EventOp {
+            payload,
+            aux,
+            opcode: operation as u8,
+            flags,
+        });
+        self.ends
+            .push(if operation.is_container() { 0 } else { index });
         self.node_count += 1;
         if let Some(parent) = parent {
             let current = self
@@ -585,17 +501,12 @@ impl SemanticTapeBuilder {
             self.last_root_child = Some(id);
         }
         if operation.is_container() {
-            push_tracked(
-                &mut self.open,
-                OpenFrame {
-                    node: id,
-                    flags,
-                    last_child: None,
-                    pending_space: false,
-                },
-                &mut self.metrics,
-            );
-            note_open_depth(&mut self.metrics, self.open.len());
+            self.open.push(OpenFrame {
+                node: id,
+                flags,
+                last_child: None,
+                pending_space: false,
+            });
         }
         Ok(id)
     }
@@ -687,7 +598,7 @@ impl SemanticTapeBuilder {
                 return Ok(Some(previous));
             }
             let value = self.append_text_with_prefix(value, leading_space)?;
-            let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics)?;
+            let payload = push_payload(&mut self.payloads.text_refs, value, &self.metrics)?;
             return self
                 .append_operation_with_flags(
                     parent,
@@ -703,7 +614,7 @@ impl SemanticTapeBuilder {
                 .map(Some);
         }
         let value = self.append_text_with_prefix(value_ref, needs_leading_space)?;
-        let payload = push_payload(&mut self.payloads.text_refs, value, &mut self.metrics)?;
+        let payload = push_payload(&mut self.payloads.text_refs, value, &self.metrics)?;
         self.append_operation_with_flags(
             parent,
             OperationKind::Text,
@@ -805,7 +716,7 @@ impl SemanticTapeBuilder {
             }
         }
         let separator = self.append_text(" ")?;
-        let payload = push_payload(&mut self.payloads.text_refs, separator, &mut self.metrics)?;
+        let payload = push_payload(&mut self.payloads.text_refs, separator, &self.metrics)?;
         self.append_operation(parent, OperationKind::Text, payload, 0)?;
         Ok(())
     }
@@ -833,9 +744,9 @@ impl SemanticTapeBuilder {
         }
         let reference = TextRef::new(start, length)?;
         if leading_space {
-            push_str_tracked(&mut self.text, " ", &mut self.metrics);
+            self.text.push(' ');
         }
-        push_str_tracked(&mut self.text, value, &mut self.metrics);
+        self.text.push_str(value);
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(length);
         self.compile_stats.add_semantic_text_bytes(length);
         Ok(reference)
@@ -871,9 +782,9 @@ impl SemanticTapeBuilder {
             return Err(BuildError::CapacityExceeded);
         }
         if leading_space {
-            push_str_tracked(&mut self.text, " ", &mut self.metrics);
+            self.text.push(' ');
         }
-        push_str_tracked(&mut self.text, value, &mut self.metrics);
+        self.text.push_str(value);
         self.output_capacity_hint = self.output_capacity_hint.saturating_add(added);
         self.compile_stats.add_semantic_text_bytes(added);
         Ok(reference)
@@ -883,42 +794,6 @@ impl SemanticTapeBuilder {
         self.text
             .get(value.range())
             .expect("text reference must point into the tape text arena")
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    fn capacity_bytes(&self) -> usize {
-        self.ops.capacity() * size_of::<EventOp>()
-            + self.ends.capacity() * size_of::<u32>()
-            + self.open.capacity() * size_of::<OpenFrame>()
-            + self.text.capacity()
-            + self.payloads.capacity_bytes()
-            + self.footnotes.capacity() * size_of::<FootnoteRecord>()
-            + self.footnote_index.capacity() * size_of::<(FootnoteId, usize)>()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    fn record_capacity_metrics(&mut self, peak_bytes: usize) {
-        if self.metrics_recorded {
-            return;
-        }
-        crate::instrumentation::record_builder_capacities(
-            crate::instrumentation::BuilderCapacityReport {
-                requested_bytes: self.plan.requested_bytes(),
-                final_bytes: self.capacity_bytes(),
-                peak_bytes,
-                reallocations: self.metrics.reallocations,
-                max_open_depth: self.metrics.max_open_depth,
-                shrink_bytes: self.metrics.shrink_bytes,
-                ops: self.ops.capacity() * size_of::<EventOp>(),
-                ends: self.ends.capacity() * size_of::<u32>(),
-                open: self.open.capacity() * size_of::<OpenFrame>(),
-                text: self.text.capacity(),
-                payload: self.payloads.capacity_bytes(),
-                footnotes: self.footnotes.capacity() * size_of::<FootnoteRecord>(),
-                footnote_index: self.footnote_index.capacity() * size_of::<(FootnoteId, usize)>(),
-            },
-        );
-        self.metrics_recorded = true;
     }
 }
 
@@ -953,107 +828,40 @@ impl PayloadTables {
             media: Vec::with_capacity(plan.media),
         }
     }
-
-    #[cfg(feature = "bench-instrumentation")]
-    fn capacity_bytes(&self) -> usize {
-        self.text_refs.capacity() * size_of::<TextRef>()
-            + self.code_blocks.capacity() * size_of::<CodeBlock>()
-            + self.links.capacity() * size_of::<Link>()
-            + self.images.capacity() * size_of::<Image>()
-            + self.lists.capacity() * size_of::<List>()
-            + self.tables.capacity() * size_of::<Table>()
-            + self.table_cells.capacity() * size_of::<TableCell>()
-            + self.callouts.capacity() * size_of::<Callout>()
-            + self.task_markers.capacity() * size_of::<TaskMarker>()
-            + self.math_values.capacity() * size_of::<MathValue>()
-            + self.media.capacity() * size_of::<Media>()
-    }
 }
 
+/// The `metrics` parameter carries the test-only builder limits.
+#[allow(unused_variables)]
 fn push_payload<T>(
     values: &mut Vec<T>,
     value: T,
-    metrics: &mut BuilderMetrics,
+    metrics: &BuilderMetrics,
 ) -> Result<u32, BuildError> {
     #[cfg(test)]
     if values.len() >= metrics.limits.max_payloads as usize {
         return Err(BuildError::CapacityExceeded);
     }
     let index = u32::try_from(values.len()).map_err(|_| BuildError::CapacityExceeded)?;
-    push_tracked(values, value, metrics);
+    values.push(value);
     Ok(index)
 }
 
-#[inline(always)]
-fn push_tracked<T>(values: &mut Vec<T>, value: T, metrics: &mut BuilderMetrics) {
-    #[cfg(feature = "bench-instrumentation")]
-    let previous_capacity = values.capacity();
-    values.push(value);
-    #[cfg(feature = "bench-instrumentation")]
-    note_reallocation(metrics, previous_capacity, values.capacity());
-    #[cfg(not(feature = "bench-instrumentation"))]
-    let _ = metrics;
-}
-
-#[inline(always)]
-fn push_str_tracked(value: &mut String, text: &str, metrics: &mut BuilderMetrics) {
-    #[cfg(feature = "bench-instrumentation")]
-    let previous_capacity = value.capacity();
-    value.push_str(text);
-    #[cfg(feature = "bench-instrumentation")]
-    note_reallocation(metrics, previous_capacity, value.capacity());
-    #[cfg(not(feature = "bench-instrumentation"))]
-    let _ = metrics;
-}
-
-#[inline(always)]
-fn note_reallocation(metrics: &mut BuilderMetrics, previous: usize, current: usize) {
-    #[cfg(feature = "bench-instrumentation")]
-    if current != previous {
-        metrics.reallocations = metrics.reallocations.saturating_add(1);
-    }
-    #[cfg(not(feature = "bench-instrumentation"))]
-    let _ = (metrics, previous, current);
-}
-
-#[inline(always)]
-fn note_open_depth(metrics: &mut BuilderMetrics, depth: usize) {
-    #[cfg(feature = "bench-instrumentation")]
-    {
-        metrics.max_open_depth = metrics.max_open_depth.max(depth);
-    }
-    #[cfg(not(feature = "bench-instrumentation"))]
-    let _ = (metrics, depth);
-}
-
-#[inline(always)]
-fn note_shrink(metrics: &mut BuilderMetrics, bytes: usize) {
-    #[cfg(feature = "bench-instrumentation")]
-    {
-        metrics.shrink_bytes = metrics.shrink_bytes.saturating_add(bytes);
-    }
-    #[cfg(not(feature = "bench-instrumentation"))]
-    let _ = (metrics, bytes);
-}
-
-/// Releases capacity only for severe, measured overestimates.
-fn compact_excess_capacity<T>(values: &mut Vec<T>, metrics: &mut BuilderMetrics) {
+/// Releases capacity only for severe overestimates.
+fn compact_excess_capacity<T>(values: &mut Vec<T>) {
     const MINIMUM_SAVING_BYTES: usize = 64 * 1024;
 
     let unused = values.capacity().saturating_sub(values.len());
     let unused_bytes = unused.saturating_mul(size_of::<T>());
     if values.capacity() > values.len().saturating_mul(4) && unused_bytes >= MINIMUM_SAVING_BYTES {
-        note_shrink(metrics, values.len().saturating_mul(size_of::<T>()));
         values.shrink_to_fit();
     }
 }
 
-fn compact_excess_string(value: &mut String, metrics: &mut BuilderMetrics) {
+fn compact_excess_string(value: &mut String) {
     const MINIMUM_SAVING_BYTES: usize = 64 * 1024;
 
     let unused = value.capacity().saturating_sub(value.len());
     if unused >= MINIMUM_SAVING_BYTES && unused >= value.len() {
-        note_shrink(metrics, value.len());
         value.shrink_to_fit();
     }
 }

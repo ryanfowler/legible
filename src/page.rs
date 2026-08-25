@@ -180,8 +180,6 @@ impl ExtractedPage {
 
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         self.content.document.text()
     }
 
@@ -190,8 +188,6 @@ impl ExtractedPage {
     /// The method writes to any value that implements [`fmt::Write`]. It
     /// returns the writer error, when one occurs.
     pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         self.content.document.write_text(writer)
     }
 
@@ -381,15 +377,11 @@ impl ExtractedContent {
 
     /// Renders the content as normalized plain text.
     pub fn text(&self) -> String {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         self.document.text()
     }
 
     /// Writes the content as normalized plain text.
     pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         self.document.write_text(writer)
     }
 
@@ -538,15 +530,11 @@ pub struct HtmlBuilder<'a> {
 impl HtmlBuilder<'_> {
     /// Renders canonical semantic HTML.
     pub fn render(self) -> String {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::html::render_html(self.document, self.document.output_capacity_hint())
     }
 
     /// Writes canonical semantic HTML to `writer`.
     pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::html::write_html(self.document, writer)
     }
 
@@ -600,8 +588,6 @@ impl MarkdownBuilder<'_> {
 
     /// Renders the configured Markdown output.
     pub fn render(self) -> String {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::markdown::render_markdown(
             self.document,
             self.document.output_capacity_hint(),
@@ -615,8 +601,6 @@ impl MarkdownBuilder<'_> {
 
     /// Writes the configured Markdown output to `writer`.
     pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
-        let _phase =
-            crate::instrumentation::PhaseGuard::new(crate::instrumentation::Phase::Rendering);
         crate::render::markdown::write_markdown(
             self.document,
             writer,

@@ -53,7 +53,6 @@ pub(crate) struct FootnoteAnalysis {
 
 impl FootnoteAnalysis {
     pub(crate) fn analyze(dom: &Dom, root: NodeId) -> Self {
-        crate::instrumentation::record_source_full_scan();
         if !std::iter::once(root)
             .chain(dom.descendants(root))
             .any(|node| has_possible_footnote_evidence(dom, node))
@@ -388,13 +387,10 @@ fn detect_references(
 }
 
 fn source_nodes(dom: &Dom, root: NodeId) -> Vec<NodeId> {
-    crate::instrumentation::record_source_full_scan();
     std::iter::once(root).chain(dom.descendants(root)).collect()
 }
 
 fn element_nodes_with_depth(dom: &Dom, root: NodeId, nodes: &[NodeId]) -> Vec<(NodeId, u32)> {
-    crate::instrumentation::record_source_full_scan();
-    crate::instrumentation::record_source_element_snapshot();
     let mut elements = Vec::with_capacity(nodes.len() / 2);
     let mut ancestors = Vec::<(NodeId, u32)>::new();
     for &node in nodes {

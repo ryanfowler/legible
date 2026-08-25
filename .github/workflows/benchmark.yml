@@ -35,18 +35,6 @@ jobs:
       - name: Benchmark changes
         run: cargo bench --bench smoke -- --save-baseline changes
 
-      - name: Collect phase and allocation report
-        run: |
-          mkdir -p target/performance
-          cargo run --release --bin extraction-report --features bench-instrumentation \
-            > target/performance/extraction-report.txt
-
-      - name: Upload performance report
-        uses: actions/upload-artifact@v7
-        with:
-          name: extraction-performance-report
-          path: target/performance/extraction-report.txt
-
       - name: Check out base branch
         run: git checkout --detach "origin/${GITHUB_BASE_REF}"
 

@@ -10,7 +10,6 @@ use super::{
     ValidationError, safe_destination, trim_destination,
 };
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
-use crate::instrumentation::{Phase, PhaseGuard};
 use crate::tokens::has_token;
 
 use super::sparse::SparseNodeSet;
@@ -155,20 +154,15 @@ pub(crate) fn compile_document(
     context: &CompileContext,
     inputs: &CompileInputs<'_>,
 ) -> Result<Document, CompileError> {
-    let _phase = PhaseGuard::new(Phase::SemanticCompilation);
     let ordinary_result = if inputs.ordinary_checked {
         inputs.ordinary_plan.map(|plan| {
-            let result = super::ordinary::compile_with_retained_capacity_plan(
+            super::ordinary::compile_with_retained_capacity_plan(
                 dom,
                 root,
                 context,
                 plan.capacity,
                 inputs.retained_stream,
-            );
-            if result.is_ok() {
-                crate::instrumentation::record_semantic_source_nodes(plan.source_node_count);
-            }
-            result
+            )
         })
     } else {
         try_ordinary_compilation(
@@ -182,10 +176,7 @@ pub(crate) fn compile_document(
     };
     if let Some(result) = ordinary_result {
         match result {
-            Ok(document) => {
-                record_document_metrics(&document);
-                return Ok(document);
-            }
+            Ok(document) => return Ok(document),
             Err(CompileError::RequiresComplex) => {}
             Err(error) => return Err(error),
         }
@@ -219,20 +210,15 @@ pub(crate) fn compile_document_owned(
     context: &CompileContext,
     inputs: CompileInputs<'_>,
 ) -> Result<Document, CompileError> {
-    let _phase = PhaseGuard::new(Phase::SemanticCompilation);
     let ordinary_result = if inputs.ordinary_checked {
         inputs.ordinary_plan.map(|plan| {
-            let result = super::ordinary::compile_with_retained_capacity_plan(
+            super::ordinary::compile_with_retained_capacity_plan(
                 &dom,
                 root,
                 context,
                 plan.capacity,
                 inputs.retained_stream,
-            );
-            if result.is_ok() {
-                crate::instrumentation::record_semantic_source_nodes(plan.source_node_count);
-            }
-            result
+            )
         })
     } else {
         try_ordinary_compilation(
@@ -246,10 +232,7 @@ pub(crate) fn compile_document_owned(
     };
     if let Some(result) = ordinary_result {
         match result {
-            Ok(document) => {
-                record_document_metrics(&document);
-                return Ok(document);
-            }
+            Ok(document) => return Ok(document),
             Err(CompileError::RequiresComplex) => {}
             Err(error) => return Err(error),
         }
@@ -270,17 +253,11 @@ pub(crate) fn compile_document_owned(
         source_evidence,
         inputs.retained_stream,
     );
-    let source_node_count = analysis.facts.nodes().len();
     let mut owned_source_texts = super::code::take_owned_source_texts(
         &mut dom,
         &analysis.facts.inventory().owned_code_sources,
     );
-    let result = lower_complex_document(&dom, root, context, analysis, owned_source_texts.as_mut());
-    if let Ok(document) = &result {
-        crate::instrumentation::record_semantic_source_nodes(source_node_count);
-        record_document_metrics(document);
-    }
-    result
+    lower_complex_document(&dom, root, context, analysis, owned_source_texts.as_mut())
 }
 
 fn try_ordinary_compilation(
@@ -302,23 +279,13 @@ fn try_ordinary_compilation(
             super::ordinary::ordinary_source_gate_with_retained_nodes(dom, root, retained_stream)?;
         &owned_plan
     };
-    let source_node_count = source_plan.source_node_count;
-    let result = super::ordinary::compile_with_retained_capacity_plan(
+    Some(super::ordinary::compile_with_retained_capacity_plan(
         dom,
         root,
         context,
         source_plan.capacity,
         retained_stream,
-    );
-    if result.is_ok() {
-        crate::instrumentation::record_semantic_source_nodes(source_node_count);
-    }
-    Some(result)
-}
-
-fn record_document_metrics(document: &Document) {
-    crate::instrumentation::record_semantic_operations(document.operations().len());
-    crate::instrumentation::record_retained_bytes(document.retained_bytes_estimate());
+    ))
 }
 
 struct ComplexSourceAnalysis {
@@ -401,13 +368,7 @@ fn compile_complex_document(
         source_evidence,
         retained_stream,
     );
-    let source_node_count = analysis.facts.nodes().len();
-    let result = lower_complex_document(dom, root, context, analysis, None);
-    if let Ok(document) = &result {
-        crate::instrumentation::record_semantic_source_nodes(source_node_count);
-        record_document_metrics(document);
-    }
-    result
+    lower_complex_document(dom, root, context, analysis, None)
 }
 
 fn analyze_complex_document(

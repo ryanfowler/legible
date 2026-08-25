@@ -66,10 +66,6 @@ mod dom;
 mod error;
 mod extraction;
 mod extractor;
-#[cfg(feature = "bench-instrumentation")]
-pub mod instrumentation;
-#[cfg(not(feature = "bench-instrumentation"))]
-mod instrumentation;
 mod logging;
 mod metadata;
 mod normalize;
@@ -98,11 +94,6 @@ pub use metadata::{
     MetadataSource, MetadataValue,
 };
 pub use page::{ExtractedContent, ExtractedPage, ExtractedPageParts, HtmlBuilder, MarkdownBuilder};
-
-#[cfg(feature = "bench-instrumentation")]
-pub use instrumentation::{
-    ExtractionCounters, InstrumentationSnapshot, Phase, PhaseDurations, SnapshotKind,
-};
 
 /// Extracts relevant content and metadata from an HTML document.
 ///

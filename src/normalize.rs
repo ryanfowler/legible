@@ -107,11 +107,7 @@ pub(crate) fn cleanup_selected_content_in_workspace(
     flatten_javascript_links: bool,
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-    );
+    workspace.ensure_snapshot(dom, root);
     let mut batch = MutationBatch::default();
     collect_code_language_label_removals(dom, workspace.preorder(), &mut batch);
     workspace.with_pending_detach_mask(
@@ -132,11 +128,7 @@ pub(crate) fn cleanup_selected_content_in_workspace(
     // removals before the next topology-dependent detector, then invalidate
     // once for the complete epoch.
     workspace.invalidate();
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::CleanupSelectedHeading,
-    );
+    workspace.ensure_snapshot(dom, root);
     {
         let source_nodes = workspace.preorder();
         let elements_with_depth = workspace.elements_with_depth();
@@ -203,11 +195,7 @@ pub(crate) fn prepare_media_before_cleanup_in_workspace(
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
     let mut scratch = workspace.take_scratch();
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::MediaPreparation,
-    );
+    workspace.ensure_snapshot(dom, root);
     {
         let source_nodes = workspace.preorder();
         media::prepare_with_source_nodes(dom, root, source_nodes, &mut scratch);
@@ -228,11 +216,7 @@ pub(crate) fn remove_decorative_media_before_cleanup_in_workspace(
     workspace: &mut crate::cleaning::FragmentWorkspace,
 ) {
     let mut scratch = workspace.take_scratch();
-    workspace.ensure_snapshot(
-        dom,
-        root,
-        crate::instrumentation::SnapshotKind::DecorativeMedia,
-    );
+    workspace.ensure_snapshot(dom, root);
     {
         let snapshot = workspace.elements_with_depth();
         images::remove_decorative_media_with_snapshot(dom, root, snapshot, &mut scratch);
@@ -922,11 +906,7 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
         flatten_javascript_links: bool,
     ) {
         let mut workspace = crate::cleaning::FragmentWorkspace::default();
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-        );
+        workspace.ensure_snapshot(dom, root);
         let labels: Vec<_> = workspace
             .preorder()
             .iter()
@@ -939,18 +919,10 @@ second</span></code><div class="language-rust"><div class="highlight"><pre><code
             }
         }
         workspace.invalidate();
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-        );
+        workspace.ensure_snapshot(dom, root);
         images::remove_duplicates_with_source_nodes(dom, root, workspace.preorder(), nodes, &[]);
         workspace.invalidate();
-        workspace.ensure_snapshot(
-            dom,
-            root,
-            crate::instrumentation::SnapshotKind::CleanupSelectedInitial,
-        );
+        workspace.ensure_snapshot(dom, root);
         headings::remove_artifacts_with_snapshot(
             dom,
             root,
