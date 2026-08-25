@@ -5,8 +5,8 @@ popular websites. They are not copied pages. The content is synthetic so the
 repository does not redistribute third-party text or private data.
 
 Each fixture keeps the page chrome, content boundary, metadata, and one or two
-site-specific structures that matter for extraction. The capability assertions
-check useful content, rejected chrome, and canonical HTML output.
+site-specific structures that matter for extraction. The snapshot checks exact
+Markdown and expected metadata, including the removal of rejected chrome.
 
 ## Verified layout anchors
 
@@ -25,5 +25,5 @@ HTML where available. They do not depend on every current CSS class.
 | `arxiv-paper` | LaTeXML HTML under `.ltx_page_content`, `.ltx_document`, `.ltx_authors`, and `.ltx_section`. |
 
 A `url.txt` file sets the source URL used for relative-link resolution. The
-test never fetches it. Use `html_must_contain` and `html_must_not_contain` to
-check canonical HTML without requiring a complete output snapshot.
+runner uses it only for extraction and never fetches it. It compares the
+expected Markdown and metadata.

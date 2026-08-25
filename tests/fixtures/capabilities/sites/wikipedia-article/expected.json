@@ -1,9 +1,0 @@
-{
-  "title": "River restoration",
-  "word_count_min": 48,
-  "must_contain": ["returns a damaged river", "reconnect a channel", "Remove barriers"],
-  "must_not_contain": ["community-edited encyclopedia", "Privacy policy", "Related environmental topics"],
-  "html_must_contain": ["River restoration", "<ul>"],
-  "html_must_not_contain": ["siteNotice", "navbox"],
-  "headings_min": 2
-}

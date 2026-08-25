@@ -1,0 +1,7 @@
+{
+  "title": "Array.prototype.map()",
+  "description": "The map() method creates a new array populated with the results of calling a function on every element in the source array.",
+  "site_name": "developer.mozilla.org",
+  "canonical_url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map",
+  "language": "en"
+}

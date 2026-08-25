@@ -1,0 +1,6 @@
+{
+  "title": "Build cache",
+  "description": "Build Cache stores reusable outputs so a project can finish repeated builds faster.",
+  "site_name": "github.com",
+  "canonical_url": "https://github.com/octo-tools/build-cache"
+}
