@@ -2754,6 +2754,20 @@ pub(crate) fn is_hidden_utility_class(class: &str) -> bool {
 }
 
 fn has_hidden_style(style: &str) -> bool {
+    hidden_style_states(style)
+        .into_iter()
+        .flatten()
+        .any(|(hidden, _)| hidden)
+}
+
+pub(crate) fn has_opacity_only_hidden_style(style: &str) -> bool {
+    let [display, visibility, opacity] = hidden_style_states(style);
+    opacity.is_some_and(|(hidden, _)| hidden)
+        && !display.is_some_and(|(hidden, _)| hidden)
+        && !visibility.is_some_and(|(hidden, _)| hidden)
+}
+
+fn hidden_style_states(style: &str) -> [Option<(bool, bool)>; 3] {
     // Store (hidden, important) for each property. A later declaration wins
     // unless an earlier declaration used !important.
     let mut display = None;
@@ -2789,9 +2803,6 @@ fn has_hidden_style(style: &str) -> bool {
         }
     }
     [display, visibility, opacity]
-        .into_iter()
-        .flatten()
-        .any(|(hidden, _)| hidden)
 }
 
 fn valid_display_visibility(value: &str) -> Option<bool> {
@@ -2858,20 +2869,13 @@ fn valid_visibility(value: &str) -> Option<bool> {
 }
 
 fn valid_opacity(value: &str) -> Option<bool> {
-    if ["initial", "inherit", "unset", "revert", "revert-layer"]
-        .iter()
-        .any(|expected| value.eq_ignore_ascii_case(expected))
-    {
-        return Some(false);
-    }
-    let opacity = value
+    let value = value.trim();
+    let numeric = value
         .strip_suffix('%')
-        .map_or_else(
-            || value.parse::<f64>(),
-            |value| value.parse::<f64>().map(|value| value / 100.0),
-        )
+        .unwrap_or(value)
+        .parse::<f32>()
         .ok()?;
-    (0.0..=1.0).contains(&opacity).then_some(opacity == 0.0)
+    Some(numeric == 0.0)
 }
 
 #[cfg(test)]
@@ -3025,10 +3029,10 @@ mod tests {
         assert!(!is_probably_visible(&dom, nodes[9]));
         assert!(is_probably_visible(&dom, nodes[10]));
         assert!(is_probably_visible(&dom, nodes[11]));
-        assert!(is_probably_visible(&dom, nodes[12]));
+        assert!(!is_probably_visible(&dom, nodes[12]));
         assert!(is_probably_visible(&dom, nodes[13]));
         assert!(is_probably_visible(&dom, nodes[14]));
-        assert!(is_probably_visible(&dom, nodes[15]));
+        assert!(!is_probably_visible(&dom, nodes[15]));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::document::{has_math_wrapper_class, is_math_root, is_tex_annotation};
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStats, Tag};
 use crate::quality::ContentMetrics;
 use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text};
-use crate::tokens::{has_any_token, has_token};
+use crate::tokens::{any_token_contains, has_any_token, has_token};
 use std::collections::HashSet;
 
 const NO_POSITION: u32 = u32::MAX;
@@ -357,6 +357,34 @@ impl SourceAnalysis {
         })
     }
 
+    /// Finds a server-rendered fallback that an empty application shell can
+    /// expose. Accessibility-hidden static content is normally excluded, so
+    /// require both a fallback-like name and substantial document structure.
+    pub(crate) fn static_fallback_root(&self, dom: &Dom, root: NodeId) -> Option<NodeId> {
+        self.elements_in(root)
+            .filter(|entry| {
+                entry.flags.contains(SourceFlags::ARIA_HIDDEN)
+                    && !entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                    && !entry.flags.contains(SourceFlags::UTILITY_HIDDEN)
+                    && !entry.flags.contains(SourceFlags::MODAL_DIALOG)
+                    && matches!(
+                        entry.tag,
+                        Some(Tag::Article | Tag::Div | Tag::Main | Tag::Section)
+                    )
+                    && has_static_fallback_name(dom, entry.node)
+            })
+            .filter_map(|entry| {
+                let metrics = ContentMetrics::measure(dom, entry.node);
+                (metrics.text_chars >= 120
+                    && metrics.word_count >= 20
+                    && metrics.paragraph_count > 0
+                    && metrics.link_density < 0.5)
+                    .then_some((entry.node, metrics.text_chars))
+            })
+            .max_by_key(|&(_, text_chars)| text_chars)
+            .map(|(node, _)| node)
+    }
+
     pub(crate) fn accessible_math_nodes(&self, dom: &Dom) -> HashSet<NodeId> {
         let annotations: Vec<_> = self
             .elements()
@@ -561,6 +589,21 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     (flags, class_weight)
 }
 
+fn has_static_fallback_name(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Id, AttrName::Class]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .any(|value| {
+            any_token_contains(value, "static")
+                || any_token_contains(value, "fallback")
+                || any_token_contains(value, "noscript")
+                || any_token_contains(value, "no-js")
+                || any_token_contains(value, "nojs")
+                || any_token_contains(value, "server-rendered")
+                || any_token_contains(value, "ssr")
+        })
+}
+
 fn is_strong_content_id(id: &str) -> bool {
     ["post", "content", "article-content"]
         .into_iter()
@@ -692,6 +735,29 @@ mod tests {
         assert!(source.candidates().is_semantic(content));
         assert_eq!(source.text_stats(text).unwrap().word_count, 2);
         assert_eq!(source.text_stats(text).unwrap().comma_count, 1);
+    }
+
+    #[test]
+    fn static_fallback_requires_named_accessibility_hidden_content() {
+        let dom = Dom::parse_document(
+            r#"<body><div id="static-content" aria-hidden="true"><h1>Fallback page</h1><p>This server-rendered explanation remains useful while the application shell is empty.</p><p>It has enough complete text to be a real fallback.</p></div><div id="root"></div></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let body = dom.body().unwrap();
+        let fallback = source.static_fallback_root(&dom, body).unwrap();
+        assert_eq!(dom.attr(fallback, AttrName::Id), Some("static-content"));
+
+        let unmarked = Dom::parse_document(
+            r#"<body><div aria-hidden="true"><h1>Fallback page</h1><p>This text is not selected without a fallback marker.</p><p>It has enough complete text to be a real fallback.</p></div></body>"#,
+        )
+        .unwrap();
+        let source = SourceAnalysis::build(&unmarked);
+        assert!(
+            source
+                .static_fallback_root(&unmarked, unmarked.body().unwrap())
+                .is_none()
+        );
     }
 
     #[test]

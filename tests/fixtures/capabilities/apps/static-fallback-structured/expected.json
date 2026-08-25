@@ -1,0 +1,10 @@
+{
+  "title": "Structured fallback article",
+  "word_count_min": 20,
+  "must_contain": [
+    "structured article body is the authoritative recovery text"
+  ],
+  "must_not_contain": [
+    "Unrelated static shell fallback"
+  ]
+}

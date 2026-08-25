@@ -1,0 +1,8 @@
+{
+  "title": "Animation opacity content",
+  "word_count_min": 20,
+  "must_contain": [
+    "first paragraph remains part of the article",
+    "second paragraph contains the explanation"
+  ]
+}

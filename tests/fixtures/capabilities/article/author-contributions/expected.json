@@ -1,0 +1,9 @@
+{
+  "must_contain": [
+    "clear reduction in failed requests"
+  ],
+  "must_not_contain": [
+    "Roles:",
+    "Affiliation"
+  ]
+}

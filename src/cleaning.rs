@@ -1446,11 +1446,21 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     let mut boundary_depth = None;
     for &(node, depth) in snapshot {
         if let Some(outer_depth) = boundary_depth {
-            if depth > outer_depth && !discovered_boundaries[node.index()] {
+            let nested_author_boundary =
+                depth > outer_depth && is_author_contribution_boundary(dom, node);
+            if depth > outer_depth
+                && !discovered_boundaries[node.index()]
+                && !nested_author_boundary
+            {
                 continue;
             }
             if depth <= outer_depth {
                 boundary_depth = None;
+            }
+            if nested_author_boundary {
+                nodes.push(node);
+                boundary_depth = Some(depth);
+                continue;
             }
         }
         if dom.parent(node).is_some() {
@@ -1568,6 +1578,44 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             && links >= 1
             && images >= 1;
         let author = author_name && short && (social_links > 0 || links >= 2 || author_card);
+        let author_metadata = contains_any(
+            name,
+            &[
+                "author-list",
+                "author_list",
+                "author-roles",
+                "author_roles",
+                "contributors",
+            ],
+        ) && links >= 2
+            && stats.text_length < 1_200;
+        let repeated_contribution_terms = stats.text_length < 6_000
+            && text.matches("roles").count() >= 2
+            && text.matches("affiliation").count() >= 2
+            && links >= 2;
+        let author_contribution_metadata = (stats.text_length < 1_000
+            && text.contains("roles")
+            && text.contains("affiliation")
+            && contains_any(
+                name,
+                &[
+                    "author-meta",
+                    "author_meta",
+                    "authroles",
+                    "authaffiliations",
+                ],
+            ))
+            || (repeated_contribution_terms
+                && std::iter::once(node)
+                    .chain(dom.ancestors(node))
+                    .any(|ancestor| has_author_region_name(dom, ancestor))
+                && !matches!(dom.tag(node), Some(Tag::Ol | Tag::Ul))
+                && !dom.descendants(node).any(|descendant| {
+                    matches!(
+                        dom.tag(descendant),
+                        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+                    )
+                }));
         let author_promotion = is_author_promotion(dom, node, &metrics);
         let audio_controls = is_audio_controls(&metrics);
         let job_profile = is_job_profile_content(dom, node, page_kind, &metrics);
@@ -1624,7 +1672,15 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             .any(|token| {
                 matches!(
                     token,
-                    "taxonomy" | "tags" | "entities" | "entitylist" | "taglist"
+                    "taxonomy"
+                        | "tags"
+                        | "entities"
+                        | "entitylist"
+                        | "taglist"
+                        | "subject"
+                        | "subjects"
+                        | "subjectarea"
+                        | "subjectareas"
                 )
             })
             || contains_any(
@@ -1643,6 +1699,11 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             && stats.text_length < 300
             && link_density >= 0.45
             && near_content_end_ignoring_footnotes(dom, node, root, store);
+        let subject_feedback =
+            contains_any(name, &["subject-area", "subject_areas", "subjectareas"])
+                && links >= 2
+                && stats.text_length < 1_200
+                && text.contains("feedback");
         let peripheral_panel_name = name
             .split(|character: char| !character.is_ascii_alphanumeric())
             .any(|token| matches!(token, "sidebar" | "comments" | "commentlist"));
@@ -1651,6 +1712,15 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             && short
             && link_density >= 0.2
             && (at_end || text.starts_with("comments") && text.contains("subscribe"));
+        let card_rail = links >= 3
+            && images >= 2
+            && has_repeated_link_cards(dom, node)
+            && matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+            && at_end
+            && !dom
+                .descendants(node)
+                .any(|descendant| dom.tag(descendant) == Some(Tag::Article))
+            && !is_inside_article_container(dom, node);
         let print_citation = links >= 2
             && short
             && contains_any(name, &["print-citation", "story-footer"])
@@ -1662,6 +1732,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             || breadcrumb
             || navigation
             || author
+            || author_metadata
+            || author_contribution_metadata
             || author_promotion
             || audio_controls
             || job_profile
@@ -1672,11 +1744,14 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             || comment_ui
             || terminal_action
             || terminal_taxonomy
+            || subject_feedback
             || terminal_peripheral_panel
+            || card_rail
             || print_citation
         {
             if protected
                 && !author_card
+                && !author_contribution_metadata
                 && !author_promotion
                 && !job_profile
                 && !collection_promotion
@@ -5215,6 +5290,42 @@ fn has_lazy_image_candidate(dom: &Dom, image: NodeId) -> bool {
     })
 }
 
+fn is_author_contribution_boundary(dom: &Dom, node: NodeId) -> bool {
+    if !matches!(dom.tag(node), Some(Tag::Ol | Tag::Ul)) {
+        return false;
+    }
+    if !has_author_region_name(dom, node) {
+        return false;
+    }
+    let mut text = String::new();
+    dom.append_normalized_text_limited(node, &mut text, 6_000);
+    text.make_ascii_lowercase();
+    text.matches("roles").count() >= 2
+        && text.matches("affiliation").count() >= 2
+        && dom
+            .descendants(node)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::A))
+}
+
+fn has_author_region_name(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .any(|value| {
+            [
+                "author",
+                "byline",
+                "contributor",
+                "title-authors",
+                "title_authors",
+                "authroles",
+                "authaffiliation",
+            ]
+            .iter()
+            .any(|needle| contains_ascii_case_insensitive(value, needle))
+        })
+}
+
 fn picture_has_lazy_source(dom: &Dom, image: NodeId) -> bool {
     let Some(picture) = dom
         .ancestors(image)
@@ -5251,6 +5362,14 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
     ) {
         return true;
     }
+    let author_title_wrapper =
+        contains_any(&node_name(dom, node), &["title-authors", "title_authors"])
+            && dom
+                .element_children(node)
+                .any(|child| dom.tag(child) == Some(Tag::H1))
+            && dom.descendants(node).any(|descendant| {
+                contains_any(&node_name(dom, descendant), &["author-list", "author_list"])
+            });
     matches!(
         dom.tag(node),
         Some(Tag::Div | Tag::Ol | Tag::P | Tag::Section | Tag::Ul)
@@ -5268,6 +5387,9 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "navigation",
             "breadcrumb",
             "author",
+            "author-contribution",
+            "author_contribution",
+            "contributor",
             "profile",
             "collection",
             "audio",
@@ -5292,13 +5414,17 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "comment",
             "button-wrapper",
             "taxonomy",
+            "subject",
+            "subject-area",
+            "subject_areas",
+            "subjectareas",
             "company-portals",
             "entity-list",
             "entity_list",
             "tag-list",
             "tag_list",
         ],
-    )
+    ) && !author_title_wrapper
 }
 
 fn near_content_end(

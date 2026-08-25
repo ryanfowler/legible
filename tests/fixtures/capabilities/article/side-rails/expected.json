@@ -1,0 +1,13 @@
+{
+  "title": "Article with peripheral rails",
+  "word_count_min": 25,
+  "must_contain": [
+    "primary explanation",
+    "clear conclusion"
+  ],
+  "must_not_contain": [
+    "Rail story one",
+    "Subject Areas",
+    "We want your feedback"
+  ]
+}
