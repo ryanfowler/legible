@@ -30,7 +30,7 @@ impl RecognizedCode {
     pub(crate) fn into_text(self, sources: Option<&mut OwnedSourceTexts>) -> RawCodeText {
         self.source
             .and_then(|node| sources.and_then(|sources| sources.remove(&node)))
-            .map(RawCodeText::Source)
+            .map(RawCodeText::from)
             .unwrap_or_else(|| RawCodeText::Owned(self.text.into_boxed_str()))
     }
 }

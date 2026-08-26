@@ -233,7 +233,7 @@ pub(crate) fn table_normalization_counts_for_nodes(
 
 use std::fmt;
 use std::sync::OnceLock;
-use tendril::StrTendril;
+use tendril::{Atomic, StrTendril, Tendril, fmt::UTF8};
 
 /// An index into a [`Document`] semantic tape.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -932,10 +932,12 @@ impl TextRef {
     }
 }
 
+type SendCodeText = Tendril<UTF8, Atomic>;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RawCodeText {
     Owned(Box<str>),
-    Source(StrTendril),
+    Source(SendCodeText),
 }
 
 impl From<&str> for RawCodeText {
@@ -952,6 +954,7 @@ impl From<String> for RawCodeText {
 
 impl From<StrTendril> for RawCodeText {
     fn from(value: StrTendril) -> Self {
+        let value: SendCodeText = value.into_send().into();
         Self::Source(value)
     }
 }

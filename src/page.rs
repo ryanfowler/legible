@@ -627,7 +627,15 @@ impl MarkdownBuilder<'_> {
 mod tests {
     use std::{fmt, io};
 
+    use super::ExtractedPage;
     use crate::extract;
+
+    #[test]
+    fn extracted_page_is_send() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<ExtractedPage>();
+    }
 
     #[test]
     fn outputs_are_lazy_and_deterministic() {
