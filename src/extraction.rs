@@ -38,7 +38,7 @@ use crate::quality::{
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
-use crate::tokens::{has_any_token, has_token};
+use crate::tokens::{any_token_contains, has_any_token, has_token};
 use regex::Regex;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -307,6 +307,7 @@ struct AttemptPolicyInput<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExactRootOrigin {
     Caller,
+    FastMain,
     Specialized,
     StaticFallback,
 }
@@ -672,6 +673,255 @@ fn find_content_targets_from_prepared(
         .collect()
 }
 
+/// Returns a direct main region when the body has an unambiguous document
+/// shape. This is deliberately narrower than generic candidate discovery:
+/// every other body-level element must be known page chrome, and structured
+/// data and diagnostics must be absent before the caller can use the shortcut.
+fn find_fast_main_root(dom: &Dom, body: Option<NodeId>) -> Option<NodeId> {
+    let body = body?;
+    let mut main = None;
+    for child in dom.children(body) {
+        if !dom.is_element(child) {
+            if dom
+                .text_node(child)
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                return None;
+            }
+            continue;
+        }
+        match dom.tag(child) {
+            Some(Tag::Main) => {
+                if main.replace(child).is_some() {
+                    return None;
+                }
+            }
+            Some(Tag::Footer | Tag::Nav) if fast_main_sibling_is_chrome(dom, child) => {}
+            Some(Tag::Header | Tag::Aside) if fast_main_sibling_is_chrome(dom, child) => {}
+            _ => return None,
+        }
+    }
+    let main = main?;
+    if !is_probably_visible(dom, main)
+        || has_hidden_utility_class(dom, main)
+        || dom.attr(main, AttrName::AriaModal) == Some("true")
+        || dom
+            .attr(main, AttrName::Role)
+            .is_some_and(|role| has_any_token(role, &["dialog", "alertdialog"]))
+        || fast_main_has_risky_content(dom, main)
+    {
+        return None;
+    }
+    Some(main)
+}
+
+fn fast_main_sibling_is_chrome(dom: &Dom, root: NodeId) -> bool {
+    !std::iter::once(root)
+        .chain(dom.descendants(root))
+        .any(|node| {
+            matches!(
+                dom.tag(node),
+                Some(
+                    Tag::Article
+                        | Tag::Audio
+                        | Tag::Blockquote
+                        | Tag::Button
+                        | Tag::Dl
+                        | Tag::Figure
+                        | Tag::Form
+                        | Tag::Iframe
+                        | Tag::Img
+                        | Tag::Input
+                        | Tag::Main
+                        | Tag::Ol
+                        | Tag::P
+                        | Tag::Picture
+                        | Tag::Pre
+                        | Tag::Section
+                        | Tag::Select
+                        | Tag::Table
+                        | Tag::Textarea
+                        | Tag::Ul
+                        | Tag::Video
+                        | Tag::Embed
+                        | Tag::Object
+                        | Tag::Source
+                )
+            )
+        })
+}
+
+fn fast_main_has_risky_content(dom: &Dom, root: NodeId) -> bool {
+    let risky_tags = [
+        Tag::Article,
+        Tag::Aside,
+        Tag::Header,
+        Tag::Footer,
+        Tag::Nav,
+        Tag::Form,
+        Tag::Button,
+        Tag::Input,
+        Tag::Textarea,
+        Tag::Select,
+        Tag::Img,
+        Tag::Picture,
+        Tag::Source,
+        Tag::Figure,
+        Tag::Video,
+        Tag::Audio,
+        Tag::Embed,
+        Tag::Object,
+        Tag::Iframe,
+    ];
+    let risky_names = [
+        "sidebar",
+        "paywall",
+        "barrier",
+        "subscribe",
+        "related",
+        "recommend",
+        "share",
+        "social",
+        "newsletter",
+        "comment",
+        "discussion",
+        "reply",
+        "toolbar",
+        "advert",
+        "sponsor",
+        "cookie",
+        "consent",
+        "login",
+        "signin",
+        "feedback",
+        "taxonomy",
+        "profile",
+        "collection",
+        "company",
+        "founder",
+        "player",
+        "audio",
+        "navigation",
+        "breadcrumb",
+        "contact",
+        "actions",
+    ];
+    let first_heading = std::iter::once(root)
+        .chain(dom.descendants(root))
+        .find(|&node| matches!(dom.tag(node), Some(Tag::H1 | Tag::H2 | Tag::H3)));
+    if let Some(heading) = first_heading {
+        let mut text = String::new();
+        dom.append_normalized_text_limited(heading, &mut text, 128);
+        if any_token_contains(&text, "access")
+            || any_token_contains(&text, "permission")
+            || any_token_contains(&text, "blocked")
+            || any_token_contains(&text, "subscribe")
+            || any_token_contains(&text, "locked")
+        {
+            return true;
+        }
+    }
+    let mut prefix = String::new();
+    dom.append_normalized_text_limited(root, &mut prefix, 256);
+    prefix.make_ascii_lowercase();
+    if [
+        "enable javascript",
+        "please enable js",
+        "disable any ad blocker",
+        "loading systems",
+        "use the arrows",
+    ]
+    .iter()
+    .any(|phrase| prefix.contains(phrase))
+    {
+        return true;
+    }
+    let mut has_content_structure = false;
+    let risky = std::iter::once(root)
+        .chain(dom.descendants(root))
+        .any(|node| {
+            if risky_tags.contains(&dom.tag(node).unwrap_or(Tag::Other)) {
+                return true;
+            }
+            if matches!(
+                dom.tag(node),
+                Some(
+                    Tag::Blockquote
+                        | Tag::H1
+                        | Tag::H2
+                        | Tag::H3
+                        | Tag::H4
+                        | Tag::H5
+                        | Tag::H6
+                        | Tag::P
+                        | Tag::Pre
+                        | Tag::Table
+                        | Tag::Ul
+                        | Tag::Ol
+                        | Tag::Dl
+                )
+            ) {
+                has_content_structure = true;
+            }
+            if matches!(
+                dom.tag(node),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            ) && dom.descendants(node).any(|descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(
+                        Tag::Address
+                            | Tag::Blockquote
+                            | Tag::Div
+                            | Tag::Dl
+                            | Tag::Form
+                            | Tag::Hr
+                            | Tag::Ol
+                            | Tag::P
+                            | Tag::Pre
+                            | Tag::Section
+                            | Tag::Table
+                            | Tag::Ul
+                    )
+                )
+            }) {
+                return true;
+            }
+            if dom.attr(node, AttrName::Role).is_some_and(|role| {
+                has_any_token(role, &["article", "complementary", "dialog", "main"])
+            }) {
+                return true;
+            }
+            if dom.attr(node, AttrName::ItemProp).is_some()
+                || dom.attr(node, AttrName::DataMath).is_some()
+                || dom.attr(node, AttrName::DataFootnote).is_some()
+                || dom.attr(node, AttrName::DataFootnotes).is_some()
+                || dom.attr(node, AttrName::DataCallout).is_some()
+            {
+                return true;
+            }
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|name| dom.attr(node, name))
+                .any(|value| {
+                    risky_names
+                        .iter()
+                        .any(|name| any_token_contains(value, name))
+                })
+        });
+    risky || !has_content_structure
+}
+
+fn fast_main_anchors(dom: &Dom) -> Option<DocumentAnchors> {
+    let body = dom.body()?;
+    let mut anchors = DocumentAnchors::new(dom.root());
+    anchors.body = Some(body);
+    anchors.html = dom
+        .ancestors(body)
+        .find(|&node| dom.tag(node) == Some(Tag::Html));
+    Some(anchors)
+}
+
 impl<'a> ContentExtractor<'a> {
     pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let source_dom_nodes = dom.len();
@@ -943,6 +1193,32 @@ impl<'a> ContentExtractor<'a> {
     }
 
     fn extract_content(&mut self) -> Result<ExtractedContent> {
+        if !self.options.diagnostics
+            && self.options.content_root.is_none()
+            && self.options.content_hint.is_none()
+            && self.specialized_root.is_none()
+            && self.structured_data.is_empty()
+            && self.page_kind == PageKind::Unknown
+        {
+            if let Some(anchors) = fast_main_anchors(&self.dom)
+                && let Some(root) = find_fast_main_root(&self.dom, anchors.body)
+            {
+                let compile_context = crate::document::CompileContext::new(
+                    self.base_uri.clone(),
+                    self.source_uri.as_ref(),
+                );
+                match self.extract_exact_root(
+                    root,
+                    ExactRootOrigin::FastMain,
+                    &compile_context,
+                    anchors,
+                ) {
+                    Ok(content) => return Ok(content),
+                    Err(Error::NoContent) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         let prepared_source =
             SourceAnalysis::build_with_semantic_counts(&self.dom, self.options.diagnostics);
         let exact_root = if let Some(target) = &self.options.content_root {
@@ -2281,14 +2557,28 @@ impl<'a> ContentExtractor<'a> {
         if !self.dom.is_element(root) || !root_attached {
             return Err(match origin {
                 ExactRootOrigin::Caller => Error::ContentRootNotFound,
-                ExactRootOrigin::Specialized | ExactRootOrigin::StaticFallback => Error::NoContent,
+                ExactRootOrigin::FastMain
+                | ExactRootOrigin::Specialized
+                | ExactRootOrigin::StaticFallback => Error::NoContent,
             });
         }
-
-        let source_metrics = ContentMetrics::measure(&self.dom, root);
-        if !source_metrics.has_meaningful_text() {
-            return Err(Error::NoContent);
-        }
+        let source_metrics = if self.diagnostic_attempts.is_some() {
+            let metrics = ContentMetrics::measure(&self.dom, root);
+            if !metrics.has_meaningful_text() {
+                return Err(Error::NoContent);
+            }
+            metrics
+        } else {
+            // Normal extraction does not use source-relative quality scores.
+            // Check the lexical minimum without also computing structural and
+            // semantic counts for a source tree that is about to be copied.
+            let mut store = NodeStateStore::new();
+            let stats = get_or_compute_stats(&self.dom, root, &mut store);
+            if !stats.has_alphanumeric() || stats.word_count == 0 || stats.text_length == 0 {
+                return Err(Error::NoContent);
+            }
+            ContentMetrics::default()
+        };
         if let Some(html) = anchors.html.filter(|&node| {
             self.dom.tag(node) == Some(Tag::Html) && self.dom.parent(node).is_some()
         }) {
@@ -2394,6 +2684,9 @@ impl<'a> ContentExtractor<'a> {
         }
 
         let access_barrier = is_access_barrier(&runner.dom, content_id);
+        if origin == ExactRootOrigin::FastMain && access_barrier {
+            return Err(Error::NoContent);
+        }
         let (mut source_facts, mut retained_stream) = runner.source.extractor.final_cleanup(
             &mut runner.dom,
             content_id,
@@ -2559,7 +2852,7 @@ impl<'a> ContentExtractor<'a> {
         title_plan: &TitleHeadingPlan,
         text_buffer: &mut String,
     ) -> Option<String> {
-        if origin != ExactRootOrigin::Caller {
+        if !matches!(origin, ExactRootOrigin::Caller | ExactRootOrigin::FastMain) {
             return None;
         }
         let snapshot = dom.element_descendants_snapshot_with_depth(root);
@@ -2620,7 +2913,7 @@ impl<'a> ContentExtractor<'a> {
 
     fn normalize_exact_root_structure(dom: &mut Dom, root: NodeId, origin: ExactRootOrigin) {
         match origin {
-            ExactRootOrigin::Caller => {
+            ExactRootOrigin::Caller | ExactRootOrigin::FastMain => {
                 if dom.tag(root) == Some(Tag::Div) {
                     wrap_exact_phrasing_content_in_p(dom, root);
                 }
@@ -2663,7 +2956,9 @@ impl<'a> ContentExtractor<'a> {
             selection_reason: RootSelectionReason::SpecificChild.into(),
             candidate_sources: match origin {
                 ExactRootOrigin::Caller => vec![CandidateSourceInfo::CallerHint],
-                ExactRootOrigin::Specialized | ExactRootOrigin::StaticFallback => Vec::new(),
+                ExactRootOrigin::FastMain
+                | ExactRootOrigin::Specialized
+                | ExactRootOrigin::StaticFallback => Vec::new(),
             },
         })
     }
@@ -4601,6 +4896,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(generic_scoring_calls(), 0);
+    }
+
+    #[test]
+    fn direct_main_fast_path_excludes_sibling_chrome() {
+        let page = crate::extract(
+            "<html><head><title>Fast guide</title></head><body><header><a href='/'>Site brand</a></header><nav>Home navigation</nav><main><h1>Fast guide</h1><p>This guide contains enough complete prose to verify the direct main extraction path.</p><p>A second paragraph keeps the selected content substantive.</p></main><aside><a href='/related'>Related links</a></aside><footer>Footer links</footer></body></html>",
+            None,
+        )
+        .unwrap();
+        let markdown = page.markdown();
+        assert!(markdown.contains("This guide contains enough complete prose"));
+        assert!(!markdown.contains("Site brand"));
+        assert!(!markdown.contains("Home navigation"));
+        assert!(!markdown.contains("Related links"));
+        assert!(!markdown.contains("Footer links"));
+    }
+
+    #[test]
+    fn direct_main_fast_path_rejects_access_barriers() {
+        let html = "<body><main><h2>Subscription required</h2><p>Subscribe to continue reading this report.</p></main></body>";
+        assert!(crate::extract(html, None).is_err());
+    }
+
+    #[test]
+    fn content_hints_disable_the_direct_main_fast_path() {
+        reset_generic_scoring_calls();
+        let page = crate::Extractor::builder()
+            .content_hint(crate::ContentHint::Id("preferred".into()))
+            .build()
+            .extract(
+                "<body><main><h1>Automatic content</h1><p>This main region contains complete prose for the automatic path.</p><div id='preferred'><p>The caller preferred this separate content region.</p></div></main></body>",
+                None,
+            )
+            .unwrap();
+        assert!(page.text().contains("caller preferred"));
+        assert_ne!(generic_scoring_calls(), 0);
     }
 
     #[test]

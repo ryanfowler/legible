@@ -2357,6 +2357,8 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
                     || dom.parent(node).is_none()
                     || is_protected_content(dom, node, evidence)
                     || dom.ancestors(retained).any(|ancestor| ancestor == node)
+                    || fingerprints[node.index()].strong_hash
+                        != fingerprints[retained.index()].strong_hash
                 {
                     continue;
                 }
@@ -2384,6 +2386,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
 #[derive(Clone, Copy, Default)]
 struct NormalizedFingerprint {
     hash: u64,
+    strong_hash: u64,
     normalized_hash: u64,
     first_leaf_hash: u64,
     last_leaf_hash: u64,
@@ -2406,12 +2409,17 @@ fn has_repeated_block_hint(dom: &Dom, snapshot: &[(NodeId, u32)]) -> bool {
         text.clear();
         dom.append_normalized_text_limited(node, &mut text, 512);
         let text = text.trim();
-        if text.chars().count() < 24 {
+        let text_chars = if text.is_ascii() {
+            text.len()
+        } else {
+            text.chars().count()
+        };
+        if text_chars < 24 {
             continue;
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.to_ascii_lowercase().hash(&mut hasher);
-        let key = (hasher.finish(), text.len());
+        let key = (hasher.finish(), text_chars);
         let count = fingerprints.entry(key).or_default();
         *count = count.saturating_add(1);
         if *count >= 2 {
@@ -2433,6 +2441,9 @@ fn normalized_fingerprints(
         .rev()
     {
         let mut hash = HASH_OFFSET;
+        let mut strong_hasher = std::collections::hash_map::DefaultHasher::new();
+        strong_hasher.write_u8(0xa5);
+        strong_hasher.write_u8(fingerprint_role(dom, node));
         let mut normalized_hash = 0_u64;
         let mut first_leaf_hash = 0_u64;
         let mut last_leaf_hash = 0_u64;
@@ -2442,7 +2453,7 @@ fn normalized_fingerprints(
         for child in dom.children(node) {
             if let Some(text) = dom.text_node(child) {
                 let (leaf_hash, leaf_chars) =
-                    hash_normalized_text(text, &mut hash, &mut text_chars);
+                    hash_normalized_text(text, &mut hash, &mut text_chars, &mut strong_hasher);
                 if leaf_chars > 0 {
                     normalized_hash = normalized_hash.wrapping_add(leaf_hash);
                     if leaf_count == 0 {
@@ -2455,6 +2466,8 @@ fn normalized_fingerprints(
                 let child_fingerprint = fingerprints[child.index()];
                 mix_fingerprint_boundary(&mut hash);
                 mix_hash(&mut hash, child_fingerprint.hash);
+                strong_hasher.write_u8(0x1f);
+                strong_hasher.write_u64(child_fingerprint.strong_hash);
                 normalized_hash = normalized_hash.wrapping_add(child_fingerprint.normalized_hash);
                 if child_fingerprint.leaf_count > 0 {
                     if leaf_count == 0 {
@@ -2469,6 +2482,7 @@ fn normalized_fingerprints(
         }
         fingerprints[node.index()] = NormalizedFingerprint {
             hash,
+            strong_hash: strong_hasher.finish(),
             normalized_hash,
             first_leaf_hash,
             last_leaf_hash,
@@ -2501,11 +2515,41 @@ fn fingerprint_role(dom: &Dom, node: NodeId) -> u8 {
     }
 }
 
-fn hash_normalized_text(text: &str, hash: &mut u64, text_chars: &mut u32) -> (u64, u32) {
+fn hash_normalized_text(
+    text: &str,
+    hash: &mut u64,
+    text_chars: &mut u32,
+    strong_hasher: &mut std::collections::hash_map::DefaultHasher,
+) -> (u64, u32) {
     const HASH_OFFSET: u64 = 14_695_981_039_346_656_037;
     let mut leaf_hash = HASH_OFFSET;
     let mut leaf_chars = 0_u32;
     let mut pending_space = false;
+    if text.is_ascii() {
+        for &byte in text.as_bytes() {
+            if byte.is_ascii_whitespace() {
+                pending_space = true;
+                continue;
+            }
+            if pending_space && *text_chars > 0 {
+                mix_byte(hash, b' ');
+                strong_hasher.write_u8(b' ');
+                *text_chars = (*text_chars).saturating_add(1);
+            }
+            if pending_space && leaf_chars > 0 {
+                mix_byte(&mut leaf_hash, b' ');
+                leaf_chars = leaf_chars.saturating_add(1);
+            }
+            pending_space = false;
+            let lowercase = byte.to_ascii_lowercase();
+            mix_byte(hash, lowercase);
+            mix_byte(&mut leaf_hash, lowercase);
+            strong_hasher.write_u8(lowercase);
+            *text_chars = (*text_chars).saturating_add(1);
+            leaf_chars = leaf_chars.saturating_add(1);
+        }
+        return (leaf_hash, leaf_chars);
+    }
     for character in text.chars() {
         if character.is_whitespace() {
             pending_space = true;
@@ -2513,6 +2557,7 @@ fn hash_normalized_text(text: &str, hash: &mut u64, text_chars: &mut u32) -> (u6
         }
         if pending_space && *text_chars > 0 {
             mix_byte(hash, b' ');
+            strong_hasher.write_u8(b' ');
             *text_chars = (*text_chars).saturating_add(1);
         }
         if pending_space && leaf_chars > 0 {
@@ -2522,6 +2567,8 @@ fn hash_normalized_text(text: &str, hash: &mut u64, text_chars: &mut u32) -> (u6
         pending_space = false;
         for lowercase in character.to_lowercase() {
             mix_u32(hash, lowercase as u32);
+            let mut encoded = [0; 4];
+            strong_hasher.write(lowercase.encode_utf8(&mut encoded).as_bytes());
             mix_u32(&mut leaf_hash, lowercase as u32);
         }
         *text_chars = (*text_chars).saturating_add(1);

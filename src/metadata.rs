@@ -72,6 +72,10 @@ pub(crate) enum StructuredDataError {
 const INTERNAL_MAX_JSON_LD_DEPTH: usize = 512;
 
 impl StructuredData {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
     pub(crate) fn parse(dom: &Dom, budget: &ParseBudget) -> Result<Self, StructuredDataError> {
         let scripts: Vec<_> = dom
             .descendants(dom.root())

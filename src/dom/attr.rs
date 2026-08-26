@@ -43,6 +43,26 @@ pub(crate) enum AttrName {
     DataSrc,
     DataSrcset,
     DataTable,
+    DataArticleToc,
+    DataDiscourseBaseUrl,
+    DataFullname,
+    DataMessageAuthorRole,
+    DataMessageContent,
+    DataPostId,
+    DataRole,
+    DataShortid,
+    DataTestid,
+    DataTopicTitle,
+    DataTurboBody,
+    DataUserCard,
+    DataLanguageLabel,
+    DataFootnoteBackref,
+    DataTex,
+    DataFormula,
+    HttpEquiv,
+    Datetime,
+    Display,
+    Fill,
     Dir,
     Disabled,
     Encoding,
@@ -133,6 +153,26 @@ impl AttrName {
             "data-src" => Self::DataSrc,
             "data-srcset" => Self::DataSrcset,
             "datatable" => Self::DataTable,
+            "data-article-toc" => Self::DataArticleToc,
+            "data-discourse-base-url" => Self::DataDiscourseBaseUrl,
+            "data-fullname" => Self::DataFullname,
+            "data-message-author-role" => Self::DataMessageAuthorRole,
+            "data-message-content" => Self::DataMessageContent,
+            "data-post-id" => Self::DataPostId,
+            "data-role" => Self::DataRole,
+            "data-shortid" => Self::DataShortid,
+            "data-testid" => Self::DataTestid,
+            "data-topic-title" => Self::DataTopicTitle,
+            "data-turbo-body" => Self::DataTurboBody,
+            "data-user-card" => Self::DataUserCard,
+            "data-language-label" => Self::DataLanguageLabel,
+            "data-footnote-backref" => Self::DataFootnoteBackref,
+            "data-tex" => Self::DataTex,
+            "data-formula" => Self::DataFormula,
+            "http-equiv" => Self::HttpEquiv,
+            "datetime" => Self::Datetime,
+            "display" => Self::Display,
+            "fill" => Self::Fill,
             "dir" => Self::Dir,
             "disabled" => Self::Disabled,
             "encoding" => Self::Encoding,
@@ -186,6 +226,26 @@ impl AttrName {
                 | Self::For
                 | Self::Open
                 | Self::Separators
+                | Self::DataArticleToc
+                | Self::DataDiscourseBaseUrl
+                | Self::DataFullname
+                | Self::DataMessageAuthorRole
+                | Self::DataMessageContent
+                | Self::DataPostId
+                | Self::DataRole
+                | Self::DataShortid
+                | Self::DataTestid
+                | Self::DataTopicTitle
+                | Self::DataTurboBody
+                | Self::DataUserCard
+                | Self::DataLanguageLabel
+                | Self::DataFootnoteBackref
+                | Self::DataTex
+                | Self::DataFormula
+                | Self::HttpEquiv
+                | Self::Datetime
+                | Self::Display
+                | Self::Fill
         )
     }
 
@@ -234,6 +294,26 @@ impl AttrName {
             Self::DataSrc => "data-src",
             Self::DataSrcset => "data-srcset",
             Self::DataTable => "datatable",
+            Self::DataArticleToc => "data-article-toc",
+            Self::DataDiscourseBaseUrl => "data-discourse-base-url",
+            Self::DataFullname => "data-fullname",
+            Self::DataMessageAuthorRole => "data-message-author-role",
+            Self::DataMessageContent => "data-message-content",
+            Self::DataPostId => "data-post-id",
+            Self::DataRole => "data-role",
+            Self::DataShortid => "data-shortid",
+            Self::DataTestid => "data-testid",
+            Self::DataTopicTitle => "data-topic-title",
+            Self::DataTurboBody => "data-turbo-body",
+            Self::DataUserCard => "data-user-card",
+            Self::DataLanguageLabel => "data-language-label",
+            Self::DataFootnoteBackref => "data-footnote-backref",
+            Self::DataTex => "data-tex",
+            Self::DataFormula => "data-formula",
+            Self::HttpEquiv => "http-equiv",
+            Self::Datetime => "datetime",
+            Self::Display => "display",
+            Self::Fill => "fill",
             Self::Dir => "dir",
             Self::Disabled => "disabled",
             Self::Encoding => "encoding",

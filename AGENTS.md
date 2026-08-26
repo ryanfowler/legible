@@ -52,7 +52,7 @@ The extraction pipeline flows through these stages:
 | `budget.rs` | Public parser and structured-data resource budgets |
 | `page.rs` | `ExtractedPage`, independently owned page parts, and lazy HTML/MD/text serialization |
 | `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
-| `extraction.rs` | Source-session orchestration, per-attempt fragment execution, strategy retries, candidate selection, and content consolidation |
+| `extraction.rs` | Source-session orchestration, conservative direct-main fast path, per-attempt fragment execution, strategy retries, candidate selection, and content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `scoring.rs::ScoringView` | Sparse scoring tag, parent, wrapper, and paragraph projections over the immutable source DOM |
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
@@ -210,3 +210,4 @@ commands, and regression guardrails.
 `benches/pipeline.rs` covers generated compatibility workloads, large fixtures, lazy renderers, and deeply nested parser input.
 
 Keep malformed nested-table handling linear. Use bounded text scans for heading and clutter classifiers. Do not repeat full subtree scans for nested tables or protected-content checks. Keep ASCII normalized-text, cached candidate statistics, and Markdown ordinary-text paths bulk-oriented, with Unicode and syntax-sensitive fallbacks. Markdown rendering retains its reusable line buffer and uses slice-based ASCII paths for ordinary text, destinations, and link titles. Related-heading checks must gate expensive name assembly behind heading evidence. The parser must keep its default zero-budget path free of depth bookkeeping and repeated interior-mutability checks. Parser element-name callbacks must clone only the namespace and local name. Do not clone the unused prefix. The semantic compiler skips multiline and media separator passes when their source evidence is absent. Use the end-to-end `extract_markdown` benchmark when changing the raw-HTML-to-Markdown path.
+The extraction stage may use the direct-main fast path only for an unambiguous body-level `<main>` with no specialized, structured, media, or risky semantic content. Keep its eligibility checks conservative so candidate ranking remains the fallback for ambiguous pages.
