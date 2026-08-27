@@ -1,5 +1,3 @@
-# River restoration
-
 **Contents** [History](#history) [Methods](#methods)
 
 **River restoration** returns a damaged river toward a more natural structure and function.

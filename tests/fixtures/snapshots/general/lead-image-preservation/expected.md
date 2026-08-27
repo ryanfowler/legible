@@ -1,5 +1,3 @@
-# Lead image preservation
-
 ![A detailed system overview with three connected services](https://example.test/media/lead-illustration.webp)
 
 A detailed system overview with three connected services.

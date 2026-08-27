@@ -489,40 +489,20 @@ impl ScoringView {
     /// Copies selected roots while applying the immutable scoring projection.
     /// The source DOM remains unchanged and no fragment scoring discovery is
     /// needed after this operation.
-    #[cfg(test)]
     pub(crate) fn copy_projected_subtrees_as_fragment_excluding(
         &self,
         source: &Dom,
         source_roots: &[NodeId],
         excluded: &[bool],
     ) -> Result<Dom, DomError> {
-        self.copy_projected_subtrees_as_fragment_with_exceptions(
-            source,
-            source_roots,
-            excluded,
-            &[],
-        )
-    }
-
-    /// Copies selected roots while allowing a small set of source roots to
-    /// bypass an exclusion mask. This keeps title recovery sparse: callers do
-    /// not need to clone a DOM-sized mask for one retained heading.
-    pub(crate) fn copy_projected_subtrees_as_fragment_with_exceptions(
-        &self,
-        source: &Dom,
-        source_roots: &[NodeId],
-        excluded: &[bool],
-        exceptions: &[NodeId],
-    ) -> Result<Dom, DomError> {
         #[cfg(test)]
         Dom::record_fragment_copy_for_test();
 
-        let capacity =
-            1 + self.projected_fragment_capacity(source, source_roots, excluded, exceptions);
+        let capacity = 1 + self.projected_fragment_capacity(source, source_roots, excluded);
         let mut fragment = Dom::with_capacity(NodeData::Fragment, capacity);
         let mut work = SmallVec::<[ProjectionWork; 32]>::new();
         for &root in source_roots.iter().rev() {
-            if is_excluded_except(source, root, excluded, exceptions) {
+            if excluded.get(root.index()).copied().unwrap_or(false) {
                 return Err(DomError("selected root is excluded".into()));
             }
             work.push(ProjectionWork::Node {
@@ -537,7 +517,7 @@ impl ScoringView {
                     source: source_id,
                     parent,
                 } => {
-                    if is_excluded_except(source, source_id, excluded, exceptions) {
+                    if excluded.get(source_id.index()).copied().unwrap_or(false) {
                         continue;
                     }
                     if source.is_element(source_id)
@@ -545,7 +525,7 @@ impl ScoringView {
                     {
                         match self.div_projection(source_id) {
                             DivProjection::PromoteChild(child)
-                                if !is_excluded_except(source, child, excluded, exceptions) =>
+                                if !excluded.get(child.index()).copied().unwrap_or(false) =>
                             {
                                 work.push(ProjectionWork::Node {
                                     source: child,
@@ -554,8 +534,7 @@ impl ScoringView {
                                 continue;
                             }
                             DivProjection::PromotePhrasing => {
-                                let groups =
-                                    phrasing_groups(source, source_id, excluded, exceptions);
+                                let groups = phrasing_groups(source, source_id, excluded);
                                 if let Some(group) = groups.first() {
                                     work.push(ProjectionWork::Phrasing {
                                         sources: group.iter().copied().collect(),
@@ -591,7 +570,7 @@ impl ScoringView {
                     }
                     if let NodeData::Element(element) = &source.node(source_id).data
                         && let Some(template) = element.template_contents.get()
-                        && !is_excluded_except(source, template, excluded, exceptions)
+                        && !excluded.get(template.index()).copied().unwrap_or(false)
                     {
                         let template_copy = fragment.create(projected_node_data(
                             source,
@@ -618,7 +597,6 @@ impl ScoringView {
                             source_id,
                             destination,
                             excluded,
-                            exceptions,
                             &mut work,
                         );
                     } else {
@@ -660,7 +638,6 @@ impl ScoringView {
         source: &Dom,
         source_roots: &[NodeId],
         excluded: &[bool],
-        exceptions: &[NodeId],
     ) -> usize {
         let mut capacity = 0;
         let mut operations = SmallVec::<[ProjectionWork; 32]>::new();
@@ -676,14 +653,14 @@ impl ScoringView {
                     source: node,
                     parent,
                 } => {
-                    if is_excluded_except(source, node, excluded, exceptions) {
+                    if excluded.get(node.index()).copied().unwrap_or(false) {
                         continue;
                     }
                     if source.is_element(node) && self.effective_tag(source, node) == Some(Tag::Div)
                     {
                         match self.div_projection(node) {
                             DivProjection::PromoteChild(child)
-                                if !is_excluded_except(source, child, excluded, exceptions) =>
+                                if !excluded.get(child.index()).copied().unwrap_or(false) =>
                             {
                                 operations.push(ProjectionWork::Node {
                                     source: child,
@@ -692,8 +669,7 @@ impl ScoringView {
                                 continue;
                             }
                             DivProjection::PromotePhrasing => {
-                                if let Some(group) =
-                                    phrasing_groups(source, node, excluded, exceptions).first()
+                                if let Some(group) = phrasing_groups(source, node, excluded).first()
                                 {
                                     operations.push(ProjectionWork::Phrasing {
                                         sources: group.iter().copied().collect(),
@@ -710,7 +686,7 @@ impl ScoringView {
                     capacity += 1;
                     if let NodeData::Element(element) = &source.node(node).data
                         && let Some(template) = element.template_contents.get()
-                        && !is_excluded_except(source, template, excluded, exceptions)
+                        && !excluded.get(template.index()).copied().unwrap_or(false)
                     {
                         capacity += 1;
                         operations.push(ProjectionWork::Children {
@@ -722,14 +698,7 @@ impl ScoringView {
                     if self.effective_tag(source, node) == Some(Tag::Div)
                         || matches!(div_projection, DivProjection::RenameP)
                     {
-                        queue_projected_children(
-                            source,
-                            node,
-                            parent,
-                            excluded,
-                            exceptions,
-                            &mut operations,
-                        );
+                        queue_projected_children(source, node, parent, excluded, &mut operations);
                     } else {
                         operations.push(ProjectionWork::Children {
                             source: node,
@@ -793,22 +762,14 @@ fn projected_node_data(source: &Dom, node: NodeId, replacement: Option<&str>) ->
     }
 }
 
-fn is_excluded_except(dom: &Dom, node: NodeId, excluded: &[bool], exceptions: &[NodeId]) -> bool {
-    excluded.get(node.index()).copied().unwrap_or(false)
-        && !exceptions
-            .iter()
-            .any(|&root| node == root || dom.ancestors(node).any(|ancestor| ancestor == root))
-}
-
 fn phrasing_groups(
     dom: &Dom,
     parent: NodeId,
     excluded: &[bool],
-    exceptions: &[NodeId],
 ) -> SmallVec<[SmallVec<[NodeId; 8]>; 8]> {
     let children: SmallVec<[NodeId; 16]> = dom
         .children(parent)
-        .filter(|child| !is_excluded_except(dom, *child, excluded, exceptions))
+        .filter(|child| !excluded.get(child.index()).copied().unwrap_or(false))
         .collect();
     let mut groups = SmallVec::new();
     let mut index = 0;
@@ -849,12 +810,11 @@ fn queue_projected_children(
     parent: NodeId,
     destination: NodeId,
     excluded: &[bool],
-    exceptions: &[NodeId],
     work: &mut SmallVec<[ProjectionWork; 32]>,
 ) {
     let children: SmallVec<[NodeId; 16]> = source
         .children(parent)
-        .filter(|child| !is_excluded_except(source, *child, excluded, exceptions))
+        .filter(|child| !excluded.get(child.index()).copied().unwrap_or(false))
         .collect();
     let mut planned = SmallVec::<[ProjectionWork; 16]>::new();
     let mut index = 0;

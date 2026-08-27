@@ -1,5 +1,3 @@
-# Workshop log
-
 The workshop log was published with nested presentation tables.
 
 ## Result
