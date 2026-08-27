@@ -27,7 +27,7 @@ pub mod regexps {
 
     /// Matches unlikely candidates for main content.
     pub static UNLIKELY_CANDIDATES: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)-ad-|ai2html|banner|breadcrumbs|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager|popup|yom-remote").unwrap()
+        Regex::new(r"(?i)-ad-|ai2html|banner|breadcrumbs|bibliograph|citation|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|ref-list|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager|popup|recommender|recent-changes|revision-history|yom-remote").unwrap()
     });
 
     /// Matches positive indicators for content.
@@ -37,7 +37,7 @@ pub mod regexps {
 
     /// Matches negative indicators for content.
     pub static NEGATIVE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)-ad-|hidden|^hid$| hid$| hid |^hid |banner|combx|comment|com-|contact|footer|gdpr|masthead|media|meta|outbrain|promo|related|scroll|share|shoutbox|sidebar|skyscraper|sponsor|shopping|tags|widget").unwrap()
+        Regex::new(r"(?i)-ad-|bibliograph|citation|hidden|^hid$| hid$| hid |^hid |banner|combx|comment|com-|contact|footer|gdpr|masthead|media|meta|outbrain|promo|ref-list|related|recommender|recent-changes|revision-history|scroll|share|shoutbox|sidebar|skyscraper|sponsor|shopping|tags|widget").unwrap()
     });
 
     /// Matches video hosting URLs.

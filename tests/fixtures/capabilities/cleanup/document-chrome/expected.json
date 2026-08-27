@@ -1,0 +1,12 @@
+{
+  "title": "Document with chrome",
+  "word_count_min": 35,
+  "must_contain": [
+    "retained article",
+    "Recent changes in the method",
+    "sponsored evidence",
+    "Article share context",
+    "practical action"
+  ],
+  "must_not_contain": ["Recent changes: Last updated today", "Know someone", "Sponsored partner message"]
+}

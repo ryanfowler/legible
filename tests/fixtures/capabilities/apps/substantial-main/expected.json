@@ -1,0 +1,10 @@
+{
+  "title": "Static application view",
+  "word_count_min": 40,
+  "must_contain": [
+    "Project workspace",
+    "latest report is ready",
+    "next decision"
+  ],
+  "must_not_contain": ["document.querySelector"]
+}

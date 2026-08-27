@@ -1,0 +1,9 @@
+{
+  "title": "Research brief",
+  "word_count_min": 30,
+  "must_contain": [
+    "primary analysis",
+    "calibrated instruments",
+    "clear baseline"
+  ]
+}

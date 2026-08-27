@@ -85,6 +85,7 @@ pub(crate) struct CandidateFeatures {
     pub(crate) semantic_prior: f64,
     pub(crate) positive_name_score: f64,
     pub(crate) negative_name_score: f64,
+    pub(crate) utility_name_score: f64,
 }
 
 /// Page-level evidence used to distinguish a complete streamed document from
@@ -751,12 +752,24 @@ pub(crate) fn select_content_root<'a>(
     body: NodeId,
     structured_texts: impl IntoIterator<Item = &'a str>,
 ) -> RootSelection {
-    let Some(first) = ranked.first() else {
+    let Some(top) = ranked.first() else {
         return RootSelection {
             node: body,
             reason: RootSelectionReason::BodyFallback,
             branches: SmallVec::new(),
         };
+    };
+    let first = if is_document_utility_root(dom, top.node) {
+        ranked
+            .iter()
+            .skip(1)
+            .find(|candidate| {
+                !is_document_utility_root(dom, candidate.node)
+                    && competitive_score(candidate.score, top.score)
+            })
+            .unwrap_or(top)
+    } else {
+        top
     };
     let mut selected = first.node;
     let mut reason = RootSelectionReason::Ranked;
@@ -771,7 +784,9 @@ pub(crate) fn select_content_root<'a>(
         if let Some((node, agreement)) = ranked
             .iter()
             .filter(|candidate| {
-                candidate.node != body && structured_tie_score(candidate.score, first.score)
+                candidate.node != body
+                    && structured_tie_score(candidate.score, first.score)
+                    && !is_document_utility_root(dom, candidate.node)
             })
             .map(|candidate| {
                 (
@@ -940,6 +955,36 @@ pub(crate) fn select_content_root<'a>(
         reason,
         branches,
     }
+}
+
+fn is_document_utility_root(dom: &Dom, node: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .any(|ancestor| {
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|attribute| dom.attr(ancestor, attribute))
+                .any(|value| {
+                    let value = value.to_ascii_lowercase();
+                    [
+                        "bibliograph",
+                        "citation",
+                        "extra-services",
+                        "extraservices",
+                        "labstabs",
+                        "recommender",
+                        "ref-list",
+                        "reflist",
+                        "reference-list",
+                        "recent-changes",
+                        "recentchanges",
+                        "revision-history",
+                        "revisionhistory",
+                    ]
+                    .iter()
+                    .any(|needle| value.contains(needle))
+                })
+        })
 }
 
 fn competitive_score(score: f64, top_score: f64) -> bool {
@@ -2469,6 +2514,20 @@ mod tests {
         assert_eq!(
             select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
             "specific"
+        );
+    }
+
+    #[test]
+    fn root_selection_ignores_a_utility_winner_only_when_content_is_competitive() {
+        let html = r#"<body><section id="references" class="ref-list">Reference records.</section><article id="article"><p>The primary article contains the useful analysis.</p></article></body>"#;
+
+        assert_eq!(
+            select_test_root(html, &[("references", 100.0), ("article", 70.0)], [],),
+            "references"
+        );
+        assert_eq!(
+            select_test_root(html, &[("references", 100.0), ("article", 85.0)], [],),
+            "article"
         );
     }
 

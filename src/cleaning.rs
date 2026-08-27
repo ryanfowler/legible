@@ -1233,6 +1233,7 @@ fn populate_heuristic_aggregates(
     has_forms: &mut [bool],
     has_social_links: &mut [bool],
     has_action_urls: &mut [bool],
+    has_sponsored_links: &mut [bool],
 ) {
     for &(node, _) in snapshot.iter().rev() {
         let tag = dom.tag(node);
@@ -1257,6 +1258,7 @@ fn populate_heuristic_aggregates(
                     || contains_ascii_case_insensitive(href, "/reply")
                     || contains_ascii_case_insensitive(href, "dialog=")
             });
+        has_sponsored_links[node.index()] = is_sponsored_anchor(dom, node);
         let mut image_count = usize::from(has_images[node.index()]);
         for child in dom.element_children(node) {
             link_counts[node.index()] =
@@ -1270,6 +1272,7 @@ fn populate_heuristic_aggregates(
             has_forms[node.index()] |= has_forms[child.index()];
             has_social_links[node.index()] |= has_social_links[child.index()];
             has_action_urls[node.index()] |= has_action_urls[child.index()];
+            has_sponsored_links[node.index()] |= has_sponsored_links[child.index()];
         }
         has_images[node.index()] = image_count > 0;
         has_two_images[node.index()] = image_count >= 2;
@@ -1313,7 +1316,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
     let (has_images, bits) = bits.split_at_mut(dom.len());
     let (has_two_images, bits) = bits.split_at_mut(dom.len());
     let (has_forms, bits) = bits.split_at_mut(dom.len());
-    let (has_social_links, has_action_urls) = bits.split_at_mut(dom.len());
+    let (has_social_links, bits) = bits.split_at_mut(dom.len());
+    let (has_action_urls, has_sponsored_links) = bits.split_at_mut(dom.len());
     let link_counts = &mut scratch.bytes[..dom.len()];
     store.clear_stats();
     store.enable_link_lengths();
@@ -1335,6 +1339,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             has_forms,
             has_social_links,
             has_action_urls,
+            has_sponsored_links,
         );
         let mut table_depths = SmallVec::<[u32; 8]>::new();
         for &(node, depth) in snapshot {
@@ -1433,6 +1438,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         has_forms,
         has_social_links,
         has_action_urls,
+        has_sponsored_links,
     );
     let root_length = get_or_compute_stats(dom, root, store).text_length.max(1);
     let protected_masks = snapshot
@@ -1620,6 +1626,11 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let audio_controls = is_audio_controls(&metrics);
         let job_profile = is_job_profile_content(dom, node, page_kind, &metrics);
         let collection_promotion = is_collection_promotion(dom, node, &metrics);
+        let share_prompt = is_standalone_share_prompt(dom, node, &metrics);
+        let sponsored_content = !is_inside_primary_content_container(dom, node)
+            && is_sponsored_content(&metrics, has_sponsored_links[node.index()]);
+        let revision_history =
+            !is_inside_primary_content_container(dom, node) && is_revision_history(&metrics);
 
         let advertisement = strong_ad_name(name) && short && (links > 0 || stats.text_length < 100);
         let consent = contains_name_or_text(
@@ -1738,6 +1749,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             || audio_controls
             || job_profile
             || collection_promotion
+            || share_prompt
+            || sponsored_content
+            || revision_history
             || advertisement
             || consent
             || account
@@ -1755,6 +1769,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 && !author_promotion
                 && !job_profile
                 && !collection_promotion
+                && !share_prompt
+                && !sponsored_content
+                && !revision_history
             {
                 hoist_protected_children(dom, node, store, evidence);
             }
@@ -1816,6 +1833,45 @@ pub(crate) fn remove_inline_chrome_controls_in_workspace(
         }
         detach_and_invalidate_stats(dom, node, store);
         changed = true;
+    }
+    if changed {
+        workspace.invalidate();
+    }
+    changed
+}
+
+/// Removes separator text that only exists to imitate a Markdown rule. The
+/// adjacent HTML horizontal rule is the semantic source for that separator.
+pub(crate) fn remove_decorative_separator_paragraphs_in_workspace(
+    dom: &mut Dom,
+    root: NodeId,
+    store: &mut crate::dom::NodeStateStore,
+    evidence: &crate::document::SourceEvidence,
+    workspace: &mut FragmentWorkspace,
+) -> bool {
+    workspace.ensure_snapshot(dom, root);
+    let snapshot = workspace.elements_with_depth();
+    let mut changed = false;
+    for &(node, _) in snapshot {
+        if dom.parent(node).is_none()
+            || dom.tag(node) != Some(Tag::P)
+            || is_protected_content(dom, node, evidence)
+        {
+            continue;
+        }
+        let mut text = String::new();
+        dom.append_normalized_text_limited(node, &mut text, 32);
+        if !is_decorative_separator_text(text.trim()) {
+            continue;
+        }
+        let adjacent_rule = previous_element(dom, node)
+            .is_some_and(|sibling| dom.tag(sibling) == Some(Tag::Hr))
+            || next_element_sibling(dom, node)
+                .is_some_and(|sibling| dom.tag(sibling) == Some(Tag::Hr));
+        if adjacent_rule {
+            detach_and_invalidate_stats(dom, node, store);
+            changed = true;
+        }
     }
     if changed {
         workspace.invalidate();
@@ -2005,11 +2061,18 @@ pub(crate) fn remove_global_chrome_in_workspace(
                     .parent(node)
                     .is_some_and(|parent| dom.tag(parent) == Some(Tag::Header));
         let leading_frame_candidate = depth <= 3 && aggregate.link_count >= 3;
+        let named_share = contains_any(name, &["sharebar", "sharecta", "share-bar", "share-cta"]);
+        let revision_marker = is_revision_history_marker(dom, node);
+        let sponsored_marker = aggregate.has_sponsored_link;
         if !semantic_navigation
             && !named_chrome
             && !repeated
             && !metadata_candidate
             && !leading_frame_candidate
+            && !is_explicit_document_utility(name)
+            && !named_share
+            && !revision_marker
+            && !sponsored_marker
         {
             continue;
         }
@@ -2025,6 +2088,16 @@ pub(crate) fn remove_global_chrome_in_workspace(
         let non_link_chars = f64::from(stats.text_length) * (1.0 - link_density);
         let at_start = near_content_start(dom, node, root, store);
         let at_end = near_content_end(dom, node, root, store);
+        if is_explicit_document_utility(name)
+            && !is_inside_explicit_article_body(dom, node, root)
+            && !is_inside_primary_content_container(dom, node)
+            && stats.text_length < 2_400
+            && aggregate.link_count >= 2
+            && (at_start || at_end || name.contains("extra-services"))
+        {
+            remove[node.index()] = true;
+            continue;
+        }
         let adjacent_content =
             has_substantive_content_sibling(dom, node, store, &mut substantive_children);
         let dominant_content_sibling = leading_frame_candidate
@@ -2036,6 +2109,35 @@ pub(crate) fn remove_global_chrome_in_workspace(
         get_normalized_inner_text(dom, node, &mut text_buffer);
         text_buffer.make_ascii_lowercase();
         let text = text_buffer.trim();
+
+        let explicit_share = named_share
+            && !is_inside_explicit_article_body(dom, node, root)
+            && !is_inside_primary_content_container(dom, node)
+            && stats.text_length < 700
+            && (at_start || at_end || aggregate.link_count >= 2)
+            && contains_any(
+                text,
+                &[
+                    "know someone who should see",
+                    "share this",
+                    "pass it on",
+                    "send them the link",
+                ],
+            );
+        let explicit_sponsored = sponsored_marker
+            && !is_inside_explicit_article_body(dom, node, root)
+            && !is_inside_primary_content_container(dom, node)
+            && stats.text_length < 700
+            && text.contains("sponsored");
+        let explicit_revision = revision_marker
+            && !is_inside_explicit_article_body(dom, node, root)
+            && !is_inside_primary_content_container(dom, node)
+            && stats.text_length < 700
+            && (at_start || at_end);
+        if explicit_share || explicit_sponsored || explicit_revision {
+            remove[node.index()] = true;
+            continue;
+        }
 
         let metrics = ChromeMetrics {
             name,
@@ -2098,6 +2200,20 @@ pub(crate) fn remove_global_chrome_in_workspace(
     }
     workspace.restore_scratch(scratch);
     changed
+}
+
+fn is_explicit_document_utility(name: &str) -> bool {
+    contains_any(
+        name,
+        &[
+            "browse-context",
+            "extra-services",
+            "labs-display",
+            "labstabs",
+            "recommender",
+            "revision-history",
+        ],
+    )
 }
 
 /// Removes non-discussion comment threads and repeated content blocks from a
@@ -2862,6 +2978,7 @@ struct ChromeAggregate {
     has_meaningful_media: bool,
     has_content_structure: bool,
     has_time: bool,
+    has_sponsored_link: bool,
 }
 
 fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggregate> {
@@ -2879,6 +2996,7 @@ fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggrega
             Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 | Tag::P)
         );
         let mut has_time = dom.tag(node) == Some(Tag::Time);
+        let mut has_sponsored_link = is_sponsored_anchor(dom, node);
         for child in dom.element_children(node) {
             let child_aggregate = aggregates[child.index()];
             link_count = link_count
@@ -2887,6 +3005,7 @@ fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggrega
             has_meaningful_media |= child_aggregate.has_meaningful_media;
             has_content_structure |= child_aggregate.has_content_structure;
             has_time |= child_aggregate.has_time;
+            has_sponsored_link |= child_aggregate.has_sponsored_link;
             signature = signature
                 .wrapping_mul(1_099_511_628_211)
                 .wrapping_add(child_aggregate.signature);
@@ -2897,6 +3016,7 @@ fn chrome_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<ChromeAggrega
             has_meaningful_media,
             has_content_structure,
             has_time,
+            has_sponsored_link,
         };
     }
     aggregates
@@ -3554,12 +3674,25 @@ fn is_meaningful_article_region(dom: &Dom, node: NodeId, metrics: &ChromeMetrics
 }
 
 fn is_inside_article_container(dom: &Dom, node: NodeId) -> bool {
-    dom.ancestors(node).any(|ancestor| {
-        dom.tag(ancestor) == Some(Tag::Article)
-            || dom
-                .attr(ancestor, AttrName::Role)
-                .is_some_and(|roles| has_token(roles, "article"))
-    })
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .any(|ancestor| {
+            dom.tag(ancestor) == Some(Tag::Article)
+                || dom
+                    .attr(ancestor, AttrName::Role)
+                    .is_some_and(|roles| has_token(roles, "article"))
+        })
+}
+
+fn is_inside_primary_content_container(dom: &Dom, node: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .any(|ancestor| {
+            matches!(dom.tag(ancestor), Some(Tag::Article | Tag::Main))
+                || dom
+                    .attr(ancestor, AttrName::Role)
+                    .is_some_and(|roles| has_any_token(roles, &["article", "main"]))
+        })
 }
 
 fn has_meaningful_region_content(dom: &Dom, node: NodeId) -> bool {
@@ -4964,6 +5097,57 @@ fn is_job_profile_content(
         || repeated_founder_card
 }
 
+fn is_standalone_share_prompt(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    if is_inside_article_container(dom, node)
+        || !metrics.short
+        || !contains_any(
+            metrics.name,
+            &["sharebar", "sharecta", "share-bar", "share-cta"],
+        )
+        || metrics.controls == 0 && metrics.links < 2
+    {
+        return false;
+    }
+    contains_any(
+        metrics.text,
+        &[
+            "know someone who should see",
+            "share this",
+            "pass it on",
+            "send them the link",
+        ],
+    )
+}
+
+fn is_sponsored_anchor(dom: &Dom, node: NodeId) -> bool {
+    dom.tag(node) == Some(Tag::A)
+        && dom.attr(node, AttrName::Rel).is_some_and(|rel| {
+            rel.split_ascii_whitespace()
+                .any(|token| token.eq_ignore_ascii_case("sponsored"))
+        })
+}
+
+fn is_sponsored_content(metrics: &PeripheralMetrics<'_>, has_sponsored_link: bool) -> bool {
+    metrics.short && metrics.at_start && has_sponsored_link && metrics.text.contains("sponsored")
+}
+
+fn is_revision_history(metrics: &PeripheralMetrics<'_>) -> bool {
+    if !metrics.at_start || !metrics.short {
+        return false;
+    }
+    let metadata_name = contains_any(metrics.name, &["note-changes", "revision", "history"])
+        || metrics.name.contains(" meta");
+    let explicit_metadata =
+        metrics.text.starts_with("recent changes") || metrics.text.starts_with("recently updated");
+    (metadata_name || explicit_metadata)
+        && contains_any(metrics.text, &["recent changes", "recently updated"])
+        && contains_any(metrics.text, &["last updated", "created", "today"])
+}
+
+fn is_decorative_separator_text(text: &str) -> bool {
+    matches!(text, "###" | "***" | "___")
+}
+
 fn related_name_signal(name: &str) -> bool {
     contains_any(
         name,
@@ -5426,6 +5610,8 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "related",
             "recommend",
             "share",
+            "sharebar",
+            "sharecta",
             "social",
             "newsletter",
             "subscribe",
@@ -5472,6 +5658,20 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "tag_list",
         ],
     ) && !author_title_wrapper
+}
+
+fn is_revision_history_marker(dom: &Dom, node: NodeId) -> bool {
+    let name = node_name(dom, node);
+    let mut text = String::new();
+    append_bounded_text(dom, node, 1_024, &mut text);
+    text.make_ascii_lowercase();
+    let text = text.trim();
+    let named_metadata = contains_any(&name, &["note-changes", "revision", "history", "meta"]);
+    let explicit_metadata =
+        text.starts_with("recent changes") || text.starts_with("recently updated");
+    (named_metadata || explicit_metadata)
+        && contains_any(text, &["recent changes", "recently updated"])
+        && contains_any(text, &["last updated", "created", "today"])
 }
 
 fn near_content_end(
@@ -6227,6 +6427,53 @@ mod tests {
         ] {
             assert!(!text.contains(clutter), "retained {clutter}: {text}");
         }
+    }
+
+    #[test]
+    fn removes_decorative_separator_paragraphs_next_to_rules() {
+        let mut dom = Dom::parse_fragment(
+            "<article><p>Opening content.</p><p>###</p><hr><p>Closing content.</p></article>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let mut store = NodeStateStore::new();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &store);
+        let mut workspace = FragmentWorkspace::default();
+
+        assert!(remove_decorative_separator_paragraphs_in_workspace(
+            &mut dom,
+            root,
+            &mut store,
+            &evidence,
+            &mut workspace,
+        ));
+        assert!(!dom.text(root).contains("###"));
+        assert!(dom.text(root).contains("Opening content"));
+        assert!(dom.text(root).contains("Closing content"));
+    }
+
+    #[test]
+    fn removes_named_revision_history_from_global_chrome() {
+        let mut dom = Dom::parse_fragment(
+            "<div class='note-changes meta'>Recent changes: Last updated today.</div><article><p>Retained article content.</p></article>",
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let mut store = NodeStateStore::new();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &store);
+        let mut workspace = FragmentWorkspace::default();
+
+        assert!(remove_global_chrome_in_workspace(
+            &mut dom,
+            root,
+            &mut store,
+            &evidence,
+            &mut workspace,
+        ));
+        assert!(!dom.text(root).contains("Recent changes"));
+        assert!(dom.text(root).contains("Retained article content"));
     }
 
     #[test]

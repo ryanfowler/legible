@@ -1,0 +1,6 @@
+{
+  "title": "Visible application view",
+  "word_count_min": 30,
+  "must_contain": ["current server-rendered page", "active project status"],
+  "must_not_contain": ["Hidden application view", "inactive accessibility fallback"]
+}

@@ -1,0 +1,15 @@
+{
+  "word_count_min": 35,
+  "must_contain": [
+    "Founding Product Engineer",
+    "Proliferate",
+    "San Francisco",
+    "Oakland",
+    "FULL\\_TIME",
+    "CONTRACTOR",
+    "150000",
+    "per year"
+  ],
+  "must_not_contain": ["Other Role", "Other Company", "New York"],
+  "headings_min": 1
+}
