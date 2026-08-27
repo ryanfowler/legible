@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head><title>Static application view</title></head>
+  <body>
+    <header><nav>Overview Settings Account</nav></header>
+    <main class="application-view">
+      <h1>Project workspace</h1>
+      <p>The server sends this workspace as a complete static view while the application code loads.</p>
+      <p>Readers can review the current status, understand the available actions, and continue without waiting for client-side rendering.</p>
+      <section>
+        <h2>Current status</h2>
+        <p>The deployment is healthy, the latest report is ready, and the workspace contains the information needed for the next decision.</p>
+      </section>
+    </main>
+    <script>document.querySelector('main').dataset.ready = 'true';</script>
+  </body>
+</html>

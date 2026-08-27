@@ -922,6 +922,36 @@ fn fast_main_anchors(dom: &Dom) -> Option<DocumentAnchors> {
     Some(anchors)
 }
 
+fn prepend_job_summary(
+    dom: &mut Dom,
+    root: NodeId,
+    fields: &[(String, String)],
+) -> std::result::Result<(), ()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let node_count = 1usize.saturating_add(fields.len().saturating_mul(4));
+    dom.reserve_additional_nodes_exact(node_count);
+    let summary = dom.create_html_element(Tag::Dl).map_err(|_| ())?;
+    dom.set_attr(summary, AttrName::Class, "legible-job-summary");
+    for (label, value) in fields {
+        let term = dom.create_html_element(Tag::Dt).map_err(|_| ())?;
+        let term_text = dom.create_text(label).map_err(|_| ())?;
+        let definition = dom.create_html_element(Tag::Dd).map_err(|_| ())?;
+        let definition_text = dom.create_text(value).map_err(|_| ())?;
+        dom.append_child(term, term_text);
+        dom.append_child(definition, definition_text);
+        dom.append_child(summary, term);
+        dom.append_child(summary, definition);
+    }
+    if let Some(first) = dom.first_child(root) {
+        dom.insert_before(first, summary);
+    } else {
+        dom.append_child(root, summary);
+    }
+    Ok(())
+}
+
 impl<'a> ContentExtractor<'a> {
     pub(crate) fn from_document(dom: Dom, url: Option<&str>, options: &'a ExtractorConfig) -> Self {
         let source_dom_nodes = dom.len();
@@ -1044,6 +1074,14 @@ impl<'a> ContentExtractor<'a> {
         }
         if self.page_kind == PageKind::Unknown {
             self.page_kind = PageKind::detect(&self.dom);
+        }
+        if self.page_kind == PageKind::Unknown
+            && !self
+                .structured_data
+                .job_posting_fields(&self.structured_title, self.source_uri.as_ref())
+                .is_empty()
+        {
+            self.page_kind = PageKind::JobListing;
         }
         self.page_title = self
             .metadata
@@ -1292,9 +1330,13 @@ impl<'a> ContentExtractor<'a> {
         let static_fallback_root = (source_looks_like_empty_shell && !source_access_barrier)
             .then(|| prepared_source.static_fallback_root(&self.dom, body))
             .flatten();
+        let mut substantial_static_root = (!source_access_barrier
+            && !source_metrics.has_meaningful_text())
+        .then(|| prepared_source.substantial_static_root(&self.dom, body))
+        .flatten();
         if !source_metrics.has_meaningful_text()
             && !structured_content_usable
-            && let Some(root) = static_fallback_root
+            && let Some(root) = static_fallback_root.or(substantial_static_root)
         {
             let compile_context = crate::document::CompileContext::new(
                 self.base_uri.clone(),
@@ -1310,7 +1352,8 @@ impl<'a> ContentExtractor<'a> {
         if !source_metrics.has_meaningful_text()
             && !relaxed_source_metrics.has_meaningful_text()
             && structured_root.is_none()
-            && (structured_content_usable || static_fallback_root.is_none())
+            && (structured_content_usable
+                || static_fallback_root.is_none() && substantial_static_root.is_none())
         {
             return Err(Error::NoContent);
         }
@@ -1574,6 +1617,12 @@ impl<'a> ContentExtractor<'a> {
 
             // The attempt owns its fragment. The prepared source remains
             // available only through the runner's immutable source session.
+            let job_fields = (self.page_kind == PageKind::JobListing)
+                .then(|| {
+                    self.structured_data
+                        .job_posting_fields(&self.page_title, self.source_uri.as_ref())
+                })
+                .filter(|fields| !fields.is_empty());
             let mut runner =
                 AttemptRunner::new(self, fragment, std::mem::take(&mut attempt_scratch));
             runner.scratch.workspace.reset();
@@ -1613,6 +1662,10 @@ impl<'a> ContentExtractor<'a> {
                 (copied_top, content_id)
             };
             let synthetic = selection.node == body || !selection.branches.is_empty();
+            if let Some(fields) = job_fields.as_deref() {
+                prepend_job_summary(&mut runner.dom, content_id, fields)
+                    .map_err(|_| Error::NoContent)?;
+            }
             if let Some(lead_media) = lead_media
                 && !source_siblings.contains(&lead_media)
                 && let Some(first_child) = runner.dom.first_child(content_id)
@@ -1942,20 +1995,24 @@ impl<'a> ContentExtractor<'a> {
             }
         }
 
-        if let Some(root) = static_fallback_root
-            && !structured_content_usable
+        let needs_static_fallback = !structured_content_usable
             && self
                 .best_attempt
                 .as_ref()
-                .is_none_or(|best| best.quality.is_suspiciously_small())
-        {
-            self.best_attempt.take();
-            return self.extract_exact_root(
-                root,
-                ExactRootOrigin::StaticFallback,
-                &compile_context,
-                prepared_source.anchors,
-            );
+                .is_none_or(|best| best.quality.is_suspiciously_small());
+        if needs_static_fallback {
+            if substantial_static_root.is_none() && !source_access_barrier {
+                substantial_static_root = prepared_source.substantial_static_root(&self.dom, body);
+            }
+            if let Some(root) = static_fallback_root.or(substantial_static_root) {
+                self.best_attempt.take();
+                return self.extract_exact_root(
+                    root,
+                    ExactRootOrigin::StaticFallback,
+                    &compile_context,
+                    prepared_source.anchors,
+                );
+            }
         }
         let best = self.best_attempt.take().ok_or(Error::NoContent)?;
         if !best.quality.is_good() && best.quality.is_suspiciously_small() {
@@ -2647,6 +2704,16 @@ impl<'a> ContentExtractor<'a> {
         let mut runner = AttemptRunner::new(self, fragment, AttemptScratch::default());
         runner.scratch.workspace.reset();
         runner.scratch.node_data.enable_link_lengths();
+
+        if self.page_kind == PageKind::JobListing {
+            let fields = self
+                .structured_data
+                .job_posting_fields(&self.page_title, self.source_uri.as_ref());
+            if !fields.is_empty() {
+                prepend_job_summary(&mut runner.dom, content_id, &fields)
+                    .map_err(|_| Error::NoContent)?;
+            }
+        }
 
         let shell_evidence = interactive_shell_evidence(&runner.dom, content_id);
         let video = regexps::VIDEOS.clone();
@@ -4177,6 +4244,21 @@ impl<'a> ContentExtractor<'a> {
                 dom,
                 root,
                 self.page_kind,
+                node_data,
+                &source_evidence,
+                workspace,
+            );
+            self.record_cleanup_delta(
+                dom,
+                cleanup_actions,
+                CleanupActionKind::HeuristicCleanup,
+                before,
+                root,
+            );
+            let before = self.diagnostic_element_count(dom, root);
+            remove_decorative_separator_paragraphs_in_workspace(
+                dom,
+                root,
                 node_data,
                 &source_evidence,
                 workspace,

@@ -1832,6 +1832,11 @@ impl CandidateFeatureIndex {
         } else {
             (0.0, 0.0)
         };
+        let utility_name_score = if weight_classes {
+            utility_name_signal(dom, candidate.node)
+        } else {
+            0.0
+        };
 
         CandidateFeatures {
             text_chars: text.text_length,
@@ -1855,6 +1860,7 @@ impl CandidateFeatureIndex {
             semantic_prior: candidate.semantic_prior,
             positive_name_score,
             negative_name_score,
+            utility_name_score,
         }
     }
 }
@@ -1904,6 +1910,7 @@ impl CandidateFeatures {
             self.negative_name_score * (1.0 + self.readability_score.max(0.0) * 0.6).min(125.0)
         };
         let name_evidence = self.positive_name_score * 0.001 - negative_name_penalty;
+        let utility_name_penalty = self.utility_name_score * 48.0;
 
         // Dashboard charts and metric cards often expose every value as a
         // paragraph-like wrapper. They can outscore a complete document on
@@ -1938,6 +1945,42 @@ impl CandidateFeatures {
             + name_evidence
             - link_penalty
             - repeated_metric_penalty
+            - utility_name_penalty
+    }
+}
+
+fn utility_name_signal(dom: &Dom, node: NodeId) -> f64 {
+    if std::iter::once(node)
+        .chain(dom.ancestors(node))
+        .any(|ancestor| {
+            [AttrName::Class, AttrName::Id]
+                .into_iter()
+                .filter_map(|attribute| dom.attr(ancestor, attribute))
+                .any(|value| {
+                    let value = value.to_ascii_lowercase();
+                    [
+                        "bibliograph",
+                        "citation",
+                        "extra-services",
+                        "extraservices",
+                        "labstabs",
+                        "recommender",
+                        "ref-list",
+                        "reflist",
+                        "reference-list",
+                        "recent-changes",
+                        "recentchanges",
+                        "revision-history",
+                        "revisionhistory",
+                    ]
+                    .iter()
+                    .any(|needle| value.contains(needle))
+                })
+        })
+    {
+        1.0
+    } else {
+        0.0
     }
 }
 

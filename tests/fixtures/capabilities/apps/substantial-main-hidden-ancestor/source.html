@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <head><title>Visible application view</title></head>
+  <body>
+    <div aria-hidden="true">
+      <main>
+        <h1>Hidden application view</h1>
+        <p>This hidden region contains enough text to look like a complete server-rendered page, but it must not be extracted.</p>
+        <p>The hidden content is an inactive accessibility fallback and is not the visible document.</p>
+      </main>
+    </div>
+    <main>
+      <h1>Visible application view</h1>
+      <p>This visible region contains the current server-rendered page and gives the reader the active project status.</p>
+      <p>The visible result is safe to extract because it is not inside a hidden or modal ancestor.</p>
+    </main>
+  </body>
+</html>

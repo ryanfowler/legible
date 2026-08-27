@@ -1,0 +1,5 @@
+{
+  "word_count_min": 20,
+  "must_contain": ["available opportunities"],
+  "must_not_contain": ["Product Engineer", "Design Lead", "North Company"]
+}

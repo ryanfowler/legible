@@ -1,0 +1,16 @@
+{
+  "title": "Main document with primary chrome",
+  "word_count_min": 55,
+  "must_contain": [
+    "main document",
+    "Recent changes in the main document",
+    "Sponsored context remains",
+    "In-main recommender context",
+    "closing evidence"
+  ],
+  "must_not_contain": [
+    "Outside recommendations",
+    "Sponsored outside promotion"
+  ],
+  "headings_min": 1
+}

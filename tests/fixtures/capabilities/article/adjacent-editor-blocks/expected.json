@@ -1,0 +1,8 @@
+{
+  "must_contain": [
+    "first editor block",
+    "important detail",
+    "final conclusion"
+  ],
+  "must_occur_once": ["first editor block", "important detail", "final conclusion"]
+}

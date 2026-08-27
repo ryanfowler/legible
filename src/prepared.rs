@@ -9,7 +9,10 @@ use crate::constants::{is_unlikely_role, regexps};
 use crate::document::{has_math_wrapper_class, is_math_root, is_tex_annotation};
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStats, Tag};
 use crate::quality::ContentMetrics;
-use crate::scoring::{has_hidden_utility_class_for_discovery, is_probably_visible, stats_for_text};
+use crate::scoring::{
+    has_hidden_utility_class, has_hidden_utility_class_for_discovery, is_probably_visible,
+    stats_for_text,
+};
 use crate::tokens::{any_token_contains, has_any_token, has_token};
 use std::collections::HashSet;
 
@@ -84,6 +87,29 @@ pub(crate) struct SourceAnalysis {
     /// this storage proportional to text nodes instead of all DOM nodes.
     text_stats: Vec<NodeStats>,
     candidates: CandidateSet,
+}
+
+#[derive(Clone, Copy, Default)]
+struct StaticRootMetrics {
+    text_chars: usize,
+    word_count: usize,
+    link_text_chars: usize,
+    paragraph_count: usize,
+    heading_count: usize,
+    list_item_count: usize,
+    table_count: usize,
+}
+
+impl StaticRootMetrics {
+    fn add(&mut self, other: Self) {
+        self.text_chars = self.text_chars.saturating_add(other.text_chars);
+        self.word_count = self.word_count.saturating_add(other.word_count);
+        self.link_text_chars = self.link_text_chars.saturating_add(other.link_text_chars);
+        self.paragraph_count = self.paragraph_count.saturating_add(other.paragraph_count);
+        self.heading_count = self.heading_count.saturating_add(other.heading_count);
+        self.list_item_count = self.list_item_count.saturating_add(other.list_item_count);
+        self.table_count = self.table_count.saturating_add(other.table_count);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -385,6 +411,104 @@ impl SourceAnalysis {
             .map(|(node, _)| node)
     }
 
+    /// Finds substantial visible content in an explicit primary region. This
+    /// is a last-resort path for pages where generic scoring rejects a static
+    /// dashboard or a server-rendered application view. Restrict the search
+    /// to main/article roots so an arbitrary visible card cannot become the
+    /// document.
+    pub(crate) fn substantial_static_root(&self, dom: &Dom, root: NodeId) -> Option<NodeId> {
+        // Build all subtree metrics in one reverse-preorder pass. Measuring
+        // every candidate with a fresh DOM traversal made nested main/article
+        // roots quadratic on large application documents.
+        let mut metrics = vec![StaticRootMetrics::default(); dom.len()];
+        let mut hidden_subtree = vec![false; dom.len()];
+        let mut inside_link = vec![false; dom.len()];
+        for entry in &self.entries {
+            inside_link[entry.node.index()] = entry.tag == Some(Tag::A)
+                || dom
+                    .parent(entry.node)
+                    .is_some_and(|parent| inside_link[parent.index()]);
+        }
+        for entry in self.entries.iter().rev() {
+            let node = entry.node;
+            if !entry.is_element() {
+                if let Some(stats) = self.text_stats_for_entry(entry) {
+                    metrics[node.index()] = StaticRootMetrics {
+                        text_chars: stats.text_length as usize,
+                        word_count: stats.word_count as usize,
+                        link_text_chars: if inside_link[node.index()] {
+                            stats.text_length as usize
+                        } else {
+                            0
+                        },
+                        ..StaticRootMetrics::default()
+                    };
+                }
+                continue;
+            }
+            let hidden = entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                || entry.flags.contains(SourceFlags::UTILITY_HIDDEN)
+                || entry.flags.contains(SourceFlags::ARIA_HIDDEN)
+                || entry.flags.contains(SourceFlags::MODAL_DIALOG)
+                || entry.flags.contains(SourceFlags::ARIA_MODAL)
+                || !is_probably_visible(dom, node)
+                || is_static_root_non_content_tag(entry.tag);
+            if hidden {
+                hidden_subtree[node.index()] = true;
+                continue;
+            }
+            let mut aggregate = StaticRootMetrics::default();
+            for child in dom.children(node) {
+                if !hidden_subtree[child.index()] {
+                    aggregate.add(metrics[child.index()]);
+                }
+            }
+            match entry.tag {
+                Some(Tag::P) => aggregate.paragraph_count += 1,
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => {
+                    aggregate.heading_count += 1;
+                }
+                Some(Tag::Li) => aggregate.list_item_count += 1,
+                Some(Tag::Table) => aggregate.table_count += 1,
+                _ => {}
+            }
+            metrics[node.index()] = aggregate;
+        }
+        self.elements_in(root)
+            .filter(|entry| {
+                !entry.flags.contains(SourceFlags::STATIC_HIDDEN)
+                    && !entry.flags.contains(SourceFlags::UTILITY_HIDDEN)
+                    && !entry.flags.contains(SourceFlags::ARIA_HIDDEN)
+                    && !entry.flags.contains(SourceFlags::MODAL_DIALOG)
+                    && (entry.tag == Some(Tag::Main)
+                        || entry.tag == Some(Tag::Article)
+                        || entry.flags.contains(SourceFlags::MAIN_ROLE))
+                    && is_probably_visible(dom, entry.node)
+                    && !has_hidden_ancestor(dom, entry.node)
+            })
+            .filter_map(|entry| {
+                let root_metrics = metrics[entry.node.index()];
+                let structural = root_metrics.heading_count > 0
+                    || root_metrics.paragraph_count >= 2
+                    || root_metrics.table_count > 0
+                    || root_metrics.list_item_count >= 3;
+                let link_density = if root_metrics.text_chars == 0 {
+                    0.0
+                } else {
+                    root_metrics.link_text_chars as f64 / root_metrics.text_chars as f64
+                };
+                (root_metrics.text_chars >= 240
+                    && root_metrics.word_count >= 40
+                    && structural
+                    && link_density < 0.7)
+                    .then_some((entry.node, root_metrics.text_chars))
+            })
+            .max_by_key(|&(node, text_chars)| {
+                (text_chars, u8::from(dom.tag(node) == Some(Tag::Main)))
+            })
+            .map(|(node, _)| node)
+    }
+
     pub(crate) fn accessible_math_nodes(&self, dom: &Dom) -> HashSet<NodeId> {
         let annotations: Vec<_> = self
             .elements()
@@ -427,6 +551,39 @@ impl SourceAnalysis {
         }
         accessible
     }
+}
+
+fn is_static_root_non_content_tag(tag: Option<Tag>) -> bool {
+    matches!(
+        tag,
+        Some(
+            Tag::Script
+                | Tag::Style
+                | Tag::Template
+                | Tag::Meta
+                | Tag::Link
+                | Tag::Input
+                | Tag::Textarea
+                | Tag::Select
+                | Tag::Datalist
+                | Tag::Option
+                | Tag::Iframe
+                | Tag::Embed
+                | Tag::Object
+        )
+    )
+}
+
+fn has_hidden_ancestor(dom: &Dom, node: NodeId) -> bool {
+    dom.ancestors(node).any(|ancestor| {
+        !is_probably_visible(dom, ancestor)
+            || has_hidden_utility_class(dom, ancestor)
+            || dom.attr(ancestor, AttrName::AriaHidden) == Some("true")
+            || dom.attr(ancestor, AttrName::AriaModal) == Some("true")
+            || dom
+                .attr(ancestor, AttrName::Role)
+                .is_some_and(|roles| has_any_token(roles, &["dialog", "alertdialog"]))
+    })
 }
 
 fn has_local_fragment_target(href: &str) -> bool {
@@ -758,6 +915,24 @@ mod tests {
                 .static_fallback_root(&unmarked, unmarked.body().unwrap())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn substantial_static_root_rejects_hidden_ancestors() {
+        for class in ["hidden", "sr-only", "visually-hidden"] {
+            let html = format!(
+                r#"<body><div class="{class}"><main><h1>Hidden view</h1><p>This hidden primary region contains enough complete text to look like a complete server-rendered page.</p><p>The inactive view must not become extracted content.</p></main></div></body>"#
+            );
+            let dom = Dom::parse_document(&html).unwrap();
+            let source = SourceAnalysis::build(&dom);
+
+            assert!(
+                source
+                    .substantial_static_root(&dom, dom.body().unwrap())
+                    .is_none(),
+                "hidden utility class {class} must hide descendants"
+            );
+        }
     }
 
     #[test]

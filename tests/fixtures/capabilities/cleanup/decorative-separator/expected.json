@@ -1,0 +1,4 @@
+{
+  "must_contain": ["opening section", "conclusion states"],
+  "must_not_contain": ["###"]
+}

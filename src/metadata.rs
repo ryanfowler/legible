@@ -236,6 +236,216 @@ impl StructuredData {
     pub(crate) fn retained_items(&self) -> Vec<Value> {
         self.items.clone()
     }
+
+    /// Returns compact fields from the primary job posting, when the page
+    /// exposes Schema.org job data. The description itself stays in the HTML
+    /// extraction path. These fields fill the common gap where a job card is
+    /// separate from the selected job description.
+    pub(crate) fn job_posting_fields(
+        &self,
+        document_title: &str,
+        source_url: Option<&Url>,
+    ) -> Vec<(String, String)> {
+        let Some(item) =
+            select_job_posting(self.typed_items("JobPosting"), document_title, source_url)
+        else {
+            return Vec::new();
+        };
+        let mut fields = Vec::with_capacity(5);
+        add_job_field(
+            &mut fields,
+            "Role",
+            item.get("title").and_then(Value::as_str),
+        );
+        add_job_field(
+            &mut fields,
+            "Company",
+            item.get("hiringOrganization").and_then(job_name_value),
+        );
+        if let Some(value) = item.get("jobLocation").and_then(job_location_value) {
+            add_job_field(&mut fields, "Location", Some(&value));
+        }
+        add_job_field(
+            &mut fields,
+            "Employment",
+            item.get("employmentType")
+                .and_then(job_string_value)
+                .as_deref(),
+        );
+        if let Some(value) = item.get("baseSalary").and_then(job_salary_value) {
+            add_job_field(&mut fields, "Salary", Some(&value));
+        }
+        if item
+            .get("jobLocationType")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("TELECOMMUTE"))
+        {
+            add_job_field(&mut fields, "Workplace", Some("Remote"));
+        }
+        fields
+    }
+}
+
+fn add_job_field(fields: &mut Vec<(String, String)>, label: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    fields.push((label.to_owned(), value.to_owned()));
+}
+
+fn select_job_posting<'a>(
+    items: impl IntoIterator<Item = &'a Value>,
+    document_title: &str,
+    source_url: Option<&Url>,
+) -> Option<&'a Value> {
+    let mut unique_by_fingerprint = HashMap::<u64, Vec<&Value>>::new();
+    for item in items {
+        let bucket = unique_by_fingerprint
+            .entry(structured_item_fingerprint(item))
+            .or_default();
+        if !bucket.contains(&item) {
+            bucket.push(item);
+        }
+    }
+    let postings = unique_by_fingerprint
+        .into_values()
+        .flatten()
+        .collect::<Vec<_>>();
+    if postings.len() == 1 {
+        return postings.into_iter().next();
+    }
+    let mut matches = postings.into_iter().filter(|item| {
+        let title_match = item
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|title| {
+                !document_title.is_empty()
+                    && text_similarity(title, document_title) >= 0.6
+                    && text_similarity(document_title, title) >= 0.8
+            });
+        let url_match = json_url(item)
+            .and_then(|value| Url::parse(value).ok())
+            .zip(source_url)
+            .is_some_and(|(candidate, source)| same_host_and_path(&candidate, source));
+        title_match || url_match
+    });
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
+}
+
+fn job_string_value(value: &Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_owned());
+    }
+    let values = value.as_array()?.iter().filter_map(Value::as_str);
+    let values = values
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
+}
+
+fn job_name_value(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("name").and_then(Value::as_str))
+}
+
+fn job_location_value(value: &Value) -> Option<String> {
+    let locations = value
+        .as_array()
+        .map(|values| values.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![value]);
+    let values = locations
+        .into_iter()
+        .filter_map(job_single_location_value)
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join("; "))
+}
+
+fn job_single_location_value(location: &Value) -> Option<String> {
+    let address = location.get("address").unwrap_or(location);
+    let mut parts = [None; 4];
+    parts[0] = address.get("streetAddress").and_then(Value::as_str);
+    parts[1] = address.get("addressLocality").and_then(Value::as_str);
+    parts[2] = address.get("addressRegion").and_then(Value::as_str);
+    parts[3] = address.get("addressCountry").and_then(|country| {
+        country
+            .as_str()
+            .or_else(|| country.get("name").and_then(Value::as_str))
+    });
+    let value = parts
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!value.is_empty()).then(|| value.join(", "))
+}
+
+fn job_salary_value(value: &Value) -> Option<String> {
+    let currency = value.get("currency").and_then(Value::as_str).unwrap_or("");
+    let salary_value = value.get("value").unwrap_or(value);
+    let unit = salary_value
+        .get("unitText")
+        .or_else(|| value.get("unitText"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty());
+    let format_number = |number: &Value| -> Option<String> {
+        number.as_str().map(str::to_owned).or_else(|| {
+            number.as_f64().map(|value| {
+                if value.fract() == 0.0 {
+                    format!("{value:.0}")
+                } else {
+                    value.to_string()
+                }
+            })
+        })
+    };
+    let formatted = if salary_value.is_object() {
+        let min = salary_value.get("minValue").and_then(&format_number);
+        let max = salary_value.get("maxValue").and_then(&format_number);
+        match (min, max) {
+            (Some(min), Some(max)) => Some(format_job_salary(currency, &min, &max, unit)),
+            (Some(min), None) => Some(format_job_salary(currency, &min, "", unit)),
+            (None, Some(max)) => Some(format_job_salary(currency, &max, "", unit)),
+            _ => None,
+        }
+    } else {
+        format_number(salary_value).map(|number| format_job_salary(currency, &number, "", unit))
+    }?;
+    Some(formatted)
+}
+
+fn format_job_salary(currency: &str, first: &str, second: &str, unit: Option<&str>) -> String {
+    let range = if second.is_empty() {
+        first.to_owned()
+    } else {
+        format!("{first}–{second}")
+    };
+    let separator = if currency
+        .chars()
+        .last()
+        .is_some_and(|character| character.is_ascii_alphanumeric())
+    {
+        " "
+    } else {
+        ""
+    };
+    let unit = unit
+        .map(|unit| {
+            let normalized = unit.to_ascii_lowercase();
+            let normalized = normalized.strip_prefix("per ").unwrap_or(&normalized);
+            match normalized {
+                "year" | "yearly" | "annual" | "annually" => " per year".to_owned(),
+                "month" | "monthly" => " per month".to_owned(),
+                "hour" | "hourly" => " per hour".to_owned(),
+                value => format!(" per {value}"),
+            }
+        })
+        .unwrap_or_default();
+    format!("{currency}{separator}{range}{unit}")
 }
 
 fn script_text_bounded<'a>(
@@ -1177,6 +1387,7 @@ fn structured_item_score(item: &Value, document_title: &str, source_url: Option<
     let title = item
         .get("headline")
         .or_else(|| item.get("name"))
+        .or_else(|| item.get("title"))
         .and_then(Value::as_str);
     let title_score = title
         .map(|title| (text_similarity(title, document_title) * 100.0) as u16)
@@ -1184,11 +1395,14 @@ fn structured_item_score(item: &Value, document_title: &str, source_url: Option<
     let url_score = json_url(item)
         .and_then(|value| Url::parse(value).ok())
         .zip(source_url)
-        .filter(|(candidate, source)| {
-            candidate.as_str().trim_end_matches('/') == source.as_str().trim_end_matches('/')
-        })
+        .filter(|(candidate, source)| same_host_and_path(candidate, source))
         .map_or(0, |_| 150);
     title_score + url_score
+}
+
+fn same_host_and_path(candidate: &Url, source: &Url) -> bool {
+    candidate.host() == source.host()
+        && candidate.path().trim_end_matches('/') == source.path().trim_end_matches('/')
 }
 
 fn add_json_string(
@@ -3337,6 +3551,18 @@ mod tests {
         assert_eq!(
             data.primary_texts(&title, None).collect::<Vec<_>>(),
             ["The repeated article body has enough useful words to identify its content."]
+        );
+    }
+
+    #[test]
+    fn job_salary_units_are_not_prefixed_twice() {
+        assert_eq!(
+            format_job_salary("USD", "150000", "", Some("per year")),
+            "USD 150000 per year"
+        );
+        assert_eq!(
+            format_job_salary("USD", "12500", "", Some("MONTHLY")),
+            "USD 12500 per month"
         );
     }
 
