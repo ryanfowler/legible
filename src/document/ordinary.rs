@@ -928,7 +928,10 @@ pub(super) fn compile_with_retained_capacity_plan(
             }),
             _ if is_block_tag(tag)
                 && !(matches!(tag, Tag::Div | Tag::Section)
-                    && parent_is_block_group
+                    && (parent_is_block_group
+                        || scope
+                            .parent
+                            .is_some_and(|parent| builder.is_list_item(parent)))
                     && has_single_content_child(dom, node)) =>
             {
                 Some(SemanticKind::BlockGroup)

@@ -773,6 +773,16 @@ pub(crate) fn select_content_root<'a>(
     };
     let mut selected = first.node;
     let mut reason = RootSelectionReason::Ranked;
+    if is_document_utility_root(dom, selected)
+        && let Some(ancestor) = dom.ancestors(selected).find(|&ancestor| {
+            ancestor != body
+                && !is_document_utility_root(dom, ancestor)
+                && candidates.get(ancestor).is_some()
+        })
+    {
+        selected = ancestor;
+        reason = RootSelectionReason::CompleteAncestor;
+    }
 
     let hints: Vec<_> = structured_texts
         .into_iter()
@@ -958,7 +968,7 @@ pub(crate) fn select_content_root<'a>(
 }
 
 fn is_document_utility_root(dom: &Dom, node: NodeId) -> bool {
-    std::iter::once(node)
+    let named_utility = std::iter::once(node)
         .chain(dom.ancestors(node))
         .any(|ancestor| {
             [AttrName::Class, AttrName::Id]
@@ -984,6 +994,68 @@ fn is_document_utility_root(dom: &Dom, node: NodeId) -> bool {
                     .iter()
                     .any(|needle| value.contains(needle))
                 })
+        });
+    let reference_heading = std::iter::once(node)
+        .chain(dom.ancestors(node).take(8))
+        .any(|section| {
+            first_heading_is_reference_list(dom, section)
+                && dom.ancestors(section).take(8).any(|ancestor| {
+                    is_authoritative_semantic_node(dom, ancestor)
+                        && !first_heading_is_reference_list(dom, ancestor)
+                })
+        });
+    named_utility || reference_heading
+}
+
+/// Returns true for a section whose first heading identifies a bibliography.
+/// A parent article is not marked when it has an ordinary title first, even if
+/// it contains a later references section.
+fn first_heading_is_reference_list(dom: &Dom, node: NodeId) -> bool {
+    let heading = if is_heading_like(dom, node) {
+        Some(node)
+    } else {
+        dom.descendants(node)
+            .take(64)
+            .find(|&descendant| is_heading_like(dom, descendant))
+    };
+    let Some(heading) = heading else { return false };
+    let mut text = String::new();
+    dom.append_normalized_text_limited(heading, &mut text, 64);
+    let text = text.to_ascii_lowercase();
+    let tokens: Vec<_> = split_word_tokens(&text).collect();
+    let leading = std::iter::once(node)
+        .chain(dom.descendants(node))
+        .take_while(|&descendant| descendant != heading)
+        .all(|descendant| {
+            dom.text_node(descendant)
+                .is_none_or(|text| text.trim().is_empty())
+        });
+    leading
+        && tokens.len() <= 3
+        && tokens.last().is_some_and(|token| {
+            matches!(*token, "references" | "bibliography")
+                || tokens
+                    .windows(2)
+                    .any(|pair| pair == ["literature", "cited"] || pair == ["works", "cited"])
+        })
+}
+
+fn is_heading_like(dom: &Dom, node: NodeId) -> bool {
+    if matches!(
+        dom.tag(node),
+        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+    ) {
+        return true;
+    }
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            )
         })
 }
 
@@ -1161,6 +1233,7 @@ fn more_specific_candidate(
             candidate.node != selected
                 && competitive_score(candidate.score, top_score)
                 && is_descendant_of(dom, candidate.node, selected)
+                && !is_document_utility_root(dom, candidate.node)
                 && candidates
                     .get(candidate.node)
                     .is_some_and(|value| value.has_source(CandidateSource::Semantic))
@@ -1948,6 +2021,41 @@ fn bounded_normalized_text(dom: &Dom, root: NodeId, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_heading_marks_only_the_reference_section_as_utility() {
+        let dom = Dom::parse_document(
+            "<body><main><h1>Study title</h1><section><h2>Introduction</h2><p>Study text.</p></section><section id='refs' class='ref-list'><div class='h1'>References</div><p>Citation text.</p></section></main></body>",
+        )
+        .unwrap();
+        let main = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+        let refs = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("refs"))
+            .unwrap();
+
+        assert!(is_document_utility_root(&dom, refs));
+        assert!(!is_document_utility_root(&dom, main));
+
+        let descendant = Dom::parse_document(
+            "<body><main><h1>Study title</h1><section><div class='h1'>References</div><p id='reference'>Published source details.</p></section></main></body>",
+        )
+        .unwrap();
+        let reference = descendant
+            .descendants(descendant.root())
+            .find(|&node| descendant.attr(node, AttrName::Id) == Some("reference"))
+            .unwrap();
+        assert!(is_document_utility_root(&descendant, reference));
+
+        let standalone = Dom::parse_document(
+            "<body><main><h1>References</h1><p>Published source details.</p></main></body>",
+        )
+        .unwrap();
+        let standalone_main = standalone
+            .first_descendant_by_tag(standalone.root(), Tag::Main)
+            .unwrap();
+        assert!(!is_document_utility_root(&standalone, standalone_main));
+    }
 
     #[test]
     fn discovers_and_merges_semantic_signals() {

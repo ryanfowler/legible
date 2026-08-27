@@ -359,7 +359,18 @@ pub fn is_div_to_p_elem(tag: Tag) -> bool {
 pub fn is_alter_to_div_exception(tag: Tag) -> bool {
     matches!(
         tag,
-        Tag::Div | Tag::Article | Tag::Section | Tag::P | Tag::Ol | Tag::Ul
+        Tag::Div
+            | Tag::Article
+            | Tag::Section
+            | Tag::P
+            | Tag::Ol
+            | Tag::Ul
+            | Tag::H1
+            | Tag::H2
+            | Tag::H3
+            | Tag::H4
+            | Tag::H5
+            | Tag::H6
     )
 }
 

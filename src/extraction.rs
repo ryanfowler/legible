@@ -6257,6 +6257,46 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     }
 
     #[test]
+    fn page_title_stays_in_metadata_instead_of_markdown_content() {
+        let page = crate::extract(
+            r#"<html><head><title>Complete article title</title></head><body><main><h1>Complete article title</h1><div class="content"><p>This article contains complete prose with enough detail to select the nested content region.</p><p>The second paragraph adds more context and confirms that the title belongs to the selected content.</p></div></main></body></html>"#,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            page.metadata().title.as_deref(),
+            Some("Complete article title")
+        );
+        let markdown = page.markdown();
+        assert!(
+            !markdown.starts_with("# Complete article title"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("second paragraph"), "{markdown}");
+    }
+
+    #[test]
+    fn reference_sections_do_not_replace_the_article_body() {
+        let article = "This introduction explains the study method, the measured results, and the practical limits of the analysis. ".repeat(5);
+        let references = "Citation author and publication details. ".repeat(20);
+        let html = format!(
+            r#"<html><head><title>Complete study</title></head><body><main><h1>Complete study</h1><section><h2>Introduction</h2><p>{article}</p></section><section><h2>References</h2><p>{references}</p></section></main></body></html>"#
+        );
+
+        let page = crate::extract(&html, None).unwrap();
+        let text = page.text();
+        assert!(
+            text.contains("introduction explains the study method"),
+            "{text}"
+        );
+        assert!(
+            !text.starts_with("Citation author and publication details"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn readability_discovery_adds_and_selects_a_non_semantic_candidate() {
         let html = r#"<body><blockquote><p>
             Traditional article prose has enough detail, punctuation, and length to identify this container.
@@ -6298,6 +6338,22 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let ranked =
             readability.rank_candidates(&scoring_dom, &mut candidates, scores, &excluded_mask);
         assert_eq!(ranked[0].node, content);
+    }
+
+    #[test]
+    fn link_only_list_items_render_on_the_marker_line() {
+        let page = crate::extract(
+            r#"<body><main><h1>Reference index</h1><ul><li><div><span><a href="/one">First reference</a></span></div></li><li><div><span><a href="/two">Second reference</a></span></div></li><li><div><span><a href="/three">Third reference</a></span></div></li><li><div><span><a href="/four">Fourth reference</a></span></div></li></ul></main></body>"#,
+            Some("https://example.test/index"),
+        )
+        .unwrap();
+        let markdown = page.markdown();
+
+        assert!(
+            markdown.contains("- [First reference](https://example.test/one)"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("- \n  [First reference]"), "{markdown}");
     }
 
     #[test]
