@@ -1,3 +1,5 @@
+# Stable record processing
+
 A short guide to repeatable validation and storage.
 
 The processor reads each source record and checks its required fields before it writes any output.

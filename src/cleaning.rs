@@ -4497,7 +4497,13 @@ fn mark_terminal_peripheral_sequence(
             break;
         }
     }
-    if signal_nodes < 2 && !explicit_promotion || start == 0 || start == children.len() {
+    let single_explicit_related_heading = signal_nodes > 0
+        && related_heading_signal_in(dom, children[start]) == RelatedHeadingSignal::Strong
+        && link_counts[children[start].index()] >= 2;
+    if signal_nodes < 2 && !explicit_promotion && !single_explicit_related_heading
+        || start == 0
+        || start == children.len()
+    {
         return;
     }
     let preceding_text = children[..start]
@@ -6506,6 +6512,17 @@ mod tests {
         assert!(!text.contains("Subscribe"), "{text}");
         assert!(!text.contains("Continue reading"), "{text}");
         assert!(!text.contains("About"), "{text}");
+    }
+
+    #[test]
+    fn terminal_peripheral_sequence_removes_one_explicit_related_section() {
+        let text = clean_fragment(
+            r#"<article><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><section><h2>Read next</h2><div><a href="/one">First related report</a><a href="/two">Second related report</a></div></section></article>"#,
+        );
+
+        assert!(text.contains("complete extraction method"), "{text}");
+        assert!(!text.contains("First related report"), "{text}");
+        assert!(!text.contains("Second related report"), "{text}");
     }
 
     #[test]

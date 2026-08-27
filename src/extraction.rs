@@ -190,6 +190,43 @@ fn remove_title_brand_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingP
     }
 }
 
+fn remove_duplicate_title_headings(dom: &mut Dom, root: NodeId, plan: &TitleHeadingPlan) {
+    let Some(preferred) = plan.preferred else {
+        return;
+    };
+    if preferred != root && !dom.ancestors(preferred).any(|ancestor| ancestor == root) {
+        return;
+    }
+    let preferred_text = get_inner_text_owned_limited(dom, preferred, 4_096);
+    let preferred_level = crate::normalize::heading_level(dom, preferred);
+    let mut substantial_before = false;
+    let mut headings = SmallVec::<[NodeId; 4]>::new();
+    for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
+        if has_primary_heading_semantics(dom, node)
+            && node != preferred
+            && crate::normalize::heading_level(dom, node) == preferred_level
+            && !substantial_before
+        {
+            let text = get_inner_text_owned_limited(dom, node, 4_096);
+            if metadata::text_similarity(&text, &preferred_text) > 0.9
+                && metadata::text_similarity(&preferred_text, &text) > 0.9
+            {
+                headings.push(node);
+            }
+        }
+        if matches!(
+            dom.tag(node),
+            Some(Tag::P | Tag::Blockquote | Tag::Pre | Tag::Li | Tag::Table | Tag::Figure)
+        ) && dom.normalized_char_count(node) >= 80
+        {
+            substantial_before = true;
+        }
+    }
+    for heading in headings {
+        dom.detach(heading);
+    }
+}
+
 fn exact_is_phrasing_content(dom: &Dom, node: NodeId, depth: u32) -> bool {
     if dom.is_text(node) || dom.is_comment(node) {
         return true;
@@ -393,6 +430,7 @@ struct PhysicalPlan {
     body_fallback: bool,
     rename_top: bool,
     lead_media: Option<NodeId>,
+    lead_title: Option<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1458,6 +1496,7 @@ impl<'a> ContentExtractor<'a> {
             let synthetic = physical_plan.synthetic;
             let rename_top = physical_plan.rename_top;
             let lead_media = physical_plan.lead_media;
+            let title_root = physical_plan.lead_title;
             let source_direction = plan.source_direction.clone();
             let root_info = plan.root_info.clone();
             let root_in_document_chrome = plan.root_in_document_chrome;
@@ -1593,13 +1632,15 @@ impl<'a> ContentExtractor<'a> {
             // Copy only the selected source roots. The scoring view remains
             // available for later strategies, so a rejected attempt does not
             // require another complete DOM clone.
+            let title_exceptions: SmallVec<[NodeId; 1]> = title_root.into_iter().collect();
             let fragment = {
                 analysis
                     .view
-                    .copy_projected_subtrees_as_fragment_excluding(
+                    .copy_projected_subtrees_as_fragment_with_exceptions(
                         working_dom,
                         &source_siblings,
                         &analysis.excluded_mask,
+                        &title_exceptions,
                     )
                     .map_err(|_| Error::NoContent)?
             };
@@ -1676,7 +1717,16 @@ impl<'a> ContentExtractor<'a> {
                     .map_err(|_| Error::NoContent)?;
                 let fragment_root = runner.dom.root();
                 runner.dom.append_child(fragment_root, copied_lead);
-                runner.dom.insert_before(first_child, copied_lead);
+                let copied_title = title_root
+                    .and_then(|title| source_siblings.iter().position(|&node| node == title))
+                    .and_then(|position| copied_siblings.get(position).copied());
+                if let Some(next) = copied_title.and_then(|title| runner.dom.next_sibling(title)) {
+                    runner.dom.insert_before(next, copied_lead);
+                } else if copied_title.is_some() {
+                    runner.dom.append_child(content_id, copied_lead);
+                } else {
+                    runner.dom.insert_before(first_child, copied_lead);
+                }
             }
             let fragment_title_snapshot = runner
                 .dom
@@ -1690,6 +1740,7 @@ impl<'a> ContentExtractor<'a> {
                 runner.source.extractor.source_uri.as_ref(),
             );
             remove_title_brand_headings(&mut runner.dom, content_id, &fragment_title_plan);
+            remove_duplicate_title_headings(&mut runner.dom, content_id, &fragment_title_plan);
 
             // Cleanup owns a compact copy of the selected region. The source
             // DOM remains available for a retry and is never affected by an
@@ -2307,12 +2358,30 @@ impl<'a> ContentExtractor<'a> {
             )
             .find_map(|node| working_dom.attr(node, AttrName::Dir))
             .map(str::to_owned);
+        let title_root = ctx.title_plan.preferred.filter(|&title| {
+            title != top_id
+                && !std::iter::once(title)
+                    .chain(working_dom.ancestors(title))
+                    .any(|node| {
+                        is_boilerplate_root_node(working_dom, node)
+                            || !is_probably_visible(working_dom, node)
+                    })
+                && (is_near_preceding_sibling(working_dom, title, top_id)
+                    || preferred_lead_heading_branch(working_dom, title, top_id).is_some())
+        });
+        if synthetic
+            && let Some(title_root) = title_root
+            && !selection.branches.contains(&title_root)
+        {
+            selection.branches.insert(0, title_root);
+        }
         let mut source_siblings: SmallVec<[NodeId; 16]> = if !synthetic {
             if selection.reason == RootSelectionReason::Ranked {
                 Self::gather_siblings(
                     working_dom,
                     &analysis.view,
                     top_id,
+                    ctx.title_plan.preferred,
                     &mut analysis.shared_facts,
                     &mut scores,
                 )
@@ -2326,12 +2395,19 @@ impl<'a> ContentExtractor<'a> {
         } else {
             SmallVec::from_slice(&[body])
         };
+        if !synthetic
+            && let Some(title_root) = title_root
+            && !source_siblings.contains(&title_root)
+        {
+            source_siblings.insert(0, title_root);
+        }
         source_siblings.retain(|node| {
-            !analysis
-                .excluded_mask
-                .get(node.index())
-                .copied()
-                .unwrap_or(false)
+            Some(*node) == title_root
+                || !analysis
+                    .excluded_mask
+                    .get(node.index())
+                    .copied()
+                    .unwrap_or(false)
         });
         let physical_plan = PhysicalPlan {
             source_roots: source_siblings.clone(),
@@ -2343,6 +2419,7 @@ impl<'a> ContentExtractor<'a> {
             body_fallback: strategy == ExtractionStrategy::BodyFallback,
             rename_top,
             lead_media,
+            lead_title: title_root,
         };
         let plan = AttemptPlan {
             strategy,
@@ -3919,6 +3996,7 @@ impl<'a> ContentExtractor<'a> {
         dom: &Dom,
         scoring_view: &ScoringView,
         top: NodeId,
+        preferred_heading: Option<NodeId>,
         facts: &mut NodeStateStore,
         scores: &mut ScoreStore,
     ) -> SmallVec<[NodeId; 8]> {
@@ -3931,7 +4009,8 @@ impl<'a> ContentExtractor<'a> {
         let class = dom.attr(top, AttrName::Class);
         let mut out = SmallVec::<[NodeId; 8]>::new();
         for x in scoring_view.effective_element_children(dom, parent) {
-            let mut yes = x == top;
+            let mut yes =
+                x == top || preferred_heading == Some(x) && is_near_preceding_sibling(dom, x, top);
             if !yes {
                 let bonus = if class.is_some() && dom.attr(x, AttrName::Class) == class {
                     scores.get(top) * 0.2
@@ -4574,7 +4653,6 @@ fn is_near_preceding_sibling_in_view(
     false
 }
 
-#[cfg(test)]
 fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bool {
     let mut sibling = dom.next_sibling(candidate);
     let mut intervening_elements = 0_u8;
@@ -4596,6 +4674,48 @@ fn is_near_preceding_sibling(dom: &Dom, candidate: NodeId, target: NodeId) -> bo
         sibling = dom.next_sibling(node);
     }
     false
+}
+
+/// Checks for a compact lead branch that contains the resolved title and
+/// precedes a narrower content branch. The branch must be close to the content
+/// and must not be a global document-chrome container.
+fn preferred_lead_heading_branch(dom: &Dom, preferred: NodeId, content: NodeId) -> Option<NodeId> {
+    let mut content_branch = content;
+    for ancestor in dom.ancestors(content).take(8) {
+        let previous = dom.prev_sibling(content_branch).and_then(|mut sibling| {
+            while dom
+                .text_node(sibling)
+                .is_some_and(|text| text.trim().is_empty())
+            {
+                sibling = dom.prev_sibling(sibling)?;
+            }
+            dom.is_element(sibling).then_some(sibling)
+        });
+        if let Some(previous) = previous
+            && (previous == preferred || dom.ancestors(preferred).any(|node| node == previous))
+            && !matches!(dom.tag(previous), Some(Tag::Aside | Tag::Footer | Tag::Nav))
+            && (dom.tag(previous) != Some(Tag::Header) || compact_title_header(dom, previous))
+            && dom
+                .descendants(previous)
+                .any(|node| crate::normalize::heading_level(dom, node).is_some())
+        {
+            return Some(previous);
+        }
+        content_branch = ancestor;
+    }
+    None
+}
+
+fn compact_title_header(dom: &Dom, node: NodeId) -> bool {
+    dom.normalized_char_count(node) <= 512
+        && dom
+            .descendants(node)
+            .filter(|&descendant| dom.tag(descendant) == Some(Tag::A))
+            .count()
+            <= 1
+        && !dom
+            .descendants(node)
+            .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Nav | Tag::Form)))
 }
 
 fn title_heading_plan(
@@ -5053,6 +5173,7 @@ mod tests {
             body_fallback: false,
             rename_top: false,
             lead_media: None,
+            lead_title: None,
         };
 
         let mut physical_attempts = Vec::new();
@@ -6244,6 +6365,60 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
     }
 
     #[test]
+    fn retains_a_nearby_preceding_page_title() {
+        let page = crate::Extractor::builder()
+            .diagnostics(true)
+            .build()
+            .extract(
+                r#"<html><head><title>Complete article title</title></head><body><main><h1>Complete article title</h1><div class="content"><p>This article contains complete prose with enough detail to select the nested content region.</p><p>The second paragraph adds more context and confirms that the title belongs to the selected content.</p></div></main></body></html>"#,
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            page.markdown().starts_with("# Complete article title"),
+            "{}",
+            page.markdown()
+        );
+        assert!(page.text().contains("second paragraph"));
+    }
+
+    #[test]
+    fn keeps_a_same_text_subheading_as_content() {
+        let page = crate::extract(
+            r#"<html><head><title>Guide</title></head><body><article><h1>Guide</h1><p>The guide explains the complete process with enough detail for the reader to follow each required step.</p><h2>Guide</h2><p>This subsection repeats the word as a useful local heading and keeps its own content.</p></article></body></html>"#,
+            None,
+        )
+        .unwrap();
+
+        let markdown = page.markdown();
+        assert!(markdown.contains("## Guide"), "{markdown}");
+        assert!(markdown.contains("useful local heading"), "{markdown}");
+    }
+
+    #[test]
+    fn keeps_a_repeated_same_level_heading_after_content() {
+        let mut dom = Dom::parse_fragment(
+            "<h1>Guide</h1><p>The opening section contains enough complete prose to establish substantial content before the repeated heading appears later.</p><h1>Guide</h1><p>The later section has useful content.</p>",
+            Tag::Div,
+        )
+        .unwrap();
+        let headings: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::H1))
+            .collect();
+        let plan = TitleHeadingPlan {
+            preferred: Some(headings[0]),
+            brand_headings: SmallVec::new(),
+        };
+
+        let root = dom.root();
+        remove_duplicate_title_headings(&mut dom, root, &plan);
+
+        assert!(dom.parent(headings[1]).is_some());
+    }
+
+    #[test]
     fn removes_a_duplicate_aria_page_title_heading() {
         let page = crate::extract(
             r#"<html><head><title>Article title</title></head><body><main><div role="heading" aria-level="1">Article title</div><p>The article contains enough useful text to select this main region and retain its complete explanation.</p><p>A second paragraph confirms that the semantic heading does not duplicate the resolved page title.</p></main></body></html>"#,
@@ -6254,6 +6429,26 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         assert_eq!(page.metadata().title.as_deref(), Some("Article title"));
         assert!(!page.text().contains("Article title"));
         assert!(page.text().contains("complete explanation"));
+    }
+
+    #[test]
+    fn reference_sections_do_not_replace_the_article_body() {
+        let article = "This introduction explains the study method, the measured results, and the practical limits of the analysis. ".repeat(5);
+        let references = "Citation author and publication details. ".repeat(20);
+        let html = format!(
+            r#"<html><head><title>Complete study</title></head><body><main><h1>Complete study</h1><section><h2>Introduction</h2><p>{article}</p></section><section><h2>References</h2><p>{references}</p></section></main></body></html>"#
+        );
+
+        let page = crate::extract(&html, None).unwrap();
+        let text = page.text();
+        assert!(
+            text.contains("introduction explains the study method"),
+            "{text}"
+        );
+        assert!(
+            !text.starts_with("Citation author and publication details"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -6298,6 +6493,22 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         let ranked =
             readability.rank_candidates(&scoring_dom, &mut candidates, scores, &excluded_mask);
         assert_eq!(ranked[0].node, content);
+    }
+
+    #[test]
+    fn link_only_list_items_render_on_the_marker_line() {
+        let page = crate::extract(
+            r#"<body><main><h1>Reference index</h1><ul><li><div><span><a href="/one">First reference</a></span></div></li><li><div><span><a href="/two">Second reference</a></span></div></li><li><div><span><a href="/three">Third reference</a></span></div></li><li><div><span><a href="/four">Fourth reference</a></span></div></li></ul></main></body>"#,
+            Some("https://example.test/index"),
+        )
+        .unwrap();
+        let markdown = page.markdown();
+
+        assert!(
+            markdown.contains("- [First reference](https://example.test/one)"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("- \n  [First reference]"), "{markdown}");
     }
 
     #[test]

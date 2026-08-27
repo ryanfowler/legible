@@ -1,3 +1,5 @@
+# Why the Linux video patent expired
+
 The patent shaped early discussions about video support on Linux, but its practical importance changed as open standards and widely available implementations became easier to use. This article reviews the history, the technical claims, and the reasons that developers can now work with the format without the same licensing uncertainty.
 
 ## What changed

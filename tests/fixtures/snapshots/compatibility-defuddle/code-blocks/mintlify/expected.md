@@ -1,3 +1,5 @@
+# Cover vs Contain Modes
+
 The `mode` prop controls how `SanityImage` handles aspect ratio changes when you specify both `width` and `height`. Understanding the difference between `cover` and `contain` is essential for getting the exact image behavior you need.
 
 ## The Two Modes

@@ -1,3 +1,5 @@
+# Command reference
+
 ## Build
 
 Run the build command to compile the project.

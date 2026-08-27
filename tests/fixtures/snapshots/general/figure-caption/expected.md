@@ -1,3 +1,5 @@
+# Result chart
+
 ![Result chart](https://example.test/docs/charts/result.png)
 
 The chart compares retained text with source text.

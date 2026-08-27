@@ -933,7 +933,11 @@ fn lower_complex_document(
         let parent_is_heading = scope
             .parent
             .is_some_and(|parent| builder.is_heading(parent));
-        let parent_allows_transparent_block = parent_is_block_group || parent_is_heading;
+        let parent_allows_transparent_block = parent_is_block_group
+            || parent_is_heading
+            || scope
+                .parent
+                .is_some_and(|parent| builder.is_list_item(parent));
         let semantic = if let Some(level) = facts.heading_level(node) {
             if !facts.heading_has_meaningful_content(node) {
                 None
