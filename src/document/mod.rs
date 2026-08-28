@@ -872,6 +872,9 @@ pub(crate) enum SemanticItemView<'a> {
     CodeBlock(&'a CodeBlock),
     List(&'a List),
     ListItem,
+    // The payload is used by validation and debug tape output, but renderers
+    // only need the variant.
+    #[allow(dead_code)]
     Table(&'a Table),
     TableCaption,
     TableRow,
