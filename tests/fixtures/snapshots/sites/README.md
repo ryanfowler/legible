@@ -23,6 +23,7 @@ HTML where available. They do not depend on every current CSS class.
 | `reddit-thread` | The static old Reddit layout: `#siteTable`, `thing link`, `usertext-body md`, and nested comments. It uses an `old.reddit.com` URL intentionally. |
 | `npm-package` | `main#main`, package tabs, `#tabpanel-readme`, `article`, `#readme`, and an accessible downloads panel. npm currently uses hashed presentation classes. |
 | `arxiv-paper` | LaTeXML HTML under `.ltx_page_content`, `.ltx_document`, `.ltx_authors`, and `.ltx_section`. |
+| `bun-docs` | Bun-style documentation layout with `main#main`, documentation navigation rails, `article#docs-content`, breadcrumbs, pagination, and an on-page index. |
 
 A `url.txt` file sets the source URL used for relative-link resolution. The
 runner uses it only for extraction and never fetches it. It compares the

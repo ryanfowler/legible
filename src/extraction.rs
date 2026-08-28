@@ -4996,6 +4996,30 @@ mod tests {
     }
 
     #[test]
+    fn documentation_layout_keeps_only_the_article_content() {
+        let html = r##"<body><main>
+            <nav aria-label="Documentation sections"><a href="/docs">Runtime</a><a href="/guides">Guides</a><a href="/reference">Reference</a></nav>
+            <div class="layout">
+                <article id="content">
+                    <nav aria-label="Breadcrumb"><a href="/docs">Runtime</a><span>›</span><span>Guide</span></nav>
+                    <h1>Guide title</h1>
+                    <p>The article contains the complete explanation and enough detail to represent the requested document.</p>
+                    <p>A second paragraph provides the remaining implementation guidance and keeps the article substantive.</p>
+                    <pre>example()</pre>
+                    <footer><nav aria-label="Pagination"><a href="/previous">Previous topic</a><a href="/next">Next topic</a></nav></footer>
+                </article>
+                <aside><nav aria-label="On this page"><a href="#one">One</a><a href="#two">Two</a></nav></aside>
+            </div>
+        </main></body>"##;
+        let markdown = crate::extract(html, None).unwrap().markdown();
+
+        assert!(markdown.contains("complete explanation"), "{markdown}");
+        assert!(!markdown.contains("On this page"), "{markdown}");
+        assert!(!markdown.contains("Previous topic"), "{markdown}");
+        assert!(!markdown.contains("Runtime"), "{markdown}");
+    }
+
+    #[test]
     fn direct_main_fast_path_rejects_access_barriers() {
         let html = "<body><main><h2>Subscription required</h2><p>Subscribe to continue reading this report.</p></main></body>";
         assert!(crate::extract(html, None).is_err());

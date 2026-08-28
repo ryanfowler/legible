@@ -3290,14 +3290,17 @@ fn is_global_navigation(
     let low_prose = metrics.stats.sentence_end_count <= 4 && metrics.non_link_chars <= 360.0;
     let pagination = metrics.at_end
         && metrics.links >= 1
-        && [
-            "previous post",
-            "next post",
-            "previous article",
-            "next article",
-        ]
-        .iter()
-        .any(|label| metrics.text.contains(label));
+        && (dom
+            .attr(node, AttrName::AriaLabel)
+            .is_some_and(is_pagination_label)
+            || [
+                "previous post",
+                "next post",
+                "previous article",
+                "next article",
+            ]
+            .iter()
+            .any(|label| metrics.text.contains(label)));
     let compact = metrics.links >= 3 && metrics.link_density >= 0.35
         || metrics.repeated && metrics.links >= 2 && metrics.link_density >= 0.45;
     let positioned = metrics.at_start || metrics.at_end || metrics.adjacent_content;
@@ -3710,6 +3713,9 @@ fn has_meaningful_region_content(dom: &Dom, node: NodeId) -> bool {
 fn hoist_footer_identity(dom: &mut Dom, footer: NodeId) {
     let children: Vec<_> = dom.children(footer).collect();
     for child in children {
+        if is_inside_pagination_navigation(dom, child, footer) {
+            continue;
+        }
         if dom.is_text(child) {
             if dom.text_node(child).is_some_and(is_footer_identity_text) {
                 dom.insert_before(footer, child);
@@ -3729,7 +3735,9 @@ fn hoist_footer_identity(dom: &mut Dom, footer: NodeId) {
 
     let links: Vec<_> = dom
         .descendants(footer)
-        .filter(|&node| dom.tag(node) == Some(Tag::A))
+        .filter(|&node| {
+            dom.tag(node) == Some(Tag::A) && !is_inside_pagination_navigation(dom, node, footer)
+        })
         .collect();
     let mut text_buffer = String::new();
     if let Some(link) = links.into_iter().find(|&link| {
@@ -3738,6 +3746,30 @@ fn hoist_footer_identity(dom: &mut Dom, footer: NodeId) {
     }) {
         dom.insert_before(footer, link);
     }
+}
+
+fn is_pagination_label(label: &str) -> bool {
+    label
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| equals_any_ascii_case_insensitive(token, &["pagination", "pager"]))
+}
+
+fn is_pagination_navigation_node(dom: &Dom, node: NodeId) -> bool {
+    dom.attr(node, AttrName::AriaLabel)
+        .is_some_and(is_pagination_label)
+        || contains_any(&node_name(dom, node), &["pagination", "pager"])
+}
+
+fn is_inside_pagination_navigation(dom: &Dom, node: NodeId, footer: NodeId) -> bool {
+    for ancestor in std::iter::once(node).chain(dom.ancestors(node)) {
+        if is_pagination_navigation_node(dom, ancestor) {
+            return true;
+        }
+        if ancestor == footer {
+            break;
+        }
+    }
+    false
 }
 
 fn is_footer_identity_node(dom: &Dom, node: NodeId) -> bool {
@@ -4938,8 +4970,9 @@ fn breadcrumb_separator_count(text: &str) -> usize {
 }
 
 fn is_breadcrumb(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    let explicit = has_breadcrumb_name(dom, node, metrics.name);
     if !metrics.at_start
-        || metrics.links < 2
+        || metrics.links < if explicit { 1 } else { 2 }
         || metrics.stats.text_length > 280
         || metrics.stats.sentence_end_count > 1
     {
@@ -4956,7 +4989,6 @@ fn is_breadcrumb(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bo
         return false;
     }
 
-    let explicit = has_breadcrumb_name(dom, node, metrics.name);
     let navigation = dom.tag(node) == Some(Tag::Nav)
         || dom
             .attr(node, AttrName::Role)
@@ -4975,7 +5007,7 @@ fn is_breadcrumb(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bo
     let compact_links = metrics.stats.text_length <= (metrics.links as u32).saturating_mul(70);
 
     compact_links
-        && metrics.link_density >= if explicit { 0.25 } else { 0.4 }
+        && metrics.link_density >= if explicit { 0.15 } else { 0.4 }
         && (explicit || separator || navigation && list_shape)
 }
 
@@ -6500,6 +6532,31 @@ mod tests {
 
         assert!(text.contains("compact tool"), "{text}");
         assert!(text.contains("Quick Start"), "{text}");
+    }
+
+    #[test]
+    fn global_footer_hoists_identity_beside_pagination() {
+        let mut dom = Dom::parse_fragment(
+            r#"<div><p>The retained document contains enough prose to make the footer peripheral and to preserve the useful page identity.</p><footer class="site-footer"><a class="pagination-link" aria-label="Pagination navigation" href="/previous">Previous article</a><a class="pagination-link" href="/next">Next article</a><div class="site-identity"><a href="/">Example Docs</a></div></footer></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let mut store = NodeStateStore::new();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, &store);
+        let mut workspace = FragmentWorkspace::default();
+
+        assert!(remove_global_chrome_in_workspace(
+            &mut dom,
+            root,
+            &mut store,
+            &evidence,
+            &mut workspace,
+        ));
+        let text = dom.text(root);
+        assert!(text.contains("Example Docs"), "{text}");
+        assert!(!text.contains("Previous article"), "{text}");
+        assert!(!text.contains("Next article"), "{text}");
     }
 
     #[test]

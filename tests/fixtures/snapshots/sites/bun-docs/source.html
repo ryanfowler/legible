@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Runtime API Guide | Example Docs</title>
+  <meta name="description" content="A concise guide to the example runtime API.">
+  <meta property="og:site_name" content="Example Docs">
+  <link rel="canonical" href="https://example.test/docs/runtime/api">
+</head>
+<body>
+  <div id="__bun">
+    <div class="flex min-h-screen flex-col">
+      <main id="main" data-pagefind-body="true" class="flex-1">
+        <nav aria-label="Documentation sections" data-pagefind-ignore="true" class="border-b border-line bg-canvas">
+          <div class="mx-auto -mb-px flex w-full max-w-[100rem] gap-1 overflow-x-auto">
+            <a aria-current="page" href="/docs">Runtime</a>
+            <a href="/docs/packages">Package Manager</a>
+            <a href="/docs/tools">Tools</a>
+            <a href="/guides">Guides</a>
+          </div>
+        </nav>
+        <div class="mx-auto flex w-full max-w-[100rem]">
+          <aside data-pagefind-ignore="true" id="docs-sidebar-rail" class="fixed md:sticky md:w-64">
+            <nav id="docs-sidebar" aria-label="Runtime navigation" class="px-5 py-6">
+              <a href="/docs">Welcome</a>
+              <a href="/docs/runtime">Runtime</a>
+              <a href="/docs/runtime/api">API guide</a>
+              <a href="/docs/runtime/other">Other API</a>
+            </nav>
+          </aside>
+          <div class="min-w-0 flex-auto px-gutter py-10 md:px-10 lg:px-14">
+            <div class="grid gap-12 xl:grid-cols-[minmax(0,1fr)_15rem]">
+            <article id="docs-content" class="min-w-0 max-w-3xl">
+              <nav aria-label="Breadcrumb" class="mb-3">
+                <ol>
+                  <li><a href="/docs">Runtime</a></li>
+                  <li><span>API guide</span></li>
+                </ol>
+              </nav>
+              <header>
+                <h1>Runtime API Guide</h1>
+                <p>Learn the basic request flow for this runtime API.</p>
+              </header>
+              <div class="prose prose-invert">
+                <p>The runtime accepts a request, validates its options, and returns a response that the caller can inspect.</p>
+                <pre><code>const result = runtime.request({ method: "GET" });</code></pre>
+                <h2 id="configure">Configure the request</h2>
+                <p>Set the endpoint and timeout before sending the request. The client keeps these values together so each operation is predictable.</p>
+                <pre><code>const client = runtime.createClient({ timeout: 5000 });</code></pre>
+                <h2 id="handle-errors">Handle errors</h2>
+                <p>Check the returned status and handle failures close to the request. This keeps recovery behavior visible to the caller.</p>
+                <pre><code>if (!result.ok) throw new Error(result.status);</code></pre>
+                <h3 id="retries">Configure retries</h3>
+                <p>Retry only transient failures and keep the retry count bounded so an unavailable service does not create an endless loop.</p>
+                <pre><code>const retry = runtime.retry({ attempts: 3 });</code></pre>
+                <h3 id="logging">Enable logging</h3>
+                <p>Enable request logging when you need to inspect a failed operation. The log records the method, status, and elapsed time.</p>
+                <pre><code>const log = runtime.logger({ level: "info" });</code></pre>
+                <h3 id="cleanup">Close the client</h3>
+                <p>Close the client after the final operation to release its resources and make shutdown behavior explicit.</p>
+                <pre><code>await client.close();</code></pre>
+                <hr>
+                <h2 id="advanced">Advanced options</h2>
+                <p>Advanced options extend the same request flow without changing the response contract or error handling rules.</p>
+                <pre><code>const advanced = runtime.request({ cache: "no-store" });</code></pre>
+              </div>
+              <footer class="mt-16 flex flex-col gap-8">
+                <nav aria-label="Pagination" data-pagefind-ignore="true" class="grid gap-4">
+                  <a href="/docs/runtime/previous">Previous API</a>
+                  <a href="/docs/runtime/next">Next API</a>
+                </nav>
+              </footer>
+            </article>
+            <aside class="hidden xl:block" data-pagefind-ignore="true">
+              <nav aria-label="On this page">
+                <p>On this page</p>
+                <ul>
+                  <li><a href="#configure">Configure the request</a></li>
+                  <li><a href="#handle-errors">Handle errors</a></li>
+                </ul>
+              </nav>
+            </aside>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>
