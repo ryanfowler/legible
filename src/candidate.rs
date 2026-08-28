@@ -822,6 +822,24 @@ pub(crate) fn select_content_root<'a>(
         reason = RootSelectionReason::ArticleBody;
     }
 
+    // Documentation layouts often put one real article beside a table of
+    // contents and navigation rails inside a generic layout wrapper. Prefer
+    // that article before broadening a ranked child to the wrapper. This is
+    // limited to one substantial article, so article listings and pages with
+    // several independent entries keep their shared parent.
+    let single_article_boundary = if !matches!(
+        reason,
+        RootSelectionReason::StructuredData | RootSelectionReason::ArticleBody
+    ) {
+        single_substantive_article_boundary(dom, candidates, selected)
+    } else {
+        None
+    };
+    if let Some(article) = single_article_boundary {
+        selected = article;
+        reason = RootSelectionReason::SpecificChild;
+    }
+
     // A semantic parent is the correct boundary when several strong branches
     // together form the useful page, such as article cards in a main element.
     // A schema match is already a high-confidence boundary, so do not broaden
@@ -911,6 +929,15 @@ pub(crate) fn select_content_root<'a>(
             };
             selected = boundary;
         }
+    }
+
+    // Keep the article boundary when a generic layout wrapper was selected
+    // around it. Later relationship checks can otherwise broaden it again to
+    // include a navigation rail or a table of contents.
+    if let Some(article) = single_article_boundary {
+        selected = article;
+        branches.clear();
+        reason = RootSelectionReason::SpecificChild;
     }
 
     // A compact code article can rank only its code wrappers as strong
@@ -1434,6 +1461,155 @@ fn is_article_semantic_node(dom: &Dom, node: NodeId) -> bool {
         || dom
             .attr(node, AttrName::Role)
             .is_some_and(|roles| matches_role(roles, "article"))
+}
+
+fn has_explicit_content_name(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Id, AttrName::Class]
+        .into_iter()
+        .any(|attribute| {
+            dom.attr(node, attribute).is_some_and(|value| {
+                value
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .filter(|token| !token.is_empty())
+                    .any(|token| {
+                        ["content", "body", "docs", "document", "entry", "post"]
+                            .iter()
+                            .any(|name| token.eq_ignore_ascii_case(name))
+                    })
+            })
+        })
+}
+
+fn single_substantive_article_boundary(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    selected: NodeId,
+) -> Option<NodeId> {
+    if candidates.is_authoritative_semantic(dom, selected) {
+        return None;
+    }
+    let selected_features = candidates.get(selected)?.features;
+    let article = dom
+        .ancestors(selected)
+        .find(|&ancestor| {
+            is_article_semantic_node(dom, ancestor) && has_explicit_content_name(dom, ancestor)
+        })
+        .or_else(|| {
+            let mut article = None;
+            for candidate in candidates.iter() {
+                if !is_article_semantic_node(dom, candidate.node)
+                    || !has_explicit_content_name(dom, candidate.node)
+                    || !is_descendant_of(dom, candidate.node, selected)
+                    || dom
+                        .ancestors(candidate.node)
+                        .take_while(|&ancestor| ancestor != selected)
+                        .any(|ancestor| is_article_semantic_node(dom, ancestor))
+                {
+                    continue;
+                }
+                if article.replace(candidate.node).is_some() {
+                    return None;
+                }
+            }
+            article
+        })?;
+    if has_independent_article_sibling(dom, article) {
+        return None;
+    }
+    let article_features = candidates.get(article)?.features;
+    let has_complete_shape = article_features.paragraph_count >= 2
+        || article_features.heading_count >= 1
+            && (article_features.code_block_count > 0
+                || article_features.table_count > 0
+                || article_features.text_chars >= 600);
+    let article_dominates_wrapper = article_features.text_chars >= 400
+        && u64::from(article_features.text_chars).saturating_mul(100)
+            >= u64::from(selected_features.text_chars).saturating_mul(55)
+        && u64::from(selected_features.text_chars).saturating_mul(120)
+            >= u64::from(article_features.text_chars).saturating_mul(100);
+    let article_is_content_like = article_features.link_density <= 0.45;
+    let outside_article_is_layout = article_has_only_layout_siblings(dom, selected, article);
+    (has_complete_shape
+        && article_dominates_wrapper
+        && article_is_content_like
+        && outside_article_is_layout)
+        .then_some(article)
+}
+
+fn has_layout_name(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Id, AttrName::Class]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .flat_map(|value| {
+            value
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .filter(|token| !token.is_empty())
+        })
+        .any(|token| {
+            [
+                "breadcrumb",
+                "header",
+                "layout",
+                "menu",
+                "nav",
+                "rail",
+                "sidebar",
+                "toc",
+            ]
+            .iter()
+            .any(|name| token.eq_ignore_ascii_case(name))
+        })
+}
+
+fn article_has_only_layout_siblings(dom: &Dom, selected: NodeId, article: NodeId) -> bool {
+    if is_descendant_of(dom, selected, article) {
+        return true;
+    }
+    let mut child = article;
+    while child != selected {
+        let Some(parent) = dom.parent(child) else {
+            return false;
+        };
+        if dom.element_children(parent).any(|sibling| {
+            sibling != child
+                && !matches!(
+                    dom.tag(sibling),
+                    Some(Tag::Aside | Tag::Footer | Tag::Header | Tag::Nav)
+                )
+                && !has_layout_name(dom, sibling)
+        }) {
+            return false;
+        }
+        child = parent;
+    }
+    true
+}
+
+/// Returns whether an article belongs to a listing with another independent
+/// article branch. Stop at an enclosing article so embedded article-shaped
+/// markup, such as comments, does not make the outer article a listing.
+fn has_independent_article_sibling(dom: &Dom, article: NodeId) -> bool {
+    let mut child = article;
+    let mut ancestor = dom.parent(article);
+    while let Some(node) = ancestor {
+        if is_article_semantic_node(dom, node) {
+            return false;
+        }
+        if dom
+            .element_children(node)
+            .filter(|&branch| branch != child)
+            .any(|branch| {
+                std::iter::once(branch)
+                    .chain(dom.descendants(branch))
+                    .any(|descendant| is_article_semantic_node(dom, descendant))
+            })
+        {
+            return true;
+        }
+        child = node;
+        ancestor = dom.parent(node);
+    }
+    false
 }
 
 /// Counts independent article branches under a main-like root. Counting the
@@ -2623,6 +2799,180 @@ mod tests {
             select_test_root(html, &[("broad", 100.0), ("specific", 90.0)], []),
             "specific"
         );
+    }
+
+    #[test]
+    fn root_selection_narrows_a_layout_wrapper_to_one_substantive_article() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div id="layout"><aside><nav><a href="/one">One</a><a href="/two">Two</a></nav></aside><article id="article_body"><h1>Technical guide</h1><p>The article contains the complete explanation and enough detail to represent the requested document.</p><p>A second paragraph provides the remaining implementation guidance and keeps the article substantive.</p><pre>example()</pre></article></div></main></body>"#,
+        )
+        .unwrap();
+        let layout = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("layout"))
+            .unwrap();
+        let content = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("article_body"))
+            .unwrap();
+        let body = dom.body().unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(layout, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == layout)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 1_000,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == content)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 700,
+            paragraph_count: 2,
+            heading_count: 1,
+            code_block_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        let selected = select_content_root(
+            &dom,
+            &candidates,
+            &[RankedCandidate {
+                node: layout,
+                score: 100.0,
+                order: 0,
+            }],
+            body,
+            [],
+        );
+        assert_eq!(selected.node, content);
+        assert_eq!(selected.reason, RootSelectionReason::SpecificChild);
+    }
+
+    #[test]
+    fn root_selection_does_not_narrow_a_listing_to_one_article() {
+        let dom = Dom::parse_document(
+            r#"<body><main><div id="listing"><article id="first" class="post"><div id="post-body"><h1>First article</h1><p>The first article contains the complete explanation and enough detail to represent the requested document.</p><p>A second paragraph provides the remaining implementation guidance and keeps this article substantive.</p></div></article><article id="second" class="post"><h2>Second article</h2><p>A second independent article card remains part of the listing.</p></article></div></main></body>"#,
+        )
+        .unwrap();
+        let first = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("first"))
+            .unwrap();
+        let post_body = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("post-body"))
+            .unwrap();
+        let second = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("second"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(post_body, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == post_body)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 700,
+            paragraph_count: 2,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == first)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 700,
+            paragraph_count: 2,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+        assert!(candidates.get(second).is_some());
+        assert!(single_substantive_article_boundary(&dom, &candidates, post_body).is_none());
+    }
+
+    #[test]
+    fn root_selection_promotes_an_inner_candidate_to_its_article() {
+        let dom = Dom::parse_document(
+            r#"<body><div id="layout"><article id="content"><div id="post_body"><h1>Technical guide</h1><p>The article contains the complete explanation and enough detail to represent the requested document.</p><p>A second paragraph provides the remaining implementation guidance and keeps the article substantive.</p></div></article></div></body>"#,
+        )
+        .unwrap();
+        let article = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("content"))
+            .unwrap();
+        let post_body = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("post_body"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(post_body, 100.0);
+        for node in [article, post_body] {
+            candidates
+                .iter_mut()
+                .find(|candidate| candidate.node == node)
+                .unwrap()
+                .features = CandidateFeatures {
+                text_chars: 700,
+                paragraph_count: 2,
+                heading_count: 1,
+                link_density: 0.0,
+                ..CandidateFeatures::default()
+            };
+        }
+
+        assert_eq!(
+            single_substantive_article_boundary(&dom, &candidates, post_body),
+            Some(article)
+        );
+    }
+
+    #[test]
+    fn root_selection_requires_layout_only_siblings_for_article_narrowing() {
+        let dom = Dom::parse_document(
+            r#"<body><div id="layout"><p id="intro">This introduction explains the subject before the article and contains meaningful context that must remain in the extracted document.</p><article id="article_body"><h1>Technical guide</h1><p>The article contains the complete explanation and enough detail to represent the requested document.</p><p>A second paragraph provides the remaining implementation guidance and keeps the article substantive.</p></article></div></body>"#,
+        )
+        .unwrap();
+        let layout = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("layout"))
+            .unwrap();
+        let article = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("article_body"))
+            .unwrap();
+        let mut candidates = CandidateSet::discover_semantic(&dom);
+        candidates.add_readability(layout, 100.0);
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == layout)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 1_000,
+            ..CandidateFeatures::default()
+        };
+        candidates
+            .iter_mut()
+            .find(|candidate| candidate.node == article)
+            .unwrap()
+            .features = CandidateFeatures {
+            text_chars: 700,
+            paragraph_count: 2,
+            heading_count: 1,
+            link_density: 0.0,
+            ..CandidateFeatures::default()
+        };
+
+        assert!(single_substantive_article_boundary(&dom, &candidates, layout).is_none());
     }
 
     #[test]
