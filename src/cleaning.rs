@@ -1755,6 +1755,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let layout_side_rail = is_compact_layout_side_rail(dom, node, &metrics, protected);
         let inline_promotion = is_compact_inline_promotion(dom, node, &metrics, protected);
         let link_index_rail = is_link_index_rail(dom, node, &metrics);
+        let document_maintenance = is_document_maintenance(dom, node, &metrics);
 
         if related
             || social
@@ -1785,6 +1786,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             || layout_side_rail
             || inline_promotion
             || link_index_rail
+            || document_maintenance
         {
             if protected
                 && !author_card
@@ -1834,7 +1836,14 @@ pub(crate) fn remove_inline_chrome_controls_in_workspace(
     let mut text = String::new();
 
     for &(node, _) in snapshot {
-        if node == root || dom.parent(node).is_none() || is_protected_content(dom, node, evidence) {
+        if node == root || dom.parent(node).is_none() {
+            continue;
+        }
+        if is_redundant_disclosure_label(dom, node, &mut text) {
+            remove[node.index()] = true;
+            continue;
+        }
+        if is_protected_content(dom, node, evidence) {
             continue;
         }
         let at_start = near_content_start(dom, node, root, store);
@@ -1864,6 +1873,31 @@ pub(crate) fn remove_inline_chrome_controls_in_workspace(
         workspace.invalidate();
     }
     changed
+}
+
+fn is_redundant_disclosure_label(dom: &Dom, node: NodeId, text: &mut String) -> bool {
+    if dom.tag(node) != Some(Tag::Summary) {
+        return false;
+    }
+    get_normalized_inner_text(dom, node, text);
+    let label = text.trim();
+    if !equals_any_ascii_case_insensitive(
+        label,
+        &[
+            "expand description",
+            "collapse description",
+            "show description",
+            "hide description",
+        ],
+    ) {
+        return false;
+    }
+    dom.parent(node).is_some_and(|parent| {
+        dom.tag(parent) == Some(Tag::Details)
+            && dom
+                .element_children(parent)
+                .any(|child| child != node && dom.has_non_whitespace_text(child))
+    })
 }
 
 /// Removes separator text that only exists to imitate a Markdown rule. The
@@ -5973,19 +6007,19 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
     ) {
         return true;
     }
-    let author_title_wrapper =
-        contains_any(&node_name(dom, node), &["title-authors", "title_authors"])
-            && dom
-                .element_children(node)
-                .any(|child| dom.tag(child) == Some(Tag::H1))
-            && dom.descendants(node).any(|descendant| {
-                contains_any(&node_name(dom, descendant), &["author-list", "author_list"])
-            });
+    let name = node_name(dom, node);
+    let author_title_wrapper = contains_any(&name, &["title-authors", "title_authors"])
+        && dom
+            .element_children(node)
+            .any(|child| dom.tag(child) == Some(Tag::H1))
+        && dom.descendants(node).any(|descendant| {
+            contains_any(&node_name(dom, descendant), &["author-list", "author_list"])
+        });
     matches!(
         dom.tag(node),
         Some(Tag::Div | Tag::Ol | Tag::P | Tag::Section | Tag::Ul)
-    ) && contains_any(
-        &node_name(dom, node),
+    ) && (contains_any(
+        &name,
         &[
             "related",
             "recommend",
@@ -6037,7 +6071,58 @@ fn is_heuristic_boundary(dom: &Dom, node: NodeId) -> bool {
             "tag-list",
             "tag_list",
         ],
-    ) && !author_title_wrapper
+    ) || has_document_maintenance_name(&name))
+        && !author_title_wrapper
+}
+
+fn is_document_maintenance(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    if !metrics.at_end || metrics.stats.text_length > 1_200 {
+        return false;
+    }
+    let maintenance_text = metrics.text.contains("was this page helpful")
+        || metrics.text.contains("this page was last modified")
+        || metrics.text.contains("help us improve this page")
+        || metrics.text.starts_with("last modified ")
+        || metrics.text.starts_with("last updated ");
+    if !maintenance_text {
+        return false;
+    }
+    let named_maintenance = has_document_maintenance_name(metrics.name);
+    let specific_name = has_specific_document_maintenance_name(metrics.name);
+    let interactive = metrics.links > 0 || metrics.controls > 0;
+    specific_name && (interactive || metrics.stats.text_length < 180)
+        || named_maintenance
+            && (interactive
+                || metrics.text.contains("was this page helpful")
+                || metrics.text.contains("help us improve this page"))
+        || matches!(dom.tag(node), Some(Tag::Footer))
+            && metrics.controls > 0
+            && (metrics.text.contains("was this page helpful")
+                || metrics.text.contains("help us improve this page"))
+}
+
+fn has_specific_document_maintenance_name(name: &str) -> bool {
+    let has = |expected: &str| {
+        name.split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == expected)
+    };
+    has("feedback")
+        || has("lastmod")
+        || has("last") && has("modified")
+        || has("page") && has("maintenance")
+}
+
+fn has_document_maintenance_name(name: &str) -> bool {
+    let has = |expected: &str| {
+        name.split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == expected)
+    };
+    has("feedback")
+        || has("lastmod")
+        || has("last") && has("modified")
+        || has("page") && (has("footer") || has("maintenance"))
+        || has("article") && has("footer")
+        || has("pre") && has("footer")
 }
 
 fn is_revision_history_marker(dom: &Dom, node: NodeId) -> bool {
@@ -6652,6 +6737,32 @@ mod tests {
         assert!(text.contains("useful article remains"));
     }
 
+    #[test]
+    fn removes_only_redundant_disclosure_labels() {
+        let mut dom = Dom::parse_fragment(
+            r#"<article><details open><summary>Expand description</summary><div><p>The complete API description remains available.</p></div></details><details><summary>Compatibility notes</summary><p>The authored compatibility notes remain too.</p></details></article>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        let store = &mut NodeStateStore::new();
+        let evidence = crate::document::SourceEvidence::analyze(&dom, root, store);
+        let mut workspace = FragmentWorkspace::default();
+
+        assert!(remove_inline_chrome_controls_in_workspace(
+            &mut dom,
+            root,
+            store,
+            &evidence,
+            &mut workspace,
+        ));
+        let text = dom.text(root);
+        assert!(!text.contains("Expand description"), "{text}");
+        assert!(text.contains("complete API description"), "{text}");
+        assert!(text.contains("Compatibility notes"), "{text}");
+        assert!(text.contains("authored compatibility notes"), "{text}");
+    }
+
     fn clean_fragment(html: &str) -> String {
         let mut dom = Dom::parse_fragment(html, Tag::Div).unwrap();
         let root = dom.root();
@@ -7148,6 +7259,34 @@ mod tests {
         );
         assert!(text.contains("files were copied successfully"), "{text}");
         assert!(text.contains("Unlock the full potential of Rust"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_terminal_document_maintenance() {
+        let text = clean_fragment(
+            r#"<article><p>This guide explains the complete procedure and the checks that confirm the final result for each supported input.</p><div id="pre-footer"><h2>Feedback</h2><p>Was this page helpful?</p><button>Yes</button><button>No</button><p>Last modified August 19, 2026.</p><a href="/edit">Edit this page</a></div></article>"#,
+        );
+        assert!(text.contains("complete procedure"), "{text}");
+        assert!(!text.contains("Was this page helpful"), "{text}");
+        assert!(!text.contains("Last modified"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_maintenance_words_in_authored_prose() {
+        let text = clean_fragment(
+            r#"<article><p>This report asks whether the page was helpful because that question is part of the research method.</p><footer><p>The last updated model remains the subject of this authored conclusion, and the report explains why.</p></footer><section class="lastmodel-results"><p>Last updated model results remain part of the authored analysis.</p><a href="/results">Review the model results</a></section></article>"#,
+        );
+        assert!(text.contains("part of the research method"), "{text}");
+        assert!(text.contains("authored conclusion"), "{text}");
+        assert!(text.contains("Last updated model results"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_authored_update_language_in_a_footer() {
+        let text = clean_fragment(
+            r#"<article><p>This report explains the study and its findings.</p><footer class="article-footer"><p>Last updated estimates show that treatment improved outcomes for the full study group.</p></footer></article>"#,
+        );
+        assert!(text.contains("treatment improved outcomes"), "{text}");
     }
 
     #[test]
