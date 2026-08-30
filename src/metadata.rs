@@ -1691,13 +1691,74 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
         .descendants(dom.root())
         .filter(|&id| dom.is_element(id))
         .collect();
-    let primary_heading = best_visible_heading(
+    let mut element_positions = vec![usize::MAX; dom.len()];
+    let mut metadata_visible = vec![false; dom.len()];
+    let mut heading_context = vec![78_u8; dom.len()];
+    let mut inside_metadata_sidebar = vec![false; dom.len()];
+    for (position, &node) in elements.iter().enumerate() {
+        element_positions[node.index()] = position;
+        let parent = dom.parent(node).filter(|&parent| dom.is_element(parent));
+        metadata_visible[node.index()] = parent
+            .is_none_or(|parent| metadata_visible[parent.index()])
+            && !has_static_hidden_marker(dom, node)
+            && !dom
+                .attr(node, AttrName::AriaHidden)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        inside_metadata_sidebar[node.index()] =
+            matches!(dom.tag(node), Some(Tag::Aside | Tag::Footer | Tag::Nav))
+                || parent.is_some_and(|parent| inside_metadata_sidebar[parent.index()]);
+        heading_context[node.index()] = if dom.tag(node) == Some(Tag::Article) {
+            82
+        } else if dom.tag(node) == Some(Tag::Main) {
+            80
+        } else if [
+            dom.attr(node, AttrName::Class),
+            dom.attr(node, AttrName::Id),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|value| value.split_ascii_whitespace())
+        .any(is_primary_content_token)
+        {
+            88
+        } else {
+            parent.map_or(78, |parent| heading_context[parent.index()])
+        };
+    }
+    let combined_byline_positions: Vec<_> = elements
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &node)| {
+            (is_combined_date_author_container(dom, node) && metadata_visible[node.index()])
+                .then_some(position)
+        })
+        .collect();
+    let primary_heading = best_precomputed_heading(
         dom,
         elements
             .iter()
             .copied()
             .filter(|&id| dom.tag(id) == Some(Tag::H1)),
-    );
+        &metadata_visible,
+        &heading_context,
+    )
+    .or_else(|| {
+        best_precomputed_heading(
+            dom,
+            elements.iter().enumerate().filter_map(|(position, &id)| {
+                (dom.tag(id) == Some(Tag::H2)
+                    && heading_matches_document_title(dom, id, document_title)
+                    && is_safe_h2_metadata_heading(
+                        position,
+                        inside_metadata_sidebar[id.index()],
+                        &combined_byline_positions,
+                    ))
+                .then_some(id)
+            }),
+            &metadata_visible,
+            &heading_context,
+        )
+    });
     let mut text_buffer = String::new();
     for id in elements {
         if dom.tag(id) == Some(Tag::Html) {
@@ -1814,9 +1875,12 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
                 );
             }
         }
+        let combined_date_author = is_combined_date_author_container(dom, id);
         let author_element = is_author_container(dom, id);
         if author_element
-            && primary_heading.is_some_and(|heading| is_byline_near_heading(dom, id, heading))
+            && !combined_date_author
+            && primary_heading
+                .is_some_and(|heading| is_byline_near_heading(dom, id, heading, &element_positions))
         {
             let author_node = preferred_author_node(dom, id);
             let value = byline_name(dom, id).unwrap_or_else(|| {
@@ -1849,6 +1913,28 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
                         46,
                     );
                 }
+            }
+        } else if combined_date_author
+            && metadata_visible[id.index()]
+            && primary_heading.is_some_and(|heading| {
+                !inside_metadata_sidebar[id.index()]
+                    && element_positions[id.index()].abs_diff(element_positions[heading.index()])
+                        <= 12
+            })
+        {
+            // Some publishers keep the date and author in one compact line.
+            // Treat this as one byline only when its name states both roles.
+            // This avoids turning an ordinary date wrapper into an author.
+            if let Some(value) = combined_date_author_name(dom, id) {
+                out.add(|set| &mut set.authors, value, MetadataSource::Inferred, 62);
+            }
+            if let Some((_, date)) = combined_written_date(dom, id) {
+                out.add(
+                    |set| &mut set.published_time,
+                    date,
+                    MetadataSource::Inferred,
+                    48,
+                );
             }
         }
     }
@@ -1990,6 +2076,168 @@ fn is_author_container(dom: &Dom, node: NodeId) -> bool {
     .any(is_author_container_token)
 }
 
+fn is_combined_date_author_container(dom: &Dom, node: NodeId) -> bool {
+    [
+        dom.attr(node, AttrName::Class),
+        dom.attr(node, AttrName::Id),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| value.split_ascii_whitespace())
+    .any(|token| {
+        let mut has_author = false;
+        let mut has_date = false;
+        for part in token
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|part| !part.is_empty())
+        {
+            has_author |= part.eq_ignore_ascii_case("author");
+            has_date |= matches!(
+                part.to_ascii_lowercase().as_str(),
+                "date" | "publish" | "published"
+            );
+        }
+        has_author && has_date
+    })
+}
+
+fn combined_date_author_name(dom: &Dom, container: NodeId) -> Option<String> {
+    if let Some(node) = preferred_author_node(dom, container)
+        && let Some(value) =
+            author_text_segment(dom, node).and_then(|value| normalize_person(&value))
+    {
+        return Some(value);
+    }
+    let value = get_inner_text_owned(dom, container);
+    let (date_start, _) = combined_written_date_value(&value)?;
+    let lower = value.to_ascii_lowercase();
+    let remainder = if let Some(offset) = lower[date_start..].find(" by ") {
+        value[date_start + offset + " by ".len()..].trim()
+    } else {
+        best_unmarked_author_segment(&value[date_start..])?
+    };
+    let lower = remainder.to_ascii_lowercase();
+    let end = [" on behalf of ", " for the "]
+        .into_iter()
+        .filter_map(|marker| lower.find(marker))
+        .min()
+        .unwrap_or(remainder.len());
+    normalize_person(&remainder[..end])
+}
+
+fn best_unmarked_author_segment(value: &str) -> Option<&str> {
+    let mut best = None;
+    let mut best_confidence = 0;
+    for segment in value
+        .split(['|', '·', '—', '–'])
+        .skip(1)
+        .map(str::trim)
+        .filter(|segment| !is_non_author_metadata_segment(segment))
+    {
+        let lower = segment.to_ascii_lowercase();
+        let end = [" on behalf of ", " for the "]
+            .into_iter()
+            .filter_map(|marker| lower.find(marker))
+            .min()
+            .unwrap_or(segment.len());
+        let candidate = segment[..end]
+            .trim()
+            .trim_start_matches(|character: char| character.is_ascii_punctuation())
+            .trim();
+        let words = split_word_tokens(candidate).take(5).count();
+        let confidence = match words {
+            2..=4 => 2,
+            1 => 1,
+            _ => 0,
+        };
+        if confidence > best_confidence {
+            best = Some(segment);
+            best_confidence = confidence;
+        }
+    }
+    best
+}
+
+fn combined_written_date(dom: &Dom, container: NodeId) -> Option<(usize, String)> {
+    combined_written_date_value(&get_inner_text_owned(dom, container))
+}
+
+fn combined_written_date_value(value: &str) -> Option<(usize, String)> {
+    if let Some(date) = written_date(value) {
+        return Some(date);
+    }
+    const MONTHS: [(&str, &str); 11] = [
+        ("Jan", "January"),
+        ("Feb", "February"),
+        ("Mar", "March"),
+        ("Apr", "April"),
+        ("Jun", "June"),
+        ("Jul", "July"),
+        ("Aug", "August"),
+        ("Sep", "September"),
+        ("Oct", "October"),
+        ("Nov", "November"),
+        ("Dec", "December"),
+    ];
+    let mut earliest = None;
+    for (abbreviation, month) in MONTHS {
+        for (start, _) in value.match_indices(abbreviation) {
+            let normalized = normalize_whitespace(&value[start..]);
+            let mut parts = normalized.split_ascii_whitespace();
+            if !parts
+                .next()
+                .is_some_and(|part| part.trim_end_matches('.') == abbreviation)
+            {
+                continue;
+            }
+            let Some(day) = parts.next().map(|part| part.trim_end_matches(',')) else {
+                continue;
+            };
+            let Some(year) = parts
+                .next()
+                .map(|part| part.trim_end_matches(|character: char| !character.is_ascii_digit()))
+            else {
+                continue;
+            };
+            if day.parse::<u8>().is_ok_and(|day| (1..=31).contains(&day))
+                && year.len() == 4
+                && year.bytes().all(|byte| byte.is_ascii_digit())
+                && earliest
+                    .as_ref()
+                    .is_none_or(|(current, _): &(usize, String)| start < *current)
+            {
+                earliest = Some((start, format!("{month} {day}, {year}")));
+            }
+        }
+    }
+    earliest
+}
+
+fn is_non_author_metadata_segment(value: &str) -> bool {
+    if combined_written_date_value(value).is_some() {
+        return true;
+    }
+    let lower = value.trim().to_ascii_lowercase();
+    lower.is_empty()
+        || lower.split_ascii_whitespace().any(|word| {
+            matches!(
+                word.trim_matches(|character: char| !character.is_ascii_alphanumeric()),
+                "category"
+                    | "comment"
+                    | "comments"
+                    | "modified"
+                    | "read"
+                    | "replies"
+                    | "reply"
+                    | "section"
+                    | "topic"
+                    | "updated"
+                    | "views"
+            )
+        })
+        || clock_time_boundary(&lower).is_some()
+}
+
 fn is_byline_container(dom: &Dom, node: NodeId) -> bool {
     [
         dom.attr(node, AttrName::Class),
@@ -2097,6 +2345,30 @@ fn best_visible_heading(dom: &Dom, headings: impl Iterator<Item = NodeId>) -> Op
         })
 }
 
+fn best_precomputed_heading(
+    dom: &Dom,
+    headings: impl Iterator<Item = NodeId>,
+    visible: &[bool],
+    context: &[u8],
+) -> Option<NodeId> {
+    headings
+        .filter_map(|heading| {
+            if !visible[heading.index()] {
+                return None;
+            }
+            let text = get_inner_text_owned(dom, heading);
+            normalize_text(&text)?;
+            let title_bonus = u8::from(has_class_or_id_token(dom, heading, "p-name")) * 4
+                + u8::from(split_word_tokens(&text).take(4).count() == 4) * 2;
+            Some((heading, context[heading.index()] + title_bonus))
+        })
+        .fold(None, |best, candidate| match best {
+            Some((_, confidence)) if confidence >= candidate.1 => best,
+            _ => Some(candidate),
+        })
+        .map(|(heading, _)| heading)
+}
+
 fn is_primary_content_token(token: &str) -> bool {
     has_any_token(
         token,
@@ -2140,6 +2412,11 @@ fn preferred_author_node(dom: &Dom, container: NodeId) -> Option<NodeId> {
 }
 
 pub(crate) fn byline_name(dom: &Dom, container: NodeId) -> Option<String> {
+    if is_combined_date_author_container(dom, container)
+        && let Some(value) = combined_date_author_name(dom, container)
+    {
+        return Some(value);
+    }
     let value = preferred_author_node(dom, container)
         .or_else(|| timestamp_author_link(dom, container))
         .and_then(|node| {
@@ -2150,6 +2427,38 @@ pub(crate) fn byline_name(dom: &Dom, container: NodeId) -> Option<String> {
         })
         .or_else(|| author_text_segment(dom, container))?;
     normalize_text(&value)
+}
+
+fn heading_matches_document_title(dom: &Dom, heading: NodeId, document_title: &str) -> bool {
+    let heading = get_inner_text_owned(dom, heading);
+    let heading = heading.trim();
+    let title = document_title.trim();
+    if heading.is_empty() || title.is_empty() {
+        return false;
+    }
+    title.eq_ignore_ascii_case(heading)
+        || title.get(..heading.len()).is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case(heading)
+                && [" | ", " - ", " — ", " – ", " :: ", " · "]
+                    .iter()
+                    .any(|separator| title[heading.len()..].starts_with(separator))
+        })
+}
+
+fn is_safe_h2_metadata_heading(
+    heading_position: usize,
+    inside_metadata_sidebar: bool,
+    combined_byline_positions: &[usize],
+) -> bool {
+    if inside_metadata_sidebar {
+        return false;
+    }
+    combined_byline_positions
+        .get(
+            combined_byline_positions
+                .partition_point(|&position| position < heading_position.saturating_sub(12)),
+        )
+        .is_some_and(|&position| heading_position.abs_diff(position) <= 12)
 }
 
 fn timestamp_author_link(dom: &Dom, container: NodeId) -> Option<NodeId> {
@@ -2346,10 +2655,17 @@ fn is_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
         .is_some_and(|(node_header, heading_header)| node_header == heading_header)
 }
 
-fn is_byline_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
+fn is_byline_near_heading(
+    dom: &Dom,
+    node: NodeId,
+    heading: NodeId,
+    element_positions: &[usize],
+) -> bool {
     is_near_heading(dom, node, heading)
         || (nearest_ancestor_with_tag(dom, node, Tag::Aside).is_none()
-            && document_element_distance(dom, node, heading) <= 12)
+            && element_positions[node.index()] != usize::MAX
+            && element_positions[heading.index()] != usize::MAX
+            && element_positions[node.index()].abs_diff(element_positions[heading.index()]) <= 12)
 }
 
 fn is_profile_author_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> bool {
@@ -2366,29 +2682,6 @@ fn is_profile_author_near_heading(dom: &Dom, node: NodeId, heading: NodeId) -> b
         current = dom.parent(ancestor);
     }
     false
-}
-
-fn document_element_distance(dom: &Dom, first: NodeId, second: NodeId) -> usize {
-    let mut first_position = None;
-    let mut second_position = None;
-    for (position, node) in dom
-        .descendants(dom.root())
-        .filter(|&node| dom.is_element(node))
-        .enumerate()
-    {
-        if node == first {
-            first_position = Some(position);
-        }
-        if node == second {
-            second_position = Some(position);
-        }
-        if first_position.is_some() && second_position.is_some() {
-            break;
-        }
-    }
-    first_position
-        .zip(second_position)
-        .map_or(usize::MAX, |(first, second)| first.abs_diff(second))
 }
 
 fn sibling_element_distance(dom: &Dom, first: NodeId, second: NodeId) -> usize {
@@ -3509,6 +3802,77 @@ mod tests {
 
         assert_eq!(result.authors, ["Jane Doe"]);
         assert_eq!(result.published_time.as_deref(), Some("August 13, 2026"));
+    }
+
+    #[test]
+    fn extracts_a_combined_date_and_author_byline() {
+        let result = metadata(
+            r#"<title>Page | Project blog</title><article><header><h2>Page</h2></header><div class="publish-date-author">Aug. 19, 2026 · teor on behalf of <a href="/team">The Language Team</a></div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["teor"]);
+        assert_eq!(result.published_time.as_deref(), Some("August 19, 2026"));
+    }
+
+    #[test]
+    fn combined_byline_skips_reading_time_before_the_author() {
+        let result = metadata(
+            r#"<title>Page</title><article><h2>Page</h2><div class="published-date-author">Aug. 19, 2026 · 5 min read · By Jane Doe</div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert_eq!(result.authors, ["Jane Doe"]);
+    }
+
+    #[test]
+    fn combined_byline_skips_discussion_and_category_segments() {
+        for byline in [
+            "Aug. 19, 2026 · 12 comments · Jane Doe",
+            "Aug. 19, 2026 · Technology · Jane Doe",
+            "Aug. 19, 2026 · Jane Doe · Technology",
+        ] {
+            let html = format!(
+                r#"<title>Page</title><article><h2>Page</h2><div class="published-date-author">{byline}</div><p>Article body.</p></article>"#,
+            );
+            let result = metadata(&html, None, false);
+
+            assert_eq!(result.authors, ["Jane Doe"], "{byline}");
+        }
+    }
+
+    #[test]
+    fn hidden_combined_byline_does_not_enable_metadata_inference() {
+        let result = metadata(
+            r#"<title>Page</title><article><h2>Page</h2><div hidden class="published-date-author">Aug. 19, 2026 · Hidden Writer</div><p>Article body.</p></article>"#,
+            None,
+            false,
+        );
+
+        assert!(result.authors.is_empty());
+        assert!(result.published_time.is_none());
+    }
+
+    #[test]
+    fn title_matching_sidebar_h2_does_not_enable_byline_inference() {
+        let result = metadata(
+            r#"<title>News</title><aside><h2>News</h2><div class="published-date-author">Aug. 19, 2026 · Sidebar Writer</div></aside><main><p>The primary page is an index without an author.</p></main>"#,
+            None,
+            false,
+        );
+
+        assert!(result.authors.is_empty());
+        assert!(result.published_time.is_none());
+    }
+
+    #[test]
+    fn abbreviated_written_date_uses_document_order() {
+        assert_eq!(
+            combined_written_date_value("Dec. 3, 2026 · Jane Doe · reviewed Aug. 1, 2027"),
+            Some((0, "December 3, 2026".to_owned()))
+        );
     }
 
     #[test]

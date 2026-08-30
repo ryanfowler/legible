@@ -55,7 +55,7 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Source-session orchestration, conservative direct-main fast path, per-attempt fragment execution, strategy retries, candidate selection, and content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `scoring.rs::ScoringView` | Sparse scoring tag, parent, wrapper, and paragraph projections over the immutable source DOM |
-| `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup, including redundant indexes and compact peripheral rails |
+| `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup, including redundant indexes, documentation controls, terminal page-maintenance panels, and compact peripheral rails |
 | `normalize.rs` / `normalize/` | Source preparation and relevance cleanup for SVG charts, media, duplicate images, and heading artifacts |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |

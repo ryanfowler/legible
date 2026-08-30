@@ -1,0 +1,14 @@
+{
+  "must_contain": [
+    "parser accepts a byte stream",
+    "Compatibility notes",
+    "supported input forms"
+  ],
+  "must_not_contain": [
+    "Expand description",
+    "Was this page helpful?",
+    "Last modified",
+    "Edit this page",
+    "Guide index"
+  ]
+}
