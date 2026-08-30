@@ -5,6 +5,7 @@ pub(crate) enum AttrName {
     Alt,
     AriaHidden,
     AriaLabel,
+    AriaLive,
     AriaLevel,
     AriaModal,
     Background,
@@ -40,6 +41,7 @@ pub(crate) enum AttrName {
     DataLanguage,
     DataLatex,
     DataMath,
+    DataMathLegacy,
     DataSrc,
     DataSrcset,
     DataTable,
@@ -115,6 +117,7 @@ impl AttrName {
             "alt" => Self::Alt,
             "aria-hidden" => Self::AriaHidden,
             "aria-label" => Self::AriaLabel,
+            "aria-live" => Self::AriaLive,
             "aria-level" => Self::AriaLevel,
             "aria-modal" => Self::AriaModal,
             "background" => Self::Background,
@@ -150,6 +153,7 @@ impl AttrName {
             "data-language" => Self::DataLanguage,
             "data-latex" => Self::DataLatex,
             "data-legible-math" => Self::DataMath,
+            "data-math" => Self::DataMathLegacy,
             "data-src" => Self::DataSrc,
             "data-srcset" => Self::DataSrcset,
             "datatable" => Self::DataTable,
@@ -215,6 +219,7 @@ impl AttrName {
             self,
             Self::Action
                 | Self::Alt
+                | Self::AriaLive
                 | Self::AriaLevel
                 | Self::DataCalloutLegacy
                 | Self::DataFootnoteLegacy
@@ -242,6 +247,7 @@ impl AttrName {
                 | Self::DataFootnoteBackref
                 | Self::DataTex
                 | Self::DataFormula
+                | Self::DataMathLegacy
                 | Self::HttpEquiv
                 | Self::Datetime
                 | Self::Display
@@ -256,6 +262,7 @@ impl AttrName {
             Self::Alt => "alt",
             Self::AriaHidden => "aria-hidden",
             Self::AriaLabel => "aria-label",
+            Self::AriaLive => "aria-live",
             Self::AriaLevel => "aria-level",
             Self::AriaModal => "aria-modal",
             Self::Background => "background",
@@ -291,6 +298,7 @@ impl AttrName {
             Self::DataLanguage => "data-language",
             Self::DataLatex => "data-latex",
             Self::DataMath => "data-legible-math",
+            Self::DataMathLegacy => "data-math",
             Self::DataSrc => "data-src",
             Self::DataSrcset => "data-srcset",
             Self::DataTable => "datatable",

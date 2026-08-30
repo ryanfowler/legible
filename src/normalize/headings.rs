@@ -101,7 +101,7 @@ pub(super) fn normalize_roles(dom: &mut Dom, root: NodeId) {
             continue;
         }
         let Some(level) = dom
-            .attr_by_local_name(node, "aria-level")
+            .attr(node, AttrName::AriaLevel)
             .and_then(|value| value.trim().parse::<u8>().ok())
             .and_then(heading_tag)
         else {
@@ -114,7 +114,7 @@ pub(super) fn normalize_roles(dom: &mut Dom, root: NodeId) {
 pub(super) fn has_primary_role(dom: &Dom, node: NodeId) -> bool {
     has_role(dom, node, "heading")
         && dom
-            .attr_by_local_name(node, "aria-level")
+            .attr(node, AttrName::AriaLevel)
             .and_then(|value| value.trim().parse::<u8>().ok())
             .is_some_and(|level| matches!(level, 1 | 2))
 }
@@ -148,7 +148,7 @@ pub(crate) fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
         _ => dom
             .attr(node, AttrName::Role)
             .filter(|roles| has_token(roles, "heading"))
-            .and_then(|_| dom.attr_by_local_name(node, "aria-level"))
+            .and_then(|_| dom.attr(node, AttrName::AriaLevel))
             .and_then(|level| level.trim().parse::<u8>().ok())
             .filter(|level| (1..=6).contains(level)),
     }

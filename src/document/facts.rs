@@ -383,7 +383,7 @@ impl SourceEvidence {
             if node_gate.contains(SemanticGate::CALLOUT) {
                 let (source, candidate) = super::callouts::source_evidence(dom, node);
                 let explicit = dom.attr(node, AttrName::DataCallout).is_some()
-                    || dom.attr_by_local_name(node, "data-callout").is_some();
+                    || dom.attr(node, AttrName::DataCalloutLegacy).is_some();
                 if source || explicit {
                     callout.insert(node);
                 }
@@ -395,9 +395,9 @@ impl SourceEvidence {
                 let explicit = dom.attr(node, AttrName::DataFootnote).is_some()
                     || dom.attr(node, AttrName::DataFootnoteRef).is_some()
                     || dom.attr(node, AttrName::DataFootnotes).is_some()
-                    || dom.attr_by_local_name(node, "data-footnote").is_some()
-                    || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
-                    || dom.attr_by_local_name(node, "data-footnotes").is_some();
+                    || dom.attr(node, AttrName::DataFootnoteLegacy).is_some()
+                    || dom.attr(node, AttrName::DataFootnoteRefLegacy).is_some()
+                    || dom.attr(node, AttrName::DataFootnotesLegacy).is_some();
                 if super::footnotes::is_source_evidence(dom, node) || explicit {
                     footnote.insert(node);
                 }
@@ -516,7 +516,7 @@ impl SourceEvidence {
 
 fn may_have_callout_evidence(dom: &Dom, node: NodeId) -> bool {
     dom.attr(node, AttrName::DataCallout).is_some()
-        || dom.attr_by_local_name(node, "data-callout").is_some()
+        || dom.attr(node, AttrName::DataCalloutLegacy).is_some()
         || matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
             && (dom
                 .attr(node, AttrName::Role)
@@ -531,11 +531,11 @@ fn has_footnote_attributes(dom: &Dom, node: NodeId) -> bool {
     dom.attr(node, AttrName::DataFootnote).is_some()
         || dom.attr(node, AttrName::DataFootnoteRef).is_some()
         || dom.attr(node, AttrName::DataFootnotes).is_some()
-        || dom.attr_by_local_name(node, "data-footnote").is_some()
-        || dom.attr_by_local_name(node, "data-footnotes").is_some()
-        || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
+        || dom.attr(node, AttrName::DataFootnoteLegacy).is_some()
+        || dom.attr(node, AttrName::DataFootnotesLegacy).is_some()
+        || dom.attr(node, AttrName::DataFootnoteRefLegacy).is_some()
         || dom
-            .attr_by_local_name(node, "data-type")
+            .attr(node, AttrName::DataType)
             .is_some_and(likely_footnote_name)
         || [AttrName::Class, AttrName::Id, AttrName::Role, AttrName::Rel]
             .into_iter()
@@ -604,11 +604,11 @@ fn may_have_math_evidence(dom: &Dom, node: NodeId) -> bool {
             let local = name.local.as_ref();
             local.eq_ignore_ascii_case("annotation") || local.eq_ignore_ascii_case("mjx-container")
         })
-        || dom.attr_by_local_name(node, "data-latex").is_some()
-        || dom.attr_by_local_name(node, "data-tex").is_some()
+        || dom.attr(node, AttrName::DataLatex).is_some()
+        || dom.attr(node, AttrName::DataTex).is_some()
         || dom.attr(node, AttrName::DataMath).is_some()
-        || dom.attr_by_local_name(node, "data-math").is_some()
-        || dom.attr_by_local_name(node, "data-formula").is_some()
+        || dom.attr(node, AttrName::DataMathLegacy).is_some()
+        || dom.attr(node, AttrName::DataFormula).is_some()
         || [AttrName::Class, AttrName::Id]
             .into_iter()
             .filter_map(|attribute| dom.attr(node, attribute))

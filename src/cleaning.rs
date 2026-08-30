@@ -853,9 +853,9 @@ fn images_are_variants(dom: &Dom, first: NodeId, second: NodeId) -> bool {
     let same_dimensions =
         same_nonempty_attr(AttrName::Width) && same_nonempty_attr(AttrName::Height);
     let same_alt = dom
-        .attr_by_local_name(first, "alt")
+        .attr(first, AttrName::Alt)
         .filter(|value| !value.is_empty())
-        .is_some_and(|value| dom.attr_by_local_name(second, "alt") == Some(value));
+        .is_some_and(|value| dom.attr(second, AttrName::Alt) == Some(value));
     same_url || same_dimensions && (same_basename || same_alt)
 }
 
@@ -1027,8 +1027,8 @@ fn preserve_media_from_hidden_variant(dom: &mut Dom, hidden: NodeId) {
     let single_pair = hidden_images.len() == 1 && visible_images.len() == 1;
     for hidden_image in hidden_images {
         let target = visible_images.iter().copied().find(|&visible_image| {
-            let hidden_alt = dom.attr_by_local_name(hidden_image, "alt");
-            hidden_alt.is_some() && hidden_alt == dom.attr_by_local_name(visible_image, "alt")
+            let hidden_alt = dom.attr(hidden_image, AttrName::Alt);
+            hidden_alt.is_some() && hidden_alt == dom.attr(visible_image, AttrName::Alt)
         });
         let target = target.or_else(|| single_pair.then_some(visible_images[0]));
         if let Some(target) = target {
@@ -1277,7 +1277,7 @@ fn populate_heuristic_aggregates(
         has_images[node.index()] = image_count > 0;
         has_two_images[node.index()] = image_count >= 2;
         if tag == Some(Tag::Other)
-            && dom.attr_by_local_name(node, "action").is_some()
+            && dom.attr(node, AttrName::Action).is_some()
             && (dom.qual_name(node).is_some_and(|name| {
                 contains_ascii_case_insensitive(name.local.as_ref(), "newsletter-form")
             }) || dom
@@ -1567,18 +1567,15 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let navigation_label = dom
             .attr(node, AttrName::AriaLabel)
             .is_some_and(|label| contains_ascii_case_insensitive(label, "navigation"));
-        let documentation_toc = dom
-            .attr_by_local_name(node, "aria-label")
-            .is_some_and(|label| {
-                equals_any_ascii_case_insensitive(
-                    label.trim(),
-                    &["on this page", "table of contents", "contents"],
-                )
-            })
-            || contains_any(
-                name,
-                &["table-of-contents", "table_of_contents", "docs-toc"],
-            );
+        let documentation_toc = dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
+            equals_any_ascii_case_insensitive(
+                label.trim(),
+                &["on this page", "table of contents", "contents"],
+            )
+        }) || contains_any(
+            name,
+            &["table-of-contents", "table_of_contents", "docs-toc"],
+        );
         let navigation = navigation_semantic
             && !documentation_toc
             && !breadcrumb
@@ -1589,10 +1586,7 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let author_name = contains_any(name, &["author-bio", "author_bio", "profile", "bio"]);
         let inside_article_toc = std::iter::once(node)
             .chain(dom.ancestors(node))
-            .any(|ancestor| {
-                dom.attr_by_local_name(ancestor, "data-article-toc")
-                    .is_some()
-            });
+            .any(|ancestor| dom.attr(ancestor, AttrName::DataArticleToc).is_some());
         let author_card = (author_name || inside_article_toc)
             && short
             && (at_start || at_end)
@@ -1963,7 +1957,7 @@ fn is_small_navigation_media_link(dom: &Dom, node: NodeId, text: &mut String) ->
     let alt = dom
         .descendants(node)
         .find(|&descendant| dom.tag(descendant) == Some(Tag::Img))
-        .and_then(|image| dom.attr_by_local_name(image, "alt"))
+        .and_then(|image| dom.attr(image, AttrName::Alt))
         .unwrap_or_default();
     let utility = [label.as_str(), title, alt]
         .into_iter()
@@ -3091,7 +3085,7 @@ fn own_meaningful_media(dom: &Dom, node: NodeId) -> bool {
         return true;
     }
     dom.tag(node) == Some(Tag::Img)
-        && dom.attr_by_local_name(node, "alt").is_some_and(|alt| {
+        && dom.attr(node, AttrName::Alt).is_some_and(|alt| {
             let alt = alt.trim();
             alt.chars().count() >= 12
                 && !["logo", "icon", "avatar", "placeholder"]
@@ -3587,7 +3581,7 @@ fn has_compact_content_identity(dom: &Dom, node: NodeId, links: usize) -> bool {
         has_heading |= matches!(dom.tag(descendant), Some(Tag::H1 | Tag::H2));
         has_described_image |= dom.tag(descendant) == Some(Tag::Img)
             && dom
-                .attr_by_local_name(descendant, "alt")
+                .attr(descendant, AttrName::Alt)
                 .is_some_and(|alt| !alt.trim().is_empty());
         if dom.tag(descendant) == Some(Tag::P) {
             let mut text = String::new();
@@ -4190,7 +4184,7 @@ fn remove_explicit_peripheral_sections(
         }
 
         let name = node_name(dom, node);
-        let article_toc = dom.attr_by_local_name(node, "data-article-toc").is_some();
+        let article_toc = dom.attr(node, AttrName::DataArticleToc).is_some();
         let related_component = name.contains("related-content-tout")
             || name.contains("related")
                 && contains_any(&name, &["articles", "cards", "grid", "stories"]);
@@ -4224,7 +4218,7 @@ fn remove_explicit_peripheral_sections(
             .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Audio | Tag::Source)));
         let custom_form = dom.descendants(node).any(|descendant| {
             dom.tag(descendant) == Some(Tag::Other)
-                && dom.attr_by_local_name(descendant, "action").is_some()
+                && dom.attr(descendant, AttrName::Action).is_some()
                 && node_name(dom, descendant).contains("newsletter-form")
         });
 
@@ -5816,7 +5810,7 @@ fn remove_contextual_boilerplate_in_workspace(
                 || at_end
                 || contains_any(&name, &["newsletter", "subscribe", "signup", "sign-up"]));
         let copy_confirmation = matches!(text, "copied" | "copied to clipboard" | "copy complete")
-            && (dom.attr_by_local_name(node, "aria-live").is_some()
+            && (dom.attr(node, AttrName::AriaLive).is_some()
                 || contains_any(&name, &["clipboard", "copy-status", "copy_status"]));
         let promotional_prompt = text.split_ascii_whitespace().count() <= 12
             && (text.starts_with("unlock the full ") || text.starts_with("start your free trial"))

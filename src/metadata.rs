@@ -1544,7 +1544,7 @@ fn collect_meta_candidates(dom: &Dom, out: &mut MetadataCandidates) {
         let property = dom.attr(id, AttrName::Property);
         let Some(raw_name) = property
             .or_else(|| dom.attr(id, AttrName::Name))
-            .or_else(|| dom.attr_by_local_name(id, "http-equiv"))
+            .or_else(|| dom.attr(id, AttrName::HttpEquiv))
         else {
             continue;
         };
@@ -1831,7 +1831,7 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
         }
         if itemprop_is_page_metadata && has_published_itemprop {
             let value = dom
-                .attr_by_local_name(id, "datetime")
+                .attr(id, AttrName::Datetime)
                 .or_else(|| dom.attr(id, AttrName::Content))
                 .unwrap_or_else(|| get_inner_text(dom, id, &mut text_buffer));
             out.add(
@@ -1844,7 +1844,7 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
             && primary_heading.is_some_and(|heading| is_near_heading(dom, id, heading))
         {
             let value = dom
-                .attr_by_local_name(id, "datetime")
+                .attr(id, AttrName::Datetime)
                 .unwrap_or_else(|| get_inner_text(dom, id, &mut text_buffer));
             out.add(
                 |set| &mut set.published_time,
