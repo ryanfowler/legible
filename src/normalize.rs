@@ -278,7 +278,7 @@ fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
                 .is_some_and(crate::render::markdown::has_visible_inline_text)
                 || dom.tag(node) == Some(Tag::Img)
                     && (dom
-                        .attr_by_local_name(node, "alt")
+                        .attr(node, AttrName::Alt)
                         .is_some_and(crate::render::markdown::has_visible_inline_text)
                         || dom
                             .attr(node, AttrName::Src)

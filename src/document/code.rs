@@ -533,7 +533,7 @@ fn language_from_header(dom: &Dom, pre: NodeId) -> Option<String> {
             let named_label = is_language_label(dom, node);
             if named_label
                 && let Some(language) = dom
-                    .attr_by_local_name(node, "data-language-label")
+                    .attr(node, AttrName::DataLanguageLabel)
                     .and_then(normalize_explicit_language)
             {
                 return Some(language);
@@ -627,9 +627,7 @@ fn is_language_label(dom: &Dom, node: NodeId) -> bool {
                 ],
             )
         })
-        || dom
-            .attr_by_local_name(node, "data-language-label")
-            .is_some()
+        || dom.attr(node, AttrName::DataLanguageLabel).is_some()
 }
 
 fn language_from_label(value: &str) -> Option<String> {

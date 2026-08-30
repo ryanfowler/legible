@@ -217,7 +217,7 @@ impl ScoringView {
             let roles = dom.attr(node, AttrName::Role).unwrap_or_default();
             if has_token(roles, "heading")
                 && let Some(tag) = dom
-                    .attr_by_local_name(node, "aria-level")
+                    .attr(node, AttrName::AriaLevel)
                     .and_then(|value| value.trim().parse::<u8>().ok())
                     .and_then(|level| match level {
                         1 => Some(Tag::H1),

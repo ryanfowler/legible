@@ -630,9 +630,9 @@ fn possible_footnote_reference(dom: &Dom, node: NodeId, tag: Option<Tag>) -> boo
             && dom
                 .attr(node, AttrName::Class)
                 .is_some_and(|classes| has_any_token(classes, &["footref", "sidenote-number"]))
-            && dom.attr_by_local_name(node, "for").is_some()
+            && dom.attr(node, AttrName::For).is_some()
         || dom.attr(node, AttrName::DataFootnoteRef).is_some()
-        || dom.attr_by_local_name(node, "data-footnote-ref").is_some()
+        || dom.attr(node, AttrName::DataFootnoteRefLegacy).is_some()
 }
 
 fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8) {
@@ -739,7 +739,7 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     ) || dom
         .attr(node, AttrName::Role)
         .is_some_and(|role| has_token(role, "heading"))
-        || dom.attr_by_local_name(node, "aria-level").is_some()
+        || dom.attr(node, AttrName::AriaLevel).is_some()
     {
         flags.insert(SourceFlags::PRIMARY_HEADING);
     }

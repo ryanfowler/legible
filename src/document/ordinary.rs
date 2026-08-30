@@ -827,7 +827,7 @@ pub(super) fn compile_with_retained_capacity_plan(
                 .and_then(|value| context.image_destination(value));
             let frame_index = frames.len() - 1;
             if let Some(source) = source {
-                let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
+                let alt = super::images::canonical_label(dom.attr(node, AttrName::Alt));
                 let first = alt.chars().find(|character| !character.is_whitespace());
                 consume_boundary(&mut frames, &mut builder, frame_index, first)?;
                 builder.emit(
@@ -835,7 +835,7 @@ pub(super) fn compile_with_retained_capacity_plan(
                     SemanticKind::Image(semantic_image(dom, node, source)),
                 )?;
             } else {
-                let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
+                let alt = super::images::canonical_label(dom.attr(node, AttrName::Alt));
                 let normalized = super::text::normalize_prose_fragment(&alt);
                 let first = normalized.append.first_non_space;
                 consume_boundary(&mut frames, &mut builder, frame_index, first)?;

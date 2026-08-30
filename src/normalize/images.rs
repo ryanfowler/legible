@@ -1437,13 +1437,13 @@ fn lightbox_links_to(dom: &Dom, thumbnail: NodeId, full: NodeId) -> bool {
 }
 
 fn same_meaningful_alt(dom: &Dom, first: NodeId, second: NodeId) -> bool {
-    let Some(first) = dom.attr_by_local_name(first, "alt").map(str::trim) else {
+    let Some(first) = dom.attr(first, AttrName::Alt).map(str::trim) else {
         return false;
     };
     first.len() > 3
         && !first.eq_ignore_ascii_case("image")
         && dom
-            .attr_by_local_name(second, "alt")
+            .attr(second, AttrName::Alt)
             .is_some_and(|second| first.eq_ignore_ascii_case(second.trim()))
 }
 

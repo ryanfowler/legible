@@ -741,7 +741,7 @@ fn lower_complex_document(
         let Some(tag) = dom.tag(node) else {
             continue;
         };
-        if dom.attr_by_local_name(node, "aria-live").is_some() {
+        if dom.attr(node, AttrName::AriaLive).is_some() {
             let text = dom.text(node);
             if matches!(
                 text.trim().to_ascii_lowercase().as_str(),
@@ -892,7 +892,7 @@ fn lower_complex_document(
             continue;
         }
         if tag == Tag::Img {
-            let alt = super::images::canonical_label(dom.attr_by_local_name(node, "alt"));
+            let alt = super::images::canonical_label(dom.attr(node, AttrName::Alt));
             let source = images.source(node).map(Into::into);
             if let Some(source) = source {
                 builder.emit(
@@ -1664,7 +1664,7 @@ fn footnote_id(
 pub(super) fn semantic_image(dom: &Dom, node: NodeId, source: Box<str>) -> Image {
     Image {
         source,
-        alt: super::images::canonical_label(dom.attr_by_local_name(node, "alt")),
+        alt: super::images::canonical_label(dom.attr(node, AttrName::Alt)),
         title: dom
             .attr(node, AttrName::Title)
             .map(|title| super::images::canonical_label(Some(title))),
@@ -1702,7 +1702,7 @@ pub(super) fn heading_level(dom: &Dom, node: NodeId) -> Option<u8> {
     native.or_else(|| {
         dom.attr(node, AttrName::Role)
             .filter(|roles| has_token(roles, "heading"))
-            .and_then(|_| dom.attr_by_local_name(node, "aria-level"))
+            .and_then(|_| dom.attr(node, AttrName::AriaLevel))
             .and_then(|level| level.trim().parse::<u8>().ok())
             .filter(|level| (1..=6).contains(level))
     })
