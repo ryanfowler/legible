@@ -1365,6 +1365,18 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                     discovered_boundaries,
                 );
             }
+            if is_compact_link_index_heading(dom, node) {
+                for ancestor in dom.ancestors(node).take(3) {
+                    if dom
+                        .element_children(ancestor)
+                        .take(16)
+                        .any(|child| matches!(dom.tag(child), Some(Tag::Ol | Tag::Ul)))
+                    {
+                        discovered_boundaries[ancestor.index()] = true;
+                        break;
+                    }
+                }
+            }
             if dom.tag(node) == Some(Tag::Form) {
                 mark_subscription_boundary(
                     dom,
@@ -1552,6 +1564,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 .attr(node, AttrName::Role)
                 .is_some_and(|role| has_token(role, "navigation"));
         let menu_name = contains_any(name, &["menu", "navigation", "breadcrumb"]);
+        let navigation_label = dom
+            .attr(node, AttrName::AriaLabel)
+            .is_some_and(|label| contains_ascii_case_insensitive(label, "navigation"));
         let documentation_toc = dom
             .attr_by_local_name(node, "aria-label")
             .is_some_and(|label| {
@@ -1567,8 +1582,8 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         let navigation = navigation_semantic
             && !documentation_toc
             && !breadcrumb
-            && (menu_name || links >= 3)
-            && link_density >= 0.6
+            && (menu_name || navigation_label || links >= 3)
+            && link_density >= if navigation_label { 0.35 } else { 0.6 }
             && stats.text_length < 500;
 
         let author_name = contains_any(name, &["author-bio", "author_bio", "profile", "bio"]);
@@ -1736,6 +1751,10 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             && short
             && contains_any(name, &["print-citation", "story-footer"])
             && text.contains("appears in print");
+        let redundant_document_toc = is_redundant_document_toc(dom, node, root, &metrics);
+        let layout_side_rail = is_compact_layout_side_rail(dom, node, &metrics, protected);
+        let inline_promotion = is_compact_inline_promotion(dom, node, &metrics, protected);
+        let link_index_rail = is_link_index_rail(dom, node, &metrics);
 
         if related
             || social
@@ -1762,6 +1781,10 @@ pub(crate) fn heuristic_cleanup_in_workspace(
             || terminal_peripheral_panel
             || card_rail
             || print_citation
+            || redundant_document_toc
+            || layout_side_rail
+            || inline_promotion
+            || link_index_rail
         {
             if protected
                 && !author_card
@@ -1772,6 +1795,9 @@ pub(crate) fn heuristic_cleanup_in_workspace(
                 && !share_prompt
                 && !sponsored_content
                 && !revision_history
+                && !redundant_document_toc
+                && !inline_promotion
+                && !link_index_rail
             {
                 hoist_protected_children(dom, node, store, evidence);
             }
@@ -3572,14 +3598,24 @@ fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
     let mut heading_matches = false;
     let mut links = 0usize;
     let mut non_fragment_link = false;
-    for descendant in dom.descendants(node) {
+    for (index, descendant) in dom.descendants(node).enumerate() {
+        if index >= 512 {
+            return false;
+        }
         let tag = dom.tag(descendant);
         if !heading_matches && matches!(tag, Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6))
         {
             let mut text = String::new();
             dom.append_normalized_text_limited(descendant, &mut text, 128);
-            heading_matches =
-                equals_any_ascii_case_insensitive(text.trim(), &["contents", "on this page"]);
+            heading_matches = equals_any_ascii_case_insensitive(
+                text.trim(),
+                &[
+                    "contents",
+                    "on this page",
+                    "table of contents",
+                    "in this article",
+                ],
+            );
             if heading_matches {
                 return true;
             }
@@ -3592,6 +3628,260 @@ fn is_document_toc(dom: &Dom, node: NodeId, name: &str) -> bool {
         }
     }
     links > 0 && !non_fragment_link
+}
+
+fn has_explicit_document_toc_label(dom: &Dom, node: NodeId, name: &str) -> bool {
+    dom.attr(node, AttrName::AriaLabel).is_some_and(|label| {
+        equals_any_ascii_case_insensitive(
+            label.trim(),
+            &[
+                "on this page",
+                "table of contents",
+                "contents",
+                "toc",
+                "in this article",
+            ],
+        )
+    }) || contains_any(
+        name,
+        &[
+            "table-of-contents",
+            "table_of_contents",
+            "docs-toc",
+            "reference-toc",
+        ],
+    ) || name_has_token(name, "toc")
+        || dom
+            .descendants(node)
+            .take(48)
+            .any(|descendant| is_document_toc_heading(dom, descendant))
+}
+
+fn is_document_toc_heading(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+    ) && {
+        let mut text = String::new();
+        dom.append_normalized_text_limited(node, &mut text, 128);
+        equals_any_ascii_case_insensitive(
+            text.trim(),
+            &[
+                "contents",
+                "on this page",
+                "table of contents",
+                "in this article",
+            ],
+        )
+    }
+}
+
+fn is_compact_link_index_heading(dom: &Dom, node: NodeId) -> bool {
+    matches!(dom.tag(node), Some(Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)) && {
+        let mut text = String::new();
+        dom.append_normalized_text_limited(node, &mut text, 96);
+        equals_any_ascii_case_insensitive(
+            text.trim(),
+            &[
+                "news",
+                "recent posts",
+                "latest articles",
+                "popular posts",
+                "most read",
+            ],
+        )
+    }
+}
+
+fn is_redundant_document_toc(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    metrics: &PeripheralMetrics<'_>,
+) -> bool {
+    if metrics.links < 2
+        || metrics.stats.text_length >= 4_000
+        || metrics.link_density < 0.15
+        || dom
+            .attr(root, AttrName::Class)
+            .is_some_and(|class| has_token(class, "mw-parser-output"))
+        || !has_explicit_document_toc_label(dom, node, metrics.name)
+        || !is_document_toc(dom, node, metrics.name)
+        || !std::iter::once(node)
+            .chain(dom.descendants(node))
+            .take(256)
+            .any(|descendant| matches!(dom.tag(descendant), Some(Tag::Nav | Tag::Ol | Tag::Ul)))
+    {
+        return false;
+    }
+
+    let mut headings = 0_u8;
+    for (index, candidate) in dom.descendants(root).enumerate() {
+        if index >= 512 {
+            return false;
+        }
+        if matches!(
+            dom.tag(candidate),
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) && candidate != node
+            && is_proven_outside_subtree(dom, candidate, node)
+        {
+            headings += 1;
+            if headings >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_proven_outside_subtree(dom: &Dom, candidate: NodeId, subtree: NodeId) -> bool {
+    for (index, ancestor) in dom.ancestors(candidate).enumerate() {
+        if ancestor == subtree {
+            return false;
+        }
+        if index >= 63 {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_compact_layout_side_rail(
+    dom: &Dom,
+    node: NodeId,
+    metrics: &PeripheralMetrics<'_>,
+    protected: bool,
+) -> bool {
+    dom.tag(node) == Some(Tag::Aside)
+        && !protected
+        && !is_inside_primary_content_container_bounded(dom, node)
+        && (!dom
+            .descendants(node)
+            .take(256)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::P))
+            || contains_any(metrics.name, &["sidebar", "side-rail", "side_rail", "rail"]))
+        && (metrics.at_start || metrics.at_end)
+        && metrics.stats.text_length < 700
+        && metrics.stats.sentence_end_count <= 2
+        && !has_substantive_prose_bounded(dom, node)
+        && !std::iter::once(node)
+            .chain(dom.descendants(node))
+            .take(256)
+            .any(|descendant| {
+                matches!(
+                    dom.tag(descendant),
+                    Some(Tag::Blockquote | Tag::Figure | Tag::Pre | Tag::Table)
+                )
+            })
+}
+
+fn is_compact_inline_promotion(
+    dom: &Dom,
+    node: NodeId,
+    metrics: &PeripheralMetrics<'_>,
+    protected: bool,
+) -> bool {
+    matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+        && !protected
+        && contains_any(metrics.name, &["promotion", "promo", "paywall", "upsell"])
+        && metrics.stats.text_length < 500
+        && metrics.stats.sentence_end_count <= 2
+        && (metrics.controls > 0 || metrics.links > 0 || metrics.has_form)
+        && !has_substantive_prose_bounded(dom, node)
+}
+
+fn is_link_index_rail(dom: &Dom, node: NodeId, metrics: &PeripheralMetrics<'_>) -> bool {
+    let layout_peer = has_substantive_layout_peer(dom, node);
+    let inside_primary = is_inside_primary_content_container_bounded(dom, node);
+    let explicit_peripheral = ["sidebar", "rail"]
+        .iter()
+        .any(|token| name_has_token(metrics.name, token));
+    if !matches!(dom.tag(node), Some(Tag::Aside | Tag::Div | Tag::Section))
+        || inside_primary && !explicit_peripheral
+        || !(metrics.at_start || metrics.at_end || layout_peer)
+        || metrics.links < 4
+        || metrics.stats.text_length >= 1_200
+        || metrics.link_density < 0.55
+        || metrics.stats.sentence_end_count > 3
+    {
+        return false;
+    }
+    dom.descendants(node).take(48).any(|heading| {
+        matches!(
+            dom.tag(heading),
+            Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+        ) && {
+            let mut text = String::new();
+            dom.append_normalized_text_limited(heading, &mut text, 96);
+            equals_any_ascii_case_insensitive(
+                text.trim(),
+                &[
+                    "news",
+                    "recent posts",
+                    "latest articles",
+                    "popular posts",
+                    "most read",
+                ],
+            )
+        }
+    })
+}
+
+fn has_substantive_layout_peer(dom: &Dom, node: NodeId) -> bool {
+    let mut branch = node;
+    for parent in dom.ancestors(node).take(3) {
+        for (index, sibling) in dom.element_children(parent).enumerate() {
+            if index >= 16 {
+                return false;
+            }
+            if sibling == branch {
+                continue;
+            }
+            for (descendant_index, descendant) in dom.descendants(sibling).enumerate() {
+                if descendant_index >= 256 {
+                    return false;
+                }
+                if dom.tag(descendant) == Some(Tag::P)
+                    && dom.normalized_char_count(descendant) >= 120
+                {
+                    return true;
+                }
+            }
+        }
+        branch = parent;
+    }
+    false
+}
+
+fn has_substantive_prose_bounded(dom: &Dom, node: NodeId) -> bool {
+    for (index, descendant) in dom.descendants(node).enumerate() {
+        if index >= 256 {
+            return true;
+        }
+        if matches!(dom.tag(descendant), Some(Tag::Blockquote | Tag::P))
+            && dom.normalized_char_count(descendant) >= 80
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_inside_primary_content_container_bounded(dom: &Dom, node: NodeId) -> bool {
+    for (index, ancestor) in std::iter::once(node).chain(dom.ancestors(node)).enumerate() {
+        if index >= 64 {
+            return true;
+        }
+        if matches!(dom.tag(ancestor), Some(Tag::Article | Tag::Main))
+            || dom
+                .attr(ancestor, AttrName::Role)
+                .is_some_and(|roles| has_any_token(roles, &["article", "main"]))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_pricing_heading(dom: &Dom, node: NodeId) -> bool {
@@ -4336,6 +4626,8 @@ fn remove_direct_peripheral_siblings(
     }
     for &(node, _) in snapshot {
         if (related_heading_signal(dom, node) == RelatedHeadingSignal::Strong
+            || is_document_toc_heading(dom, node)
+            || is_compact_link_index_heading(dom, node)
             || dom.tag(node) == Some(Tag::Form)
             || is_terminal_sequence_candidate(dom, node)
                 && terminal_sequence_score(dom, node, link_counts[node.index()]) > 0)
@@ -4949,6 +5241,21 @@ fn is_structural_peripheral_candidate(
         let text = text.trim();
         equals_any_ascii_case_insensitive(text, &["collection", "company profile", "founders"])
             || starts_ascii_case_insensitive(text, "the latest from ")
+            || equals_any_ascii_case_insensitive(
+                text,
+                &[
+                    "news",
+                    "recent posts",
+                    "latest articles",
+                    "popular posts",
+                    "most read",
+                ],
+            ) && dom
+                .descendants(node)
+                .filter(|&child| dom.tag(child) == Some(Tag::A))
+                .take(4)
+                .count()
+                >= 4
     });
 
     structural_name || job_name || promotional_heading
@@ -5411,7 +5718,7 @@ fn remove_contextual_boilerplate_in_workspace(
     get_or_compute_stats(dom, root, store);
 
     for &node in nodes.iter().rev() {
-        if dom.parent(node).is_none() || is_protected_content(dom, node, evidence) {
+        if dom.parent(node).is_none() {
             continue;
         }
         if store
@@ -5474,8 +5781,30 @@ fn remove_contextual_boilerplate_in_workspace(
             && (at_start
                 || at_end
                 || contains_any(&name, &["newsletter", "subscribe", "signup", "sign-up"]));
+        let copy_confirmation = matches!(text, "copied" | "copied to clipboard" | "copy complete")
+            && (dom.attr_by_local_name(node, "aria-live").is_some()
+                || contains_any(&name, &["clipboard", "copy-status", "copy_status"]));
+        let promotional_prompt = text.split_ascii_whitespace().count() <= 12
+            && (text.starts_with("unlock the full ") || text.starts_with("start your free trial"))
+            && (contains_any(&name, &["promotion", "promo", "paywall", "upsell"])
+                || dom.ancestors(node).take(3).any(|ancestor| {
+                    contains_any(
+                        &node_name(dom, ancestor),
+                        &["promotion", "promo", "paywall", "upsell"],
+                    )
+                }));
 
-        if reading_time || advertisement || action || subscription {
+        if is_protected_content(dom, node, evidence) && !copy_confirmation && !promotional_prompt {
+            continue;
+        }
+
+        if reading_time
+            || advertisement
+            || action
+            || subscription
+            || copy_confirmation
+            || promotional_prompt
+        {
             detach_and_invalidate_stats(dom, node, store);
         }
     }
@@ -5485,7 +5814,20 @@ fn remove_contextual_boilerplate_in_workspace(
 fn is_contextual_text_boundary(dom: &Dom, node: NodeId) -> bool {
     matches!(
         dom.tag(node),
-        Some(Tag::Aside | Tag::Div | Tag::Footer | Tag::P | Tag::Section | Tag::Small | Tag::Span)
+        Some(
+            Tag::Aside
+                | Tag::Div
+                | Tag::Footer
+                | Tag::H2
+                | Tag::H3
+                | Tag::H4
+                | Tag::H5
+                | Tag::H6
+                | Tag::P
+                | Tag::Section
+                | Tag::Small
+                | Tag::Span
+        )
     )
 }
 
@@ -5889,6 +6231,12 @@ fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
+}
+
+fn name_has_token(value: &str, expected: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token.eq_ignore_ascii_case(expected))
 }
 
 fn contains_name_or_text(name: &str, text: &str, needles: &[&str]) -> bool {
@@ -6791,6 +7139,72 @@ mod tests {
         assert!(text.contains("advertisement changed television"), "{text}");
         assert!(text.contains("read more carefully"), "{text}");
         assert!(text.contains("share this article in class"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_ui_phrases_in_authored_content() {
+        let text = clean_fragment(
+            r##"<article><p>The files were <span>copied</span> successfully.</p><h2><a href="#ownership">Unlock the full potential of Rust</a></h2><p>This section explains ownership and borrowing.</p></article>"##,
+        );
+        assert!(text.contains("files were copied successfully"), "{text}");
+        assert!(text.contains("Unlock the full potential of Rust"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_an_authored_news_link_section() {
+        for container in ["section", "aside"] {
+            let html = format!(
+                r#"<article><p>This digest explains the changes that affect the project and gives readers enough context to choose the relevant report.</p><{container}><h3>News</h3><ul><li><a href="/one">Compiler release</a></li><li><a href="/two">Library release</a></li><li><a href="/three">Tooling release</a></li><li><a href="/four">Community report</a></li></ul></{container}></article>"#,
+            );
+            let text = clean_fragment(&html);
+            assert!(text.contains("News"), "{container}: {text}");
+            assert!(text.contains("Compiler release"), "{container}: {text}");
+            assert!(text.contains("Community report"), "{container}: {text}");
+        }
+    }
+
+    #[test]
+    fn heuristic_cleanup_keeps_protected_content_in_promo_named_regions() {
+        let text = clean_fragment(
+            r#"<article><h1>Promotion API</h1><div class="promo-example"><a href="/api">API reference</a><pre><code>promotion.enable()</code></pre></div><p>The method enables a promotion for the selected account.</p></article>"#,
+        );
+        assert!(text.contains("promotion.enable()"), "{text}");
+        assert!(text.contains("API reference"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_removes_a_redundant_explicit_toc() {
+        let text = clean_fragment(
+            r##"<article><h1>Client guide</h1><p>This guide explains the complete client workflow and the checks that validate each operation.</p><nav id="toc"><h2>Contents</h2><ol><li><a href="#setup">Setup</a></li><li><a href="#usage">Usage</a></li></ol></nav><h2 id="setup">Setup</h2><p>Install the client and set its endpoint.</p><h2 id="usage">Usage</h2><p>Run the client and inspect each result.</p></article>"##,
+        );
+        assert!(!text.contains("Contents"), "{text}");
+        assert!(text.contains("Install the client"), "{text}");
+        assert!(text.contains("inspect each result"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_does_not_match_toc_inside_an_unrelated_name() {
+        let text = clean_fragment(
+            r##"<article><h1>Market report</h1><p>This report explains the complete market result and its measured effect.</p><div id="stock-list"><ol><li><a href="#alpha">Alpha stock</a></li><li><a href="#beta">Beta stock</a></li></ol></div><h2 id="alpha">Alpha</h2><p>The Alpha result remains stable.</p><h2 id="beta">Beta</h2><p>The Beta result increased.</p></article>"##,
+        );
+        assert!(text.contains("Alpha stock"), "{text}");
+        assert!(text.contains("Beta stock"), "{text}");
+    }
+
+    #[test]
+    fn heuristic_cleanup_bounds_many_compact_rail_probes() {
+        let mut html = String::from(
+            "<main><article><p>The primary report contains enough detailed prose to remain the selected content after cleanup.</p></article>",
+        );
+        for index in 0..500 {
+            html.push_str(&format!(
+                r#"<aside><h3>News</h3><ul><li><a href="/{index}/1">One</a></li><li><a href="/{index}/2">Two</a></li><li><a href="/{index}/3">Three</a></li><li><a href="/{index}/4">Four</a></li></ul></aside>"#,
+            ));
+        }
+        html.push_str("</main>");
+
+        let text = clean_fragment(&html);
+        assert!(text.contains("primary report"), "{text}");
     }
 
     #[test]

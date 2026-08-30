@@ -425,6 +425,58 @@ fn is_line_number_element(dom: &Dom, node: NodeId) -> bool {
         })
 }
 
+/// Returns true for a separate preformatted gutter beside the real source.
+pub(crate) fn is_parallel_line_number_block(dom: &Dom, node: NodeId) -> bool {
+    if dom.tag(node) != Some(Tag::Pre)
+        || !is_line_number_element(dom, node)
+        || dom
+            .descendants(node)
+            .any(|descendant| dom.tag(descendant) == Some(Tag::Code))
+    {
+        return false;
+    }
+    let text = dom.text(node);
+    let mut lines = 0_u8;
+    let mut has_copy_label = false;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line.bytes().all(|byte| byte.is_ascii_digit()) {
+            lines = lines.saturating_add(1);
+            continue;
+        }
+        let trailing_copy = line
+            .strip_suffix("Copy code")
+            .or_else(|| line.strip_suffix("copy code"))
+            .map(str::trim)
+            .is_some_and(|prefix| {
+                prefix.is_empty() || prefix.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if trailing_copy && lines >= 2 {
+            has_copy_label = true;
+            if line
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_digit())
+            {
+                lines = lines.saturating_add(1);
+            }
+            continue;
+        }
+        return false;
+    }
+    if lines < 2 || !has_copy_label {
+        return false;
+    }
+    let Some(parent) = dom.parent(node) else {
+        return false;
+    };
+    dom.element_children(parent).any(|sibling| {
+        sibling != node
+            && dom.tag(sibling) == Some(Tag::Pre)
+            && !is_line_number_element(dom, sibling)
+            && dom.has_non_whitespace_text(sibling)
+    })
+}
+
 fn is_line_wrapper(dom: &Dom, node: NodeId) -> bool {
     let line_element = matches!(dom.tag(node), Some(Tag::Div | Tag::Span));
     line_element
@@ -807,6 +859,49 @@ mod tests {
             r#"<pre><code><span data-line><span class="lineno">1</span><span>let value = 1;</span></span><span data-line><span class="lineno">2</span><span>value</span><br></span></code></pre>"#,
         );
         assert_eq!(code.text, "let value = 1;\nvalue\n");
+    }
+
+    #[test]
+    fn recognizes_a_parallel_numeric_gutter_with_a_copy_label() {
+        let dom = Dom::parse_fragment(
+            r#"<div class="highlight"><pre class="line-numbers">1
+2
+3 Copy code</pre><pre><code>let value = 1;
+value</code></pre></div>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let gutter = dom
+            .descendants(dom.root())
+            .find(|&node| dom.tag(node) == Some(Tag::Pre))
+            .unwrap();
+
+        assert!(is_parallel_line_number_block(&dom, gutter));
+    }
+
+    #[test]
+    fn keeps_numeric_code_with_a_line_number_class() {
+        for numeric in [
+            r#"<pre class="line-numbers"><code>10
+20
+30</code></pre>"#,
+            r#"<pre class="line-numbers">10
+20
+30</pre>"#,
+        ] {
+            let html = format!(r#"<div>{numeric}<pre><code>another sample</code></pre></div>"#);
+            let dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
+            let numeric_code = dom
+                .descendants(dom.root())
+                .find(|&node| dom.tag(node) == Some(Tag::Pre))
+                .unwrap();
+
+            assert!(!is_parallel_line_number_block(&dom, numeric_code));
+            assert_eq!(
+                recognize_block(&dom, numeric_code).unwrap().text,
+                "10\n20\n30"
+            );
+        }
     }
 
     #[test]

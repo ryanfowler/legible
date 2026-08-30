@@ -1177,8 +1177,52 @@ pub(crate) fn content_identity_title(dom: &Dom, document_title: &str) -> String 
         return document_title.to_owned();
     }
     dom.first_descendant_by_tag(dom.root(), Tag::H1)
-        .map(|heading| get_inner_text_owned(dom, heading))
+        .map(|heading| visible_heading_text(dom, heading))
         .unwrap_or_default()
+}
+
+/// Returns authored heading text without embedded interface controls.
+fn visible_heading_text(dom: &Dom, heading: NodeId) -> String {
+    let mut raw = String::new();
+    let mut stack: Vec<_> = dom
+        .children_rev(heading)
+        .map(|node| (node, false))
+        .collect();
+    while let Some((node, hidden)) = stack.pop() {
+        if let Some(value) = dom.text_node(node) {
+            if !hidden {
+                raw.push_str(value);
+            }
+            continue;
+        }
+        let hidden = hidden
+            || matches!(
+                dom.tag(node),
+                Some(Tag::Input | Tag::Select | Tag::Textarea)
+            )
+            || dom.tag(node) == Some(Tag::Button) && is_heading_utility_button(dom, node)
+            || dom
+                .attr(node, AttrName::AriaHidden)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        stack.extend(dom.children_rev(node).map(|child| (child, hidden)));
+    }
+    normalize_whitespace(raw.trim())
+}
+
+fn is_heading_utility_button(dom: &Dom, button: NodeId) -> bool {
+    let mut text = String::new();
+    dom.append_normalized_text_limited(button, &mut text, 64);
+    let utility_label = |label: &str| {
+        matches!(
+            label.trim().to_ascii_lowercase().as_str(),
+            "copy" | "copy item path" | "copy link" | "copy permalink" | "permalink"
+        )
+    };
+    utility_label(&text)
+        || ["aria-label", "title"]
+            .into_iter()
+            .filter_map(|name| dom.attr_by_local_name(button, name))
+            .any(utility_label)
 }
 
 fn metadata_identity_title(dom: &Dom, document_title: &str) -> String {
@@ -1188,7 +1232,7 @@ fn metadata_identity_title(dom: &Dom, document_title: &str) -> String {
             .filter(|&node| dom.tag(node) == Some(Tag::H1)),
     )
     .filter(|&heading| visible_heading_confidence(dom, heading) > 78)
-    .map(|heading| get_inner_text_owned(dom, heading))
+    .map(|heading| visible_heading_text(dom, heading))
     .filter(|title| !title.trim().is_empty())
     .unwrap_or_else(|| document_title.to_owned())
 }
@@ -1675,12 +1719,12 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
             }
         }
         if dom.tag(id) == Some(Tag::H1) {
-            let text = get_inner_text(dom, id, &mut text_buffer);
+            let text = visible_heading_text(dom, id);
             let confidence = visible_heading_confidence(dom, id);
             if confidence > 0 {
                 out.add(
                     |set| &mut set.title,
-                    text,
+                    &text,
                     MetadataSource::HtmlElement,
                     confidence,
                 );
@@ -3178,6 +3222,52 @@ mod tests {
             );
             assert_eq!(article.site_name.as_deref(), Some("example.test"));
         }
+    }
+
+    #[test]
+    fn heading_controls_do_not_pollute_the_title() {
+        let result = metadata(
+            r#"<title>Buffer in crate - Docs</title><main><section id="main-content"><h1>Struct <span>Buffer</span><button>Copy item path</button><span aria-hidden="true">Hidden status</span></h1><p>Reference text.</p></section></main>"#,
+            Some("https://docs.example.test/buffer"),
+            false,
+        );
+
+        assert_eq!(result.title.as_deref(), Some("Struct Buffer"));
+    }
+
+    #[test]
+    fn heading_text_preserves_inline_punctuation_boundaries() {
+        let dom = Dom::parse_document(
+            r#"<main><h1><code>Vec</code>&lt;T&gt;: <span>methods</span><button>Copy</button></h1></main>"#,
+        )
+        .unwrap();
+        let heading = dom.first_descendant_by_tag(dom.root(), Tag::H1).unwrap();
+
+        assert_eq!(visible_heading_text(&dom, heading), "Vec<T>: methods");
+    }
+
+    #[test]
+    fn heading_text_keeps_button_wrapped_authored_text() {
+        let dom = Dom::parse_document(
+            r#"<main><h1><button aria-expanded="true">Installation guide</button></h1></main>"#,
+        )
+        .unwrap();
+        let heading = dom.first_descendant_by_tag(dom.root(), Tag::H1).unwrap();
+
+        assert_eq!(visible_heading_text(&dom, heading), "Installation guide");
+    }
+
+    #[test]
+    fn heading_text_handles_deep_markup_iteratively() {
+        let mut html = String::from("<h1>");
+        html.push_str(&"<span>".repeat(4_000));
+        html.push_str("Deep title");
+        html.push_str(&"</span>".repeat(4_000));
+        html.push_str("</h1>");
+        let dom = Dom::parse_fragment(&html, Tag::Div).unwrap();
+        let heading = dom.first_descendant_by_tag(dom.root(), Tag::H1).unwrap();
+
+        assert_eq!(visible_heading_text(&dom, heading), "Deep title");
     }
 
     #[test]

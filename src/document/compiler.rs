@@ -741,6 +741,15 @@ fn lower_complex_document(
         let Some(tag) = dom.tag(node) else {
             continue;
         };
+        if dom.attr_by_local_name(node, "aria-live").is_some() {
+            let text = dom.text(node);
+            if matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "copied" | "copied to clipboard" | "copy complete"
+            ) {
+                continue;
+            }
+        }
         if matches!(
             tag,
             Tag::Head | Tag::Script | Tag::Style | Tag::Template | Tag::Noscript
@@ -835,6 +844,9 @@ fn lower_complex_document(
                 }
                 super::tables::TableKind::Data => {}
             }
+        }
+        if super::code::is_parallel_line_number_block(dom, node) {
+            continue;
         }
         if facts.is_code_block(node)
             && let Some(code) = owned_source_texts
