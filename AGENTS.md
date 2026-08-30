@@ -55,7 +55,7 @@ The extraction pipeline flows through these stages:
 | `extraction.rs` | Source-session orchestration, conservative direct-main fast path, per-attempt fragment execution, strategy retries, candidate selection, and content consolidation |
 | `scoring.rs` | General candidate features, ranking, and cached text statistics |
 | `scoring.rs::ScoringView` | Sparse scoring tag, parent, wrapper, and paragraph projections over the immutable source DOM |
-| `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup |
+| `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup, including redundant indexes and compact peripheral rails |
 | `normalize.rs` / `normalize/` | Source preparation and relevance cleanup for SVG charts, media, duplicate images, and heading artifacts |
 | `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
@@ -107,6 +107,7 @@ These invariants are costly to violate:
 - **Use static image evidence together.** Small dimensions are a signal. Protect described images, math, responsive sources, and captioned figures.
 - **Preserve table content models.** Synthetic extraction boundaries must keep valid table, section, row, and cell ancestry. Normalize conservative rank-based listing tables into lists, but keep real data tables.
 - **Use multiple clutter signals.** Do not remove substantial content from one weak class, ID, role, length, or link-density signal. Breadcrumb, subscription, related-content, and document-chrome cleanup must also use structure and document position. Preserve article-contained regions, pricing content, meaningful media, and identity text. A single terminal related section requires a strong heading, multiple links, and substantial preceding content.
+- **Remove indexes only with structural proof.** A repeated table of contents or compact link rail needs an explicit heading or label, several links, and substantial content outside the index. Preserve authored references, callouts, and navigation that is the page's main content.
 - **Compile code directly.** The semantic compiler recognizes source code, language hints, line wrappers, and explicit syntax-highlighter gutters without renderer-oriented DOM rewrites. Preserve numeric source code and source-line wrappers.
 - **Compile lists and tables directly.** Keep scoring-time table analysis and ARIA list preparation separate. The semantic compiler emits ordered-list metadata, converts rank-based listings, flattens layout tables, and preserves data-table cells without renderer-oriented DOM rewrites. Transparent block wrappers inside list items must not create empty list markers.
 - **Borrow, don't clone.** Borrow `ExtractorConfig` during extraction. Borrow a JSON-LD script's single text child and allocate a fallback only when the subtree is complex.

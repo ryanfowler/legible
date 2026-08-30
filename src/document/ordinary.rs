@@ -763,6 +763,9 @@ pub(super) fn compile_with_retained_capacity_plan(
         if super::code::is_code_language_label(dom, node) {
             continue;
         }
+        if super::code::is_parallel_line_number_block(dom, node) {
+            continue;
+        }
         if has_complex_tag(tag) {
             requires_complex!();
         }
