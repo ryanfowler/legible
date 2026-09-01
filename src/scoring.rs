@@ -1264,10 +1264,12 @@ fn append_content_stats(a: &mut NodeStats, b: &NodeStats) {
     a.set_has_alphanumeric(a.has_alphanumeric() || b.has_alphanumeric());
     a.set_ends_with_whitespace(b.ends_with_whitespace());
 }
+#[inline(always)]
 pub fn get_or_compute_stats(dom: &Dom, id: NodeId, store: &mut NodeStateStore) -> NodeStats {
     get_or_compute_stats_excluding(dom, id, store, &[])
 }
 
+#[inline(always)]
 fn get_or_compute_stats_from_source(
     dom: &Dom,
     source: Option<&SourceAnalysis>,
@@ -1278,6 +1280,7 @@ fn get_or_compute_stats_from_source(
     get_or_compute_stats_excluding_impl(dom, source, id, store, excluded)
 }
 
+#[inline(always)]
 pub(crate) fn get_or_compute_stats_from_source_excluding(
     dom: &Dom,
     source: &SourceAnalysis,
@@ -1431,6 +1434,7 @@ pub(crate) fn stats_from_analysis_entries_pair(
 /// Computes text statistics while omitting the roots marked in `excluded`.
 ///
 /// The cache must be empty because its entries describe this filtered tree view.
+#[inline(always)]
 pub(crate) fn get_or_compute_stats_excluding(
     dom: &Dom,
     id: NodeId,
@@ -1440,6 +1444,7 @@ pub(crate) fn get_or_compute_stats_excluding(
     get_or_compute_stats_excluding_impl(dom, None, id, store, excluded)
 }
 
+#[inline(always)]
 fn get_or_compute_stats_excluding_impl(
     dom: &Dom,
     source: Option<&SourceAnalysis>,
@@ -1447,7 +1452,26 @@ fn get_or_compute_stats_excluding_impl(
     store: &mut NodeStateStore,
     excluded: &[bool],
 ) -> NodeStats {
-    let source_cache = store.source_stats_enabled() && source.is_some() && excluded.is_empty();
+    if excluded.is_empty() {
+        get_or_compute_stats_impl::<true>(dom, source, id, store, excluded)
+    } else {
+        get_or_compute_stats_impl::<false>(dom, source, id, store, excluded)
+    }
+}
+
+/// Computes subtree statistics. The const parameter lets the common
+/// unfiltered scoring path compile without exclusion-mask branches in its
+/// inner traversal while keeping the filtered implementation shared.
+#[inline]
+fn get_or_compute_stats_impl<const UNFILTERED: bool>(
+    dom: &Dom,
+    source: Option<&SourceAnalysis>,
+    id: NodeId,
+    store: &mut NodeStateStore,
+    excluded: &[bool],
+) -> NodeStats {
+    let source_cache =
+        store.source_stats_enabled() && source.is_some() && (UNFILTERED || excluded.is_empty());
     let cached = if source_cache {
         store.get_source_stats(id)
     } else {
@@ -1480,7 +1504,7 @@ fn get_or_compute_stats_excluding_impl(
             break Some(("", None));
         };
         if dom.next_sibling(child).is_some()
-            || excluded.get(child.index()).copied().unwrap_or(false)
+            || (!UNFILTERED && excluded.get(child.index()).copied().unwrap_or(false))
         {
             break None;
         }
@@ -1557,7 +1581,7 @@ fn get_or_compute_stats_excluding_impl(
     while let Some(frame) = stack.last_mut() {
         if let Some(child) = frame.next_child {
             frame.next_child = dom.next_sibling(child);
-            if excluded.get(child.index()).copied().unwrap_or(false) {
+            if !UNFILTERED && excluded.get(child.index()).copied().unwrap_or(false) {
                 continue;
             }
             let child_stats = if source_cache {

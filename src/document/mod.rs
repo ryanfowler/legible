@@ -134,20 +134,24 @@ pub(crate) fn semantic_source_evidence(
         || footnotes::has_possible_footnote_evidence(dom, node)
         || [
             crate::dom::AttrName::DataCallout,
+            crate::dom::AttrName::DataCalloutLegacy,
             crate::dom::AttrName::DataFootnote,
+            crate::dom::AttrName::DataFootnoteLegacy,
             crate::dom::AttrName::DataFootnoteRef,
+            crate::dom::AttrName::DataFootnoteRefLegacy,
             crate::dom::AttrName::DataFootnotes,
+            crate::dom::AttrName::DataFootnotesLegacy,
             crate::dom::AttrName::DataMath,
+            crate::dom::AttrName::DataMathLegacy,
         ]
         .into_iter()
         .any(|attribute| dom.attr(node, attribute).is_some())
         || dom
-            .attr_by_local_name(node, "data-type")
+            .attr(node, crate::dom::AttrName::DataType)
             .is_some_and(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "footnote" | "noteref" | "footnotes"
-                )
+                value.eq_ignore_ascii_case("footnote")
+                    || value.eq_ignore_ascii_case("noteref")
+                    || value.eq_ignore_ascii_case("footnotes")
             })
 }
 
@@ -155,31 +159,6 @@ fn has_source_recognizer_gate(dom: &crate::dom::Dom, node: crate::dom::NodeId) -
     let Some(tag) = dom.tag(node) else {
         return false;
     };
-    let has_class_or_id = dom.attr(node, crate::dom::AttrName::Class).is_some()
-        || dom.attr(node, crate::dom::AttrName::Id).is_some();
-    let has_role = dom.attr(node, crate::dom::AttrName::Role).is_some();
-    let has_semantic_data = [
-        "data-latex",
-        "data-tex",
-        "data-math",
-        "data-formula",
-        "data-type",
-        "data-callout",
-        "data-footnote",
-        "data-footnote-ref",
-        "data-footnotes",
-    ]
-    .into_iter()
-    .any(|name| dom.attr_by_local_name(node, name).is_some())
-        || dom.attr(node, crate::dom::AttrName::DataCallout).is_some()
-        || dom.attr(node, crate::dom::AttrName::DataFootnote).is_some()
-        || dom
-            .attr(node, crate::dom::AttrName::DataFootnoteRef)
-            .is_some()
-        || dom
-            .attr(node, crate::dom::AttrName::DataFootnotes)
-            .is_some()
-        || dom.attr(node, crate::dom::AttrName::DataMath).is_some();
     let has_semantic_tag = matches!(
         tag,
         crate::dom::Tag::A
@@ -190,7 +169,44 @@ fn has_source_recognizer_gate(dom: &crate::dom::Dom, node: crate::dom::NodeId) -
     ) || dom
         .qual_name(node)
         .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"));
-    has_class_or_id || has_role || has_semantic_data || has_semantic_tag
+    if has_semantic_tag {
+        return true;
+    }
+
+    // Class, id, and role nodes already need the richer recognizers. Do not
+    // scan the rest of the semantic attribute set for ordinary wrappers.
+    if dom.attrs(node).is_empty() {
+        return false;
+    }
+    let has_class_or_id = dom.attr(node, crate::dom::AttrName::Class).is_some()
+        || dom.attr(node, crate::dom::AttrName::Id).is_some();
+    let has_role = dom.attr(node, crate::dom::AttrName::Role).is_some();
+    if has_class_or_id || has_role {
+        return true;
+    }
+
+    [
+        crate::dom::AttrName::DataLatex,
+        crate::dom::AttrName::DataTex,
+        crate::dom::AttrName::DataMathLegacy,
+        crate::dom::AttrName::DataFormula,
+        crate::dom::AttrName::DataType,
+        crate::dom::AttrName::DataCalloutLegacy,
+        crate::dom::AttrName::DataFootnoteLegacy,
+        crate::dom::AttrName::DataFootnoteRefLegacy,
+        crate::dom::AttrName::DataFootnotesLegacy,
+    ]
+    .into_iter()
+    .any(|name| dom.attr(node, name).is_some())
+        || dom.attr(node, crate::dom::AttrName::DataCallout).is_some()
+        || dom.attr(node, crate::dom::AttrName::DataFootnote).is_some()
+        || dom
+            .attr(node, crate::dom::AttrName::DataFootnoteRef)
+            .is_some()
+        || dom
+            .attr(node, crate::dom::AttrName::DataFootnotes)
+            .is_some()
+        || dom.attr(node, crate::dom::AttrName::DataMath).is_some()
 }
 
 pub(crate) use tables::repeated_listing_start;

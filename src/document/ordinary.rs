@@ -340,6 +340,9 @@ fn is_heading(tag: Tag) -> bool {
 }
 
 fn has_complex_attributes(dom: &Dom, node: NodeId) -> bool {
+    if dom.attrs(node).is_empty() {
+        return false;
+    }
     if dom.attr(node, AttrName::Role).is_some() {
         return true;
     }
