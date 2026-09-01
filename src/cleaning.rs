@@ -32,6 +32,9 @@ pub(crate) struct FragmentWorkspace {
     preorder: Vec<NodeId>,
     elements_with_depth: Vec<(NodeId, u32)>,
     snapshot_stack: Vec<(NodeId, u32)>,
+    chrome_aggregates: Vec<ChromeAggregate>,
+    chrome_aggregates_epoch: Option<u32>,
+    chrome_aggregates_root: Option<NodeId>,
     scratch_u32: Vec<u32>,
     scratch_bytes: Vec<u8>,
     scratch_bits: Vec<bool>,
@@ -49,6 +52,8 @@ impl FragmentWorkspace {
         self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         self.snapshot_epoch = None;
         self.snapshot_root = None;
+        self.chrome_aggregates_epoch = None;
+        self.chrome_aggregates_root = None;
     }
 
     /// Starts a new fragment epoch without releasing reusable buffers.
@@ -57,6 +62,9 @@ impl FragmentWorkspace {
         self.preorder.clear();
         self.elements_with_depth.clear();
         self.snapshot_stack.clear();
+        self.chrome_aggregates.clear();
+        self.chrome_aggregates_epoch = None;
+        self.chrome_aggregates_root = None;
         self.scratch_u32.clear();
         self.scratch_bytes.clear();
         self.scratch_bits.clear();
@@ -101,6 +109,22 @@ impl FragmentWorkspace {
 
     pub(crate) fn elements_with_depth(&self) -> &[(NodeId, u32)] {
         &self.elements_with_depth
+    }
+
+    fn ensure_chrome_aggregates(&mut self, dom: &Dom, root: NodeId) {
+        self.ensure_snapshot(dom, root);
+        if self.chrome_aggregates_epoch == Some(self.mutation_epoch)
+            && self.chrome_aggregates_root == Some(root)
+        {
+            return;
+        }
+        self.chrome_aggregates = chrome_aggregates(dom, &self.elements_with_depth);
+        self.chrome_aggregates_epoch = Some(self.mutation_epoch);
+        self.chrome_aggregates_root = Some(root);
+    }
+
+    fn chrome_aggregates(&self) -> &[ChromeAggregate] {
+        &self.chrome_aggregates
     }
 
     pub(crate) fn take_scratch(&mut self) -> FragmentScratch {
@@ -2048,10 +2072,12 @@ pub(crate) fn remove_global_chrome_in_workspace(
     store.enable_link_lengths();
     get_or_compute_stats(dom, root, store);
 
-    let aggregates = {
-        let snapshot = workspace.elements_with_depth();
-        chrome_aggregates(dom, snapshot)
-    };
+    workspace.ensure_chrome_aggregates(dom, root);
+    let mut scratch = workspace.take_scratch();
+    scratch.bits.resize(dom.len(), false);
+    scratch.bits.fill(false);
+    let remove = &mut scratch.bits[..dom.len()];
+    let aggregates = workspace.chrome_aggregates();
     let mut signatures = HashMap::<u64, u8>::new();
     for &(node, _) in workspace.elements_with_depth() {
         let aggregate = aggregates[node.index()];
@@ -2060,11 +2086,6 @@ pub(crate) fn remove_global_chrome_in_workspace(
             *count = count.saturating_add(1).min(3);
         }
     }
-
-    let mut scratch = workspace.take_scratch();
-    scratch.bits.resize(dom.len(), false);
-    scratch.bits.fill(false);
-    let remove = &mut scratch.bits[..dom.len()];
     let mut text_buffer = String::new();
     let mut name_buffer = String::new();
     let mut parent_content = vec![None; dom.len()];
@@ -2293,7 +2314,7 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
     }
 
     let mut changed = false;
-    if page_kind != PageKind::Discussion {
+    if page_kind != PageKind::Discussion && has_possible_comment_content(dom, snapshot) {
         let snapshot = workspace.elements_with_depth();
         let comment_aggregates = comment_aggregates(dom, snapshot);
         let mut remove = vec![false; dom.len()];
@@ -2332,9 +2353,10 @@ pub(crate) fn remove_repeated_and_discussion_content_in_workspace(
         }
     }
 
-    let snapshot = workspace.elements_with_depth();
     if page_kind != PageKind::Discussion {
-        let aggregates = chrome_aggregates(dom, snapshot);
+        workspace.ensure_chrome_aggregates(dom, root);
+        let snapshot = workspace.elements_with_depth();
+        let aggregates = workspace.chrome_aggregates();
         let mut remove = vec![false; dom.len()];
         let mut text = String::new();
         for &(node, _) in snapshot {
@@ -2567,7 +2589,7 @@ struct NormalizedFingerprint {
 }
 
 fn has_repeated_block_hint(dom: &Dom, snapshot: &[(NodeId, u32)]) -> bool {
-    let mut fingerprints = HashMap::<(u64, usize), u8>::new();
+    let mut fingerprints = HashMap::<(u64, usize, usize), u8>::new();
     let mut text = String::new();
     for &(node, _) in snapshot {
         if !matches!(
@@ -2578,18 +2600,35 @@ fn has_repeated_block_hint(dom: &Dom, snapshot: &[(NodeId, u32)]) -> bool {
         }
         text.clear();
         dom.append_normalized_text_limited(node, &mut text, 512);
+        text.make_ascii_lowercase();
         let text = text.trim();
         let text_chars = if text.is_ascii() {
             text.len()
         } else {
             text.chars().count()
         };
-        if text_chars < 24 {
+        if text_chars < 24
+            && !matches!(
+                dom.tag(node),
+                Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+            )
+        {
             continue;
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.to_ascii_lowercase().hash(&mut hasher);
-        let key = (hasher.finish(), text_chars);
+        text.hash(&mut hasher);
+        // The duplicate-region pass groups block candidates by parent as
+        // well. Keep that boundary for paragraphs so repeated prose in
+        // separate sections does not trigger a full fingerprint walk. A
+        // repeated heading remains a useful document-level hint because it
+        // commonly identifies duplicated titled regions whose paragraphs have
+        // different wrappers.
+        let parent = if dom.tag(node) == Some(Tag::P) {
+            dom.parent(node).map_or(node.index(), NodeId::index)
+        } else {
+            usize::MAX
+        };
+        let key = (hasher.finish(), text_chars, parent);
         let count = fingerprints.entry(key).or_default();
         *count = count.saturating_add(1);
         if *count >= 2 {
@@ -2840,6 +2879,43 @@ fn comment_aggregates(dom: &Dom, snapshot: &[(NodeId, u32)]) -> Vec<CommentAggre
         };
     }
     aggregates
+}
+
+/// Returns whether the comment-specific cleanup pass can find any candidate.
+///
+/// Most article fragments have no comment markers. Avoid the aggregate build
+/// and per-element name normalization in that common case. This is only an
+/// early-out check; all detailed comment classification remains unchanged.
+fn has_possible_comment_content(dom: &Dom, snapshot: &[(NodeId, u32)]) -> bool {
+    for &(node, _) in snapshot {
+        let named = dom.tag(node) == Some(Tag::Other)
+            && dom.qual_name(node).is_some_and(|name| {
+                let local = name.local.as_ref();
+                contains_ascii_case_insensitive(local, "comment")
+                    || contains_ascii_case_insensitive(local, "discussion")
+                    || contains_ascii_case_insensitive(local, "repl")
+            });
+        let class_or_id = [AttrName::Class, AttrName::Id]
+            .into_iter()
+            .filter_map(|name| dom.attr(node, name))
+            .any(|value| {
+                contains_ascii_case_insensitive(value, "comment")
+                    || contains_ascii_case_insensitive(value, "discussion")
+                    || contains_ascii_case_insensitive(value, "repl")
+            });
+        let semantic = dom
+            .attr(node, AttrName::Role)
+            .is_some_and(|value| has_any_token(value, &["comment", "discussion"]));
+        let reply_link = dom.tag(node) == Some(Tag::A)
+            && (dom.attr(node, AttrName::Href).is_some_and(|href| {
+                contains_ascii_case_insensitive(href, "comment")
+                    || contains_ascii_case_insensitive(href, "reply")
+            }) || dom.normalized_text_eq_ignore_ascii_case(node, b"reply"));
+        if named || class_or_id || semantic || reply_link {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_comment_token(name: &str) -> bool {
@@ -5012,6 +5088,9 @@ fn related_heading_signal(dom: &Dom, node: NodeId) -> RelatedHeadingSignal {
         dom.tag(node),
         Some(Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
     );
+    if !tag_heading && dom.attrs(node).is_empty() && dom.tag(node) != Some(Tag::Other) {
+        return RelatedHeadingSignal::None;
+    }
     let aria_heading = dom
         .attr(node, AttrName::Role)
         .is_some_and(|role| has_token(role, "heading"));
@@ -6255,6 +6334,9 @@ impl std::ops::Deref for NodeName<'_> {
 }
 
 fn node_name<'a>(dom: &'a Dom, node: NodeId) -> NodeName<'a> {
+    if dom.tag(node) != Some(Tag::Other) && dom.attrs(node).is_empty() {
+        return NodeName::Borrowed("");
+    }
     let tag_name = (dom.tag(node) == Some(Tag::Other))
         .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
         .flatten();
@@ -6292,6 +6374,9 @@ fn node_name<'a>(dom: &'a Dom, node: NodeId) -> NodeName<'a> {
 
 fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
     output.clear();
+    if dom.tag(node) != Some(Tag::Other) && dom.attrs(node).is_empty() {
+        return;
+    }
     let tag_name = (dom.tag(node) == Some(Tag::Other))
         .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
         .flatten();
@@ -7028,6 +7113,17 @@ mod tests {
     fn terminal_peripheral_sequence_removes_one_explicit_related_section() {
         let text = clean_fragment(
             r#"<article><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><section><h2>Read next</h2><div><a href="/one">First related report</a><a href="/two">Second related report</a></div></section></article>"#,
+        );
+
+        assert!(text.contains("complete extraction method"), "{text}");
+        assert!(!text.contains("First related report"), "{text}");
+        assert!(!text.contains("Second related report"), "{text}");
+    }
+
+    #[test]
+    fn terminal_peripheral_sequence_recognizes_custom_related_heading() {
+        let text = clean_fragment(
+            r#"<article><p>The report explains the complete extraction method, the input corpus, and the checks that verify each result. It gives enough detail for another person to repeat the work with the same inputs and compare every output.</p><section><section-title>Related articles</section-title><div><a href="/one">First related report</a><a href="/two">Second related report</a></div></section></article>"#,
         );
 
         assert!(text.contains("complete extraction method"), "{text}");
