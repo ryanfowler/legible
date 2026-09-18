@@ -2088,6 +2088,7 @@ pub(crate) fn remove_global_chrome_in_workspace(
     }
     let mut text_buffer = String::new();
     let mut name_buffer = String::new();
+    let mut marker_buffer = String::new();
     let mut parent_content = vec![None; dom.len()];
     let mut substantive_children = vec![None; dom.len()];
     for &(node, depth) in workspace.elements_with_depth() {
@@ -2137,7 +2138,7 @@ pub(crate) fn remove_global_chrome_in_workspace(
                     .is_some_and(|parent| dom.tag(parent) == Some(Tag::Header));
         let leading_frame_candidate = depth <= 3 && aggregate.link_count >= 3;
         let named_share = contains_any(name, &["sharebar", "sharecta", "share-bar", "share-cta"]);
-        let revision_marker = is_revision_history_marker(dom, node);
+        let revision_marker = is_revision_history_marker(dom, node, &mut marker_buffer);
         let sponsored_marker = aggregate.has_sponsored_link;
         if !semantic_navigation
             && !named_chrome
@@ -6198,13 +6199,28 @@ fn has_document_maintenance_name(name: &str) -> bool {
         || has("pre") && has("footer")
 }
 
-fn is_revision_history_marker(dom: &Dom, node: NodeId) -> bool {
-    let name = node_name(dom, node);
-    let mut text = String::new();
-    append_bounded_text(dom, node, 1_024, &mut text);
-    text.make_ascii_lowercase();
-    let text = text.trim();
-    let named_metadata = contains_any(&name, &["note-changes", "revision", "history", "meta"]);
+fn is_revision_history_marker(dom: &Dom, node: NodeId, buffer: &mut String) -> bool {
+    let named_metadata = {
+        let name = node_name(dom, node);
+        contains_any(&name, &["note-changes", "revision", "history", "meta"])
+    };
+    if !named_metadata {
+        // Without a metadata name, the region text must start with an
+        // explicit marker. The phrase spans at most two text nodes, so a
+        // few leading nodes are enough to test that prefix. Ordinary
+        // elements then avoid a full subtree scan in the chrome loop.
+        buffer.clear();
+        append_bounded_text(dom, node, 4, buffer);
+        buffer.make_ascii_lowercase();
+        let prefix = buffer.trim_start();
+        if !(prefix.starts_with("recent changes") || prefix.starts_with("recently updated")) {
+            return false;
+        }
+    }
+    buffer.clear();
+    append_bounded_text(dom, node, 1_024, buffer);
+    buffer.make_ascii_lowercase();
+    let text = buffer.trim();
     let explicit_metadata =
         text.starts_with("recent changes") || text.starts_with("recently updated");
     (named_metadata || explicit_metadata)
