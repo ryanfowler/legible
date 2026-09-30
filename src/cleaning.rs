@@ -11,7 +11,7 @@ use crate::scoring::{
     has_hidden_utility_class, has_static_hidden_marker, is_hidden_utility_class,
     is_phrasing_content,
 };
-use crate::tokens::{has_any_token, has_token};
+use crate::tokens::{contains_any, contains_ascii_case_insensitive, has_any_token, has_token};
 use html5ever::{LocalName, QualName, ns};
 use regex::Regex;
 use smallvec::SmallVec;
@@ -202,10 +202,9 @@ pub(crate) fn prep_document_with_body(dom: &mut Dom, body: Option<NodeId>) {
         .filter(|&id| {
             matches!(dom.tag(id), Some(Tag::Noscript | Tag::Style))
                 || dom.tag(id) == Some(Tag::Script)
-                    && !dom.attr(id, AttrName::Type).is_some_and(|value| {
-                        let value = value.trim().to_ascii_lowercase();
-                        value == "math/tex" || value.starts_with("math/tex;") || value == "text/tex"
-                    })
+                    && !dom
+                        .attr(id, AttrName::Type)
+                        .is_some_and(crate::dom::is_math_script_type)
         })
         .collect();
     for &id in &ids {
@@ -6409,10 +6408,6 @@ fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
     output.make_ascii_lowercase();
 }
 
-fn contains_any(value: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| value.contains(needle))
-}
-
 fn name_has_token(value: &str, expected: &str) -> bool {
     value
         .split(|character: char| !character.is_ascii_alphanumeric())
@@ -6439,17 +6434,6 @@ fn contains_name_or_text(name: &str, text: &str, needles: &[&str]) -> bool {
 fn contains_followed_by_space(text: &str, needle: &str) -> bool {
     text.match_indices(needle)
         .any(|(index, _)| text[index + needle.len()..].starts_with(' '))
-}
-
-fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
-    let needle = needle.as_bytes();
-    !needle.is_empty()
-        && value.as_bytes().windows(needle.len()).any(|window| {
-            window
-                .iter()
-                .zip(needle)
-                .all(|(&left, &right)| left.eq_ignore_ascii_case(&right))
-        })
 }
 
 fn starts_ascii_case_insensitive(value: &str, prefix: &str) -> bool {

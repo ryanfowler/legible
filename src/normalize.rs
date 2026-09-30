@@ -229,21 +229,6 @@ pub(crate) fn adjacent_lead_media(dom: &Dom, root: NodeId) -> Option<NodeId> {
     images::adjacent_lead_media(dom, root)
 }
 
-pub(crate) fn adopt_external_footnotes(
-    definitions: &crate::document::ExternalFootnoteDefinitions,
-    source: &Dom,
-    fragment: &mut Dom,
-    fragment_root: NodeId,
-) {
-    crate::document::adopt_external_footnotes(definitions, source, fragment, fragment_root);
-}
-
-pub(crate) fn collect_external_footnotes(
-    dom: &Dom,
-) -> crate::document::ExternalFootnoteDefinitions {
-    crate::document::collect_external_footnotes(dom)
-}
-
 pub(crate) fn has_primary_heading_semantics(dom: &Dom, node: NodeId) -> bool {
     matches!(dom.tag(node), Some(Tag::H1 | Tag::H2)) || headings::has_primary_role(dom, node)
 }
@@ -257,17 +242,6 @@ pub(crate) fn remove_empty_content(dom: &mut Dom, root: NodeId, nodes: &mut Vec<
     let source_evidence =
         crate::document::SourceEvidence::analyze(dom, root, &crate::dom::NodeStateStore::new());
     remove_empty_content_with_source_facts(dom, root, nodes, &mut source_facts, &source_evidence);
-}
-
-/// Removes empty blocks while updating facts shared with semantic compilation.
-pub(crate) fn remove_empty_content_with_source_facts(
-    dom: &mut Dom,
-    root: NodeId,
-    nodes: &mut Vec<NodeId>,
-    source_facts: &mut Option<crate::document::SemanticSourceFacts>,
-    source_evidence: &crate::document::SourceEvidence,
-) -> Option<crate::document::RetainedStream> {
-    remove_empty_nodes(dom, root, nodes, source_facts, source_evidence)
 }
 
 fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
@@ -286,7 +260,8 @@ fn has_visible_heading_content(dom: &Dom, heading: NodeId) -> bool {
         })
 }
 
-fn remove_empty_nodes(
+/// Removes empty blocks while updating facts shared with semantic compilation.
+pub(crate) fn remove_empty_content_with_source_facts(
     dom: &mut Dom,
     root: NodeId,
     nodes: &mut Vec<NodeId>,

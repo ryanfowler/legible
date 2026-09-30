@@ -6,8 +6,9 @@ use crate::dom::{
     ScoreStore, Tag,
 };
 use crate::prepared::{SourceAnalysis, SourceEntry};
-use crate::tokens::{has_any_token, has_token};
+use crate::tokens::{contains_any, has_any_token, has_token};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use tendril::StrTendril;
 
 pub(crate) const TOP_CANDIDATES: usize = 5;
@@ -1981,24 +1982,29 @@ fn utility_name_signal(dom: &Dom, node: NodeId) -> f64 {
                 .into_iter()
                 .filter_map(|attribute| dom.attr(ancestor, attribute))
                 .any(|value| {
-                    let value = value.to_ascii_lowercase();
-                    [
-                        "bibliograph",
-                        "citation",
-                        "extra-services",
-                        "extraservices",
-                        "labstabs",
-                        "recommender",
-                        "ref-list",
-                        "reflist",
-                        "reference-list",
-                        "recent-changes",
-                        "recentchanges",
-                        "revision-history",
-                        "revisionhistory",
-                    ]
-                    .iter()
-                    .any(|needle| value.contains(needle))
+                    let value = if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                        Cow::Owned(value.to_ascii_lowercase())
+                    } else {
+                        Cow::Borrowed(value)
+                    };
+                    contains_any(
+                        &value,
+                        &[
+                            "bibliograph",
+                            "citation",
+                            "extra-services",
+                            "extraservices",
+                            "labstabs",
+                            "recommender",
+                            "ref-list",
+                            "reflist",
+                            "reference-list",
+                            "recent-changes",
+                            "recentchanges",
+                            "revision-history",
+                            "revisionhistory",
+                        ],
+                    )
                 })
         })
     {

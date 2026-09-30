@@ -43,8 +43,7 @@ pub(crate) use compiler::{
 };
 pub(crate) use facts::{SemanticGate, SemanticSourceFacts, SourceEvidence};
 pub(crate) use footnotes::{
-    Definitions as ExternalFootnoteDefinitions, adopt_external as adopt_external_footnotes,
-    collect_external as collect_external_footnotes,
+    adopt_external as adopt_external_footnotes, collect_external as collect_external_footnotes,
 };
 pub(crate) use headings::permalink_nodes as heading_permalink_nodes;
 pub(crate) use math::{
