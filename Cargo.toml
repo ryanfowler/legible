@@ -34,7 +34,7 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 caseless = "0.2"
-html5ever = "0.39"
+html5ever = "0.40"
 memchr = "2.8"
 regex = "1.13"
 serde = { version = "1.0", features = ["derive"] }
@@ -48,6 +48,8 @@ url = "2.5"
 [dev-dependencies]
 criterion = "0.8"
 datatest-stable = "0.3"
+# RcDom still uses html5ever 0.39. Keep the compatibility parser on that version.
+html5ever_compat = { package = "html5ever", version = "0.39" }
 markup5ever_rcdom = "0.39"
 pretty_assertions = "1.4"
 

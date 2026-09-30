@@ -141,23 +141,23 @@ mod tests {
         let svg = dom.first_descendant_by_tag(body, Tag::Svg).unwrap();
         assert_eq!(dom.attr_by_local_name(svg, "viewBox"), Some("0 0 1 1"));
         assert_eq!(
-            dom.qual_name(svg).unwrap().ns.as_ref(),
+            dom.qual_name(svg).unwrap().ns.as_str(),
             "http://www.w3.org/2000/svg"
         );
         let foreign_object = dom
             .descendants(svg)
             .find(|&node| {
                 dom.qual_name(node)
-                    .is_some_and(|name| name.local.as_ref() == "foreignObject")
+                    .is_some_and(|name| name.local.as_str() == "foreignObject")
             })
             .unwrap();
         assert_eq!(
-            dom.qual_name(foreign_object).unwrap().ns.as_ref(),
+            dom.qual_name(foreign_object).unwrap().ns.as_str(),
             "http://www.w3.org/2000/svg"
         );
         let math = dom.first_descendant_by_tag(body, Tag::Math).unwrap();
         assert_eq!(
-            dom.qual_name(math).unwrap().ns.as_ref(),
+            dom.qual_name(math).unwrap().ns.as_str(),
             "http://www.w3.org/1998/Math/MathML"
         );
         let template = dom.first_descendant_by_tag(body, Tag::Template).unwrap();

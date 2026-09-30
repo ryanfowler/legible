@@ -107,7 +107,7 @@ fn has_specialized_node_marker(dom: &Dom, node: NodeId) -> bool {
                 ],
             );
         }
-        let name = attribute.name.local.as_ref();
+        let name = attribute.name.local.as_str();
         matches!(
             name,
             "data-turbo-body"

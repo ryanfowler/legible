@@ -2,9 +2,15 @@
 
 use libfuzzer_sys::fuzz_target;
 
+#[allow(dead_code)]
+#[path = "../../src/budget.rs"]
+mod budget;
 #[allow(dead_code, unused_imports)]
 #[path = "../../src/dom/mod.rs"]
 mod dom;
+#[allow(dead_code)]
+#[path = "../../src/scan.rs"]
+mod scan;
 mod support;
 
 use support::{escape_attribute, input, parse_article, reparse_serialized};

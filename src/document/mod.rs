@@ -167,7 +167,7 @@ fn has_source_recognizer_gate(dom: &crate::dom::Dom, node: crate::dom::NodeId) -
             | crate::dom::Tag::Script
     ) || dom
         .qual_name(node)
-        .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("mjx-container"));
+        .is_some_and(|name| name.local.as_str().eq_ignore_ascii_case("mjx-container"));
     if has_semantic_tag {
         return true;
     }
