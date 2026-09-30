@@ -369,7 +369,7 @@ pub(crate) struct Attribute {
 impl From<html5ever::Attribute> for Attribute {
     #[inline]
     fn from(attribute: html5ever::Attribute) -> Self {
-        let kind = AttrName::from_local(attribute.name.local.as_ref());
+        let kind = AttrName::from_local(attribute.name.local.as_str());
         Self {
             name: attribute.name,
             value: attribute.value,
@@ -381,7 +381,7 @@ impl From<html5ever::Attribute> for Attribute {
 impl Attribute {
     #[inline]
     pub(crate) fn new(name: html5ever::QualName, value: tendril::StrTendril) -> Self {
-        let kind = AttrName::from_local(name.local.as_ref());
+        let kind = AttrName::from_local(name.local.as_str());
         Self { name, value, kind }
     }
 

@@ -74,7 +74,7 @@ impl ElementData {
         self.attrs
             .iter()
             .find(|attribute| {
-                let local = attribute.name.local.as_ref();
+                let local = attribute.name.local.as_str();
                 local == name || local.eq_ignore_ascii_case(name)
             })
             .map(|attribute| attribute.value.as_ref())

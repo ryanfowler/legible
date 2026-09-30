@@ -2430,7 +2430,7 @@ pub fn get_class_weight(dom: &Dom, id: NodeId, weight_classes: bool) -> i32 {
     }
     let mut w = 0;
     for a in dom.attrs(id) {
-        if !matches!(a.name.local.as_ref(), "class" | "id") || a.value.is_empty() {
+        if !matches!(a.name.local.as_str(), "class" | "id") || a.value.is_empty() {
             continue;
         }
         let m = regexps::CLASS_WEIGHT_SET.matches(a.value.as_ref());

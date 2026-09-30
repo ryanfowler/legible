@@ -12,7 +12,7 @@ default = ["fuzzing"]
 fuzzing = []
 
 [dependencies]
-html5ever = "0.39"
+html5ever = "0.40"
 legible = { path = "..", features = ["fuzzing"] }
 libfuzzer-sys = "0.4"
 memchr = "2.8"

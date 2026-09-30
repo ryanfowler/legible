@@ -115,7 +115,7 @@ impl Tag {
         } else if name.ns != ns!(html) {
             Self::Other
         } else {
-            Self::from_local(name.local.as_ref())
+            Self::from_local(name.local.as_str())
         }
     }
     pub(crate) fn from_local(name: &str) -> Self {

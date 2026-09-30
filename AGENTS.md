@@ -136,6 +136,7 @@ These invariants are costly to violate:
 ### Common Pitfalls
 
 - Do not add dependencies on `ego-tree`, `scraper`, or other DOM crates. The custom arena DOM is intentional.
+- Use `as_str()` for HTML name atoms. `as_ref()` can also return bytes. Keep the test-only `html5ever_compat` parser at the version required by `markup5ever_rcdom`.
 - Mutation belongs in `dom/mutation.rs`. External modules must use the public traversal and query APIs.
 - `scoring.rs` owns all text statistics. Do not duplicate text scanning in other modules.
 - Use the `Error` enum from `error.rs` for fallible paths. Do not panic.
@@ -193,6 +194,8 @@ let markdown = page.markdown();
 Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.
 
 The internal `fuzzing` feature exposes semantic document validation only to fuzz targets. Standalone DOM fuzz targets validate their own DOM values. Do not use this feature in normal applications.
+
+Keep the fuzz crate's parser version aligned with the library. The semantic normalization target includes the DOM source. It must also include the budget and scan modules that the DOM uses.
 
 ## Performance
 

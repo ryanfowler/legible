@@ -6,7 +6,7 @@
 //! These tests compare retained words instead of source wrappers and attributes.
 //! They also verify that output does not grow beyond five times the expected word count.
 
-use html5ever::{parse_document, tendril::TendrilSink};
+use html5ever_compat::{parse_document, tendril::TendrilSink};
 use legible::{Metadata, extract};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde::Deserialize;

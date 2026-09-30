@@ -648,7 +648,7 @@ pub fn fix_lazy_images(dom: &mut Dom, root: NodeId, nodes: &mut Vec<NodeId>) {
         let mut lazy_srcset = None;
         for a in dom.attrs(id) {
             let v = a.value.as_ref();
-            match AttrName::from_local(a.name.local.as_ref()) {
+            match AttrName::from_local(a.name.local.as_str()) {
                 AttrName::Src => {
                     src = !v.is_empty();
                     if let Some((_, media_type)) = parse_b64_data_url(v)
@@ -750,7 +750,7 @@ fn noscript_media_root(dom: &Dom, noscript: NodeId, image: NodeId) -> NodeId {
 
 fn useful_image(dom: &Dom, id: NodeId) -> bool {
     dom.attrs(id).iter().any(|attribute| {
-        let name = attribute.name.local.as_ref();
+        let name = attribute.name.local.as_str();
         matches!(name, "src" | "srcset" | "data-src" | "data-srcset")
             || has_image_extension(attribute.value.as_ref())
     })
@@ -763,17 +763,17 @@ fn copy_image_attributes(dom: &mut Dom, from: NodeId, to: NodeId) {
         .filter(|a| {
             !a.value.is_empty()
                 && (matches!(
-                    AttrName::from_local(a.name.local.as_ref()),
+                    AttrName::from_local(a.name.local.as_str()),
                     AttrName::Src | AttrName::Srcset
                 ) || has_image_extension(a.value.as_ref()))
         })
         .map(|a| (a.name.clone(), a.value.clone()))
         .collect();
     for (mut name, value) in attrs {
-        if dom.attr_by_local_name(to, name.local.as_ref()) == Some(value.as_ref()) {
+        if dom.attr_by_local_name(to, name.local.as_str()) == Some(value.as_ref()) {
             continue;
         }
-        if dom.attr_by_local_name(to, name.local.as_ref()).is_some() {
+        if dom.attr_by_local_name(to, name.local.as_str()).is_some() {
             name = QualName::new(
                 None,
                 ns!(),
@@ -790,11 +790,11 @@ fn copy_missing_image_description(dom: &mut Dom, from: NodeId, to: NodeId) {
         .iter()
         .filter(|attribute| {
             matches!(
-                attribute.name.local.as_ref(),
+                attribute.name.local.as_str(),
                 "alt" | "aria-label" | "title"
             ) && !attribute.value.trim().is_empty()
                 && dom
-                    .attr_by_local_name(to, attribute.name.local.as_ref())
+                    .attr_by_local_name(to, attribute.name.local.as_str())
                     .is_none_or(|value| value.trim().is_empty())
         })
         .map(|attribute| (attribute.name.clone(), attribute.value.to_string()))
@@ -1302,7 +1302,7 @@ fn populate_heuristic_aggregates(
         if tag == Some(Tag::Other)
             && dom.attr(node, AttrName::Action).is_some()
             && (dom.qual_name(node).is_some_and(|name| {
-                contains_ascii_case_insensitive(name.local.as_ref(), "newsletter-form")
+                contains_ascii_case_insensitive(name.local.as_str(), "newsletter-form")
             }) || dom
                 .attr(node, AttrName::Class)
                 .is_some_and(|value| contains_ascii_case_insensitive(value, "newsletter-form"))
@@ -2890,7 +2890,7 @@ fn has_possible_comment_content(dom: &Dom, snapshot: &[(NodeId, u32)]) -> bool {
     for &(node, _) in snapshot {
         let named = dom.tag(node) == Some(Tag::Other)
             && dom.qual_name(node).is_some_and(|name| {
-                let local = name.local.as_ref();
+                let local = name.local.as_str();
                 contains_ascii_case_insensitive(local, "comment")
                     || contains_ascii_case_insensitive(local, "discussion")
                     || contains_ascii_case_insensitive(local, "repl")
@@ -6001,7 +6001,7 @@ fn invalidate_stats_for_ancestors(dom: &Dom, node: NodeId, store: &mut crate::do
 
 fn has_lazy_image_candidate(dom: &Dom, image: NodeId) -> bool {
     dom.attrs(image).iter().any(|attribute| {
-        let name = attribute.name.local.as_ref();
+        let name = attribute.name.local.as_str();
         name.starts_with("data-")
             && (has_image_src(attribute.value.as_ref())
                 || has_image_srcset(attribute.value.as_ref()))
@@ -6353,7 +6353,7 @@ fn node_name<'a>(dom: &'a Dom, node: NodeId) -> NodeName<'a> {
         return NodeName::Borrowed("");
     }
     let tag_name = (dom.tag(node) == Some(Tag::Other))
-        .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
+        .then(|| dom.qual_name(node).map(|name| name.local.as_str()))
         .flatten();
     let class = dom.attr(node, AttrName::Class);
     let id = dom.attr(node, AttrName::Id);
@@ -6393,7 +6393,7 @@ fn append_node_name(dom: &Dom, node: NodeId, output: &mut String) {
         return;
     }
     let tag_name = (dom.tag(node) == Some(Tag::Other))
-        .then(|| dom.qual_name(node).map(|name| name.local.as_ref()))
+        .then(|| dom.qual_name(node).map(|name| name.local.as_str()))
         .flatten();
     let class = dom.attr(node, AttrName::Class);
     let id = dom.attr(node, AttrName::Id);
