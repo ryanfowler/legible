@@ -15,14 +15,14 @@ use crate::diagnostics::{
     ExtractionStrategyInfo, NormalizationCountsInfo, QualityInfo, RepresentationMetricsInfo,
     RootInfo, RootSelectionReasonInfo,
 };
+use crate::document::{adopt_external_footnotes, collect_external_footnotes};
 use crate::dom::{AttrName, DocumentAnchors, Dom, NodeId, NodeStateStore, ScoreStore, Tag};
 use crate::error::{Error, ResourceLimitKind, Result};
 use crate::extractor::{ContentHint, ContentTag, ExtractorConfig};
 use crate::logging::debug_log;
 use crate::metadata::{self, Metadata, MetadataDiagnostics, StructuredData};
 use crate::normalize::{
-    accessible_math_nodes, adjacent_lead_media, adopt_external_footnotes,
-    cleanup_selected_content_in_workspace, collect_external_footnotes,
+    accessible_math_nodes, adjacent_lead_media, cleanup_selected_content_in_workspace,
     has_primary_heading_semantics, normalize_svg_before_scoring,
     prepare_media_before_cleanup_in_workspace, remove_decorative_media_before_cleanup_in_workspace,
     remove_empty_content_with_source_facts,

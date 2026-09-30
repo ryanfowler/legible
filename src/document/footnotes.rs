@@ -491,10 +491,13 @@ impl DefinitionIndex {
             preorder[node.index()] = position;
             open.push((node, depth));
         }
+        // Only conventional backlink targets are looked up below. Skip other
+        // fragment links, which are common and would each allocate a key.
         let mut targets = HashMap::<String, Vec<usize>>::new();
         for &(node, _) in elements {
             if dom.tag(node) == Some(Tag::A)
                 && let Some(target) = href_fragment(dom.attr(node, AttrName::Href))
+                && starts_with_ignore_case_any(target, &CONVENTIONAL_BACKLINK_TARGET_PREFIXES)
             {
                 targets
                     .entry(target.to_ascii_lowercase())
@@ -965,9 +968,27 @@ fn first_significant_child(dom: &Dom, node: NodeId) -> Option<NodeId> {
     })
 }
 
+/// Lowercase prefixes of every target that `conventional_backlink_targets`
+/// can return.
+const CONVENTIONAL_BACKLINK_TARGET_PREFIXES: [&str; 6] = [
+    "user-content-fnref-",
+    "footnoteref",
+    "footnote-ref",
+    "fnref",
+    "_ftnref",
+    "ftnt_ref",
+];
+
 fn conventional_backlink_targets(definition_key: &str) -> SmallVec<[String; 3]> {
-    let key = definition_key.to_ascii_lowercase();
     let mut targets = SmallVec::new();
+    // Most IDs are not footnote definitions. Reject them before allocating.
+    if !starts_with_ignore_case_any(
+        definition_key,
+        &["user-content-fn-", "footnotedef", "_ftn", "ftnt"],
+    ) {
+        return targets;
+    }
+    let key = definition_key.to_ascii_lowercase();
     if let Some(suffix) = key.strip_prefix("user-content-fn-") {
         targets.push(format!("user-content-fnref-{suffix}"));
     } else if let Some(suffix) = key.strip_prefix("footnotedef") {
@@ -1156,27 +1177,34 @@ fn href_fragment(href: Option<&str>) -> Option<&str> {
 }
 
 fn looks_like_footnote_id(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value.starts_with("fn")
-        || value.starts_with("_ftn")
-        || value.starts_with("ftnt")
-        || value.starts_with("footnote")
-        || value.starts_with("note-")
-        || value.starts_with("sn")
-        || value.starts_with("sidenote")
-        || value.starts_with("cite_note")
-        || value.starts_with("user-content-fn")
-        || value.starts_with("footnotedef")
+    starts_with_ignore_case_any(
+        value,
+        &[
+            "fn",
+            "_ftn",
+            "ftnt",
+            "footnote",
+            "note-",
+            "sn",
+            "sidenote",
+            "cite_note",
+            "user-content-fn",
+            "footnotedef",
+        ],
+    )
 }
 
 fn special_footnote_key(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value.starts_with("_ftn")
-        || value.starts_with("ftnt")
-        || value.starts_with("cite_note")
-        || value.starts_with("user-content-fn")
-        || value.starts_with("footnotedef")
-        || value.chars().all(|character| character.is_ascii_digit())
+    starts_with_ignore_case_any(
+        value,
+        &[
+            "_ftn",
+            "ftnt",
+            "cite_note",
+            "user-content-fn",
+            "footnotedef",
+        ],
+    ) || value.chars().all(|character| character.is_ascii_digit())
         || value.len() >= 24 && value.contains('-')
 }
 

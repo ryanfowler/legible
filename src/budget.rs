@@ -18,7 +18,8 @@ pub struct ParseBudget {
     pub max_total_attributes: usize,
     /// Maximum number of attributes on one element.
     pub max_attributes_per_element: usize,
-    /// Maximum number of text bytes in the DOM.
+    /// Maximum number of parsed text bytes. This includes executable script
+    /// text that the parser does not keep.
     pub max_text_bytes: usize,
     /// Maximum element nesting depth.
     pub max_depth: usize,

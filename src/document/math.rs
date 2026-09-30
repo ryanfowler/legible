@@ -1,4 +1,4 @@
-use crate::dom::{AttrName, Dom, NodeId, Tag};
+use crate::dom::{AttrName, Dom, NodeId, Tag, is_math_script_type};
 use crate::tokens::has_any_token;
 use std::collections::HashSet;
 
@@ -650,11 +650,6 @@ fn valid_latex(value: &str) -> bool {
         && !value
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-}
-
-fn is_math_script_type(value: &str) -> bool {
-    let value = value.trim().to_ascii_lowercase();
-    value == "math/tex" || value.starts_with("math/tex;") || value == "text/tex"
 }
 
 pub(crate) fn has_math_wrapper_class(dom: &Dom, node: NodeId) -> bool {

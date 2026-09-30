@@ -10,7 +10,7 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::scoring::{
     get_inner_text, get_inner_text_owned, get_normalized_inner_text, has_static_hidden_marker,
 };
-use crate::tokens::{has_any_token, has_token};
+use crate::tokens::{contains_ascii_case_insensitive, has_any_token, has_token};
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -81,11 +81,9 @@ impl StructuredData {
             .descendants(dom.root())
             .filter(|&id| {
                 dom.tag(id) == Some(Tag::Script)
-                    && dom.attr(id, AttrName::Type).is_some_and(|value| {
-                        value.split(';').next().is_some_and(|mime| {
-                            mime.trim().eq_ignore_ascii_case("application/ld+json")
-                        })
-                    })
+                    && dom
+                        .attr(id, AttrName::Type)
+                        .is_some_and(crate::dom::is_json_ld_script_type)
             })
             .collect();
         let mut items = Vec::new();
@@ -2000,6 +1998,13 @@ fn written_date(text: &str) -> Option<(usize, String)> {
 }
 
 fn is_author_container_token(token: &str) -> bool {
+    // Every accepted token names an author or byline role. Most class and ID
+    // tokens do not, so reject them before allocating lowercase parts.
+    if !contains_ascii_case_insensitive(token, "author")
+        && !contains_ascii_case_insensitive(token, "byline")
+    {
+        return false;
+    }
     let lower = token.to_ascii_lowercase();
     let parts: Vec<_> = lower
         .split(|character: char| !character.is_ascii_alphanumeric())
@@ -2085,6 +2090,9 @@ fn is_combined_date_author_container(dom: &Dom, node: NodeId) -> bool {
     .flatten()
     .flat_map(|value| value.split_ascii_whitespace())
     .any(|token| {
+        if !contains_ascii_case_insensitive(token, "author") {
+            return false;
+        }
         let mut has_author = false;
         let mut has_date = false;
         for part in token
@@ -2092,10 +2100,9 @@ fn is_combined_date_author_container(dom: &Dom, node: NodeId) -> bool {
             .filter(|part| !part.is_empty())
         {
             has_author |= part.eq_ignore_ascii_case("author");
-            has_date |= matches!(
-                part.to_ascii_lowercase().as_str(),
-                "date" | "publish" | "published"
-            );
+            has_date |= ["date", "publish", "published"]
+                .iter()
+                .any(|name| part.eq_ignore_ascii_case(name));
         }
         has_author && has_date
     })

@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
-use super::{Attribute, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
+use super::{AttrName, Attribute, Dom, DomError, ElementData, NodeData, NodeId, NodeLink, Tag};
 use crate::budget::ParseBudget;
 use html5ever::tokenizer::TokenizerOpts;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
@@ -60,7 +60,50 @@ struct DomSink {
     total_attributes: Cell<usize>,
     text_bytes: Cell<usize>,
     depths: RefCell<Vec<u32>>,
+    document: bool,
 }
+
+/// True for a script type whose text is TeX source.
+pub(crate) fn is_math_script_type(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("math/tex")
+        || value.eq_ignore_ascii_case("text/tex")
+        || value
+            .as_bytes()
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"math/tex;"))
+}
+
+/// True for a JSON-LD script type. The type can have MIME parameters.
+pub(crate) fn is_json_ld_script_type(value: &str) -> bool {
+    value
+        .split(';')
+        .next()
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/ld+json"))
+}
+
+/// True when extraction reads the text of a script with this type.
+///
+/// Metadata reads JSON-LD, and semantic compilation reads TeX. Other script
+/// text is executable or application data that extraction never uses.
+fn is_source_data_script_type(value: &str) -> bool {
+    is_json_ld_script_type(value) || is_math_script_type(value)
+}
+
+/// True when a document parse can drop text appended to `parent`.
+///
+/// Script tokenization copies each text run into the tree. Most script text
+/// is executable code, which preparation removes and extraction never reads.
+/// Dropping it here avoids storing large inline bundles. JSON-LD and TeX
+/// scripts keep their text because metadata and math compilation read it.
+#[inline]
+fn discards_script_text(dom: &Dom, parent: NodeId) -> bool {
+    dom.tag(parent) == Some(Tag::Script)
+        && !dom
+            .attr(parent, AttrName::Type)
+            .is_some_and(is_source_data_script_type)
+}
+
 impl DomSink {
     fn new(fragment: bool, capacity: usize, budget: ParseBudget) -> Self {
         let mut depths = Vec::with_capacity(capacity.max(1));
@@ -82,6 +125,7 @@ impl DomSink {
             total_attributes: Cell::new(0),
             text_bytes: Cell::new(0),
             depths: RefCell::new(depths),
+            document: !fragment,
         }
     }
 
@@ -428,6 +472,11 @@ impl TreeSink for DomSink {
                 if !self.add_text_bytes(text.len()) {
                     return;
                 }
+                // The budget still counts discarded script text, so limits
+                // do not depend on script types.
+                if self.document && discards_script_text(&d, *parent) {
+                    return;
+                }
                 if let Some(last) = d.last_child(*parent) {
                     if let NodeData::Text(existing) = &mut d.node_mut(last).data {
                         existing.push_tendril(&text);
@@ -622,6 +671,44 @@ mod tests {
                 "<article><p>This document has enough text to make its markup sparse.</p></article>"
             ) > 1
         );
+    }
+
+    #[test]
+    fn document_parsing_keeps_only_source_data_script_text() {
+        let dom = Dom::parse_document(
+            r#"<html><head>
+            <script>if (a < b) { c(); }</script>
+            <script type="module">import x from "y";</script>
+            <script type="application/ld+json; charset=utf-8">{"@type":"Article"}</script>
+            <script type="math/tex; mode=display">x^2</script>
+            </head><body><p>Text</p></body></html>"#,
+        )
+        .unwrap();
+        let scripts: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.tag(node) == Some(Tag::Script))
+            .map(|node| dom.text(node))
+            .collect();
+        assert_eq!(scripts, ["", "", r#"{"@type":"Article"}"#, "x^2"]);
+
+        let fragment = Dom::parse_fragment("<script>keep()</script>", Tag::Div).unwrap();
+        let script = fragment
+            .descendants(fragment.root())
+            .find(|&node| fragment.tag(node) == Some(Tag::Script))
+            .unwrap();
+        assert_eq!(fragment.text(script), "keep()");
+    }
+
+    #[test]
+    fn discarded_script_text_counts_toward_the_text_budget() {
+        let result = Dom::parse_document_with_budget(
+            "<html><head><script>0123456789</script></head><body></body></html>",
+            &ParseBudget {
+                max_text_bytes: 4,
+                ..ParseBudget::default()
+            },
+        );
+        assert!(result.is_err());
     }
 
     #[test]

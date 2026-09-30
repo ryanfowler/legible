@@ -81,7 +81,7 @@ The extraction pipeline flows through these stages:
 | `constants.rs` | Regex patterns, config flags, matching helpers |
 | `scan.rs` | Word-at-a-time ASCII whitespace scanners with scalar small-input fast paths |
 | `dom/` | Arena storage, typed tags/attributes, traversal, mutation |
-| `dom/parse.rs` | Parser-only poisoned TreeSink, compact owned element-name callbacks, and in-work resource budget enforcement |
+| `dom/parse.rs` | Parser-only poisoned TreeSink, compact owned element-name callbacks, in-work resource budget enforcement, and script-type classification |
 | `dom/traversal.rs` | Iterative DOM-preorder snapshots and cached document anchors for immutable source phases |
 | `dom/state.rs` | Dense scoring state indexed by `NodeId` |
 
@@ -98,6 +98,7 @@ These invariants are costly to violate:
 - **Prefer complete scholarly roots.** A bibliography or reference section must not replace the article. Retain a visible, title-matched lead heading only when it is structurally close to the selected root.
 - **Lazy rendering.** `ExtractedPage` owns only the private semantic representation, not a retained DOM. Render HTML, Markdown, and text lazily from that representation. Derive result metrics from cached internal stats; defer that measurement until a text or metric method needs it. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
+- **Discard executable script text at parse.** Document parsing keeps text only for JSON-LD and TeX scripts. The text budget still counts discarded script text. Fragment parsing keeps all text.
 - **Preparation order:** collect metadata first. Then reveal noscript images, remove non-math scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage. Keep math source until semantic compilation.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Do not clone the DOM for scoring.** Use `ScoringView` for scoring-only structure. Apply retained block projections only to the selected fragment.
