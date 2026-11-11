@@ -12,18 +12,29 @@ const LOW7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
 
 /// Returns one `0x80` lane for each byte that is ASCII whitespace.
 ///
-/// A lane matches when its byte equals `b' '` or lies in `b'\t'..=b'\r'`.
-/// High bytes (`>= 0x80`) never match. The range test sets the high bit of
-/// every lane before subtracting `0x09`, so no lane borrows from its
-/// neighbour, and clears lanes whose low seven bits exceed `0x0D`.
+/// A lane matches when its byte is `b' '`, `b'\t'`, `b'\n'`, `0x0C`, or
+/// `b'\r'`, as in [`u8::is_ascii_whitespace`]. The vertical tab (`0x0B`) does
+/// not match. High bytes (`>= 0x80`) never match. The range test sets the
+/// high bit of every lane before subtracting `0x09`, so no lane borrows from
+/// its neighbour, and clears lanes whose low seven bits exceed `0x0D`.
 #[inline]
 fn ascii_whitespace_mask(word: u64) -> u64 {
     let ge_tab = (word | HIGH).wrapping_sub(0x0909_0909_0909_0909) & HIGH;
     let gt_cr = ((word & LOW7).wrapping_add(0x7272_7272_7272_7272) | word) & HIGH;
-    let range = ge_tab & !gt_cr;
-    let without_space = word ^ (ONES * 0x20);
-    let space = without_space.wrapping_sub(ONES) & !without_space & HIGH;
-    range | space
+    let range = ge_tab & !gt_cr & !byte_equal_mask(word, 0x0B);
+    range | byte_equal_mask(word, b' ')
+}
+
+/// Returns one `0x80` lane for each byte equal to `byte`.
+///
+/// The test is exact for every lane. The addition cannot carry out of a lane
+/// because `(lane & 0x7F) + 0x7F <= 0xFE`. The common
+/// `(x - 0x01..) & !x & 0x80..` test is not exact: a borrow from a matching
+/// lane can mark the next lane.
+#[inline]
+fn byte_equal_mask(word: u64, byte: u8) -> u64 {
+    let difference = word ^ (ONES * u64::from(byte));
+    !(((difference & LOW7).wrapping_add(LOW7)) | difference) & HIGH
 }
 
 #[inline]
@@ -136,6 +147,35 @@ mod tests {
                 sample.iter().position(|byte| !byte.is_ascii_whitespace()),
                 "length {length}"
             );
+        }
+    }
+
+    #[test]
+    fn matches_scalar_scan_for_every_adjacent_byte_pair() {
+        // Each pair occupies every position of a word-scanned buffer. The
+        // fill byte is whitespace for one scan and text for the other, so a
+        // false match in either direction changes the first result.
+        for fill in *b" x" {
+            let mut sample = [fill; 40];
+            for first in 0..=u8::MAX {
+                for second in 0..=u8::MAX {
+                    for position in 0..8 {
+                        sample.fill(fill);
+                        sample[position] = first;
+                        sample[position + 1] = second;
+                        assert_eq!(
+                            find_ascii_whitespace(&sample),
+                            sample.iter().position(|byte| byte.is_ascii_whitespace()),
+                            "find_ascii_whitespace {first:#04x} {second:#04x} at {position}"
+                        );
+                        assert_eq!(
+                            find_non_ascii_whitespace(&sample),
+                            sample.iter().position(|byte| !byte.is_ascii_whitespace()),
+                            "find_non_ascii_whitespace {first:#04x} {second:#04x} at {position}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

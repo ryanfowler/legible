@@ -55,3 +55,17 @@ fn canonical_output_preserves_metadata_and_rewrites_urls() {
         r#"<div><div><p><a href="https://example.com/story?x=1&amp;y=2">A relative link</a> <img src="https://example.com/large.jpg" alt="Photo"> This paragraph has enough useful article text for deterministic extraction. </p></div></div>"#
     );
 }
+
+#[test]
+fn vertical_tab_in_long_text_does_not_stop_extraction() {
+    // A fuzz case. The word-at-a-time whitespace scanner once treated a
+    // vertical tab as whitespace while the scalar check did not, and text
+    // normalization did not advance.
+    let page = extract(
+        "<html><head><title>Fuzz article</title></head><body><article><h1>Fuzz article</h1><p>Article text starts here. [(=\u{b} This paragraph contains enough text for extraction. </p></article></body></html>",
+        Some("https://example.com/articles/index.html"),
+    )
+    .unwrap();
+
+    assert!(page.text().contains("[(=\u{b}"), "{:?}", page.text());
+}
