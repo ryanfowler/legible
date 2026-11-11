@@ -69,10 +69,10 @@ links and media URLs. Relative URLs stay relative when you pass `None`.
 Use one `Extractor` for pages that share a configuration.
 
 ```rust
-use legible::Extractor;
+use legible::{Extractor, ParseBudget};
 
 let extractor = Extractor::builder()
-    .max_elements(100_000)
+    .parse_budget(ParseBudget::untrusted())
     .structured_data(true)
     .build();
 
@@ -80,28 +80,23 @@ let page = extractor.extract("<main><p>Page content.</p></main>", None)?;
 # Ok::<(), legible::Error>(())
 ```
 
-`max_elements(0)` sets no limit. Structured-data metadata extraction is enabled by
-default. For resource-constrained callers, use `ParseBudget` or the builder's
-budget methods to limit input bytes, DOM nodes, attributes, text, nesting depth,
-and JSON-LD work. A value of `0` means no caller-configured limit. JSON-LD depth
-still has an internal safety cap.
+Structured-data metadata extraction is enabled by default.
 
-You can set all limits with `ParseBudget`:
+The default extractor has no resource limits. Use `ParseBudget::untrusted()` for
+HTML from the network or from other untrusted sources. It limits input bytes,
+DOM nodes, attributes, text, nesting depth, and JSON-LD work. The depth limit is
+512 elements. Some extraction checks look at the ancestors or subtree of each
+element, so very deep documents cost more to extract.
+
+Change single limits with struct update syntax. A value of `0` means no
+caller-configured limit. JSON-LD depth still has an internal safety cap.
 
 ```rust
 use legible::{Extractor, ParseBudget};
 
 let budget = ParseBudget {
-    max_input_bytes: 10 * 1024 * 1024,
-    max_nodes: 200_000,
-    max_elements: 100_000,
-    max_total_attributes: 500_000,
-    max_attributes_per_element: 200,
-    max_text_bytes: 8 * 1024 * 1024,
-    max_depth: 512,
-    max_json_ld_bytes: 2 * 1024 * 1024,
-    max_json_ld_items: 10_000,
-    max_json_ld_depth: 128,
+    max_input_bytes: 4 * 1024 * 1024,
+    ..ParseBudget::untrusted()
 };
 
 let extractor = Extractor::builder()

@@ -30,10 +30,10 @@
 //! Use [`Extractor::builder`] to set the durable extraction limits and features.
 //!
 //! ```rust
-//! use legible::Extractor;
+//! use legible::{Extractor, ParseBudget};
 //!
 //! let extractor = Extractor::builder()
-//!     .max_elements(100_000)
+//!     .parse_budget(ParseBudget::untrusted())
 //!     .structured_data(true)
 //!     .build();
 //! let page = extractor.extract("<main><p>Content</p></main>", None)?;
@@ -47,7 +47,8 @@
 //! ```
 //!
 //! Use [`ParseBudget`] to bound parser and JSON-LD work when the input is not
-//! trusted. Zero-valued limits are unlimited, except that JSON-LD depth uses an
+//! trusted. [`ParseBudget::untrusted`] returns limits for HTML from the network.
+//! Zero-valued limits are unlimited, except that JSON-LD depth uses an
 //! internal safety cap. The default extractor has no caller-configured limit.
 //!
 //! # Security

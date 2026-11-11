@@ -24,7 +24,10 @@ mod tests {
         let cases = [
             (
                 Extractor::builder()
-                    .max_elements(1)
+                    .parse_budget(legible::ParseBudget {
+                        max_elements: 1,
+                        ..Default::default()
+                    })
                     .build()
                     .extract(html, None),
                 "ResourceLimit",
