@@ -1,0 +1,8 @@
+{
+  "must_contain": [
+    "The client supports two proxy modes",
+    "| Mode | Behavior |",
+    "Pooled route"
+  ],
+  "tables_min": 1
+}
