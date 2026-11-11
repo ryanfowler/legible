@@ -12,7 +12,6 @@ name = "legible"
 path = "src/main.rs"
 
 [dependencies]
-encoding_rs = "0.8"
 legible = { path = ".." }
 reqwest = { version = "0.12", default-features = false, features = [
     "blocking",

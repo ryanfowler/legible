@@ -69,6 +69,7 @@ mod constants;
 mod diagnostics;
 mod document;
 mod dom;
+mod encoding;
 mod error;
 mod extraction;
 mod extractor;

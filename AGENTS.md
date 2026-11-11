@@ -50,6 +50,7 @@ The extraction pipeline flows through these stages:
 |---|---|
 | `extractor.rs` | Public builder, extraction config |
 | `budget.rs` | Public parser and structured-data resource budgets |
+| `encoding.rs` | Character-encoding detection and decoding for `Extractor::extract_bytes` |
 | `page.rs` | `ExtractedPage`, independently owned page parts, and lazy HTML/MD/text serialization |
 | `candidate.rs` | Internal candidate model and balanced structural root-boundary selection |
 | `extraction.rs` | Source-session orchestration, conservative direct-main fast path, per-attempt fragment execution, strategy retries, candidate selection, and content consolidation |

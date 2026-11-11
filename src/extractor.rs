@@ -110,6 +110,52 @@ impl Extractor {
             .map_err(crate::error::Error::from_parse_error)?;
         ContentExtractor::from_document(dom, url, &self.config).extract()
     }
+
+    /// Decodes HTML bytes and extracts relevant content and metadata.
+    ///
+    /// Use this method for an HTTP response body or a file whose character
+    /// encoding is not known. `content_type` is the complete transport
+    /// `Content-Type` value, such as `text/html; charset=shift_jis`. Pass
+    /// `None` when there is no transport value.
+    ///
+    /// Legible selects the encoding in this order: a byte order mark, the
+    /// `content_type` charset, valid UTF-8, a `meta` charset near the start
+    /// of the document, and then Windows-1252. Valid UTF-8 is not copied.
+    /// Malformed byte sequences become U+FFFD.
+    ///
+    /// The input-byte limit applies to the bytes and to the decoded text.
+    ///
+    /// ```rust
+    /// use legible::Extractor;
+    ///
+    /// let body = b"<main><p>Caf\xe9 menus change every week in this town.</p></main>";
+    /// let page = Extractor::default().extract_bytes(
+    ///     body,
+    ///     Some("https://example.com/menus"),
+    ///     Some("text/html; charset=windows-1252"),
+    /// )?;
+    /// assert!(page.text().contains("Café"));
+    /// # Ok::<(), legible::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::extract`].
+    pub fn extract_bytes(
+        &self,
+        html: &[u8],
+        url: Option<&str>,
+        content_type: Option<&str>,
+    ) -> Result<ExtractedPage> {
+        let max_input_bytes = self.config.parse_budget.max_input_bytes;
+        if max_input_bytes > 0 && html.len() > max_input_bytes {
+            return Err(crate::error::Error::ResourceLimit {
+                resource: ResourceLimitKind::InputBytes,
+                limit: max_input_bytes,
+            });
+        }
+        self.extract(&crate::encoding::decode_html(html, content_type), url)
+    }
 }
 
 impl Default for Extractor {
@@ -227,6 +273,34 @@ mod tests {
             })
         ));
         assert_eq!(ParseBudget::default().max_depth, 0);
+    }
+
+    #[test]
+    fn extract_bytes_decodes_before_extraction_and_checks_raw_size() {
+        // "日本語" in Shift_JIS, declared only by a meta element.
+        let mut html = b"<html><head><meta charset=shift_jis></head><body><main><p>".to_vec();
+        html.extend_from_slice(b"\x93\xfa\x96\x7b\x8c\xea");
+        html.extend_from_slice(
+            b" text is decoded before extraction starts.</p></main></body></html>",
+        );
+        let page = Extractor::default()
+            .extract_bytes(&html, None, None)
+            .unwrap();
+        assert!(page.text().starts_with("日本語 text"), "{}", page.text());
+
+        let limited = Extractor::builder()
+            .parse_budget(ParseBudget {
+                max_input_bytes: 8,
+                ..ParseBudget::default()
+            })
+            .build();
+        assert!(matches!(
+            limited.extract_bytes(&html, None, Some("text/html; charset=shift_jis")),
+            Err(Error::ResourceLimit {
+                resource: ResourceLimitKind::InputBytes,
+                limit: 8
+            })
+        ));
     }
 
     #[test]
