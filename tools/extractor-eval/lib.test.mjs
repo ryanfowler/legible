@@ -5,14 +5,18 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   aggregateReport,
+  compareWithBaseline,
   comparisonResult,
   discoverFixtures,
   formatMarkdownSummary,
+  isKnownReliabilityFailure,
+  legibleBaseline,
   markdownVisibleText,
   normalizeText,
   outputMetrics,
   referenceScores,
   scoreExtraction,
+  validateBaseline,
   validateManifest,
 } from "./lib.mjs";
 
@@ -505,4 +509,60 @@ test("lists reliability failures for both extractors", () => {
   );
   assert.match(summary, /Legible reliability failures: sample/u);
   assert.match(summary, /Defuddle reliability failures: sample/u);
+});
+
+function baselineResult(fixtureId, legible) {
+  return {
+    fixture: fixtureId,
+    legible: {
+      reliability_pass: true,
+      required_content_score: 1,
+      noise_score: 1,
+      structure_score: null,
+      metadata_score: null,
+      reference: null,
+      ...legible,
+    },
+  };
+}
+
+test("records only Legible scores in a sorted baseline", () => {
+  const baseline = legibleBaseline([
+    baselineResult("b-fixture", { reference: { f1: 0.5 } }),
+    baselineResult("a-fixture", { reliability_pass: false }),
+  ]);
+  assert.deepEqual(Object.keys(baseline.fixtures), ["a-fixture", "b-fixture"]);
+  assert.equal(baseline.fixtures["b-fixture"].reference_f1, 0.5);
+  assert.equal(validateBaseline(baseline), baseline);
+  assert.equal(isKnownReliabilityFailure(baseline, "a-fixture"), true);
+  assert.equal(isKnownReliabilityFailure(baseline, "b-fixture"), false);
+  assert.equal(isKnownReliabilityFailure(null, "a-fixture"), false);
+  assert.throws(() => validateBaseline({ schema_version: 0, fixtures: {} }));
+});
+
+test("reports baseline regressions and improvements per score", () => {
+  const baseline = legibleBaseline([
+    baselineResult("steady"),
+    baselineResult("worse"),
+    baselineResult("lost", { noise_score: 0.5 }),
+    baselineResult("fixed", { reliability_pass: false, noise_score: 0.5 }),
+  ]);
+  const comparison = compareWithBaseline(
+    [
+      baselineResult("steady"),
+      baselineResult("worse", { noise_score: 0.75 }),
+      baselineResult("lost", { reliability_pass: false, noise_score: null }),
+      baselineResult("fixed", { noise_score: 1 }),
+      baselineResult("new-fixture", { noise_score: 0 }),
+    ],
+    baseline,
+  );
+  assert.deepEqual(
+    comparison.regressions.map((item) => `${item.fixture}:${item.score}`),
+    ["worse:noise_score", "lost:reliability", "lost:noise_score"],
+  );
+  assert.deepEqual(
+    comparison.improvements.map((item) => `${item.fixture}:${item.score}`),
+    ["fixed:reliability", "fixed:noise_score"],
+  );
 });

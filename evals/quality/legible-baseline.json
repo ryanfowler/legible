@@ -1,0 +1,1077 @@
+{
+  "schema_version": 1,
+  "fixtures": {
+    "access-barrier-main": {
+      "reliability_pass": true,
+      "required_content_score": null,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-access-barrier": {
+      "reliability_pass": true,
+      "required_content_score": null,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-accessibility-duplicate": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": 1
+    },
+    "app-accordion-content": {
+      "reliability_pass": true,
+      "required_content_score": 0.75,
+      "noise_score": 1,
+      "structure_score": 0.5,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-empty-shell": {
+      "reliability_pass": false,
+      "required_content_score": null,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-hidden-complete-content": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-hidden-junk-negative": {
+      "reliability_pass": true,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-javascript-shell": {
+      "reliability_pass": true,
+      "required_content_score": null,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-jsonld-region": {
+      "reliability_pass": true,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
+      "structure_score": 0,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-loading-shell": {
+      "reliability_pass": true,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-navigation-tree": {
+      "reliability_pass": true,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
+      "structure_score": 0,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-noscript-adjacent": {
+      "reliability_pass": true,
+      "required_content_score": 0,
+      "noise_score": 0.5,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-streamed-fragments": {
+      "reliability_pass": true,
+      "required_content_score": 0.3333333333333333,
+      "noise_score": 1,
+      "structure_score": 0,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-tab-panels": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "app-template-content": {
+      "reliability_pass": true,
+      "required_content_score": 0,
+      "noise_score": 0.5,
+      "structure_score": 0,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "architecture-components": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-body-semantic-root": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-body-token-boundary": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-correction-note": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-fact-box": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-hero-caption": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-related-stories-footer": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-resilient-lead": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-results-table": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "article-sponsored-insert": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "bilingual-article": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "blog-newsletter-footer": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "blog-series-navigation": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "breaking-news-timeline": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "cli-command-reference": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "code-heavy-line-numbers": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "command-subcommands-index": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "concepts-event-ordering": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "configuration-option-table": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "database-migration-guide": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-code-reply": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-collapsed-content": {
+      "reliability_pass": true,
+      "required_content_score": 0.3333333333333333,
+      "noise_score": 1,
+      "structure_score": 0,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-deleted-parent": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-flat-comments": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-link-heavy": {
+      "reliability_pass": true,
+      "required_content_score": 0.8,
+      "noise_score": 1,
+      "structure_score": 0.5,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-list-reply": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-moderator-notice": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-one-level-replies": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-only": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-pagination": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 0,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-primary-post": {
+      "reliability_pass": true,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
+      "structure_score": 0.5,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-quote-reply": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-short-quality": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-sponsored-card": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 0,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "discussion-three-level-thread": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-callout-types": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-copy-buttons": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-definition-list": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-inline-warning": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-large-navigation": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-pagination-content": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-search-no-results": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-table-of-contents": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "docs-version-selector": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "documentation-index": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "empty-application-shell": {
+      "reliability_pass": true,
+      "required_content_score": null,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "environment-variable-reference": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "error-code-reference": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "essay-footnotes": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "essay-pullquote": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "essay-sidenote": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "food-blog-narrative": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "go-package-guide": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "http-api-endpoint": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "independent-product-review": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 0,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "installation-platform-tabs": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "interview-transcript": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "javascript-stream-tutorial": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "legacy-table-doc": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "link-index": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "live-report-updates": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "local-news-sidebar": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "main-with-article-peers": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": null,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-avatar-title-conflict": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-caption-evidence": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-comment-avatars": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-embed-fallback": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-figure-peripheral-card": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-hero-before-root": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-hero-siblings-before": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-lazy-attributes": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-lightbox-image": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-logo-favicon-tracker": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-picture-hero": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-related-thumbnails": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-responsive-duplicates": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-small-diagram": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-srcset-weak-src": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "media-svg-chart-icon": {
+      "reliability_pass": true,
+      "required_content_score": 0.5,
+      "noise_score": 1,
+      "structure_score": 0.5,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "metadata-avatar-alt-author": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-byline-mixed": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 0.3333333333333333,
+      "reference_f1": null
+    },
+    "metadata-canonical-conflict": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-hidden-visible-h1": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-image-conflict": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-jsonld-stale-title": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-language-conflict": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": 0,
+      "reference_f1": null
+    },
+    "metadata-multiple-authors": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 0,
+      "reference_f1": null
+    },
+    "metadata-multiple-h1": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 0,
+      "reference_f1": null
+    },
+    "metadata-nested-itemprop-author": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-og-h1-conflict": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 0,
+      "reference_f1": null
+    },
+    "metadata-organization-person": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-placeholder-tags": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 0,
+      "reference_f1": null
+    },
+    "metadata-published-modified": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-section-byline": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-site-name-heading": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-title-site-only": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-title-site-suffix": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-twitter-og-conflict": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "metadata-visible-written-date": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 0,
+      "reference_f1": null
+    },
+    "multi-author-investigation": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "news-analysis-inline-promo": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "news-article": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": 1,
+      "reference_f1": null
+    },
+    "opinion-counterargument": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "paywall-access-shell": {
+      "reliability_pass": true,
+      "required_content_score": null,
+      "noise_score": null,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "personal-essay-chapters": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "photo-essay-captions": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "release-notes-document": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "responsive-duplicate-copies": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": 1
+    },
+    "rust-api-reference": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "semantic-code-table-article": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "semantic-code-table-peer-articles": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "semantic-main-with-chrome": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "semantic-root-valid-with-heavy-shell": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": null,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "social-thread-media-links": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 0.6666666666666666,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "support-faq-accordions": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "tabbed-code-source": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "technical-doc": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": 1
+    },
+    "travel-blog-itinerary": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    },
+    "troubleshooting-decision-tree": {
+      "reliability_pass": true,
+      "required_content_score": 1,
+      "noise_score": 1,
+      "structure_score": 1,
+      "metadata_score": null,
+      "reference_f1": null
+    }
+  }
+}

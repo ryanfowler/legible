@@ -159,6 +159,8 @@ Unlikely class, ID, and role values are negative ranking evidence. They do not r
 
 `evals/quality/` contains independent extraction-quality evaluations. Install dependencies with `npm --prefix tools/extractor-eval ci` and `cargo fetch`. Run all quality fixtures with `node tools/extractor-eval/index.mjs --all`, or use `--fixture <id>` for one case. The runner invokes Cargo offline. Third-party extractor output is comparison data, not ground truth.
 
+CI fails when a Legible quality score falls below `evals/quality/legible-baseline.json`. Run `node tools/extractor-eval/index.mjs --all --gate legible --baseline evals/quality/legible-baseline.json` after extraction changes. When scores improve or you add a fixture, update the baseline with `--write-baseline evals/quality/legible-baseline.json` in the same change. Do not update the baseline to hide a regression.
+
 Default extraction must return `Error::NoContent` for empty, head-only, and image-only documents.
 
 After logic changes:
@@ -191,7 +193,7 @@ let markdown = page.markdown();
 
 ## Fuzzing
 
-Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`.
+Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`. CI runs each target for 60 seconds. Add each fixed fuzz case as a regression test.
 
 The internal `fuzzing` feature exposes semantic document validation only to fuzz targets. Standalone DOM fuzz targets validate their own DOM values. Do not use this feature in normal applications.
 

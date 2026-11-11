@@ -65,6 +65,50 @@ jobs:
       - run: cargo fetch
       - run: npm --prefix tools/extractor-eval test
 
+  quality-gate:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/extractor-eval/package-lock.json
+      - run: npm --prefix tools/extractor-eval ci
+      - run: cargo fetch
+      - run: node tools/extractor-eval/index.mjs --all --gate legible --baseline evals/quality/legible-baseline.json
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - document_parse
+          - dom_mutation_serialization
+          - json_ld_metadata
+          - nested_malformed_html
+          - render_markdown_text
+          - semantic_normalization
+          - url_rewriting
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # The prebuilt cargo-fuzz binary is a musl build. Sanitizers need glibc.
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=60
+
   docs:
     name: Docs
     runs-on: ubuntu-latest
