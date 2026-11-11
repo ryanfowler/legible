@@ -19,6 +19,9 @@ Available targets:
 - `nested_malformed_html` exercises deep nesting and HTML parser repair.
 - `semantic_normalization` exercises malformed semantic markup and all output renderers.
 
+CI builds every target and runs each one for 60 seconds. Add a regression test
+for each fixed fuzz case.
+
 Each target skips inputs larger than 256 KiB. Cargo-fuzz currently uses nightly
 Rust because it enables unstable sanitizer compiler options. The targets treat extraction errors as
 valid results. A panic, stack overflow, or failure to reparse serialized extracted HTML

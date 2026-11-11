@@ -6,11 +6,16 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   aggregateReport,
+  compareWithBaseline,
   comparisonResult,
   discoverFixtures,
   fixtureOutputDirectory,
+  formatBaselineComparison,
   formatHumanReport,
   formatMarkdownSummary,
+  isKnownReliabilityFailure,
+  legibleBaseline,
+  validateBaseline,
 } from "./lib.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +34,9 @@ Options:
   --json PATH           Also write the aggregate JSON report to PATH.
   --summary PATH        Also write a compact Markdown summary to PATH.
   --gate MODE           Fail for reliability errors from "legible" or "both" (default).
+  --baseline PATH       Fail when a Legible score is lower than in this baseline.
+                        Known Legible reliability failures in the baseline do not fail.
+  --write-baseline PATH Write the Legible per-fixture scores to PATH.
   --help                Show this help.
 
 DEFUDDLE_COMMAND and DEFUDDLE_ARGS can replace the pinned local Defuddle wrapper.`;
@@ -43,6 +51,8 @@ function parseArguments(arguments_) {
     jsonPath: null,
     summaryPath: null,
     gate: "both",
+    baselinePath: null,
+    writeBaselinePath: null,
   };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -78,6 +88,12 @@ function parseArguments(arguments_) {
           throw new Error("--gate must be legible or both");
         }
         break;
+      case "--baseline":
+        options.baselinePath = resolve(value());
+        break;
+      case "--write-baseline":
+        options.writeBaselinePath = resolve(value());
+        break;
       case "--help":
       case "-h":
         console.log(usage());
@@ -89,6 +105,10 @@ function parseArguments(arguments_) {
   }
   if (options.all && options.fixture) {
     throw new Error("--all and --fixture cannot be used together");
+  }
+  if (options.fixture && options.writeBaselinePath) {
+    // A partial baseline would drop the protection of every other fixture.
+    throw new Error("--write-baseline requires all fixtures");
   }
   if (!options.fixture) options.all = true;
   return options;
@@ -347,6 +367,10 @@ async function main() {
     throw new Error(`no quality fixtures found under ${options.fixtureRoot}`);
   }
 
+  const baseline = options.baselinePath
+    ? validateBaseline(JSON.parse(readFileSync(options.baselinePath, "utf8")))
+    : null;
+
   const defuddleCommand = process.env.DEFUDDLE_COMMAND;
   const runDefuddle = defuddleCommand
     ? externalDefuddleRunner(defuddleCommand)
@@ -382,12 +406,26 @@ async function main() {
   console.log(formatHumanReport(report));
   console.log(`\nWrote comparison artifacts to ${options.outputRoot}`);
 
+  if (options.writeBaselinePath) {
+    writeJson(options.writeBaselinePath, legibleBaseline(results));
+    console.log(
+      `Wrote the Legible quality baseline to ${options.writeBaselinePath}`,
+    );
+  }
+
   const reliabilityFailed = results.some(
     (result) =>
-      !result.legible.reliability_pass ||
+      (!result.legible.reliability_pass &&
+        !isKnownReliabilityFailure(baseline, result.fixture)) ||
       (options.gate === "both" && !result.defuddle.reliability_pass),
   );
   if (reliabilityFailed) process.exitCode = 1;
+
+  if (baseline) {
+    const comparison = compareWithBaseline(results, baseline);
+    console.log(`\n${formatBaselineComparison(comparison)}`);
+    if (comparison.regressions.length > 0) process.exitCode = 1;
+  }
 }
 
 main().catch((error) => {

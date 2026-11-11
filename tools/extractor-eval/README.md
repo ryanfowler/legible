@@ -54,6 +54,33 @@ By default, a reliability failure from either extractor makes the command fail.
 Use `--gate legible` when Legible is the only acceptance gate. The report still
 contains comparator results.
 
+## Baseline gate
+
+`evals/quality/legible-baseline.json` records the Legible scores for each
+fixture. CI runs this command:
+
+```bash
+node tools/extractor-eval/index.mjs --all --gate legible \
+  --baseline evals/quality/legible-baseline.json
+```
+
+The command fails when a fixture loses reliability or when a recorded score
+decreases. A Legible reliability failure that the baseline already records does
+not fail the command. New fixtures that are not in the baseline must pass the
+reliability gate.
+
+The command lists improvements. When a change improves scores, or when you add
+a fixture, write a new baseline and commit it with the change. The runner writes
+a baseline only from all fixtures, so `--write-baseline` cannot be used with
+`--fixture`:
+
+```bash
+node tools/extractor-eval/index.mjs --all --gate legible \
+  --write-baseline evals/quality/legible-baseline.json
+```
+
+Do not write a new baseline to hide a regression.
+
 The JSON report records the Legible commit, dirty-worktree state, dirty diff hash, and pinned Defuddle version. It reports content recall, noise rejection, structure, metadata, reference token scores, reliability, panic and tool-failure counts, and diagnostic counts. It keeps these dimensions separate. Phrase and reference-token checks use visible Markdown text and ignore link destinations. Structural checks can cover heading levels, figures, and list-encoded reply depth.
 
 See `evals/quality/README.md` for the fixture schema, tokenization rules, quality definitions, and instructions for adding a case.

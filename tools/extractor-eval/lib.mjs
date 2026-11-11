@@ -817,3 +817,126 @@ export function fixtureOutputDirectory(outputRoot, fixture) {
 export function fixtureIdFromPath(path) {
   return basename(dirname(path));
 }
+
+export const BASELINE_SCHEMA_VERSION = 1;
+
+const BASELINE_SCORES = [
+  "required_content_score",
+  "noise_score",
+  "structure_score",
+  "metadata_score",
+  "reference_f1",
+];
+
+function baselineEntry(score) {
+  return {
+    reliability_pass: score.reliability_pass,
+    required_content_score: score.required_content_score ?? null,
+    noise_score: score.noise_score ?? null,
+    structure_score: score.structure_score ?? null,
+    metadata_score: score.metadata_score ?? null,
+    reference_f1: score.reference?.f1 ?? null,
+  };
+}
+
+// Returns the committed per-fixture Legible scores for a regression gate.
+// Comparator scores are not part of the baseline.
+export function legibleBaseline(results) {
+  return {
+    schema_version: BASELINE_SCHEMA_VERSION,
+    fixtures: Object.fromEntries(
+      [...results]
+        .sort((left, right) => left.fixture.localeCompare(right.fixture))
+        .map((result) => [result.fixture, baselineEntry(result.legible)]),
+    ),
+  };
+}
+
+export function validateBaseline(baseline) {
+  if (
+    baseline?.schema_version !== BASELINE_SCHEMA_VERSION ||
+    typeof baseline.fixtures !== "object" ||
+    baseline.fixtures === null
+  ) {
+    throw new Error(
+      `quality baseline must use schema_version ${BASELINE_SCHEMA_VERSION}`,
+    );
+  }
+  return baseline;
+}
+
+// Compares Legible results with a baseline. A fixture regresses when it
+// loses reliability or when a score that the baseline records decreases.
+// Fixtures that are absent from the baseline are new and are not compared.
+export function compareWithBaseline(results, baseline, tolerance = 1e-9) {
+  const regressions = [];
+  const improvements = [];
+  for (const result of results) {
+    const expected = baseline.fixtures[result.fixture];
+    if (!expected) continue;
+    const actual = baselineEntry(result.legible);
+    if (expected.reliability_pass && !actual.reliability_pass) {
+      regressions.push({
+        fixture: result.fixture,
+        score: "reliability",
+        baseline: 1,
+        actual: 0,
+      });
+    } else if (!expected.reliability_pass && actual.reliability_pass) {
+      improvements.push({
+        fixture: result.fixture,
+        score: "reliability",
+        baseline: 0,
+        actual: 1,
+      });
+    }
+    for (const name of BASELINE_SCORES) {
+      const before = expected[name];
+      if (before === null || before === undefined) continue;
+      const after = actual[name];
+      if (after === null || after < before - tolerance) {
+        regressions.push({
+          fixture: result.fixture,
+          score: name,
+          baseline: before,
+          actual: after,
+        });
+      } else if (after > before + tolerance) {
+        improvements.push({
+          fixture: result.fixture,
+          score: name,
+          baseline: before,
+          actual: after,
+        });
+      }
+    }
+  }
+  return { regressions, improvements };
+}
+
+// Returns whether the baseline already records a Legible reliability
+// failure for `fixture`. Known failures do not fail the gate again.
+export function isKnownReliabilityFailure(baseline, fixture) {
+  return baseline?.fixtures[fixture]?.reliability_pass === false;
+}
+
+export function formatBaselineComparison({ regressions, improvements }) {
+  const line = (item) =>
+    `- ${item.fixture} ${item.score}: ${formatScore(item.baseline)} -> ${formatScore(item.actual)}`;
+  const lines = [];
+  if (regressions.length > 0) {
+    lines.push(
+      `Quality regressions against the baseline (${regressions.length}):`,
+    );
+    lines.push(...regressions.map(line));
+  } else {
+    lines.push("No quality regressions against the baseline.");
+  }
+  if (improvements.length > 0) {
+    lines.push(
+      `Improvements against the baseline (${improvements.length}). Update the baseline with --write-baseline:`,
+    );
+    lines.push(...improvements.map(line));
+  }
+  return lines.join("\n");
+}

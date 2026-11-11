@@ -140,3 +140,72 @@ test("keeps revision hashing stable across custom summary writes", () => {
     rmSync(summaryPath, { force: true });
   }
 });
+
+test("fails the baseline gate only for a lower Legible score", () => {
+  const root = mkdtempSync(join(tmpdir(), "legible-quality-baseline-"));
+  const fixtureDirectory = join(root, "simple-article");
+  const outputDirectory = join(root, "output");
+  mkdirSync(fixtureDirectory);
+  writeFileSync(
+    join(fixtureDirectory, "manifest.json"),
+    JSON.stringify({
+      id: "simple-article",
+      category: "news-article",
+      source_url: "https://example.test/simple",
+      page_shape: "article",
+      must_include: ["The harbour opened at dawn"],
+      must_exclude: ["Missing phrase that never appears"],
+      notes: "Exercise the baseline regression gate.",
+    }),
+  );
+  writeFileSync(
+    join(fixtureDirectory, "source.html"),
+    "<html><body><article><h1>Harbour</h1><p>The harbour opened at dawn and the first ferry left on time for the island.</p></article></body></html>",
+  );
+  const run = (extraArguments) =>
+    execFileSync(
+      process.execPath,
+      [
+        indexPath,
+        "--fixture-root",
+        root,
+        "--output",
+        outputDirectory,
+        "--gate",
+        "legible",
+        ...extraArguments,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DEFUDDLE_COMMAND: process.execPath,
+          DEFUDDLE_ARGS: JSON.stringify(["-e", "console.log('{}')"]),
+        },
+        stdio: "pipe",
+      },
+    );
+
+  const baselinePath = join(root, "baseline.json");
+  assert.throws(
+    () =>
+      run(["--fixture", "simple-article", "--write-baseline", baselinePath]),
+    (error) => /--write-baseline requires all fixtures/u.test(error.stderr),
+  );
+  assert.equal(existsSync(baselinePath), false);
+  run(["--all", "--write-baseline", baselinePath]);
+  const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+  assert.equal(baseline.fixtures["simple-article"].required_content_score, 1);
+  assert.match(
+    run(["--all", "--baseline", baselinePath]),
+    /No quality regressions against the baseline\./u,
+  );
+
+  // A baseline that records a higher score than Legible can reach must fail.
+  baseline.fixtures["simple-article"].noise_score = 2;
+  writeFileSync(baselinePath, JSON.stringify(baseline));
+  assert.throws(
+    () => run(["--all", "--baseline", baselinePath]),
+    (error) => /simple-article noise_score: 2\.00 -> 1\.00/u.test(error.stdout),
+  );
+});
