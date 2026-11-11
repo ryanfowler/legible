@@ -24,7 +24,8 @@ The crate has four main public entry points:
 
 - `extract(html, url)` performs one extraction with the default configuration.
 - `Extractor` stores configuration that you can reuse for many documents.
-- `ExtractedPage` provides Markdown, HTML, text, metadata, diagnostics, and metrics.
+- `ExtractedPage` provides Markdown, HTML, text, metadata, and diagnostics. Its
+  `content()` value also provides streaming writers and content metrics.
 - `ParseBudget` limits parser and JSON-LD resource use.
 
 The extracted representation is private. You can use the output methods without
@@ -157,21 +158,25 @@ Legible does not retain attempt diagnostics by default. When enabled, diagnostic
 
 Legible's semantic representation is an internal implementation detail. Public
 output contracts are Markdown, canonical semantic HTML, normalized text, metadata,
-and scalar metrics. Content methods return Markdown, canonical semantic HTML, or
-normalized text. Metadata and scalar metrics are also available on `ExtractedPage`:
+and content metrics. `ExtractedPage` provides `markdown()`, `markdown_builder()`,
+`html()`, and `text()`. `page.content()` returns the `ExtractedContent` value.
+It provides the same output methods, the streaming writers, and `metrics()`:
 
 ```rust
 # let page = legible::extract("<main><p>Page content.</p></main>", None)?;
-println!("{} words", page.word_count());
-println!("{} characters", page.text_length());
-println!("{} images", page.image_count());
+let metrics = page.content().metrics();
+println!("{} words", metrics.word_count);
+println!("{} characters", metrics.text_length);
+println!("{} images", metrics.image_count);
 # Ok::<(), legible::Error>(())
 ```
 
+`metrics()` returns a `ContentMetrics` value. The first call measures the
+normalized text once. Later calls and text rendering reuse that measurement.
+
 Use `page.into_parts()` when each result needs a separate owner. The returned
 `ExtractedPageParts` contains the metadata, diagnostics, structured data, and
-`ExtractedContent`. The content value provides the same render and metric
-methods as `ExtractedPage`.
+`ExtractedContent`.
 
 The representation can change without a public API change.
 
@@ -183,8 +188,8 @@ attributes, or unsupported URI schemes.
 deterministic. Rendering is lazy, so Legible does not create all output formats
 unless you request them.
 
-Use `write_markdown`, `write_html`, or `write_text` when an API accepts a
-`std::fmt::Write` value. These methods return `fmt::Result` and write directly
+Use `page.content().write_markdown`, `write_html`, or `write_text` when an API
+accepts a `std::fmt::Write` value. These methods return `fmt::Result` and write directly
 to the provided value. They do not create a complete intermediate output
 `String`.
 
@@ -193,18 +198,18 @@ to the provided value. They do not create a complete intermediate output
 use std::fmt::Write;
 
 let mut output = String::new();
-page.write_markdown(&mut output).unwrap();
+page.content().write_markdown(&mut output).unwrap();
 ```
 
 Use `write_markdown_io`, `write_html_io`, or `write_text_io` when an API accepts
 a `std::io::Write` value. These methods write UTF-8 bytes directly and return
-`std::io::Result<()>`. The builder methods named `write_io` provide the same output
-configuration as the `fmt::Write` methods.
+`std::io::Result<()>`. The Markdown builder methods named `write` and `write_io`
+apply the builder's output configuration.
 
-```rust
+```rust,no_run
 # let page = legible::extract("<main><p>Text</p></main>", None).unwrap();
 let mut output = std::io::BufWriter::new(std::fs::File::create("output.md").unwrap());
-page.write_markdown_io(&mut output).unwrap();
+page.content().write_markdown_io(&mut output).unwrap();
 ```
 
 ## Render Markdown

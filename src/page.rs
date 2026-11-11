@@ -3,7 +3,7 @@
 use std::{fmt, io};
 
 use crate::diagnostics::ExtractionDiagnostics;
-use crate::document::Document;
+use crate::document::{Document, DocumentStats};
 use crate::metadata::{Metadata, MetadataDiagnostics};
 use serde_json::Value;
 
@@ -173,59 +173,20 @@ impl ExtractedPage {
     }
 
     /// Renders the extracted content as CommonMark.
+    ///
+    /// Use [`Self::content`] for streaming writers and content metrics.
     pub fn markdown(&self) -> String {
-        self.markdown_builder().render()
-    }
-
-    /// Writes the extracted content as CommonMark.
-    ///
-    /// The method writes to any value that implements [`fmt::Write`]. It
-    /// returns the writer error, when one occurs.
-    pub fn write_markdown<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        self.markdown_builder().write(writer)
-    }
-
-    /// Writes the extracted content as CommonMark to an I/O writer.
-    ///
-    /// The method writes UTF-8 bytes to any value that implements
-    /// [`std::io::Write`]. It returns the first I/O error.
-    pub fn write_markdown_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        let mut adapter = IoFmtWriter::new(writer);
-        let result = self.markdown_builder().write(&mut adapter);
-        adapter.finish(result)
+        self.content.markdown()
     }
 
     /// Returns a Markdown output builder.
     pub fn markdown_builder(&self) -> MarkdownBuilder<'_> {
-        MarkdownBuilder {
-            document: &self.content.document,
-            links: true,
-            images: true,
-            max_line_width: None,
-        }
+        self.content.markdown_builder()
     }
 
     /// Renders the extracted content as normalized plain text.
     pub fn text(&self) -> String {
-        self.content.document.text()
-    }
-
-    /// Writes the extracted content as normalized plain text.
-    ///
-    /// The method writes to any value that implements [`fmt::Write`]. It
-    /// returns the writer error, when one occurs.
-    pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        self.content.document.write_text(writer)
-    }
-
-    /// Writes the extracted content as normalized plain text to an I/O writer.
-    ///
-    /// The method writes UTF-8 bytes to any value that implements
-    /// [`std::io::Write`]. It returns the first I/O error.
-    pub fn write_text_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        let mut adapter = IoFmtWriter::new(writer);
-        let result = self.write_text(&mut adapter);
-        adapter.finish(result)
+        self.content.text()
     }
 
     /// Renders the extracted content as canonical semantic HTML.
@@ -233,127 +194,7 @@ impl ExtractedPage {
     /// The private semantic representation cannot contain active source elements,
     /// arbitrary attributes, or unsupported URI schemes.
     pub fn html(&self) -> String {
-        self.html_builder().render()
-    }
-
-    /// Writes the extracted content as canonical semantic HTML.
-    ///
-    /// The method writes to any value that implements [`fmt::Write`]. It
-    /// returns the writer error, when one occurs.
-    pub fn write_html<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        self.html_builder().write(writer)
-    }
-
-    /// Writes the extracted content as canonical semantic HTML to an I/O writer.
-    ///
-    /// The method writes UTF-8 bytes to any value that implements
-    /// [`std::io::Write`]. It returns the first I/O error.
-    pub fn write_html_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        let mut adapter = IoFmtWriter::new(writer);
-        let result = self.html_builder().write(&mut adapter);
-        adapter.finish(result)
-    }
-
-    /// Returns an HTML output builder.
-    pub fn html_builder(&self) -> HtmlBuilder<'_> {
-        HtmlBuilder {
-            document: &self.content.document,
-        }
-    }
-
-    /// Returns the number of words in the normalized extracted text.
-    pub fn word_count(&self) -> usize {
-        self.content.document.word_count()
-    }
-
-    /// Returns the number of characters in the normalized extracted text.
-    pub fn text_length(&self) -> usize {
-        self.content.document.text_length()
-    }
-
-    /// Returns the number of characters contributed by link content.
-    pub fn link_text_length(&self) -> usize {
-        self.content.document.link_text_length()
-    }
-
-    /// Returns the fraction of normalized text contributed by links.
-    pub fn link_density(&self) -> f64 {
-        self.content.document.link_density()
-    }
-
-    /// Returns the number of semantic paragraphs.
-    pub fn paragraph_count(&self) -> usize {
-        self.content.document.paragraph_count()
-    }
-
-    /// Returns the number of semantic headings.
-    pub fn heading_count(&self) -> usize {
-        self.content.document.heading_count()
-    }
-
-    /// Returns the number of semantic list items.
-    pub fn list_item_count(&self) -> usize {
-        self.content.document.list_item_count()
-    }
-
-    /// Returns the number of semantic code blocks.
-    pub fn code_block_count(&self) -> usize {
-        self.content.document.code_block_count()
-    }
-
-    /// Returns the number of semantic data tables.
-    pub fn table_count(&self) -> usize {
-        self.content.document.table_count()
-    }
-
-    /// Returns the number of semantic figures.
-    pub fn figure_count(&self) -> usize {
-        self.content.document.figure_count()
-    }
-
-    /// Returns the number of semantic images.
-    pub fn image_count(&self) -> usize {
-        self.content.document.image_count()
-    }
-
-    /// Returns the number of footnote references.
-    pub fn footnote_reference_count(&self) -> usize {
-        self.content.document.footnote_reference_count()
-    }
-
-    /// Returns the number of footnote definitions.
-    pub fn footnote_definition_count(&self) -> usize {
-        self.content.document.footnote_definition_count()
-    }
-
-    /// Returns the number of math expressions.
-    pub fn math_count(&self) -> usize {
-        self.content.document.math_count()
-    }
-
-    /// Returns the number of blocks with useful structural evidence.
-    pub fn structured_block_count(&self) -> usize {
-        self.content.document.structured_block_count()
-    }
-
-    /// Returns whether normalized text contains an alphanumeric character.
-    pub fn has_alphanumeric_text(&self) -> bool {
-        self.content.document.stats().has_alphanumeric_text
-    }
-
-    /// Returns the number of alphabetic characters in normalized text.
-    pub fn alphabetic_chars(&self) -> usize {
-        self.content.document.stats().alphabetic_chars
-    }
-
-    /// Returns the number of numeric characters in normalized text.
-    pub fn digit_chars(&self) -> usize {
-        self.content.document.stats().digit_chars
-    }
-
-    /// Returns whether the result contains contextual semantic structure.
-    pub fn has_contextual_structure(&self) -> bool {
-        self.content.document.has_contextual_structure()
+        self.content.html()
     }
 
     #[cfg(test)]
@@ -381,15 +222,19 @@ impl ExtractedContent {
     }
 
     /// Writes the content as CommonMark.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
     pub fn write_markdown<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
         self.markdown_builder().write(writer)
     }
 
     /// Writes the content as CommonMark to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
     pub fn write_markdown_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        let mut adapter = IoFmtWriter::new(writer);
-        let result = self.markdown_builder().write(&mut adapter);
-        adapter.finish(result)
+        self.markdown_builder().write_io(writer)
     }
 
     /// Returns a Markdown output builder.
@@ -408,11 +253,17 @@ impl ExtractedContent {
     }
 
     /// Writes the content as normalized plain text.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
     pub fn write_text<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
         self.document.write_text(writer)
     }
 
     /// Writes the content as normalized plain text to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
     pub fn write_text_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let mut adapter = IoFmtWriter::new(writer);
         let result = self.write_text(&mut adapter);
@@ -420,122 +271,37 @@ impl ExtractedContent {
     }
 
     /// Renders the content as canonical semantic HTML.
+    ///
+    /// The private semantic representation cannot contain active source elements,
+    /// arbitrary attributes, or unsupported URI schemes.
     pub fn html(&self) -> String {
-        self.html_builder().render()
+        crate::render::html::render_html(&self.document, self.document.output_capacity_hint())
     }
 
     /// Writes the content as canonical semantic HTML.
+    ///
+    /// The method writes to any value that implements [`fmt::Write`]. It
+    /// returns the writer error, when one occurs.
     pub fn write_html<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        self.html_builder().write(writer)
+        crate::render::html::write_html(&self.document, writer)
     }
 
     /// Writes the content as canonical semantic HTML to an I/O writer.
+    ///
+    /// The method writes UTF-8 bytes to any value that implements
+    /// [`std::io::Write`]. It returns the first I/O error.
     pub fn write_html_io<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let mut adapter = IoFmtWriter::new(writer);
-        let result = self.html_builder().write(&mut adapter);
+        let result = self.write_html(&mut adapter);
         adapter.finish(result)
     }
 
-    /// Returns an HTML output builder.
-    pub fn html_builder(&self) -> HtmlBuilder<'_> {
-        HtmlBuilder {
-            document: &self.document,
-        }
-    }
-
-    /// Returns the number of words in the normalized content text.
-    pub fn word_count(&self) -> usize {
-        self.document.word_count()
-    }
-
-    /// Returns the number of characters in the normalized content text.
-    pub fn text_length(&self) -> usize {
-        self.document.text_length()
-    }
-
-    /// Returns the number of characters contributed by link content.
-    pub fn link_text_length(&self) -> usize {
-        self.document.link_text_length()
-    }
-
-    /// Returns the fraction of normalized text contributed by links.
-    pub fn link_density(&self) -> f64 {
-        self.document.link_density()
-    }
-
-    /// Returns the number of semantic paragraphs.
-    pub fn paragraph_count(&self) -> usize {
-        self.document.paragraph_count()
-    }
-
-    /// Returns the number of semantic headings.
-    pub fn heading_count(&self) -> usize {
-        self.document.heading_count()
-    }
-
-    /// Returns the number of semantic list items.
-    pub fn list_item_count(&self) -> usize {
-        self.document.list_item_count()
-    }
-
-    /// Returns the number of semantic code blocks.
-    pub fn code_block_count(&self) -> usize {
-        self.document.code_block_count()
-    }
-
-    /// Returns the number of semantic data tables.
-    pub fn table_count(&self) -> usize {
-        self.document.table_count()
-    }
-
-    /// Returns the number of semantic figures.
-    pub fn figure_count(&self) -> usize {
-        self.document.figure_count()
-    }
-
-    /// Returns the number of semantic images.
-    pub fn image_count(&self) -> usize {
-        self.document.image_count()
-    }
-
-    /// Returns the number of footnote references.
-    pub fn footnote_reference_count(&self) -> usize {
-        self.document.footnote_reference_count()
-    }
-
-    /// Returns the number of footnote definitions.
-    pub fn footnote_definition_count(&self) -> usize {
-        self.document.footnote_definition_count()
-    }
-
-    /// Returns the number of math expressions.
-    pub fn math_count(&self) -> usize {
-        self.document.math_count()
-    }
-
-    /// Returns the number of blocks with useful structural evidence.
-    pub fn structured_block_count(&self) -> usize {
-        self.document.structured_block_count()
-    }
-
-    /// Returns whether normalized text contains an alphanumeric character.
-    pub fn has_alphanumeric_text(&self) -> bool {
-        self.document.stats().has_alphanumeric_text
-    }
-
-    /// Returns the number of alphabetic characters in normalized text.
-    pub fn alphabetic_chars(&self) -> usize {
-        self.document.stats().alphabetic_chars
-    }
-
-    /// Returns the number of numeric characters in normalized text.
-    pub fn digit_chars(&self) -> usize {
-        self.document.stats().digit_chars
-    }
-
-    /// Returns whether the content contains contextual semantic structure.
-    pub fn has_contextual_structure(&self) -> bool {
-        self.document.has_contextual_structure()
+    /// Returns measurements of the extracted content.
+    ///
+    /// The first call measures the normalized text once. Later calls and text
+    /// rendering reuse that measurement.
+    pub fn metrics(&self) -> ContentMetrics {
+        ContentMetrics::from(self.document.stats())
     }
 
     /// Checks private semantic representation invariants for fuzz testing.
@@ -546,41 +312,77 @@ impl ExtractedContent {
     }
 }
 
-/// Configures HTML rendering for extracted content.
+/// Measurements of extracted content.
 ///
-/// Canonical HTML is safe by construction. The builder remains public for API
-/// compatibility and for symmetry with [`MarkdownBuilder`].
-pub struct HtmlBuilder<'a> {
-    document: &'a Document,
+/// All text measurements use the normalized text from
+/// [`ExtractedContent::text`]. Counts describe the semantic result, not the
+/// source HTML.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContentMetrics {
+    /// Number of whitespace-separated words.
+    pub word_count: usize,
+    /// Number of characters.
+    pub text_length: usize,
+    /// Number of characters contributed by link content.
+    pub link_text_length: usize,
+    /// Fraction of the text contributed by links.
+    pub link_density: f64,
+    /// Number of alphabetic characters.
+    pub alphabetic_chars: usize,
+    /// Number of numeric characters.
+    pub digit_chars: usize,
+    /// Whether the text contains an alphanumeric character.
+    pub has_alphanumeric_text: bool,
+    /// Number of semantic paragraphs.
+    pub paragraph_count: usize,
+    /// Number of semantic headings.
+    pub heading_count: usize,
+    /// Number of semantic list items.
+    pub list_item_count: usize,
+    /// Number of semantic code blocks.
+    pub code_block_count: usize,
+    /// Number of semantic data tables.
+    pub table_count: usize,
+    /// Number of semantic figures.
+    pub figure_count: usize,
+    /// Number of semantic images.
+    pub image_count: usize,
+    /// Number of footnote references.
+    pub footnote_reference_count: usize,
+    /// Number of footnote definitions.
+    pub footnote_definition_count: usize,
+    /// Number of inline and display math expressions.
+    pub math_count: usize,
+    /// Number of blocks with useful structural evidence.
+    pub structured_block_count: usize,
+    /// Whether the content contains table-header, code, or math context.
+    pub has_contextual_structure: bool,
 }
 
-impl fmt::Debug for HtmlBuilder<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HtmlBuilder")
-            .finish_non_exhaustive()
-    }
-}
-
-impl HtmlBuilder<'_> {
-    /// Renders canonical semantic HTML.
-    pub fn render(self) -> String {
-        crate::render::html::render_html(self.document, self.document.output_capacity_hint())
-    }
-
-    /// Writes canonical semantic HTML to `writer`.
-    pub fn write<W: fmt::Write>(self, writer: &mut W) -> fmt::Result {
-        crate::render::html::write_html(self.document, writer)
-    }
-
-    /// Writes canonical semantic HTML to an I/O writer.
-    ///
-    /// The method writes UTF-8 bytes to any value that implements
-    /// [`std::io::Write`]. It returns the first I/O error.
-    pub fn write_io<W: io::Write>(self, writer: &mut W) -> io::Result<()> {
-        let mut adapter = IoFmtWriter::new(writer);
-        let result = self.write(&mut adapter);
-        adapter.finish(result)
+impl From<DocumentStats> for ContentMetrics {
+    fn from(stats: DocumentStats) -> Self {
+        Self {
+            word_count: stats.word_count,
+            text_length: stats.text_length,
+            link_text_length: stats.link_text_length,
+            link_density: stats.link_density,
+            alphabetic_chars: stats.alphabetic_chars,
+            digit_chars: stats.digit_chars,
+            has_alphanumeric_text: stats.has_alphanumeric_text,
+            paragraph_count: stats.paragraph_count,
+            heading_count: stats.heading_count,
+            list_item_count: stats.list_item_count,
+            code_block_count: stats.code_block_count,
+            table_count: stats.table_count,
+            figure_count: stats.figure_count,
+            image_count: stats.image_count,
+            footnote_reference_count: stats.footnote_reference_count,
+            footnote_definition_count: stats.footnote_definition_count,
+            math_count: stats.math_count,
+            structured_block_count: stats.structured_block_count,
+            has_contextual_structure: stats.has_contextual_structure,
+        }
     }
 }
 
@@ -718,9 +520,12 @@ mod tests {
         assert_eq!(page.markdown(), page.markdown());
         assert_eq!(page.text(), page.text());
         assert_eq!(page.html(), page.html());
-        assert_eq!(page.text_length(), page.text().chars().count());
-        assert_eq!(page.word_count(), 2);
-        assert_eq!(page.image_count(), 1);
+        assert_eq!(
+            page.content().metrics().text_length,
+            page.text().chars().count()
+        );
+        assert_eq!(page.content().metrics().word_count, 2);
+        assert_eq!(page.content().metrics().image_count, 1);
     }
 
     #[test]
@@ -739,7 +544,7 @@ mod tests {
         let _metadata = parts.metadata;
         let content: crate::ExtractedContent = parts.content;
         assert!(content.markdown().contains("enough meaningful content"));
-        assert!(content.word_count() > 10);
+        assert!(content.metrics().word_count > 10);
     }
 
     #[test]
@@ -751,15 +556,15 @@ mod tests {
         .unwrap();
 
         let mut markdown = String::new();
-        page.write_markdown(&mut markdown).unwrap();
+        page.content().write_markdown(&mut markdown).unwrap();
         assert_eq!(markdown, page.markdown());
 
         let mut text = String::new();
-        page.write_text(&mut text).unwrap();
+        page.content().write_text(&mut text).unwrap();
         assert_eq!(text, page.text());
 
         let mut html = String::new();
-        page.write_html(&mut html).unwrap();
+        page.content().write_html(&mut html).unwrap();
         assert_eq!(html, page.html());
 
         let mut configured = String::new();
@@ -774,15 +579,15 @@ mod tests {
         );
 
         let mut markdown = Vec::new();
-        page.write_markdown_io(&mut markdown).unwrap();
+        page.content().write_markdown_io(&mut markdown).unwrap();
         assert_eq!(markdown, page.markdown().as_bytes());
 
         let mut text = Vec::new();
-        page.write_text_io(&mut text).unwrap();
+        page.content().write_text_io(&mut text).unwrap();
         assert_eq!(text, page.text().as_bytes());
 
         let mut html = Vec::new();
-        page.write_html_io(&mut html).unwrap();
+        page.content().write_html_io(&mut html).unwrap();
         assert_eq!(html, page.html().as_bytes());
 
         let mut configured = Vec::new();
@@ -812,9 +617,9 @@ mod tests {
         }
 
         let page = extract("<main><p>Content</p></main>", None).unwrap();
-        assert!(page.write_markdown(&mut FailingWriter).is_err());
-        assert!(page.write_text(&mut FailingWriter).is_err());
-        assert!(page.write_html(&mut FailingWriter).is_err());
+        assert!(page.content().write_markdown(&mut FailingWriter).is_err());
+        assert!(page.content().write_text(&mut FailingWriter).is_err());
+        assert!(page.content().write_html(&mut FailingWriter).is_err());
     }
 
     #[test]
@@ -833,13 +638,22 @@ mod tests {
 
         let page = extract("<main><p>Content</p></main>", None).unwrap();
 
-        let error = page.write_markdown_io(&mut FailingWriter).unwrap_err();
+        let error = page
+            .content()
+            .write_markdown_io(&mut FailingWriter)
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
-        let error = page.write_text_io(&mut FailingWriter).unwrap_err();
+        let error = page
+            .content()
+            .write_text_io(&mut FailingWriter)
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
-        let error = page.write_html_io(&mut FailingWriter).unwrap_err();
+        let error = page
+            .content()
+            .write_html_io(&mut FailingWriter)
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
         let error = page
@@ -874,7 +688,7 @@ mod tests {
             output: String::new(),
             writes: 0,
         };
-        page.write_markdown(&mut markdown).unwrap();
+        page.content().write_markdown(&mut markdown).unwrap();
         assert_eq!(markdown.output, page.markdown());
         assert!(markdown.writes > 1);
 
@@ -882,7 +696,7 @@ mod tests {
             output: String::new(),
             writes: 0,
         };
-        page.write_html(&mut html).unwrap();
+        page.content().write_html(&mut html).unwrap();
         assert_eq!(html.output, page.html());
         assert!(html.writes > 1);
 
@@ -890,7 +704,7 @@ mod tests {
             output: String::new(),
             writes: 0,
         };
-        page.write_text(&mut text).unwrap();
+        page.content().write_text(&mut text).unwrap();
         assert_eq!(text.output, page.text());
         assert!(text.writes > 1);
     }
@@ -920,15 +734,15 @@ mod tests {
         assert!(!page.content.document.stats_initialized());
         assert_eq!(page.text(), "Text output.");
         assert!(page.content.document.stats_initialized());
-        assert_eq!(page.text_length(), 12);
-        assert_eq!(page.word_count(), 2);
+        assert_eq!(page.content().metrics().text_length, 12);
+        assert_eq!(page.content().metrics().word_count, 2);
     }
 
     #[test]
     fn cached_stats_keep_text_rendering_deterministic() {
         let page = extract("<main><p>Cached text.</p></main>", None).unwrap();
 
-        assert_eq!(page.word_count(), 2);
+        assert_eq!(page.content().metrics().word_count, 2);
         assert_eq!(page.text(), "Cached text.");
         assert_eq!(page.text(), "Cached text.");
     }
@@ -940,7 +754,7 @@ mod tests {
         let before = page.content.document.stats();
         assert!(page.markdown().contains("Markdown only output."));
         assert_eq!(page.content.document.stats(), before);
-        assert_eq!(page.word_count(), 3);
+        assert_eq!(page.content().metrics().word_count, 3);
     }
 
     #[test]
@@ -952,8 +766,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(page.text(), "Hello world one two before after");
-        assert_eq!(page.text_length(), page.text().chars().count());
-        assert_eq!(page.word_count(), 6);
+        assert_eq!(
+            page.content().metrics().text_length,
+            page.text().chars().count()
+        );
+        assert_eq!(page.content().metrics().word_count, 6);
     }
 
     #[test]

@@ -113,7 +113,7 @@ fn main() -> ExitCode {
                     "{}",
                     serde_json::json!({
                         "markdown": markdown,
-                        "word_count": page.word_count(),
+                        "word_count": page.content().metrics().word_count,
                         "metadata": {
                             "title": &page.metadata().title,
                             "description": &page.metadata().description,

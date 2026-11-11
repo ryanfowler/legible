@@ -183,13 +183,13 @@ let page = extractor.extract(html, None)?;
 let markdown = page.markdown();
 ```
 
-`ExtractedPage` owns a private semantic representation. It provides lazy HTML, Markdown, and text methods, scalar metrics, and page metadata. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
+`ExtractedPage` owns a private semantic representation. It provides lazy `markdown`, `markdown_builder`, `html`, and `text` methods and page metadata. `ExtractedPage::content` returns `ExtractedContent`, which owns the complete content API. Extraction diagnostics are opt-in through `ExtractorBuilder::diagnostics` and are not retained by default.
 
-`ExtractedPage` also provides `write_markdown`, `write_html`, and `write_text` methods. These methods write output to a `std::fmt::Write` value and return `std::fmt::Result`. The page also provides `write_markdown_io`, `write_html_io`, and `write_text_io` methods for `std::io::Write` values. These methods return `std::io::Result<()>`. The Markdown and HTML builders provide matching `write` and `write_io` methods.
+`ExtractedContent` provides `write_markdown`, `write_html`, and `write_text` methods. These methods write output to a `std::fmt::Write` value and return `std::fmt::Result`. It also provides `write_markdown_io`, `write_html_io`, and `write_text_io` methods for `std::io::Write` values. These methods return `std::io::Result<()>`. The Markdown builder provides matching `write` and `write_io` methods. `ExtractedContent::metrics` returns all scalar measurements as one `ContentMetrics` value. Do not add pass-through output or metric methods to `ExtractedPage`.
 
 `MarkdownBuilder::max_line_width` sets a preferred Markdown source-line width. The default does not wrap lines. The renderer wraps prose at whitespace. It keeps atomic Markdown content and structural lines intact.
 
-`ExtractedPage::into_parts` returns independently owned metadata, diagnostics, structured data, and `ExtractedContent`. `ExtractedContent` provides the same lazy output and metric methods as `ExtractedPage`.
+`ExtractedPage::into_parts` returns independently owned metadata, diagnostics, structured data, and `ExtractedContent`.
 
 ## Fuzzing
 
