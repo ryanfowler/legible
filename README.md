@@ -313,6 +313,9 @@ cargo run --manifest-path cli/Cargo.toml -- https://example.com/article
 
 ## Optional features
 
+- `serde` derives `Serialize` and `Deserialize` for metadata, metadata
+  provenance, `ContentMetrics`, extraction diagnostics, `ParseBudget`,
+  `ContentHint`, and `ResourceLimitKind`. Enum values use `snake_case` names.
 - `tracing` emits debug events for extraction decisions. Add a `tracing` subscriber
   in your application to collect them.
 

@@ -22,6 +22,7 @@
 /// # let _ = extractor;
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParseBudget {
     /// Maximum input size in bytes.
     pub max_input_bytes: usize,

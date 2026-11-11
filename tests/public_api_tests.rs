@@ -8,3 +8,5 @@ mod code_whitespace;
 mod metadata;
 #[path = "public_api/regressions.rs"]
 mod regressions;
+#[path = "public_api/serde.rs"]
+mod serde;

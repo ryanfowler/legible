@@ -9,6 +9,8 @@ use crate::dom::{ParseError, ParseLimitKind};
 /// The value identifies the resource in [`Error::ResourceLimit`].
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ResourceLimitKind {
     /// Input HTML bytes.
     InputBytes,
