@@ -994,7 +994,7 @@ impl<'a> ContentExtractor<'a> {
     }
     pub(crate) fn extract(mut self) -> Result<ExtractedPage> {
         if let Some(e) = self.url_error {
-            return Err(Error::InvalidUrl(e));
+            return Err(Error::InvalidUrl(crate::error::InvalidUrlError::new(e)));
         }
         let preparation_anchors = self.dom.document_anchors();
         if let Some(base) = preparation_anchors.first_base_with_href

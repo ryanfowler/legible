@@ -53,6 +53,9 @@ impl<W: io::Write + ?Sized> fmt::Write for IoFmtWriter<'_, W> {
 ///
 /// Output formats are rendered lazily from one private semantic representation.
 /// Calling a render method more than once produces the same output.
+///
+/// The page is `Send` and `Sync`. You can share one page between threads, for
+/// example in an `Arc`.
 pub struct ExtractedPage {
     metadata: Metadata,
     content: ExtractedContent,
@@ -62,6 +65,7 @@ pub struct ExtractedPage {
 }
 
 /// Independently owned parts of an extracted page.
+#[derive(Debug)]
 pub struct ExtractedPageParts {
     /// Discovered page metadata.
     pub metadata: Metadata,
@@ -81,6 +85,29 @@ pub struct ExtractedPageParts {
 /// page metadata or diagnostics.
 pub struct ExtractedContent {
     document: Document,
+}
+
+// The semantic representation is private. Debug output names the type and does
+// not render or measure the content.
+impl fmt::Debug for ExtractedContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractedContent")
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ExtractedPage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractedPage")
+            .field("metadata", &self.metadata)
+            .field("content", &self.content)
+            .field("diagnostics", &self.diagnostics)
+            .field("metadata_diagnostics", &self.metadata_diagnostics)
+            .field("structured_data", &self.structured_data)
+            .finish()
+    }
 }
 
 impl ExtractedPage {
@@ -527,6 +554,14 @@ pub struct HtmlBuilder<'a> {
     document: &'a Document,
 }
 
+impl fmt::Debug for HtmlBuilder<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HtmlBuilder")
+            .finish_non_exhaustive()
+    }
+}
+
 impl HtmlBuilder<'_> {
     /// Renders canonical semantic HTML.
     pub fn render(self) -> String {
@@ -558,6 +593,17 @@ pub struct MarkdownBuilder<'a> {
     links: bool,
     images: bool,
     max_line_width: Option<usize>,
+}
+
+impl fmt::Debug for MarkdownBuilder<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MarkdownBuilder")
+            .field("links", &self.links)
+            .field("images", &self.images)
+            .field("max_line_width", &self.max_line_width)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MarkdownBuilder<'_> {
@@ -631,10 +677,34 @@ mod tests {
     use crate::extract;
 
     #[test]
-    fn extracted_page_is_send() {
-        fn assert_send<T: Send>() {}
+    fn public_values_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
 
-        assert_send::<ExtractedPage>();
+        assert_send_sync::<ExtractedPage>();
+        assert_send_sync::<super::ExtractedContent>();
+        assert_send_sync::<super::ExtractedPageParts>();
+        assert_send_sync::<crate::Extractor>();
+        assert_send_sync::<crate::ExtractorBuilder>();
+        assert_send_sync::<crate::Error>();
+        assert_send_sync::<crate::Metadata>();
+        assert_send_sync::<crate::ExtractionDiagnostics>();
+    }
+
+    #[test]
+    fn debug_output_does_not_render_content() {
+        let page = extract(
+            "<main><p>Debug output must not contain this extracted sentence.</p></main>",
+            None,
+        )
+        .unwrap();
+        let debug = format!("{page:?}");
+
+        assert!(debug.starts_with("ExtractedPage {"), "{debug}");
+        assert!(
+            debug.contains("content: ExtractedContent { .. }"),
+            "{debug}"
+        );
+        assert!(format!("{:?}", page.markdown_builder().links(false)).contains("links: false"));
     }
 
     #[test]

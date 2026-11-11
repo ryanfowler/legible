@@ -709,7 +709,10 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         let extractor = Extractor::builder().max_elements(1).build();
         assert!(matches!(
             extractor.extract("<main><p>Content</p></main>", None),
-            Err(Error::TooManyElements { limit: 1, .. })
+            Err(Error::ResourceLimit {
+                resource: ResourceLimitKind::Elements,
+                limit: 1
+            })
         ));
     }
 

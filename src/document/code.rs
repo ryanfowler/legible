@@ -6,8 +6,6 @@ use crate::dom::{AttrName, Dom, NodeId, Tag};
 use crate::tokens::has_any_token;
 use tendril::StrTendril;
 
-use super::RawCodeText;
-
 pub(crate) type OwnedSourceTexts = HashMap<NodeId, StrTendril>;
 
 const MIN_OWNED_SOURCE_BYTES: usize = 4 * 1024;
@@ -27,11 +25,13 @@ impl RecognizedCode {
             .map_or(&self.text, |text| text.as_ref())
     }
 
-    pub(crate) fn into_text(self, sources: Option<&mut OwnedSourceTexts>) -> RawCodeText {
+    pub(crate) fn into_text(self, sources: Option<&mut OwnedSourceTexts>) -> Box<str> {
         self.source
             .and_then(|node| sources.and_then(|sources| sources.remove(&node)))
-            .map(RawCodeText::from)
-            .unwrap_or_else(|| RawCodeText::Owned(self.text.into_boxed_str()))
+            .map_or_else(
+                || self.text.into_boxed_str(),
+                |text| Box::from(text.as_ref()),
+            )
     }
 }
 
@@ -972,10 +972,7 @@ after</code></div>"#,
         assert_eq!(dom.text(pre), "");
         let code = recognize_owned_known_block(&dom, pre, true, &sources).unwrap();
         assert_eq!(code.content(Some(&sources)), source);
-        match code.into_text(Some(&mut sources)) {
-            RawCodeText::Source(text) => assert_eq!(text.as_ref(), source),
-            RawCodeText::Owned(_) => panic!("simple source should retain its tendril"),
-        }
+        assert_eq!(&*code.into_text(Some(&mut sources)), source);
     }
 
     #[test]

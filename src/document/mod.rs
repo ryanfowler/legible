@@ -248,7 +248,6 @@ pub(crate) fn table_normalization_counts_for_nodes(
 
 use std::fmt;
 use std::sync::OnceLock;
-use tendril::{Atomic, StrTendril, Tendril, fmt::UTF8};
 
 /// An index into a [`Document`] semantic tape.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -950,37 +949,12 @@ impl TextRef {
     }
 }
 
-type SendCodeText = Tendril<UTF8, Atomic>;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RawCodeText {
-    Owned(Box<str>),
-    Source(SendCodeText),
-}
-
-impl From<&str> for RawCodeText {
-    fn from(value: &str) -> Self {
-        Self::Owned(value.into())
-    }
-}
-
-impl From<String> for RawCodeText {
-    fn from(value: String) -> Self {
-        Self::Owned(value.into_boxed_str())
-    }
-}
-
-impl From<StrTendril> for RawCodeText {
-    fn from(value: StrTendril) -> Self {
-        let value: SendCodeText = value.into_send().into();
-        Self::Source(value)
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodeBlock {
     pub(crate) language: Option<Box<str>>,
-    pub(crate) text: RawCodeText,
+    /// Raw code is owned, not borrowed from a source tendril. A tendril is
+    /// not `Sync`, and extracted pages must be shareable across threads.
+    pub(crate) text: Box<str>,
 }
 
 impl CodeBlock {
@@ -991,10 +965,7 @@ impl CodeBlock {
 
     /// Returns the normalized preformatted code.
     pub fn text(&self) -> &str {
-        match &self.text {
-            RawCodeText::Owned(text) => text,
-            RawCodeText::Source(text) => text.as_ref(),
-        }
+        &self.text
     }
 
     pub(crate) fn text_len(&self) -> usize {

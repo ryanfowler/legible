@@ -87,7 +87,7 @@ pub use diagnostics::{
     RootInfo, RootSelectionReasonInfo, SemanticCategoryCoverageInfo, SemanticCoverageCategory,
     SemanticCoverageInfo,
 };
-pub use error::{Error, ResourceLimitKind, Result};
+pub use error::{Error, InvalidUrlError, ResourceLimitKind, Result};
 pub use extractor::{ContentHint, ContentTag, Extractor, ExtractorBuilder};
 pub use metadata::{
     Metadata, MetadataDiagnostics, MetadataFieldDiagnostics, MetadataListFieldDiagnostics,
@@ -103,8 +103,8 @@ pub use page::{ExtractedContent, ExtractedPage, ExtractedPageParts, HtmlBuilder,
 /// # Errors
 ///
 /// This function returns [`Error::InvalidUrl`], [`Error::NoBody`],
-/// [`Error::NoContent`], [`Error::TooManyElements`], [`Error::ResourceLimit`],
-/// or [`Error::Parse`] when applicable. [`Error::ContentRootNotFound`] applies
+/// [`Error::NoContent`], [`Error::ResourceLimit`], or [`Error::Parse`] when
+/// applicable. [`Error::ContentRootNotFound`] applies
 /// only when you configure an exact root with [`ExtractorBuilder::content_root`].
 pub fn extract(html: &str, url: Option<&str>) -> Result<ExtractedPage> {
     Extractor::default().extract(html, url)
