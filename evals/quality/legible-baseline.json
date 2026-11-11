@@ -766,7 +766,7 @@
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
-      "metadata_score": 0.3333333333333333,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "metadata-canonical-conflict": {
@@ -806,7 +806,7 @@
       "required_content_score": 1,
       "noise_score": null,
       "structure_score": null,
-      "metadata_score": 0,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "metadata-multiple-authors": {
@@ -814,7 +814,7 @@
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
-      "metadata_score": 0,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "metadata-multiple-h1": {
@@ -822,7 +822,7 @@
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
-      "metadata_score": 0,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "metadata-nested-itemprop-author": {
@@ -838,7 +838,7 @@
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
-      "metadata_score": 0,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "metadata-organization-person": {
@@ -854,7 +854,7 @@
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
-      "metadata_score": 0,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "metadata-published-modified": {
@@ -910,7 +910,7 @@
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
-      "metadata_score": 0,
+      "metadata_score": 1,
       "reference_f1": null
     },
     "multi-author-investigation": {
