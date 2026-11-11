@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head><title>Choosing a proxy mode</title></head>
+  <body>
+    <article>
+      <h1>Choosing a proxy mode</h1>
+      <p>The client supports two proxy modes. The table compares them.</p>
+      <table>
+        <thead><tr><th>Mode</th><th>Behavior</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Direct route</td>
+            <td>The client opens every connection through the configured host and keeps the connection open until the transfer ends or the server closes it.</td>
+          </tr>
+          <tr>
+            <td>Pooled route</td>
+            <td>The client reuses a small set of open connections and sends new transfers through the first connection that becomes free.</td>
+          </tr>
+        </tbody>
+      </table>
+    </article>
+  </body>
+</html>

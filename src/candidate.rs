@@ -1175,6 +1175,10 @@ fn shared_semantic_parent(
     })
 }
 
+/// Maximum number of ancestors between a table and its article or main
+/// boundary.
+const MAX_TABLE_BOUNDARY_DEPTH: usize = 4;
+
 fn shared_generic_parent(
     dom: &Dom,
     candidates: &CandidateSet,
@@ -1216,6 +1220,26 @@ fn shared_generic_parent(
         }
         if branch_set.len() < 2 {
             return None;
+        }
+
+        // Cells of one table are not independent page branches. A row or
+        // section boundary also breaks the table content model. Select the
+        // enclosing article or main element, because a layout table often
+        // holds only part of it. Without one, select the complete table.
+        if matches!(
+            dom.tag(parent),
+            Some(Tag::Tr | Tag::Tbody | Tag::Thead | Tag::Tfoot | Tag::Td | Tag::Th)
+        ) {
+            let table = dom
+                .ancestors(parent)
+                .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Table))?;
+            let boundary = dom
+                .ancestors(table)
+                .take_while(|&ancestor| ancestor != body)
+                .take(MAX_TABLE_BOUNDARY_DEPTH)
+                .find(|&ancestor| candidates.is_authoritative_semantic(dom, ancestor))
+                .unwrap_or(table);
+            return Some((boundary, SmallVec::new()));
         }
 
         // Keep document order. Ranking order can differ from tree order.

@@ -1,0 +1,10 @@
+{
+  "must_contain": [
+    "Read this short guide before you change the proxy route",
+    "## Configure the host",
+    "## Apply the change",
+    "Restart the client after saving"
+  ],
+  "must_not_contain": ["Legacy product navigation", "| --- |"],
+  "headings_min": 2
+}
