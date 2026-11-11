@@ -31,10 +31,10 @@ use crate::page::ExtractedPage;
 use crate::page_kind::PageKind;
 use crate::prepared::{SourceAnalysis, SourceElements, SourceEntry, SourceFlags};
 use crate::quality::{
-    CleanedFragmentAnalysis, ContentMetrics, ExtractionQuality, SemanticStructureCounts,
-    interactive_shell_evidence, is_access_barrier, is_access_barrier_prepared,
-    is_application_shell_notice, is_incoherent_short_result, is_interactive_shell,
-    is_link_only_semantic_root, semantic_coverage,
+    CleanedFragmentAnalysis, ContentMetrics, ExtractionQuality, LoadingShellSource,
+    SemanticStructureCounts, interactive_shell_evidence, is_access_barrier,
+    is_access_barrier_prepared, is_application_shell_notice, is_incoherent_short_result,
+    is_interactive_shell, is_link_only_semantic_root, semantic_coverage,
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
@@ -1833,9 +1833,11 @@ impl<'a> ContentExtractor<'a> {
                 && source_looks_like_empty_shell
                 && result_metrics.word_count <= 20
                 && result_metrics.paragraph_count <= 1;
-            let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
-                || is_application_shell_notice(&runner.dom, result_root, result_metrics)
-                || static_fallback_shell;
+            let interactive_shell =
+                is_interactive_shell(result_metrics, shell_evidence, || {
+                    LoadingShellSource::measure(&runner.source.extractor.dom, body, selection.node)
+                }) || is_application_shell_notice(&runner.dom, result_root, result_metrics)
+                    || static_fallback_shell;
             let incoherent_short = is_incoherent_short_result(result_metrics);
             let AttemptRunner {
                 dom: attempt_dom,
@@ -2839,8 +2841,10 @@ impl<'a> ContentExtractor<'a> {
         });
         let quality = ExtractionQuality::new(source_metrics, result_metrics, root != body);
         let root_in_document_chrome = false;
-        let interactive_shell = is_interactive_shell(result_metrics, shell_evidence)
-            || is_application_shell_notice(&runner.dom, result_root, result_metrics);
+        let interactive_shell =
+            is_interactive_shell(result_metrics, shell_evidence, || {
+                LoadingShellSource::measure(&runner.source.extractor.dom, body, root)
+            }) || is_application_shell_notice(&runner.dom, result_root, result_metrics);
         let incoherent_short = is_incoherent_short_result(result_metrics);
         let AttemptRunner {
             dom: attempt_dom,

@@ -140,6 +140,31 @@ impl Dom {
             self.append_child(to, id)
         }
     }
+    /// Moves the children of `node` to its position and leaves `node` empty.
+    pub(crate) fn move_children_before(&mut self, node: NodeId) {
+        while let Some(child) = self.first_child(node) {
+            self.insert_before(node, child);
+        }
+    }
+    /// Replaces a template element with its parsed contents, as a client
+    /// script does when it clones the template into the document. Returns
+    /// false and changes nothing when `template` has no contents or no parent.
+    pub(crate) fn replace_template_with_contents(&mut self, template: NodeId) -> bool {
+        let Some(contents) = self.template_contents(template) else {
+            return false;
+        };
+        if self.parent(template).is_none() {
+            return false;
+        }
+        while let Some(child) = self.first_child(contents) {
+            self.insert_before(template, child);
+        }
+        if let NodeData::Element(element) = &mut self.node_mut(template).data {
+            element.template_contents = NodeLink::NONE;
+        }
+        self.detach(template);
+        true
+    }
     pub(crate) fn set_text(&mut self, node: NodeId, text: &str) {
         if let NodeData::Text(value) = &mut self.node_mut(node).data {
             *value = StrTendril::from(text);

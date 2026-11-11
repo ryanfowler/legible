@@ -1,0 +1,10 @@
+{
+  "title": "Offline backup guide",
+  "word_count_min": 30,
+  "must_contain": [
+    "Copy the archive to two separate storage locations",
+    "compare the checksums before you continue"
+  ],
+  "must_not_contain": ["Loading"],
+  "headings_min": 1
+}

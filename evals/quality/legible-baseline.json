@@ -34,7 +34,7 @@
       "reference_f1": null
     },
     "app-empty-shell": {
-      "reliability_pass": false,
+      "reliability_pass": true,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -91,17 +91,17 @@
     },
     "app-noscript-adjacent": {
       "reliability_pass": true,
-      "required_content_score": 0,
-      "noise_score": 0.5,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
       "structure_score": null,
       "metadata_score": null,
       "reference_f1": null
     },
     "app-streamed-fragments": {
       "reliability_pass": true,
-      "required_content_score": 0.3333333333333333,
+      "required_content_score": 0.6666666666666666,
       "noise_score": 1,
-      "structure_score": 0,
+      "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null
     },
@@ -115,9 +115,9 @@
     },
     "app-template-content": {
       "reliability_pass": true,
-      "required_content_score": 0,
-      "noise_score": 0.5,
-      "structure_score": 0,
+      "required_content_score": 0.6666666666666666,
+      "noise_score": 1,
+      "structure_score": 0.5,
       "metadata_score": null,
       "reference_f1": null
     },

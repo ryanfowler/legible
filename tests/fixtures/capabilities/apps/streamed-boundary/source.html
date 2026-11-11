@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head><title>Kiln firing schedule</title></head>
+  <body>
+    <div id="root">
+      <main>
+        <h1>Kiln firing schedule</h1>
+        <p>This schedule describes a bisque firing for stoneware clay in an electric kiln.</p>
+        <!--$?--><template id="B:0"></template><div class="skeleton"><p>Loading firing stages</p></div><!--/$-->
+        <p>Let the kiln cool to room temperature before you open the lid.</p>
+      </main>
+    </div>
+    <div hidden id="S:0">
+      <section>
+        <h2>Stages</h2>
+        <ol>
+          <li>Hold the kiln at a low temperature until the pieces are completely dry.</li>
+          <li>Raise the temperature slowly through the quartz inversion range.</li>
+        </ol>
+      </section>
+    </div>
+    <script>$RC("B:0", "S:0");</script>
+  </body>
+</html>

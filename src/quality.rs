@@ -1,5 +1,8 @@
 //! Extraction quality metrics and best-attempt comparison.
 
+use crate::app_shell::{
+    ChromeItem, ChromeWalk, is_busy_region, is_control, is_progress_indicator, loading_placeholder,
+};
 use crate::diagnostics::{
     SemanticCategoryCoverageInfo, SemanticCoverageCategory, SemanticCoverageInfo,
 };
@@ -1079,6 +1082,11 @@ pub(crate) struct InteractiveShellEvidence {
     controls: usize,
     data_structure: bool,
     unresolved_loading: bool,
+    /// The region has a loading placeholder and no other text outside
+    /// controls and textless indicators.
+    loading_only: bool,
+    /// A placeholder has a progressive form, such as "Loading…".
+    progressive_placeholder: bool,
 }
 
 /// Collects source structure used to recognize an application shell.
@@ -1086,49 +1094,82 @@ pub(crate) struct InteractiveShellEvidence {
 pub(crate) fn interactive_shell_evidence(dom: &Dom, root: NodeId) -> InteractiveShellEvidence {
     let mut controls = 0;
     let mut data_structure = false;
-    let mut loading_placeholder = false;
+    let mut loading_placeholder_found = false;
+    let mut progressive_placeholder = false;
+    let mut terminal_loading_text = false;
     let mut selection_prompt = false;
     for node in std::iter::once(root).chain(dom.descendants(root)) {
-        controls += usize::from(matches!(
-            dom.tag(node),
-            Some(
-                Tag::Button | Tag::Input | Tag::Select | Tag::Textarea | Tag::Form | Tag::Datalist
-            )
-        ));
+        controls += usize::from(
+            is_control(dom, node) || matches!(dom.tag(node), Some(Tag::Form | Tag::Datalist)),
+        );
         data_structure |= matches!(
             dom.tag(node),
             Some(Tag::Table | Tag::Pre | Tag::Dl | Tag::Ol | Tag::Ul)
         );
-        loading_placeholder |= dom.text_node(node).is_some_and(|text| {
-            let text = text.trim();
-            text.len() >= 7
-                && text
-                    .get(..7)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("loading"))
-                && text.split_ascii_whitespace().count() <= 3
-                && (text.ends_with('.') || text.ends_with('…'))
-        });
-        selection_prompt |= dom.text_node(node).is_some_and(|text| {
-            let text = text.trim();
-            ["choose a ", "select a "].iter().any(|prefix| {
-                text.get(..prefix.len())
-                    .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-            })
+        let Some(text) = dom.text_node(node) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(placeholder) = loading_placeholder(dom, node) {
+            loading_placeholder_found = true;
+            progressive_placeholder |= placeholder.progressive;
+        }
+        // The older unresolved-carousel rule keeps its narrow wording, so it
+        // never rejects more than before: "Loading" plus at most two words,
+        // with a final period or ellipsis.
+        terminal_loading_text |= text.len() >= 7
+            && text
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("loading"))
+            && text.split_ascii_whitespace().count() <= 3
+            && (text.ends_with('.') || text.ends_with('…'));
+        selection_prompt |= ["choose a ", "select a "].iter().any(|prefix| {
+            text.get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
         });
     }
+    // Only a region with a placeholder needs the chrome walk. It stops at
+    // the first content text or media, including media inside a control.
+    let loading_only = loading_placeholder_found
+        && !ChromeWalk::new(dom, root, false).any(|item| {
+            matches!(item, ChromeItem::Media)
+                || matches!(item, ChromeItem::Text(text) if !text.trim().is_empty())
+        });
     InteractiveShellEvidence {
         controls,
         data_structure,
-        unresolved_loading: loading_placeholder && selection_prompt,
+        unresolved_loading: terminal_loading_text && selection_prompt,
+        loading_only,
+        progressive_placeholder,
     }
 }
 
 /// Detects a control-dominated application shell with no explanatory content.
 /// The text and semantic structure come from the compiled result.
+///
+/// "Loading dock" can be a label, and a control does not change that. A
+/// loading-only result is a shell only with unambiguous loading evidence: a
+/// progressive placeholder or a source progress indicator. `source` measures
+/// the source facts only for a loading-only result.
 pub(crate) fn is_interactive_shell(
     metrics: ContentMetrics,
     evidence: InteractiveShellEvidence,
+    source: impl FnOnce() -> LoadingShellSource,
 ) -> bool {
+    if evidence.loading_only
+        && !evidence.data_structure
+        && metrics.word_count <= 12
+        && metrics.heading_count == 0
+        && metrics.paragraph_count <= 1
+    {
+        let source = source();
+        if !source.heading && (evidence.progressive_placeholder || source.progress) {
+            return true;
+        }
+    }
     let (word_limit, paragraph_limit) = if evidence.unresolved_loading {
         (30, 3)
     } else {
@@ -1141,6 +1182,29 @@ pub(crate) fn is_interactive_shell(
         return false;
     }
     evidence.controls >= 2 && !evidence.data_structure
+}
+
+/// Source facts that confirm a loading-only result. Fragment copies can drop
+/// presentational names, so these facts come from the source DOM.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LoadingShellSource {
+    /// The page has an h1 or h2 heading. Title cleanup can remove it from the
+    /// result, but a page with such a heading is not a loading-only shell.
+    heading: bool,
+    /// The selected source region, or a busy ancestor, shows progress.
+    progress: bool,
+}
+
+impl LoadingShellSource {
+    pub(crate) fn measure(dom: &Dom, body: NodeId, root: NodeId) -> Self {
+        Self {
+            heading: dom.any_descendant_by_tags(body, &[Tag::H1, Tag::H2]),
+            progress: std::iter::once(root)
+                .chain(dom.descendants(root))
+                .any(|node| is_progress_indicator(dom, node) || is_busy_region(dom, node))
+                || dom.ancestors(root).any(|node| is_busy_region(dom, node)),
+        }
+    }
 }
 
 /// Detects the short static notices emitted by an empty client application.
@@ -1711,7 +1775,8 @@ mod tests {
         let metrics = ContentMetrics::measure(&loading, root);
         assert!(is_interactive_shell(
             metrics,
-            interactive_shell_evidence(&loading, root)
+            interactive_shell_evidence(&loading, root),
+            || LoadingShellSource::measure(&loading, root, root)
         ));
 
         let document = Dom::parse_fragment(
@@ -1722,7 +1787,76 @@ mod tests {
         let root = document.root();
         assert!(!is_interactive_shell(
             ContentMetrics::measure(&document, root),
-            interactive_shell_evidence(&document, root)
+            interactive_shell_evidence(&document, root),
+            || LoadingShellSource::measure(&document, root, root)
+        ));
+    }
+
+    #[test]
+    fn loading_only_results_are_shells_without_punctuation() {
+        let shell = |html: &str| {
+            let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+            let root = dom.root();
+            is_interactive_shell(
+                ContentMetrics::measure(&dom, root),
+                interactive_shell_evidence(&dom, root),
+                || LoadingShellSource::measure(&dom, root, root),
+            )
+        };
+        assert!(shell(
+            r#"<main><div class="spinner">Loading workspace</div><button>Sign in</button></main>"#
+        ));
+        assert!(shell(
+            r#"<main aria-busy="true"><p>Please wait</p><div role="progressbar">40%</div></main>"#
+        ));
+        assert!(!shell(
+            "<main><p>Loading dock</p><p>Deliveries are accepted from 7:00 to 15:00.</p><button>Refresh</button></main>"
+        ));
+        assert!(!shell(
+            "<main><h1>Status</h1><p>Loading complete</p><p>All jobs finished.</p></main>"
+        ));
+        assert!(!shell(
+            "<main><p>Loading</p><ul><li>Bay 1</li><li>Bay 2</li></ul></main>"
+        ));
+        assert!(!shell("<main><p>Loading dock closed today.</p></main>"));
+        for media in [
+            r#"<audio controls src="/episode.mp3"></audio>"#,
+            r#"<img src="/cover.jpg" alt="">"#,
+            r#"<iframe src="https://www.youtube.com/embed/abc"></iframe>"#,
+            r#"<button><img src="/play.png" alt=""></button>"#,
+        ] {
+            assert!(
+                !shell(&format!(
+                    r#"<main><p>Loading transcript...</p>{media}<div class="spinner"></div></main>"#
+                )),
+                "{media}"
+            );
+        }
+        assert!(!shell("<main><p>Loading workspace</p></main>"));
+        assert!(!shell(
+            "<main><p>Loading dock</p><button>Check in</button></main>"
+        ));
+        assert!(!shell(
+            "<main><form><p>Loading dock</p><p>Select a bay for check-in.</p><select><option>Bay 1</option><option>Bay 2</option></select><button>Check in</button></form></main>"
+        ));
+        assert!(shell("<main><p>Loading…</p><button>Retry</button></main>"));
+        assert!(shell("<main><p>Please wait...</p></main>"));
+        let dom = Dom::parse_fragment(
+            r#"<main><div class="spinner">Loading workspace</div></main>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        assert!(!is_interactive_shell(
+            ContentMetrics::measure(&dom, root),
+            interactive_shell_evidence(&dom, root),
+            || LoadingShellSource {
+                heading: true,
+                progress: true,
+            },
+        ));
+        assert!(!shell(
+            "<main><p>Loading <b>soon</b></p><button>Retry</button></main>"
         ));
     }
 

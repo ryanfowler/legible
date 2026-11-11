@@ -1,0 +1,10 @@
+{
+  "title": "Kiln firing schedule",
+  "word_count_min": 40,
+  "must_contain": [
+    "bisque firing for stoneware clay",
+    "Raise the temperature slowly through the quartz inversion range",
+    "Let the kiln cool to room temperature"
+  ],
+  "must_not_contain": ["Loading firing stages", "$RC"]
+}

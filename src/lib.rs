@@ -62,6 +62,7 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+mod app_shell;
 mod budget;
 mod candidate;
 mod cleaning;
