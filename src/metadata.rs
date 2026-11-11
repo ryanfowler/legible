@@ -751,6 +751,22 @@ struct MetadataCandidate {
     source: MetadataSource,
     confidence: u8,
     order: usize,
+    evidence: CandidateEvidence,
+}
+
+/// How a candidate value relates to other evidence on the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateEvidence {
+    /// The page declares the value, for example in a `meta` element.
+    Declared,
+    /// The primary content shows the value to the reader. Agreement between
+    /// a visible value and a declared value is independent corroboration,
+    /// also when both values have the same public source.
+    Visible,
+    /// The page-title rules derived the value from a heading. It repeats
+    /// that heading, so it never corroborates another candidate and no
+    /// candidate corroborates it.
+    DerivedFromHeading,
 }
 
 #[derive(Default)]
@@ -779,13 +795,59 @@ impl MetadataCandidates {
         source: MetadataSource,
         confidence: u8,
     ) {
+        self.push(
+            field,
+            value.into(),
+            source,
+            confidence,
+            CandidateEvidence::Declared,
+        );
+    }
+
+    /// Adds a value that the primary content shows to the reader.
+    fn add_visible(
+        &mut self,
+        field: fn(&mut Self) -> &mut Vec<MetadataCandidate>,
+        value: impl Into<String>,
+        confidence: u8,
+    ) {
+        self.push(
+            field,
+            value.into(),
+            MetadataSource::HtmlElement,
+            confidence,
+            CandidateEvidence::Visible,
+        );
+    }
+
+    /// Adds a document title that the page-title rules derived from a
+    /// heading.
+    fn add_derived_title(&mut self, value: impl Into<String>, confidence: u8) {
+        self.push(
+            |set| &mut set.title,
+            value.into(),
+            MetadataSource::HtmlElement,
+            confidence,
+            CandidateEvidence::DerivedFromHeading,
+        );
+    }
+
+    fn push(
+        &mut self,
+        field: fn(&mut Self) -> &mut Vec<MetadataCandidate>,
+        value: String,
+        source: MetadataSource,
+        confidence: u8,
+        evidence: CandidateEvidence,
+    ) {
         let order = self.next_order;
         self.next_order += 1;
         field(self).push(MetadataCandidate {
-            value: value.into(),
+            value,
             source,
             confidence,
             order,
+            evidence,
         });
     }
 }
@@ -824,7 +886,7 @@ pub(crate) fn discover_with_diagnostics(
         }
     }
 
-    resolve_candidates(candidates, base_url, retain_diagnostics)
+    resolve_candidates(candidates, base_url, source_url, retain_diagnostics)
 }
 
 /// Finds content that is present in reliable page metadata but absent from the
@@ -1630,6 +1692,235 @@ fn collect_meta_value(out: &mut MetadataCandidates, name: &str, content: &str, i
     }
 }
 
+/// The list form of one declared author value.
+enum PersonList<'a> {
+    /// One person or organization.
+    Single,
+    /// An explicit list of full person names.
+    People(SmallVec<[&'a str; 4]>),
+    /// Two parts joined by a comma, `and`, or `&`. This can also be one
+    /// inverted name, such as `García Márquez, Gabriel José`, or one firm,
+    /// such as `Davis Polk & Wardwell`.
+    AmbiguousPair([&'a str; 2]),
+}
+
+/// Classifies a declared author value as one name or a list of names.
+///
+/// A general `meta` author has no list form, so pages join several people
+/// with commas, semicolons, `and`, or `&`. A value is a list only when every
+/// part looks like a full person name. This keeps `Smith, John`,
+/// `Jane Doe, PhD`, role suffixes, and organization names such as
+/// `Johnson & Johnson` intact. Every two-part value is ambiguous, because
+/// it can also be one inverted name or one firm named after two people. A
+/// semicolon or three or more parts makes the list explicit.
+fn person_list(value: &str) -> PersonList<'_> {
+    const MAX_PEOPLE: usize = 10;
+    let value = value.trim();
+    let parts: SmallVec<[&str; 4]> = value
+        .split([',', ';'])
+        .flat_map(|segment| segment.split(" and ").flat_map(|part| part.split(" & ")))
+        .map(|part| {
+            let part = part.trim();
+            let part = ["and ", "& "]
+                .iter()
+                .find_map(|prefix| part.strip_prefix(prefix))
+                .unwrap_or(part);
+            strip_by_prefix(part.trim()).trim()
+        })
+        .filter(|part| !part.is_empty())
+        .collect();
+    let all_caps = !value.chars().any(char::is_lowercase);
+    if parts.len() < 2
+        || parts.len() > MAX_PEOPLE
+        || !parts.iter().all(|part| is_full_person_name(part))
+        || parts.iter().any(|part| is_credential_list(part, all_caps))
+    {
+        PersonList::Single
+    } else if parts.len() == 2 && !value.contains(';') {
+        PersonList::AmbiguousPair([parts[0], parts[1]])
+    } else {
+        PersonList::People(parts)
+    }
+}
+
+/// Returns whether a list part has only credential or suffix words, such as
+/// `MD FACC`, `PhD`, `M.D.`, `Jr`, or `III`. Such a part qualifies the name
+/// before it, so it is not a person. A short all-caps word is a credential
+/// only when the value also has lowercase letters, because some pages write
+/// whole names in capitals.
+fn is_credential_list(part: &str, all_caps: bool) -> bool {
+    const CREDENTIALS: [&str; 24] = [
+        "bsc", "cpa", "dds", "dnp", "dvm", "edd", "esq", "facc", "facs", "frcp", "ii", "iii", "iv",
+        "jd", "jr", "mba", "md", "mph", "msc", "pharmd", "phd", "psyd", "rn", "sr",
+    ];
+    let mut words = part.split_whitespace().peekable();
+    words.peek().is_some()
+        && words.all(|word| {
+            let bare = word.trim_end_matches(['.', ',']);
+            CREDENTIALS
+                .iter()
+                .any(|credential| bare.eq_ignore_ascii_case(credential))
+                || bare.contains('.')
+                || (!all_caps
+                    && (2..=5).contains(&bare.len())
+                    && bare.chars().all(|character| character.is_ascii_uppercase()))
+        })
+}
+
+/// Splits general `meta` author lists into one candidate for each person.
+///
+/// Only general and Open Graph author fields are split. Citation and Dublin
+/// Core fields repeat their element for each author, so their commas belong
+/// to one inverted name. JSON-LD uses arrays for several people. An ambiguous
+/// two-part value is split only when another author candidate, such as a
+/// visible byline, names one of its parts.
+fn split_declared_author_lists(candidates: &mut MetadataCandidates) {
+    let authors = std::mem::take(&mut candidates.authors);
+    let declared_parts: Vec<SmallVec<[&str; 4]>> = authors
+        .iter()
+        .map(|candidate| {
+            if !matches!(
+                candidate.source,
+                MetadataSource::HtmlMeta | MetadataSource::OpenGraph
+            ) {
+                return SmallVec::new();
+            }
+            match person_list(&candidate.value) {
+                PersonList::Single => SmallVec::new(),
+                PersonList::People(parts) => parts,
+                PersonList::AmbiguousPair(parts) => {
+                    let corroborated = authors.iter().any(|other| {
+                        other.order != candidate.order
+                            && parts
+                                .iter()
+                                .any(|part| metadata_values_equal(part, &other.value))
+                    });
+                    if corroborated {
+                        parts.into_iter().collect()
+                    } else {
+                        SmallVec::new()
+                    }
+                }
+            }
+        })
+        .collect();
+    let mut split = Vec::with_capacity(authors.len());
+    for (candidate, parts) in authors.iter().zip(&declared_parts) {
+        // Another source can repeat the joined list, such as a byline link
+        // with the same text. That value is the same evidence, so it splits
+        // into the same people instead of remaining as a combined author.
+        let parts = if parts.is_empty() {
+            authors
+                .iter()
+                .zip(&declared_parts)
+                .find(|(other, other_parts)| {
+                    !other_parts.is_empty() && metadata_values_equal(&other.value, &candidate.value)
+                })
+                .map_or(parts, |(_, other_parts)| other_parts)
+        } else {
+            parts
+        };
+        if parts.is_empty() {
+            split.push(candidate.clone());
+            continue;
+        }
+        for part in parts {
+            if let Some(value) = normalize_person(part) {
+                split.push(MetadataCandidate {
+                    value,
+                    order: candidates.next_order,
+                    ..candidate.clone()
+                });
+                candidates.next_order += 1;
+            }
+        }
+    }
+    candidates.authors = split;
+}
+
+/// Returns whether a list part has the form of a full person name: two to four
+/// capitalized words with optional lowercase name particles, no digits, and
+/// no organization or role word.
+fn is_full_person_name(value: &str) -> bool {
+    const PARTICLES: [&str; 14] = [
+        "al", "bin", "da", "de", "del", "der", "di", "du", "la", "le", "ten", "van", "von", "y",
+    ];
+    const NON_PERSON_WORDS: [&str; 45] = [
+        "agency",
+        "associated",
+        "associates",
+        "association",
+        "board",
+        "bureau",
+        "co",
+        "college",
+        "company",
+        "corp",
+        "correspondent",
+        "council",
+        "department",
+        "desk",
+        "developer",
+        "director",
+        "editor",
+        "editors",
+        "engineer",
+        "foundation",
+        "gmbh",
+        "group",
+        "inc",
+        "institute",
+        "llc",
+        "llp",
+        "ltd",
+        "manager",
+        "media",
+        "news",
+        "newsroom",
+        "officer",
+        "partners",
+        "phd",
+        "plc",
+        "president",
+        "press",
+        "reporter",
+        "school",
+        "society",
+        "staff",
+        "team",
+        "times",
+        "university",
+        "writer",
+    ];
+    let words: SmallVec<[&str; 4]> = value.split_whitespace().collect();
+    if !(2..=4).contains(&words.len()) {
+        return false;
+    }
+    let mut capitalized = 0;
+    for word in &words {
+        let bare = word.trim_end_matches('.');
+        if bare.is_empty()
+            || !bare.chars().all(|character| {
+                character.is_alphabetic() || matches!(character, '\'' | '’' | '-' | '.')
+            })
+            || NON_PERSON_WORDS
+                .iter()
+                .any(|excluded| bare.eq_ignore_ascii_case(excluded))
+        {
+            return false;
+        }
+        if bare.chars().next().is_some_and(char::is_uppercase) {
+            capitalized += 1;
+        } else if !PARTICLES.contains(&bare) {
+            return false;
+        }
+    }
+    capitalized >= 2
+        && words
+            .first()
+            .is_some_and(|word| word.chars().next().is_some_and(char::is_uppercase))
+}
+
 fn normalize_key(value: &str) -> String {
     value
         .trim()
@@ -1686,14 +1977,6 @@ fn collect_link_candidates(dom: &Dom, out: &mut MetadataCandidates) {
 }
 
 fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut MetadataCandidates) {
-    if !document_title.is_empty() {
-        out.add(
-            |set| &mut set.title,
-            document_title,
-            MetadataSource::HtmlElement,
-            84,
-        );
-    }
     let elements: Vec<_> = dom
         .descendants(dom.root())
         .filter(|&id| dom.is_element(id))
@@ -1766,37 +2049,19 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
             &heading_context,
         )
     });
+    collect_title_candidates(dom, document_title, &elements, &heading_context, out);
+    collect_language_candidates(dom, primary_heading, out);
     let mut text_buffer = String::new();
     for id in elements {
-        if dom.tag(id) == Some(Tag::Html) {
-            if let Some(language) = dom.attr(id, AttrName::Lang) {
-                out.add(
-                    |set| &mut set.language,
-                    language,
-                    MetadataSource::HtmlElement,
-                    100,
-                );
-            }
-            if let Some(direction) = dom.attr(id, AttrName::Dir) {
-                out.add(
-                    |set| &mut set.direction,
-                    direction,
-                    MetadataSource::HtmlElement,
-                    100,
-                );
-            }
-        }
-        if dom.tag(id) == Some(Tag::H1) {
-            let text = visible_heading_text(dom, id);
-            let confidence = visible_heading_confidence(dom, id);
-            if confidence > 0 {
-                out.add(
-                    |set| &mut set.title,
-                    &text,
-                    MetadataSource::HtmlElement,
-                    confidence,
-                );
-            }
+        if dom.tag(id) == Some(Tag::Html)
+            && let Some(direction) = dom.attr(id, AttrName::Dir)
+        {
+            out.add(
+                |set| &mut set.direction,
+                direction,
+                MetadataSource::HtmlElement,
+                100,
+            );
         }
         let itemprop = dom.attr(id, AttrName::ItemProp).unwrap_or("");
         let has_author_itemprop = has_token(itemprop, "author");
@@ -1859,6 +2124,23 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
                 MetadataSource::Inferred,
                 48,
             );
+        } else if is_dateline_candidate(dom, id)
+            && metadata_visible[id.index()]
+            && !inside_metadata_sidebar[id.index()]
+            && primary_heading.is_some_and(|heading| {
+                element_positions[id.index()].abs_diff(element_positions[heading.index()]) <= 12
+                    && !dom.ancestors(heading).any(|ancestor| ancestor == id)
+                    && is_near_heading(dom, id, heading)
+            })
+            && let Some(date) =
+                primary_heading.and_then(|heading| visible_dateline_date(dom, id, heading))
+        {
+            out.add(
+                |set| &mut set.published_time,
+                date,
+                MetadataSource::Inferred,
+                48,
+            );
         }
         if dom.tag(id) == Some(Tag::A) {
             let rel_author = dom
@@ -1897,7 +2179,7 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
                 out.add(|set| &mut set.authors, value, MetadataSource::Inferred, 62);
             }
             if is_byline_container(dom, id) {
-                let visible_date = preferred_byline_date(dom, id);
+                let visible_date = preferred_byline_date(dom, id, written_date);
                 if let Some(date) = visible_date.as_deref() {
                     out.add(
                         |set| &mut set.published_time,
@@ -1947,14 +2229,782 @@ fn collect_element_candidates(dom: &Dom, document_title: &str, out: &mut Metadat
     }
 }
 
-fn preferred_byline_date(dom: &Dom, container: NodeId) -> Option<String> {
-    dom.descendants(container)
-        .filter_map(|node| dom.text_node(node))
-        .find_map(extract_written_date)
+/// Where a visible level-one heading is on the page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeadingPlacement {
+    /// Inside an `article`, `main`, or primary-content container.
+    Content,
+    /// In the page banner or page footer.
+    PageChrome,
+    /// Elsewhere.
+    Other,
 }
 
-fn extract_written_date(text: &str) -> Option<String> {
-    written_date(text).map(|(_, date)| date)
+/// Adds the document title and the visible level-one headings.
+///
+/// A heading in the primary content is visible evidence. It corroborates an
+/// equal document title. A document title that only repeats a page-chrome
+/// heading, such as a site masthead, names the site or desk, not the page.
+/// See `is_page_chrome_heading` for the evidence.
+/// That title gets less confidence than a different primary-content heading.
+fn collect_title_candidates(
+    dom: &Dom,
+    document_title: &str,
+    elements: &[NodeId],
+    heading_context: &[u8],
+    out: &mut MetadataCandidates,
+) {
+    let headings: Vec<_> = elements
+        .iter()
+        .filter(|&&id| dom.tag(id) == Some(Tag::H1))
+        .filter_map(|&id| {
+            let confidence = visible_heading_confidence(dom, id);
+            if confidence == 0 {
+                return None;
+            }
+            let text = visible_heading_text(dom, id);
+            let placement = if heading_context[id.index()] >= 80 {
+                HeadingPlacement::Content
+            } else if is_page_chrome_heading(dom, id) {
+                HeadingPlacement::PageChrome
+            } else {
+                HeadingPlacement::Other
+            };
+            Some((text, confidence, placement))
+        })
+        .collect();
+    if !document_title.is_empty() {
+        let matches_heading = |expected: HeadingPlacement| {
+            headings.iter().any(|(text, _, placement)| {
+                *placement == expected && metadata_values_equal(text, document_title)
+            })
+        };
+        let names_page_chrome = matches_heading(HeadingPlacement::PageChrome)
+            && !matches_heading(HeadingPlacement::Content)
+            && !matches_heading(HeadingPlacement::Other)
+            && headings
+                .iter()
+                .any(|(_, _, placement)| *placement == HeadingPlacement::Content);
+        let confidence = if names_page_chrome { 76 } else { 84 };
+        if declared_title_names(dom, document_title) {
+            out.add(
+                |set| &mut set.title,
+                document_title,
+                MetadataSource::HtmlElement,
+                confidence,
+            );
+        } else {
+            out.add_derived_title(document_title, confidence);
+        }
+    }
+    for (text, confidence, placement) in headings {
+        if placement == HeadingPlacement::Content {
+            out.add_visible(|set| &mut set.title, text, confidence);
+        } else {
+            out.add(
+                |set| &mut set.title,
+                text,
+                MetadataSource::HtmlElement,
+                confidence,
+            );
+        }
+    }
+}
+
+/// Returns whether the declared `<title>` text names `title`. The text can
+/// equal it or add a site or section segment after a title separator, such
+/// as `Headline | Site` or `Section: Headline`. A title that the page-title
+/// rules derived from a heading does not pass, because the declaration does
+/// not state it.
+fn declared_title_names(dom: &Dom, title: &str) -> bool {
+    const SEPARATORS: [&str; 7] = [" | ", " - ", " — ", " – ", " :: ", " · ", ": "];
+    let Some(element) = dom.first_descendant_by_tag(dom.root(), Tag::Title) else {
+        return false;
+    };
+    let declared = normalize_whitespace(get_inner_text_owned(dom, element).trim());
+    let title = title.trim();
+    metadata_values_equal(&declared, title)
+        || SEPARATORS.iter().any(|separator| {
+            declared
+                .split(separator)
+                .any(|segment| metadata_values_equal(segment.trim(), title))
+        })
+}
+
+/// Returns whether a visible heading is in the page banner or page footer.
+///
+/// HTML scopes a `header` or `footer` inside `article`, `aside`, `main`,
+/// `nav`, or `section` to that content, so such a landmark is not page chrome.
+/// The landmark must also be a child of `body` or of one top-level wrapper,
+/// because a deeply nested component header is not the site masthead. A
+/// document title that equals a declared site name is handled when the title
+/// is resolved.
+fn is_page_chrome_heading(dom: &Dom, heading: NodeId) -> bool {
+    let Some(landmark) = dom
+        .ancestors(heading)
+        .find(|&node| matches!(dom.tag(node), Some(Tag::Header | Tag::Footer)))
+    else {
+        return false;
+    };
+    !dom.ancestors(landmark).any(|node| {
+        matches!(
+            dom.tag(node),
+            Some(Tag::Article | Tag::Aside | Tag::Main | Tag::Nav | Tag::Section)
+        )
+    }) && dom
+        .ancestors(landmark)
+        .take(2)
+        .any(|node| dom.tag(node) == Some(Tag::Body))
+}
+
+/// Adds the document language and a more specific content-root language.
+///
+/// The `lang` attribute that governs the primary heading on an `article`,
+/// `main`, `body`, or primary-content container states the language of the
+/// page content. When its primary language subtag conflicts with the
+/// document language, it replaces the document language as the best value.
+fn collect_language_candidates(
+    dom: &Dom,
+    primary_heading: Option<NodeId>,
+    out: &mut MetadataCandidates,
+) {
+    let document_language = dom
+        .first_descendant_by_tag(dom.root(), Tag::Html)
+        .and_then(|html| dom.attr(html, AttrName::Lang))
+        .filter(|value| !value.trim().is_empty());
+    let content_language = primary_heading
+        .and_then(|heading| content_root_language(dom, heading))
+        .filter(|content| {
+            document_language.is_none_or(|document| !same_primary_language(document, content))
+        });
+    if let Some(language) = content_language {
+        out.add(
+            |set| &mut set.language,
+            language,
+            MetadataSource::HtmlElement,
+            100,
+        );
+    }
+    if let Some(language) = document_language {
+        out.add(
+            |set| &mut set.language,
+            language,
+            MetadataSource::HtmlElement,
+            if content_language.is_some() { 80 } else { 100 },
+        );
+    }
+}
+
+fn content_root_language(dom: &Dom, heading: NodeId) -> Option<&str> {
+    let mut current = dom.parent(heading);
+    while let Some(node) = current {
+        if dom.tag(node) == Some(Tag::Html) {
+            return None;
+        }
+        if let Some(language) = dom
+            .attr(node, AttrName::Lang)
+            .filter(|value| !value.trim().is_empty())
+        {
+            let content_root = matches!(dom.tag(node), Some(Tag::Article | Tag::Main | Tag::Body))
+                || [
+                    dom.attr(node, AttrName::Class),
+                    dom.attr(node, AttrName::Id),
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|value| value.split_ascii_whitespace())
+                .any(is_primary_content_token);
+            return content_root.then_some(language);
+        }
+        current = dom.parent(node);
+    }
+    None
+}
+
+fn same_primary_language(first: &str, second: &str) -> bool {
+    fn primary(value: &str) -> &str {
+        value.trim().split(['-', '_']).next().unwrap_or("")
+    }
+    primary(first).eq_ignore_ascii_case(primary(second))
+}
+
+/// Returns the publication date in a byline or dateline container.
+///
+/// The container can hold several dates. Each visible date has a role:
+///
+/// - A publication label, such as `Published` or `Posted on`, or a
+///   publication class, ID, or `itemprop` makes it a publication date. The
+///   date with the strongest [`PublicationEvidence`] wins. Equal evidence
+///   keeps the first date in source order.
+/// - A modification label or marker, such as `Updated at` or
+///   `class="updated"`, excludes it.
+/// - Other dates have no stated role. Without a publication date, the first
+///   of them in source order is used. A `time` with a calendar `datetime`
+///   gives that value, because it keeps the source format. A text date comes
+///   from `parse`.
+///
+/// A `datetime` value must be a calendar date or date-time. Text inside a
+/// `time` element with such a value is the same date, so it is not read again.
+fn preferred_byline_date(
+    dom: &Dom,
+    container: NodeId,
+    parse: fn(&str) -> Option<(usize, String)>,
+) -> Option<String> {
+    // The strongest publication evidence wins. Equal evidence keeps the
+    // first date in source order. Unstated dates have the weakest evidence.
+    let mut best: Option<(Option<PublicationEvidence>, String)> = None;
+    let mut consider = |node: NodeId, prefix: &str, value: String| {
+        let strength = match date_role(dom, node, container, prefix) {
+            DateRole::Publication(evidence) => Some(evidence),
+            DateRole::Unstated => None,
+            DateRole::Modification | DateRole::Other => return,
+        };
+        if best.as_ref().is_none_or(|(current, _)| strength > *current) {
+            best = Some((strength, value));
+        }
+    };
+    for node in dom.descendants(container) {
+        if dom.tag(node) == Some(Tag::Time) {
+            if let Some(value) = calendar_datetime(dom, node)
+                && !is_hidden_within(dom, node, container)
+            {
+                consider(node, "", value.to_owned());
+            }
+            continue;
+        }
+        let Some(text) = dom.text_node(node) else {
+            continue;
+        };
+        if dom
+            .ancestors(node)
+            .take_while(|&ancestor| ancestor != container)
+            .any(|ancestor| calendar_datetime(dom, ancestor).is_some())
+            || is_hidden_within(dom, node, container)
+        {
+            continue;
+        }
+        // One text node can hold several dates, such as
+        // `Updated August 14, 2026 · Published August 13, 2026`. The text
+        // directly before each date is its label.
+        let mut offset = 0;
+        while let Some((start, date)) = text.get(offset..).and_then(parse) {
+            let start = offset + start;
+            consider(node, label_window(&text[..start]), date);
+            offset = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    best.map(|(_, value)| value)
+}
+
+/// Returns the end of the text before a date, bounded to the label length
+/// that `label_role_at_end` can use.
+fn label_window(prefix: &str) -> &str {
+    const LABEL_BYTE_LIMIT: usize = 64;
+    let mut start = prefix.len().saturating_sub(LABEL_BYTE_LIMIT);
+    while !prefix.is_char_boundary(start) {
+        start += 1;
+    }
+    &prefix[start..]
+}
+
+/// The role that labels and markers give a visible date.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DateRole {
+    Publication(PublicationEvidence),
+    Modification,
+    /// A different date, such as an event start date.
+    Other,
+    Unstated,
+}
+
+/// The kind of evidence that marks a publication date, from weakest to
+/// strongest.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PublicationEvidence {
+    /// A generic post-date class, such as `entry-date`.
+    GenericClass,
+    /// A specific class or ID part, such as `published`.
+    SpecificClass,
+    /// A visible label, such as `Published` or `First published`.
+    Label,
+    /// The schema.org `datePublished` property.
+    Property,
+}
+
+fn calendar_datetime(dom: &Dom, node: NodeId) -> Option<&str> {
+    (dom.tag(node) == Some(Tag::Time))
+        .then(|| dom.attr(node, AttrName::Datetime))
+        .flatten()
+        .map(str::trim)
+        .filter(|value| is_calendar_datetime(value))
+}
+
+/// Returns whether a `datetime` value names a calendar date or date-time,
+/// such as `2026-08-13` or `2026-08-13T10:00Z`. A duration such as `PT5M` or
+/// a time of day such as `10:00` is not a publication date.
+fn is_calendar_datetime(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 4
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes.get(4).is_none_or(|&byte| byte == b'-')
+}
+
+/// Returns whether a node or an ancestor up to and including the container
+/// is hidden.
+fn is_hidden_within(dom: &Dom, node: NodeId, container: NodeId) -> bool {
+    let mut current = Some(node);
+    while let Some(element) = current {
+        if is_hidden_node(dom, element) {
+            return true;
+        }
+        current = (element != container)
+            .then(|| dom.parent(element))
+            .flatten();
+    }
+    false
+}
+
+/// Returns the role of a date node inside a container. `prefix` is the text
+/// of a text node before its date.
+///
+/// The evidence is checked in this order. The nearest marker on the node or
+/// an ancestor inside the container decides each marker step.
+///
+/// 1. A schema.org `itemprop`, such as `datePublished` or `dateModified`.
+/// 2. A visible label at the start of a date element, or directly before the
+///    date: the prefix when it has words, or else the end of the nearest
+///    preceding non-blank sibling at the node or an ancestor inside the
+///    container.
+/// 3. A specific class or ID part, such as `published` or `updated`.
+/// 4. A generic post-date class or ID, such as `entry-date`.
+fn date_role(dom: &Dom, node: NodeId, container: NodeId, prefix: &str) -> DateRole {
+    const LABEL_CHAR_LIMIT: usize = 48;
+    let nearest_marker = |tier: MarkerTier| {
+        let mut current = Some(node);
+        while let Some(element) = current {
+            if let Some(role) = marker_role(dom, element, tier) {
+                return Some(role);
+            }
+            current = (element != container)
+                .then(|| dom.parent(element))
+                .flatten();
+        }
+        None
+    };
+    if let Some(role) = nearest_marker(MarkerTier::Property) {
+        return role;
+    }
+    if dom.is_element(node) {
+        let mut own_text = String::new();
+        dom.append_normalized_text_limited(node, &mut own_text, 4 * LABEL_CHAR_LIMIT);
+        if let Some(role) = label_role_at_start(&own_text) {
+            return role;
+        }
+    }
+    if let Some(role) = label_role_at_end(&preceding_label(dom, node, container, prefix)) {
+        return role;
+    }
+    nearest_marker(MarkerTier::SpecificClass)
+        .or_else(|| nearest_marker(MarkerTier::GenericClass))
+        .unwrap_or(DateRole::Unstated)
+}
+
+/// Assembles the visible text directly before a date, starting with
+/// `prefix`. The text grows backward through preceding siblings, and then
+/// through the siblings of ancestors inside the container. It never crosses
+/// an earlier `time` element. It stops when it
+/// has a word that is not a connector, such as `Updated` in
+/// `<span>Updated</span> on <time>`, or a separator such as `·`. Hidden
+/// subtrees do not contribute.
+fn preceding_label(dom: &Dom, node: NodeId, container: NodeId, prefix: &str) -> String {
+    const LABEL_CHAR_LIMIT: usize = 48;
+    let mut label = prefix.to_owned();
+    let mut current = node;
+    while !is_complete_label(&label) && current != container {
+        let mut sibling = dom.prev_sibling(current);
+        while let Some(previous) = sibling {
+            if !is_hidden_node(dom, previous) {
+                let (text, reached_date) = trailing_text(dom, previous, LABEL_CHAR_LIMIT);
+                label.insert(0, ' ');
+                label.insert_str(0, &text);
+                if reached_date || is_complete_label(&label) {
+                    return label;
+                }
+            }
+            sibling = dom.prev_sibling(previous);
+        }
+        let Some(parent) = dom.parent(current) else {
+            break;
+        };
+        current = parent;
+    }
+    label
+}
+
+/// The longest label segment, in characters, that can describe a date.
+const LABEL_SEGMENT_CHARS: usize = 48;
+
+/// Returns whether assembled label text reaches back far enough: it has a
+/// separator, an earlier date, or a full label segment.
+fn is_complete_label(text: &str) -> bool {
+    text.contains(is_label_separator)
+        || text.chars().count() >= LABEL_SEGMENT_CHARS
+        || combined_written_date_value(text).is_some()
+}
+
+fn is_label_separator(character: char) -> bool {
+    matches!(character, '·' | '|' | '•' | ';' | '\n')
+}
+
+fn is_hidden_node(dom: &Dom, node: NodeId) -> bool {
+    has_static_hidden_marker(dom, node)
+        || dom
+            .attr(node, AttrName::AriaHidden)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// Returns the last `limit` characters of the visible text in a subtree. The
+/// scan starts at the end, so a long subtree costs only the text it needs.
+///
+/// A `time` element is an earlier date, so the scan stops before it, whatever
+/// text it shows. The flag is `true` when the scan reached such a date.
+fn trailing_text(dom: &Dom, root: NodeId, limit: usize) -> (String, bool) {
+    let mut pieces = Vec::new();
+    let mut chars = 0;
+    let mut reached_date = false;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if let Some(text) = dom.text_node(node) {
+            chars += text.chars().count();
+            pieces.push(text);
+            if chars >= limit {
+                break;
+            }
+            continue;
+        }
+        if dom.tag(node) == Some(Tag::Time) {
+            reached_date = true;
+            break;
+        }
+        if !is_hidden_node(dom, node) {
+            stack.extend(dom.children(node));
+        }
+    }
+    let joined: String = pieces.into_iter().rev().collect();
+    let normalized = normalize_whitespace(&joined);
+    let skip = normalized.chars().count().saturating_sub(limit);
+    (normalized.chars().skip(skip).collect(), reached_date)
+}
+
+const MODIFICATION_LABELS: [&str; 5] = ["updated", "update", "modified", "revised", "edited"];
+const PUBLICATION_LABELS: [&str; 2] = ["published", "posted"];
+
+fn label_role(label: &str) -> Option<DateRole> {
+    if MODIFICATION_LABELS
+        .iter()
+        .any(|expected| label.eq_ignore_ascii_case(expected))
+    {
+        Some(DateRole::Modification)
+    } else if PUBLICATION_LABELS
+        .iter()
+        .any(|expected| label.eq_ignore_ascii_case(expected))
+    {
+        Some(DateRole::Publication(PublicationEvidence::Label))
+    } else {
+        None
+    }
+}
+
+/// Returns the role of a label at the start of a date element's text, such
+/// as `Updated 10:00` or `Last updated`. `Last` and `First` are qualifiers.
+fn label_role_at_start(text: &str) -> Option<DateRole> {
+    let mut words = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty());
+    let first = words.next()?;
+    if ["last", "first"]
+        .iter()
+        .any(|qualifier| first.eq_ignore_ascii_case(qualifier))
+    {
+        label_role(words.next()?)
+    } else {
+        label_role(first)
+    }
+}
+
+/// Returns the role of the label segment directly before a date.
+///
+/// The segment is the text after the nearest separator (`·`, `|`, `•`, `;`,
+/// or a line break) or after an earlier date, bounded to
+/// `LABEL_SEGMENT_CHARS` characters. A whole modification word, such as
+/// `updated` in `Last updated as of`, makes the date a modification date. Else
+/// a whole publication word, such as `published` in `First published on:`,
+/// makes it a publication date. A modification word followed by `by`, such as
+/// `edited by`, credits a person, so it is not a date label.
+fn label_role_at_end(text: &str) -> Option<DateRole> {
+    let segment = label_segment(text);
+    let words: SmallVec<[&str; 8]> = segment
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has_word = |labels: &[&str]| {
+        words.iter().enumerate().any(|(index, word)| {
+            labels.iter().any(|label| word.eq_ignore_ascii_case(label))
+                && !words
+                    .get(index + 1)
+                    .is_some_and(|next| next.eq_ignore_ascii_case("by"))
+        })
+    };
+    if has_word(&MODIFICATION_LABELS) {
+        Some(DateRole::Modification)
+    } else if has_word(&PUBLICATION_LABELS) {
+        Some(DateRole::Publication(PublicationEvidence::Label))
+    } else {
+        None
+    }
+}
+
+/// Returns the byte length of a written date at the start of `text`. A
+/// written date has a month, a day, and a year word.
+fn written_date_len(text: &str) -> usize {
+    let mut words = 0;
+    let mut in_word = false;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if in_word {
+                words += 1;
+                if words == 3 {
+                    return index;
+                }
+            }
+            in_word = false;
+        } else {
+            in_word = true;
+        }
+    }
+    text.len()
+}
+
+/// Returns the label segment at the end of `text`: the text after the last
+/// separator or earlier written date, bounded to `LABEL_SEGMENT_CHARS`
+/// characters.
+fn label_segment(text: &str) -> &str {
+    let mut segment = text.rfind(is_label_separator).map_or(text, |index| {
+        &text[index + text[index..].chars().next().map_or(1, char::len_utf8)..]
+    });
+    while let Some((start, _)) = combined_written_date_value(segment) {
+        segment = &segment[start + written_date_len(&segment[start..])..];
+    }
+    let skip = segment.chars().count().saturating_sub(LABEL_SEGMENT_CHARS);
+    segment
+        .char_indices()
+        .nth(skip)
+        .map_or("", |(index, _)| &segment[index..])
+}
+
+/// Returns the publication date of a short visible dateline near the primary
+/// heading, such as `<p class="date">Published August 13, 2026</p>`.
+///
+/// The line must state its role with a publication label, such as
+/// `Published`, or a publication marker, such as `class="published"`,
+/// `class="entry-date"`, or `itemprop="datePublished"`. A generic `date`
+/// token is not enough. The date must follow the label directly, and little text can
+/// follow the date. A modification label, class, ID, or `itemprop` on the line
+/// or on a wrapper rejects it. The caller checks visibility and heading
+/// proximity.
+fn visible_dateline_date(dom: &Dom, node: NodeId, heading: NodeId) -> Option<String> {
+    const MAX_DATELINE_CHARS: usize = 80;
+    const TEXT_BYTE_LIMIT: usize = 256;
+    const MAX_TRAILING_CHARS: usize = 24;
+    let mut text = String::new();
+    dom.append_normalized_text_limited(node, &mut text, TEXT_BYTE_LIMIT);
+    let text = text.trim();
+    if text.is_empty() || text.len() >= TEXT_BYTE_LIMIT || text.chars().count() > MAX_DATELINE_CHARS
+    {
+        return None;
+    }
+    let marked_publication = match dateline_marker_role(dom, node, heading) {
+        DateRole::Publication(_) => true,
+        DateRole::Unstated => false,
+        DateRole::Modification | DateRole::Other => return None,
+    };
+    if label_role_at_start(text) == Some(DateRole::Modification) {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let labelled = ["first published", "published", "posted"]
+        .iter()
+        .find_map(|label| text.get(label.len()..).filter(|_| lower.starts_with(label)))
+        .map(|remainder| {
+            let remainder = remainder.trim_start_matches([':', ' ']);
+            remainder
+                .strip_prefix("on ")
+                .unwrap_or(remainder)
+                .trim_start()
+        });
+    let remainder = match labelled {
+        Some(remainder) => remainder,
+        None if marked_publication => text,
+        None => return None,
+    };
+    let (start, _) = combined_written_date_value(remainder)?;
+    // A written date has a month, a day, and a year word.
+    let trailing_chars: usize = remainder[start..]
+        .split_ascii_whitespace()
+        .skip(3)
+        .map(|word| word.chars().count() + 1)
+        .sum();
+    if start > 0 || trailing_chars > MAX_TRAILING_CHARS {
+        return None;
+    }
+    preferred_byline_date(dom, node, combined_written_date_value)
+}
+
+/// Returns the date role that markers give a dateline.
+///
+/// The search covers the dateline and its wrappers up to the first ancestor
+/// that also holds the primary heading, such as the article header, so
+/// page-level classes do not count. An `itemprop` other than `datePublished`
+/// states a different property, such as an event `startDate`, so it gives
+/// [`DateRole::Other`]. Otherwise the nearest marker decides.
+fn dateline_marker_role(dom: &Dom, node: NodeId, heading: NodeId) -> DateRole {
+    let elements = || {
+        std::iter::once(node).chain(
+            dom.ancestors(node)
+                .take_while(|&ancestor| !dom.ancestors(heading).any(|shared| shared == ancestor)),
+        )
+    };
+    if elements().any(|element| {
+        dom.attr(element, AttrName::ItemProp)
+            .is_some_and(|itemprop| {
+                !itemprop.trim().is_empty() && !has_token(itemprop, "datePublished")
+            })
+    }) {
+        return DateRole::Other;
+    }
+    [
+        MarkerTier::Property,
+        MarkerTier::SpecificClass,
+        MarkerTier::GenericClass,
+    ]
+    .into_iter()
+    .find_map(|tier| elements().find_map(|element| marker_role(dom, element, tier)))
+    .unwrap_or(DateRole::Unstated)
+}
+
+/// The kind of marker that `marker_role` reads. Stronger kinds come first.
+#[derive(Clone, Copy)]
+enum MarkerTier {
+    /// A schema.org `itemprop`.
+    Property,
+    /// A class or ID part that names the date role, such as `published`.
+    SpecificClass,
+    /// A class or ID that names a post date without a role, such as
+    /// `entry-date`.
+    GenericClass,
+}
+
+/// Returns the date role that one kind of marker on an element states.
+///
+/// - [`MarkerTier::Property`]: `datePublished` and `dateModified` give their
+///   roles. Another date or time property, such as `startDate`, gives
+///   [`DateRole::Other`].
+/// - [`MarkerTier::SpecificClass`]: every class and ID part counts, so
+///   `class="date updated"` marks a modification date. Publishing systems
+///   often mark the original date with both roles, such as WordPress
+///   `class="entry-date published updated"`, so a publication part wins on
+///   the same element. A bare `update` part is not a marker, because script
+///   hooks such as `update_posted_time` name an action, not the date role.
+/// - [`MarkerTier::GenericClass`]: `entry-date` and `post-date` usually name
+///   the publication date of a post. A visible label or a specific marker
+///   overrides them.
+fn marker_role(dom: &Dom, element: NodeId, tier: MarkerTier) -> Option<DateRole> {
+    const PUBLICATION_PARTS: [&str; 5] = [
+        "datepublished",
+        "pubdate",
+        "publicationdate",
+        "publishdate",
+        "published",
+    ];
+    const MODIFICATION_PARTS: [&str; 9] = [
+        "datemodified",
+        "dateupdated",
+        "edited",
+        "lastmod",
+        "lastmodified",
+        "lastupdated",
+        "modified",
+        "revised",
+        "updated",
+    ];
+    const GENERIC_TOKENS: [&str; 5] = [
+        "entry-date",
+        "entry_date",
+        "post-date",
+        "post_date",
+        "postdate",
+    ];
+    let class_and_id = || {
+        [
+            dom.attr(element, AttrName::Class),
+            dom.attr(element, AttrName::Id),
+        ]
+        .into_iter()
+        .flatten()
+    };
+    match tier {
+        MarkerTier::Property => {
+            let itemprop = dom.attr(element, AttrName::ItemProp)?;
+            if has_token(itemprop, "datePublished") {
+                Some(DateRole::Publication(PublicationEvidence::Property))
+            } else if has_token(itemprop, "dateModified") {
+                Some(DateRole::Modification)
+            } else if itemprop.split_ascii_whitespace().any(|property| {
+                contains_ascii_case_insensitive(property, "date")
+                    || contains_ascii_case_insensitive(property, "time")
+                    || ["validFrom", "validThrough", "expires"]
+                        .iter()
+                        .any(|name| property.eq_ignore_ascii_case(name))
+            }) {
+                Some(DateRole::Other)
+            } else {
+                None
+            }
+        }
+        MarkerTier::SpecificClass => {
+            let has_part = |parts: &[&str]| {
+                class_and_id()
+                    .flat_map(|value| {
+                        value.split(|character: char| !character.is_ascii_alphanumeric())
+                    })
+                    .any(|part| parts.iter().any(|marker| part.eq_ignore_ascii_case(marker)))
+            };
+            if has_part(&PUBLICATION_PARTS) {
+                Some(DateRole::Publication(PublicationEvidence::SpecificClass))
+            } else if has_part(&MODIFICATION_PARTS) {
+                Some(DateRole::Modification)
+            } else {
+                None
+            }
+        }
+        MarkerTier::GenericClass => class_and_id()
+            .flat_map(str::split_ascii_whitespace)
+            .any(|token| {
+                GENERIC_TOKENS
+                    .iter()
+                    .any(|name| token.eq_ignore_ascii_case(name))
+            })
+            .then_some(DateRole::Publication(PublicationEvidence::GenericClass)),
+    }
+}
+
+/// Cheap tag gate for a short dateline element. Headings, times, and author
+/// containers have their own rules.
+fn is_dateline_candidate(dom: &Dom, node: NodeId) -> bool {
+    matches!(
+        dom.tag(node),
+        Some(Tag::P | Tag::Div | Tag::Span | Tag::Small | Tag::Address)
+    ) && !is_author_container(dom, node)
 }
 
 fn written_date(text: &str) -> Option<(usize, String)> {
@@ -2608,27 +3658,51 @@ fn is_author_role_node(dom: &Dom, node: NodeId) -> bool {
     })
 }
 
+/// Returns the one section link in a byline.
+///
+/// Category evidence comes first: a section or category path, `rel="category"`,
+/// or a link after a rule. A `rel="tag"` link names a topic, so it is the
+/// section only when the byline has no category evidence. More than one link
+/// of the selected kind is ambiguous.
 fn preferred_byline_section_node(
     dom: &Dom,
     container: NodeId,
     author_node: Option<NodeId>,
 ) -> Option<NodeId> {
-    let mut links = dom.descendants(container).filter(|&node| {
-        dom.tag(node) == Some(Tag::A)
-            && author_node.is_none_or(|author| node != author)
-            && is_section_link(dom, node)
-            && !dom
-                .attr(node, AttrName::Rel)
-                .is_some_and(|rel| has_token(rel, "author"))
-            && !dom
-                .attr(node, AttrName::Href)
-                .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"))
-    });
-    let first = links.next()?;
-    links.next().is_none().then_some(first)
+    let links = || {
+        dom.descendants(container).filter(|&node| {
+            dom.tag(node) == Some(Tag::A)
+                && author_node.is_none_or(|author| node != author)
+                && !dom
+                    .attr(node, AttrName::Rel)
+                    .is_some_and(|rel| has_token(rel, "author"))
+                && !dom
+                    .attr(node, AttrName::Href)
+                    .is_some_and(|href| href.to_ascii_lowercase().contains("/author/"))
+        })
+    };
+    let only = |evidence: SectionEvidence| {
+        let mut matches = links().filter(|&node| section_evidence(dom, node) == evidence);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    };
+    if links().any(|node| section_evidence(dom, node) == SectionEvidence::Category) {
+        only(SectionEvidence::Category)
+    } else {
+        only(SectionEvidence::Tag)
+    }
 }
 
-fn is_section_link(dom: &Dom, link: NodeId) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SectionEvidence {
+    None,
+    /// A section or category link.
+    Category,
+    /// A topic tag link.
+    Tag,
+}
+
+fn section_evidence(dom: &Dom, link: NodeId) -> SectionEvidence {
     let section_path = dom.attr(link, AttrName::Href).is_some_and(|href| {
         let path = href.to_ascii_lowercase();
         [
@@ -2642,7 +3716,17 @@ fn is_section_link(dom: &Dom, link: NodeId) -> bool {
         .iter()
         .any(|marker| path.contains(marker))
     });
-    section_path || previous_element_sibling(dom, link) == Some(Tag::Hr)
+    let rel = dom.attr(link, AttrName::Rel).unwrap_or("");
+    if section_path
+        || has_token(rel, "category")
+        || previous_element_sibling(dom, link) == Some(Tag::Hr)
+    {
+        SectionEvidence::Category
+    } else if has_token(rel, "tag") {
+        SectionEvidence::Tag
+    } else {
+        SectionEvidence::None
+    }
 }
 
 fn previous_element_sibling(dom: &Dom, node: NodeId) -> Option<Tag> {
@@ -2733,11 +3817,13 @@ fn nearest_ancestor_with_tag(dom: &Dom, node: NodeId, tag: Tag) -> Option<NodeId
 fn resolve_candidates(
     mut candidates: MetadataCandidates,
     base_url: Option<&Url>,
+    source_url: Option<&Url>,
     retain_diagnostics: bool,
 ) -> (Metadata, Option<MetadataDiagnostics>) {
     normalize_all(&mut candidates.title, normalize_title);
     normalize_all(&mut candidates.description, normalize_description);
     normalize_all(&mut candidates.authors, normalize_person);
+    split_declared_author_lists(&mut candidates);
     if candidates
         .authors
         .iter()
@@ -2765,6 +3851,10 @@ fn resolve_candidates(
         )
     });
     let site_name = resolve_one(&candidates.site_name);
+    let source_host = source_url.and_then(Url::host_str);
+    candidates
+        .tags
+        .retain(|tag| !names_publisher(&tag.value, site_name.as_deref(), source_host));
     let selected_title = resolve_best(&candidates.title);
     let mut title = selected_title.map(|candidate| candidate.value.clone());
     if let (Some(title_value), Some(site)) = (&title, &site_name) {
@@ -2826,6 +3916,47 @@ fn resolve_candidates(
         tags: list_diagnostics(&candidates.tags, &metadata.tags),
     });
     (metadata, diagnostics)
+}
+
+/// Returns whether a tag only names the publication. Keyword lists often
+/// repeat the site name, such as `Example News` on `example.com`. Such a value
+/// does not describe the page topic. A tag names the publication when its
+/// letters and digits equal the resolved site name. A tag that adds one
+/// generic publication word, such as `News`, also matches the site name or
+/// the first label of the source host. A bare host label such as `Python` on
+/// `python.org` stays because it can name the topic. Site-name candidates that
+/// lost resolution are not publication names.
+fn names_publisher(tag: &str, site_name: Option<&str>, source_host: Option<&str>) -> bool {
+    const PUBLICATION_WORDS: [&str; 6] = ["blog", "daily", "magazine", "media", "news", "online"];
+    fn compact(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    let tag_name = compact(tag);
+    if tag_name.is_empty() {
+        return false;
+    }
+    let site_name = site_name.map(compact).filter(|name| !name.is_empty());
+    let tag_base = tag
+        .rsplit_once(char::is_whitespace)
+        .filter(|(_, last)| {
+            PUBLICATION_WORDS
+                .iter()
+                .any(|word| last.eq_ignore_ascii_case(word))
+        })
+        .map(|(base, _)| compact(base))
+        .filter(|base| !base.is_empty());
+    let host_label = source_host
+        .map(|host| host.strip_prefix("www.").unwrap_or(host))
+        .and_then(|host| host.split_once('.'))
+        .map(|(label, _)| compact(label));
+    site_name.as_ref() == Some(&tag_name)
+        || tag_base.as_ref().is_some_and(|base| {
+            site_name.as_ref() == Some(base) || host_label.as_ref() == Some(base)
+        })
 }
 
 fn public_value(candidate: &MetadataCandidate, value: String) -> MetadataValue<String> {
@@ -3245,14 +4376,28 @@ fn candidate_resolution_score(
     candidate: &MetadataCandidate,
     candidates: &[MetadataCandidate],
 ) -> u16 {
-    let agreements = candidates
-        .iter()
-        .filter(|other| {
-            other.source != candidate.source
-                && metadata_values_equal(&other.value, &candidate.value)
-        })
-        .count() as u16;
-    u16::from(candidate.confidence) + agreements.min(3) * 5
+    // A value that the reader sees and a value that the page declares are
+    // independent evidence. Their agreement outweighs one conflicting
+    // declaration with a slightly higher confidence.
+    const VISIBLE_CORROBORATION_BONUS: u16 = 7;
+    if candidate.evidence == CandidateEvidence::DerivedFromHeading {
+        return u16::from(candidate.confidence);
+    }
+    let mut agreements = 0_u16;
+    let mut visible_corroboration = false;
+    for other in candidates {
+        if other.evidence == CandidateEvidence::DerivedFromHeading
+            || (other.source == candidate.source && other.evidence == candidate.evidence)
+            || !metadata_values_equal(&other.value, &candidate.value)
+        {
+            continue;
+        }
+        agreements += 1;
+        visible_corroboration |= other.evidence != candidate.evidence;
+    }
+    u16::from(candidate.confidence)
+        + agreements.min(3) * 5
+        + u16::from(visible_corroboration) * VISIBLE_CORROBORATION_BONUS
 }
 
 fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Option<String> {
@@ -3935,7 +5080,9 @@ mod tests {
     #[test]
     fn written_date_uses_document_order_instead_of_month_order() {
         assert_eq!(
-            extract_written_date("Published July 29, 2026 Updated January 2, 2027").as_deref(),
+            written_date("Published July 29, 2026 Updated January 2, 2027")
+                .map(|(_, date)| date)
+                .as_deref(),
             Some("July 29, 2026")
         );
     }
@@ -4200,5 +5347,971 @@ mod tests {
             Some("Schema title")
         );
         assert!(metadata(html, None, false).title.is_none());
+    }
+
+    fn article_page(head: &str, article: &str) -> String {
+        format!(
+            "<html lang=\"en\"><head>{head}</head><body><nav>Home Topics</nav><main><article>\
+             {article}<p>The article body has enough text to describe the event in detail.</p>\
+             </article></main></body></html>"
+        )
+    }
+
+    #[test]
+    fn a_visible_heading_and_document_title_outweigh_a_stale_og_title() {
+        let html = article_page(
+            "<title>Archive opens downtown</title>\
+             <meta property=\"og:title\" content=\"Plans announced for an archive\">",
+            "<h1>Archive opens downtown</h1>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).title.as_deref(),
+            Some("Archive opens downtown")
+        );
+    }
+
+    #[test]
+    fn a_disagreeing_heading_does_not_override_an_agreed_og_title() {
+        let html = article_page(
+            "<title>Archive opens downtown</title>\
+             <meta property=\"og:title\" content=\"Archive opens downtown\">",
+            "<h1>Readers share their archive memories</h1>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).title.as_deref(),
+            Some("Archive opens downtown")
+        );
+    }
+
+    #[test]
+    fn a_masthead_title_yields_to_the_article_heading() {
+        let html = "<html><head><title>Regional Desk</title></head><body>\
+            <header><h1>Regional Desk</h1></header>\
+            <main><article><h1>Wetland board approves restoration</h1>\
+            <p>The approved work reconnects two channels.</p></article></main>\
+            <footer><h1>More reporting</h1></footer></body></html>";
+        assert_eq!(
+            metadata(html, None, false).title.as_deref(),
+            Some("Wetland board approves restoration")
+        );
+    }
+
+    #[test]
+    fn a_nested_component_heading_is_not_a_masthead() {
+        // A title that matches a heading in a nested component header keeps
+        // its confidence. A long caption heading must not replace it.
+        let html = "<html><head><title>Cargo ship breaks up over Siberia</title></head><body>\
+            <div><div><div><header><h1>Cargo ship breaks up over Siberia</h1></header></div></div></div>\
+            <div><article><h1>In this photo the rocket booster is on the launch pad</h1>\
+            <p>The ship broke up minutes after launch.</p></article></div></body></html>";
+        assert_eq!(
+            metadata(html, None, false).title.as_deref(),
+            Some("Cargo ship breaks up over Siberia")
+        );
+    }
+
+    #[test]
+    fn a_content_root_language_overrides_a_conflicting_document_language() {
+        let html = "<html lang=\"en\"><head><meta property=\"og:locale\" content=\"fr_CA\"></head>\
+            <body><main><article lang=\"fr\"><h1>Le réseau ajoute trois stations</h1>\
+            <p>Les nouvelles stations ouvrent lundi.</p></article></main></body></html>";
+        assert_eq!(metadata(html, None, false).language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn a_compatible_or_inline_language_keeps_the_document_language() {
+        let regional = "<html lang=\"en\"><body><article lang=\"en-GB\"><h1>Rail plans</h1>\
+            <p>Text.</p></article></body></html>";
+        assert_eq!(
+            metadata(regional, None, false).language.as_deref(),
+            Some("en")
+        );
+        let inline = "<html lang=\"en\"><body><article><h1><span lang=\"fr\">Bonjour</span> \
+            readers</h1><p>Text.</p></article></body></html>";
+        assert_eq!(
+            metadata(inline, None, false).language.as_deref(),
+            Some("en")
+        );
+        let meta_only = "<html lang=\"en\"><head><meta http-equiv=\"content-language\" \
+            content=\"fr\"></head><body><article><h1>Title</h1></article></body></html>";
+        assert_eq!(
+            metadata(meta_only, None, false).language.as_deref(),
+            Some("en")
+        );
+    }
+
+    #[test]
+    fn splits_a_declared_list_of_full_person_names() {
+        for value in ["Dana Chen; Priya Rao", "By Dana Chen; Priya Rao"] {
+            let html = format!("<head><meta name=\"author\" content=\"{value}\"></head>");
+            assert_eq!(
+                metadata(&html, None, false).authors,
+                ["Dana Chen", "Priya Rao"],
+                "{value}"
+            );
+        }
+        let html = "<head><meta name=\"author\" \
+            content=\"Dana Chen, Priya Rao, and Ana de la Cruz\"></head>";
+        assert_eq!(
+            metadata(html, None, false).authors,
+            ["Dana Chen", "Priya Rao", "Ana de la Cruz"]
+        );
+    }
+
+    #[test]
+    fn keeps_inverted_names_roles_and_organizations_as_one_author() {
+        for (value, expected) in [
+            ("Smith, John", "Smith, John"),
+            ("Jane Doe, PhD", "Jane Doe, PhD"),
+            ("Johnson & Johnson", "Johnson & Johnson"),
+            ("Simon and Schuster", "Simon and Schuster"),
+            (
+                "Jane Doe and Associated Press",
+                "Jane Doe and Associated Press",
+            ),
+            ("Jane Doe, Senior Editor", "Jane Doe"),
+        ] {
+            let html = format!("<head><meta name=\"author\" content=\"{value}\"></head>");
+            assert_eq!(metadata(&html, None, false).authors, [expected], "{value}");
+        }
+    }
+
+    #[test]
+    fn a_two_name_comma_list_splits_only_with_byline_corroboration() {
+        // One comma can join two people or invert one name.
+        let corroborated = article_page(
+            "<meta name=\"author\" content=\"Dana Chen, Priya Rao\">",
+            "<h1>Joint survey maps urban tree cover</h1><p class=\"byline\">By \
+             <span class=\"author\">Dana Chen</span> and <span class=\"author\">Priya Rao</span></p>",
+        );
+        assert_eq!(
+            metadata(&corroborated, None, false).authors,
+            ["Dana Chen", "Priya Rao"]
+        );
+        let alone = "<head><meta name=\"author\" content=\"García Márquez, Gabriel José\"></head>";
+        assert_eq!(
+            metadata(alone, None, false).authors,
+            ["García Márquez, Gabriel José"]
+        );
+    }
+
+    #[test]
+    fn per_author_citation_and_dublin_core_fields_never_split() {
+        let html = "<head>\
+            <meta name=\"citation_author\" content=\"García Márquez, Gabriel José\">\
+            <meta name=\"citation_author\" content=\"Doe, Jane, Roe, Richard, Poe, Edgar\">\
+            <meta name=\"dc.creator\" content=\"Dana Chen and Priya Rao\"></head>";
+        let authors = metadata(html, None, false).authors;
+        assert!(authors.contains(&"García Márquez, Gabriel José".to_owned()));
+        assert!(!authors.iter().any(|author| author == "Gabriel José"));
+        assert!(!authors.iter().any(|author| author == "Priya Rao"));
+        let general = "<head><meta name=\"author\" \
+            content=\"Dana Chen, Priya Rao, Ana Ruiz\"></head>";
+        assert_eq!(
+            metadata(general, None, false).authors,
+            ["Dana Chen", "Priya Rao", "Ana Ruiz"]
+        );
+    }
+
+    #[test]
+    fn collects_a_labelled_visible_dateline_near_the_heading() {
+        let html = article_page(
+            "<title>Audit published</title>",
+            "<h1>Audit published</h1><p class=\"published\">Published August 13, 2026</p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).published_time.as_deref(),
+            Some("August 13, 2026")
+        );
+        let unlabelled = article_page(
+            "<title>Audit published</title>",
+            "<h1>Audit published</h1><div class=\"post-date\">Aug 13, 2026</div>",
+        );
+        assert_eq!(
+            metadata(&unlabelled, None, false).published_time.as_deref(),
+            Some("August 13, 2026")
+        );
+    }
+
+    #[test]
+    fn ignores_body_dates_update_lines_and_unlabelled_dates() {
+        let far = format!(
+            "<html><body><article><h1>Audit published</h1>{}\
+             <p class=\"published\">Published August 13, 2026</p></article></body></html>",
+            "<p>Body paragraph with enough words.</p>".repeat(8)
+        );
+        assert_eq!(metadata(&far, None, false).published_time, None);
+        for line in [
+            "<p>Updated August 13, 2026</p>",
+            "<p>August 13, 2026 was the day the audit began.</p>",
+            "<p>Published in 1998, the original report on August 13, 2026 remains open.</p>",
+            "<p class=\"date\">Last reviewed on August 13, 2026</p>",
+        ] {
+            let html = article_page("", &format!("<h1>Audit published</h1>{line}"));
+            assert_eq!(metadata(&html, None, false).published_time, None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_byline_time_keeps_its_machine_readable_value() {
+        let html = article_page(
+            "",
+            "<h1>Cooling upgrade cuts energy use</h1><p class=\"byline\">By \
+             <span rel=\"author\">Dana Chen</span> · <time datetime=\"2026-08-13\">August 13, \
+             2026</time> · <a rel=\"tag\">Engineering</a></p>",
+        );
+        let result = metadata(&html, None, false);
+        assert_eq!(result.published_time.as_deref(), Some("2026-08-13"));
+        assert_eq!(result.section.as_deref(), Some("Engineering"));
+    }
+
+    #[test]
+    fn several_byline_tag_links_do_not_choose_a_section() {
+        let html = article_page(
+            "",
+            "<h1>Cooling upgrade cuts energy use</h1><p class=\"byline\">By Dana Chen · \
+             <time datetime=\"2026-08-13\">August 13, 2026</time> · \
+             <a rel=\"tag\">Engineering</a> <a rel=\"tag\">Energy</a></p>",
+        );
+        assert_eq!(metadata(&html, None, false).section, None);
+    }
+
+    #[test]
+    fn rejects_placeholder_and_publication_name_tags() {
+        let html = "<head><meta property=\"og:site_name\" content=\"Daily Planet\">\
+            <meta property=\"article:tag\" content=\"none\">\
+            <meta property=\"article:tag\" content=\"Wearables\">\
+            <meta name=\"keywords\" content=\"undefined, Health, Example News, Daily Planet, \
+            Example, Planet\"></head>";
+        assert_eq!(
+            metadata(html, Some("https://www.example.com/story"), false).tags,
+            ["Wearables", "Health", "Example", "Planet"]
+        );
+    }
+
+    #[test]
+    fn an_update_time_does_not_replace_the_publication_date() {
+        let update_label = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · Published August 13, \
+             2026 · Updated <time datetime=\"2026-08-14\">August 14, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&update_label, None, false)
+                .published_time
+                .as_deref(),
+            Some("August 13, 2026")
+        );
+        let update_class = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · \
+             <time class=\"updated\" datetime=\"2026-08-14\">Aug 14</time> \
+             <time class=\"published\" datetime=\"2026-08-13\">Aug 13</time></p>",
+        );
+        assert_eq!(
+            metadata(&update_class, None, false)
+                .published_time
+                .as_deref(),
+            Some("2026-08-13")
+        );
+        let publication = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · Published \
+             <time datetime=\"2026-08-13\">August 13, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&publication, None, false)
+                .published_time
+                .as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn modification_tokens_reject_a_dateline() {
+        for line in [
+            "<p class=\"date updated\">August 14, 2026</p>",
+            "<p class=\"date modified\">August 14, 2026</p>",
+            "<p class=\"published\" itemprop=\"dateModified\">Published August 14, 2026</p>",
+            "<p class=\"date\">Revised August 14, 2026</p>",
+        ] {
+            let html = article_page("", &format!("<h1>Audit published</h1>{line}"));
+            assert_eq!(metadata(&html, None, false).published_time, None, "{line}");
+        }
+        let script_hook = article_page(
+            "",
+            "<h1>Audit published</h1><span id=\"update_posted_time\" class=\"buzz_datetime\">\
+             posted on April 21, 2015, at 11:29 a.m.</span>",
+        );
+        assert_eq!(
+            metadata(&script_hook, None, false)
+                .published_time
+                .as_deref(),
+            Some("April 21, 2015")
+        );
+        let html = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"date published\">August 13, 2026</p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).published_time.as_deref(),
+            Some("August 13, 2026")
+        );
+    }
+
+    #[test]
+    fn category_evidence_outranks_a_topic_tag_for_the_section() {
+        let html = article_page(
+            "",
+            "<h1>Cooling upgrade cuts energy use</h1><p class=\"byline\">By Dana Chen · \
+             <time datetime=\"2026-08-13\">August 13, 2026</time> · \
+             <a href=\"/category/science\">Science</a> \
+             <a rel=\"tag\" href=\"/tag/climate\">Climate</a></p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).section.as_deref(),
+            Some("Science")
+        );
+    }
+
+    #[test]
+    fn tags_are_compared_only_with_the_resolved_site_name() {
+        let html = "<head><meta property=\"og:site_name\" content=\"Example Journal\">\
+            <meta name=\"application-name\" content=\"Science\">\
+            <meta name=\"keywords\" content=\"Science, Physics, Example Journal\"></head>";
+        let result = metadata(html, Some("https://journal.test/story"), false);
+        assert_eq!(result.site_name.as_deref(), Some("Example Journal"));
+        assert_eq!(result.tags, ["Science", "Physics"]);
+    }
+
+    #[test]
+    fn a_dateline_modification_time_is_not_restored_by_its_text() {
+        for line in [
+            "<p class=\"date\"><time class=\"updated\" datetime=\"2026-08-14\">August 14, \
+             2026</time></p>",
+            "<p class=\"date\"><span itemprop=\"dateModified\">August 14, 2026</span></p>",
+        ] {
+            let html = article_page("", &format!("<h1>Audit published</h1>{line}"));
+            assert_eq!(metadata(&html, None, false).published_time, None, "{line}");
+        }
+        let html = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"published\"><time datetime=\"2026-08-13\">\
+             August 13, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).published_time.as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn a_styled_update_label_before_whitespace_marks_the_time() {
+        let html = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · Published August 13, \
+             2026 · <span>Updated</span> <time datetime=\"2026-08-14\">August 14, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).published_time.as_deref(),
+            Some("August 13, 2026")
+        );
+        let published = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · <span>Published</span> \
+             <time datetime=\"2026-08-13\">August 13, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&published, None, false).published_time.as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn hidden_times_do_not_override_visible_dates() {
+        for hidden in ["hidden", "aria-hidden=\"true\"", "style=\"display:none\""] {
+            let html = article_page(
+                "",
+                &format!(
+                    "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · Published \
+                     August 13, 2026 <time {hidden} datetime=\"2026-08-14\">August 14, \
+                     2026</time></p>"
+                ),
+            );
+            assert_eq!(
+                metadata(&html, None, false).published_time.as_deref(),
+                Some("August 13, 2026"),
+                "{hidden}"
+            );
+        }
+        let html = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · <span hidden>\
+             <time datetime=\"2026-08-14\">August 14, 2026</time></span> \
+             <time datetime=\"2026-08-13\">August 13, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).published_time.as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn a_sectioned_article_header_is_not_a_masthead() {
+        let html = "<html><head><title>Wetland board approves restoration</title></head><body>\
+            <section><header><h1>Wetland board approves restoration</h1></header>\
+            <article><h1>How the restoration will work</h1>\
+            <p>The approved work reconnects two channels.</p></article></section></body></html>";
+        assert_eq!(
+            metadata(html, None, false).title.as_deref(),
+            Some("Wetland board approves restoration")
+        );
+    }
+
+    #[test]
+    fn a_duration_or_clock_datetime_is_not_a_publication_date() {
+        for datetime in ["PT5M", "10:30"] {
+            let html = article_page(
+                "",
+                &format!(
+                    "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · \
+                     <time datetime=\"{datetime}\">5 min read</time> · Published August 13, \
+                     2026</p>"
+                ),
+            );
+            assert_eq!(
+                metadata(&html, None, false).published_time.as_deref(),
+                Some("August 13, 2026"),
+                "{datetime}"
+            );
+        }
+        let html = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"byline\">By Dana Chen · \
+             <time datetime=\"2026-08-13T10:30:00Z\">August 13, 2026</time></p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).published_time.as_deref(),
+            Some("2026-08-13T10:30:00Z")
+        );
+    }
+
+    #[test]
+    fn a_modification_wrapper_rejects_a_nested_dateline() {
+        let wrapped = "<html><body><article><header><h1>Audit published</h1>\
+            <div class=\"updated\"><span class=\"date\">August 14, 2026</span></div>\
+            </header><p>The audit records completed improvements.</p></article></body></html>";
+        assert_eq!(metadata(wrapped, None, false).published_time, None);
+        let published = "<html><body><article class=\"updated\"><header><h1>Audit published</h1>\
+            <div class=\"meta\"><span class=\"entry-date\">August 13, 2026</span></div>\
+            </header><p>The audit records completed improvements.</p></article></body></html>";
+        assert_eq!(
+            metadata(published, None, false).published_time.as_deref(),
+            Some("August 13, 2026")
+        );
+    }
+
+    #[test]
+    fn a_repeated_joined_author_list_does_not_remain_as_one_author() {
+        let html = article_page(
+            "<meta name=\"author\" content=\"Dana Chen, Priya Rao and Ana Ruiz\">",
+            "<h1>Joint survey maps tree cover</h1>\
+             <p><a rel=\"author\" href=\"/people\">Dana Chen, Priya Rao and Ana Ruiz</a></p>",
+        );
+        assert_eq!(
+            metadata(&html, None, false).authors,
+            ["Dana Chen", "Priya Rao", "Ana Ruiz"]
+        );
+        let third = article_page(
+            "<meta name=\"author\" content=\"Dana Chen, Priya Rao and Ana Ruiz\">",
+            "<h1>Joint survey maps tree cover</h1>\
+             <p><a rel=\"author\" href=\"/people/lee\">Lee Park</a></p>",
+        );
+        assert_eq!(
+            metadata(&third, None, false).authors,
+            ["Dana Chen", "Priya Rao", "Ana Ruiz", "Lee Park"]
+        );
+    }
+
+    #[test]
+    fn a_two_part_list_needs_corroboration_and_no_organization_word() {
+        for value in [
+            "Davis Polk &amp; Wardwell LLP",
+            "Dana Chen and Priya Rao",
+            "Dana Chen & Priya Rao",
+        ] {
+            let html = format!("<head><meta name=\"author\" content=\"{value}\"></head>");
+            assert_eq!(metadata(&html, None, false).authors.len(), 1, "{value}");
+        }
+        let corroborated = article_page(
+            "<meta name=\"author\" content=\"Dana Chen &amp; Priya Rao\">",
+            "<h1>Joint survey maps tree cover</h1><p class=\"byline\">By \
+             <span class=\"author\">Dana Chen</span></p>",
+        );
+        assert_eq!(
+            metadata(&corroborated, None, false).authors,
+            ["Dana Chen", "Priya Rao"]
+        );
+        // A corroborated part does not split a firm name.
+        let firm = article_page(
+            "<meta name=\"author\" content=\"Davis Polk &amp; Wardwell Partners\">",
+            "<h1>Merger guidance</h1><p class=\"byline\">By \
+             <span class=\"author\">Davis Polk</span></p>",
+        );
+        assert!(
+            !metadata(&firm, None, false)
+                .authors
+                .iter()
+                .any(|author| author == "Wardwell Partners")
+        );
+        for value in [
+            "Dana Chen, Priya Rao, Acme Group",
+            "Dana Chen; Northwind Media",
+        ] {
+            let html = format!("<head><meta name=\"author\" content=\"{value}\"></head>");
+            assert_eq!(metadata(&html, None, false).authors.len(), 1, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_title_derived_from_a_heading_does_not_corroborate_it() {
+        let html = "<html><head><title>News</title>\
+            <meta property=\"og:title\" content=\"New train services to begin in May\"></head>\
+            <body><main><h1>All the latest news and updates</h1><article>\
+            <h2>New train services to begin in May</h2><p>The services begin on the coast line.</p>\
+            </article></main></body></html>";
+        assert_eq!(
+            metadata(html, None, false).title.as_deref(),
+            Some("New train services to begin in May")
+        );
+        // A declared title with a site segment still corroborates the heading.
+        let declared = "<html><head><title>Community archive opens downtown today | City Paper</title>\
+            <meta property=\"og:title\" content=\"Plans announced for an archive\"></head>\
+            <body><main><article><h1>Community archive opens downtown today</h1><p>Text.</p>\
+            </article></main></body></html>";
+        assert_eq!(
+            metadata(declared, None, false).title.as_deref(),
+            Some("Community archive opens downtown today")
+        );
+    }
+
+    fn byline_date(byline: &str) -> Option<String> {
+        let html = article_page(
+            "",
+            &format!("<h1>Audit published</h1><p class=\"byline\">{byline}</p>"),
+        );
+        metadata(&html, None, false).published_time
+    }
+
+    #[test]
+    fn the_end_of_a_long_preceding_label_marks_an_update_time() {
+        assert_eq!(
+            byline_date(
+                "By Alexandra Montgomery and Christopher Wellington · Published August 13, 2026 \
+                 · Updated <time datetime=\"2026-08-14\">August 14, 2026</time>"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+        // The label is at the end of a long sibling, beyond a prefix window.
+        assert_eq!(
+            byline_date(
+                "<span>By Alexandra Montgomery and Christopher Wellington of the Regional \
+                 Environment Desk · Updated</span> <time datetime=\"2026-08-14\">Aug 14</time> \
+                 · <time datetime=\"2026-08-13\">Aug 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn a_connector_after_an_update_label_still_marks_the_time() {
+        for connector in ["at", "on", "at:"] {
+            assert_eq!(
+                byline_date(&format!(
+                    "By Dana Chen · Updated {connector} <time datetime=\"2026-08-14T10:00:00Z\">\
+                     10:00 on August 14, 2026</time> · <time datetime=\"2026-08-13\">Aug \
+                     13</time>"
+                ))
+                .as_deref(),
+                Some("2026-08-13"),
+                "{connector}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_labelled_publication_date_outranks_an_unlabelled_time() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time datetime=\"2026-08-14\">Aug 14</time> · Published \
+                 August 13, 2026"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time datetime=\"2026-08-14\">Aug 14</time> · \
+                 <time itemprop=\"datePublished\" datetime=\"2026-08-13\">Aug 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        assert_eq!(
+            byline_date("By Dana Chen · First published August 12, 2026").as_deref(),
+            Some("August 12, 2026")
+        );
+        // Without a publication label, the first date in source order wins.
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time datetime=\"2026-08-14\">August 14, 2026</time> · \
+                 August 13, 2026"
+            )
+            .as_deref(),
+            Some("2026-08-14")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · August 13, 2026 · <time datetime=\"2026-08-14\">August 14, \
+                 2026</time>"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+    }
+
+    #[test]
+    fn a_label_assembled_across_connector_nodes_marks_an_update() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · August 13, 2026 · <span>Updated</span> on \
+                 <time datetime=\"2026-08-14\">August 14, 2026</time>"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <span>Updated</span><span>:</span> <span>at</span> \
+                 <time datetime=\"2026-08-14\">Aug 14</time> · \
+                 <time datetime=\"2026-08-13\">Aug 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        // A separator ends the label, so an earlier update label does not
+        // reach a later date.
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <span>Updated</span> · <time datetime=\"2026-08-13\">Aug \
+                 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn a_publication_marker_wins_over_a_modification_marker_on_one_time() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time class=\"entry-date published updated\" \
+                 datetime=\"2026-08-13\">August 13, 2026</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time class=\"updated\" datetime=\"2026-08-14\">August 14, \
+                 2026</time><time class=\"entry-date published\" datetime=\"2026-08-13\">\
+                 August 13, 2026</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time class=\"entry-date published\" datetime=\"2026-08-13\">\
+                 August 13, 2026</time><time class=\"updated\" datetime=\"2026-08-14\">\
+                 August 14, 2026</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        let dateline = article_page(
+            "",
+            "<h1>Audit published</h1><p class=\"date published updated\">August 13, 2026</p>",
+        );
+        assert_eq!(
+            metadata(&dateline, None, false).published_time.as_deref(),
+            Some("August 13, 2026")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time class=\"updated\" datetime=\"2026-08-14\">August 14, \
+                 2026</time>"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_dateline_needs_publication_evidence() {
+        for line in [
+            "<p class=\"event-date\" itemprop=\"startDate\">September 12, 2026</p>",
+            "<p class=\"event-date\">September 12, 2026</p>",
+            "<p class=\"date\">September 12, 2026</p>",
+            "<div itemprop=\"endDate\"><span class=\"published\">September 12, 2026</span></div>",
+            "<p class=\"published\" itemprop=\"startDate\">September 12, 2026</p>",
+        ] {
+            let html = article_page("", &format!("<h1>Harvest festival</h1>{line}"));
+            assert_eq!(metadata(&html, None, false).published_time, None, "{line}");
+        }
+        for line in [
+            "<p class=\"date\">Published September 12, 2026</p>",
+            "<p>First published September 12, 2026</p>",
+            "<p class=\"entry-date\">September 12, 2026</p>",
+            "<p class=\"postdate\">September 12, 2026</p>",
+            "<p itemprop=\"datePublished\">September 12, 2026</p>",
+        ] {
+            let html = article_page("", &format!("<h1>Harvest festival</h1>{line}"));
+            assert_eq!(
+                metadata(&html, None, false).published_time.as_deref(),
+                Some("September 12, 2026"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn credentials_do_not_become_authors() {
+        for value in [
+            "Jane Smith, MD FACC",
+            "Jane Smith, MD",
+            "Jane Smith, M.D., Ph.D.",
+        ] {
+            let html = article_page(
+                &format!("<meta name=\"author\" content=\"{value}\">"),
+                "<h1>Heart study</h1><p><a rel=\"author\" href=\"/jane\">Jane Smith</a></p>",
+            );
+            // The value stays whole, as on `main`. No credential becomes an author.
+            let authors = metadata(&html, None, false).authors;
+            assert!(
+                authors
+                    .iter()
+                    .all(|author| author.starts_with("Jane Smith")),
+                "{value}: {authors:?}"
+            );
+        }
+        let html = "<head><meta name=\"author\" content=\"Dana Chen, PhD, Priya Rao\"></head>";
+        assert!(
+            !metadata(html, None, false)
+                .authors
+                .iter()
+                .any(|author| author == "PhD")
+        );
+        let capitals =
+            "<head><meta name=\"author\" content=\"DANA CHEN, PRIYA RAO, ANA RUIZ\"></head>";
+        assert_eq!(
+            metadata(capitals, None, false).authors,
+            ["DANA CHEN", "PRIYA RAO", "ANA RUIZ"]
+        );
+    }
+
+    #[test]
+    fn every_date_in_one_text_node_is_classified() {
+        for byline in [
+            "By Dana Chen · Updated August 14, 2026 · Published August 13, 2026",
+            "By Dana Chen · Published August 13, 2026 · Updated August 14, 2026",
+            "Published August 13, 2026 · Updated August 14, 2026",
+        ] {
+            assert_eq!(
+                byline_date(byline).as_deref(),
+                Some("August 13, 2026"),
+                "{byline}"
+            );
+        }
+        // An unlabelled date after an update stays available.
+        assert_eq!(
+            byline_date("By Dana Chen · Updated August 14, 2026 · August 13, 2026").as_deref(),
+            Some("August 13, 2026")
+        );
+        assert_eq!(
+            byline_date("By Dana Chen · Updated August 14, 2026").as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn hidden_label_text_is_skipped() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · Published <span hidden>Updated</span> \
+                 <time datetime=\"2026-08-13\">August 13, 2026</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time datetime=\"2026-08-12\">Aug 12</time> · <span>Updated \
+                 <b style=\"display:none\">never</b></span> <time datetime=\"2026-08-14\">Aug \
+                 14</time>"
+            )
+            .as_deref(),
+            Some("2026-08-12")
+        );
+    }
+
+    #[test]
+    fn a_derived_title_never_corroborates_any_heading() {
+        for heading in [
+            "<header><h1>All the latest news and updates</h1></header>",
+            "<div class=\"top\"><h1>All the latest news and updates</h1></div>",
+            "<main><h1>All the latest news and updates</h1></main>",
+        ] {
+            let html = format!(
+                "<html><head><title>News</title><meta property=\"og:title\" \
+                 content=\"New train services to begin in May\"></head><body>{heading}\
+                 <article><h2>New train services to begin in May</h2>\
+                 <p>The services begin on the coast line.</p></article></body></html>"
+            );
+            assert_eq!(
+                metadata(&html, None, false).title.as_deref(),
+                Some("New train services to begin in May"),
+                "{heading}"
+            );
+        }
+        // Without a competing declaration the heading is still the title.
+        let html = "<html><head><title>News</title></head><body>\
+            <header><h1>All the latest news and updates</h1></header>\
+            <article><p>The services begin on the coast line.</p></article></body></html>";
+        assert_eq!(
+            metadata(html, None, false).title.as_deref(),
+            Some("All the latest news and updates")
+        );
+    }
+
+    #[test]
+    fn a_visible_label_outranks_a_generic_post_date_class() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · August 13, 2026 · Updated <time class=\"entry-date\" \
+                 datetime=\"2026-08-14\">August 14, 2026</time>"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+        // A schema.org property still outranks a visible label.
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · Updated <time itemprop=\"datePublished\" \
+                 datetime=\"2026-08-13\">August 13, 2026</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        // Without a label, the generic class still names the publication date.
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time datetime=\"2026-08-14\">Aug 14</time> \
+                 <time class=\"entry-date\" datetime=\"2026-08-13\">Aug 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn the_strongest_publication_evidence_wins_in_any_order() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · <time class=\"entry-date\" datetime=\"2026-08-14\">Aug 14, \
+                 2026</time> · First published August 13, 2026"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · First published August 13, 2026 · \
+                 <time class=\"entry-date\" datetime=\"2026-08-14\">Aug 14, 2026</time>"
+            )
+            .as_deref(),
+            Some("August 13, 2026")
+        );
+        // A schema.org property outranks a visible label in either order.
+        assert_eq!(
+            byline_date(
+                "By Dana Chen · Published August 12, 2026 · \
+                 <time itemprop=\"datePublished\" datetime=\"2026-08-13\">Aug 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        // Equal evidence keeps source order.
+        assert_eq!(
+            byline_date("By Dana Chen · Posted August 12, 2026 · Published August 13, 2026")
+                .as_deref(),
+            Some("August 12, 2026")
+        );
+    }
+
+    #[test]
+    fn a_label_segment_contains_the_date_role() {
+        for (label, expected) in [
+            ("Last updated as of", Some("August 13, 2026")),
+            ("Last updated date:", Some("August 13, 2026")),
+            ("Updated on:", Some("August 13, 2026")),
+            ("Published, last updated", Some("August 13, 2026")),
+            ("First published as of:", Some("2026-08-14")),
+        ] {
+            assert_eq!(
+                byline_date(&format!(
+                    "August 13, 2026 · {label} <time class=\"entry-date\" \
+                     datetime=\"2026-08-14\">August 14, 2026</time>"
+                ))
+                .as_deref(),
+                expected,
+                "{label}"
+            );
+        }
+        // An earlier date ends the segment, so its label does not reach the
+        // next date.
+        assert_eq!(
+            byline_date("By Dana Chen. Updated August 14, 2026 August 13, 2026").as_deref(),
+            Some("August 13, 2026")
+        );
+        // An editor credit is not a modification label.
+        assert_eq!(
+            byline_date(
+                "By Dana Chen, edited by Sam Roe <time datetime=\"2026-08-13\">Aug 13</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+    }
+
+    #[test]
+    fn the_label_scan_stops_at_an_earlier_time_element() {
+        assert_eq!(
+            byline_date(
+                "By Dana Chen <span>Updated <time datetime=\"2026-08-14\">Aug 14</time></span> \
+                 <span>Published <time datetime=\"2026-08-13\">August 13, 2026</time></span>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
+        assert_eq!(
+            byline_date(
+                "By Dana Chen <span>Updated <time>yesterday</time></span> \
+                 <time datetime=\"2026-08-13\">August 13, 2026</time>"
+            )
+            .as_deref(),
+            Some("2026-08-13")
+        );
     }
 }
