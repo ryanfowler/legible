@@ -53,7 +53,7 @@ pub(super) fn adjacent_lead_media(dom: &Dom, content_root: NodeId) -> Option<Nod
                         .any(|dimension| dimension >= 200))
                     && has_meaningful_image_description(dom, image)
                     && !has_adjacent_lead_peripheral_role(dom, image)
-                    && image_role_score(dom, image, true, 1).is_meaningful()
+                    && image_role_score(dom, image, true, 1).is_lead_candidate()
             })
         })
 }
@@ -174,6 +174,10 @@ pub(super) fn remove_decorative_media_with_snapshot(
         }
     }
 
+    // Decide every removal before the first detach. Figure-caption and
+    // context evidence must describe the source fragment, not a figure that
+    // earlier removals already changed.
+    let mut removals: SmallVec<[NodeId; 16]> = SmallVec::new();
     for &(node, _) in nodes.iter().rev() {
         if dom.parent(node).is_none() || !matches!(dom.tag(node), Some(Tag::Img | Tag::Svg)) {
             continue;
@@ -201,8 +205,11 @@ pub(super) fn remove_decorative_media_with_snapshot(
             role.positive += 9;
         }
         if role.should_remove() {
-            dom.detach(node);
+            removals.push(node);
         }
+    }
+    for node in removals {
+        dom.detach(node);
     }
 }
 
@@ -210,6 +217,7 @@ pub(super) fn remove_decorative_media_with_snapshot(
 struct ImageRoleEvidence {
     descriptive: bool,
     captioned: bool,
+    sole_captioned_media: bool,
     responsive: bool,
     meaningful_dimensions: bool,
     lead_position: bool,
@@ -249,6 +257,7 @@ impl ImageRoleEvidence {
         let structural_names = image_structural_context_name(dom, image);
         let context = image_context_flags(&names, &structural_names);
         let strong_peripheral = has_strong_peripheral_role_name(&structural_names);
+        let captioned = has_figure_caption(dom, image);
         Self {
             descriptive: has_meaningful_image_description_with_context(
                 dom,
@@ -257,7 +266,8 @@ impl ImageRoleEvidence {
                 &structural_names,
                 context,
             ),
-            captioned: has_figure_caption(dom, image),
+            captioned,
+            sole_captioned_media: captioned && is_sole_figure_media(dom, image),
             responsive: has_responsive_candidate(dom, image) || has_lazy_candidate(dom, image),
             meaningful_dimensions,
             lead_position: is_lead_position(dom, image, before_first_paragraph),
@@ -286,11 +296,19 @@ struct ImageRoleScore {
     positive: i16,
     negative: i16,
     strong_peripheral: bool,
+    media_control: bool,
 }
 
 impl ImageRoleScore {
     fn is_meaningful(self) -> bool {
         self.positive >= 4 && self.positive > self.negative
+    }
+
+    /// Lead-media adoption moves one image from outside the selected root.
+    /// A gallery or zoom control is weak lead evidence even when a caption
+    /// keeps the image inside the root.
+    fn is_lead_candidate(self) -> bool {
+        !self.media_control && self.is_meaningful()
     }
 
     fn should_remove(self) -> bool {
@@ -307,6 +325,7 @@ fn image_role_score(
     let evidence = ImageRoleEvidence::collect(dom, image, before_first_paragraph, repetitions);
     let mut score = ImageRoleScore {
         strong_peripheral: evidence.strong_peripheral,
+        media_control: evidence.media_control_context,
         ..ImageRoleScore::default()
     };
 
@@ -335,7 +354,15 @@ fn image_role_score(
     score.negative += i16::from(evidence.strong_logo_context) * 3;
     score.negative += i16::from(evidence.related_context) * 24;
     score.negative += i16::from(evidence.promotional_context) * 24;
-    score.negative += i16::from(evidence.media_control_context) * 24;
+    // A figure caption describes one image. A gallery, lightbox, or zoom
+    // control around that figure presents the image; it does not make the
+    // image peripheral.
+    // Small images and icons can be the control itself, so they keep the
+    // penalty.
+    let presented_figure = evidence.sole_captioned_media
+        && !evidence.small_dimensions
+        && !evidence.logo_or_icon_context;
+    score.negative += i16::from(evidence.media_control_context && !presented_figure) * 24;
     score.negative += i16::from(evidence.card_grid_context) * 2;
     score.negative += i16::from(evidence.profile_context && evidence.repetitions >= 2) * 8;
     score.negative += if evidence.repetitions >= 3 {
@@ -1664,6 +1691,31 @@ fn is_explanatory_text(dom: &Dom, node: NodeId) -> bool {
     semantic_tag || named_context
 }
 
+/// Returns whether `image` is the only media element in its figure. A
+/// caption then describes this image and not a video, chart, or embed.
+fn is_sole_figure_media(dom: &Dom, image: NodeId) -> bool {
+    dom.ancestors(image)
+        .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))
+        .is_some_and(|figure| {
+            dom.descendants(figure).all(|node| {
+                node == image
+                    || !matches!(
+                        dom.tag(node),
+                        Some(
+                            Tag::Img
+                                | Tag::Svg
+                                | Tag::Video
+                                | Tag::Audio
+                                | Tag::Iframe
+                                | Tag::Canvas
+                                | Tag::Object
+                                | Tag::Embed
+                        )
+                    )
+            })
+        })
+}
+
 fn has_figure_caption(dom: &Dom, image: NodeId) -> bool {
     dom.ancestors(image)
         .find(|&ancestor| dom.tag(ancestor) == Some(Tag::Figure))
@@ -2367,6 +2419,63 @@ mod tests {
         let picture = dom.first_descendant_by_tag(root, Tag::Picture).unwrap();
         assert_eq!(dom.parent(picture), dom.parent(button));
         assert!(dom.first_descendant_by_tag(picture, Tag::Source).is_some());
+    }
+
+    #[test]
+    fn adjacent_lead_skips_a_captioned_zoom_figure() {
+        let dom = Dom::parse_document(
+            r#"<main><figure><img src="lead.jpg" width="1200" height="700" alt="Detailed lead diagram"><figcaption>Detailed lead diagram</figcaption></figure><figure><div class="cursor-zoom-in"><img src="zoom.jpg" width="1200" height="700" alt="Detailed zoom diagram"></div><figcaption>Detailed zoom diagram</figcaption></figure><article><p>Article body.</p></article></main>"#,
+        )
+        .unwrap();
+        let article = dom
+            .first_descendant_by_tag(dom.root(), Tag::Article)
+            .unwrap();
+        let lead = adjacent_lead_media(&dom, article).unwrap();
+        let image = dom.first_descendant_by_tag(lead, Tag::Img).unwrap();
+        assert_eq!(dom.attr_by_local_name(image, "src"), Some("lead.jpg"));
+    }
+
+    #[test]
+    fn keeps_a_captioned_figure_inside_a_gallery() {
+        let mut dom = Dom::parse_document(
+            r#"<main><p>Introduction.</p><div class="gallery"><figure><img src="photo.jpg" alt="Harbour at dawn"><figcaption>The harbour at dawn.</figcaption></figure></div><p>Article body.</p></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_some());
+    }
+
+    #[test]
+    fn removes_gallery_thumbnails_that_share_one_caption() {
+        let mut dom = Dom::parse_document(
+            r#"<main><p>Introduction.</p><figure class="gallery-thumbnails"><img src="thumb-1.jpg" width="120" height="80"><img src="thumb-2.jpg" width="120" height="80"><img src="thumb-3.jpg" width="120" height="80"><figcaption>More photographs from the walk.</figcaption></figure><p>Article body.</p></main>"#,
+        )
+        .unwrap();
+        let root = dom.body().unwrap();
+        remove_decorative_media(&mut dom, root);
+        assert!(dom.first_descendant_by_tag(root, Tag::Img).is_none());
+    }
+
+    #[test]
+    fn removes_a_zoom_control_image_beside_captioned_video_or_svg() {
+        for primary in [
+            r#"<video src="clip.mp4" controls></video>"#,
+            r#"<svg viewBox="0 0 10 10"><title>Rainfall chart</title><rect width="10" height="10"></rect></svg>"#,
+        ] {
+            let html = format!(
+                r#"<main><p>Introduction.</p><figure>{primary}<button class="zoom"><img src="detail.svg" alt="Open detail"></button><figcaption>Rainfall over one year.</figcaption></figure><p>Article body.</p></main>"#
+            );
+            let mut dom = Dom::parse_document(&html).unwrap();
+            let root = dom.body().unwrap();
+            remove_decorative_media(&mut dom, root);
+            let kept = dom
+                .descendants(root)
+                .filter(|&node| dom.tag(node) == Some(Tag::Img))
+                .filter(|&node| dom.ancestors(node).all(|a| dom.tag(a) != Some(Tag::Button)))
+                .count();
+            assert_eq!(kept, 0, "{html}");
+        }
     }
 
     #[test]
