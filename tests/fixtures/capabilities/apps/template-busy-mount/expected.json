@@ -1,0 +1,5 @@
+{
+  "title": "Opening hours",
+  "must_contain": ["Open weekdays, 9 AM to 5 PM."],
+  "must_not_contain": ["Confirm your booking request", "confirmation message"]
+}

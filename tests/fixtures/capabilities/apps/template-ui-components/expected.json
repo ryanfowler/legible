@@ -1,0 +1,6 @@
+{
+  "title": "Garden soil preparation",
+  "word_count_min": 40,
+  "must_contain": ["Add compost in a layer five centimetres deep"],
+  "must_not_contain": ["Delete this saved garden plan", "planting notes are removed"]
+}

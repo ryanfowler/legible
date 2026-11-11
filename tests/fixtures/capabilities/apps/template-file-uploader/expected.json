@@ -1,0 +1,5 @@
+{
+  "title": "Album upload",
+  "must_contain": ["Photos"],
+  "must_not_contain": ["Confirm your upload", "shared album"]
+}

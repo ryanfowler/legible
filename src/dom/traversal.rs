@@ -244,6 +244,29 @@ impl Dom {
     pub(crate) fn descendants_snapshot(&self, id: NodeId) -> Vec<NodeId> {
         self.descendants(id).collect()
     }
+    /// Returns the node after `node` in a preorder walk below `root`. When
+    /// `enter` is false, the walk skips the children of `node`. A caller uses
+    /// this to prune subtrees without a stack.
+    pub(crate) fn next_in_preorder(
+        &self,
+        root: NodeId,
+        node: NodeId,
+        enter: bool,
+    ) -> Option<NodeId> {
+        if enter && let Some(child) = self.first_child(node) {
+            return Some(child);
+        }
+        let mut current = node;
+        loop {
+            if current == root {
+                return None;
+            }
+            if let Some(sibling) = self.next_sibling(current) {
+                return Some(sibling);
+            }
+            current = self.parent(current)?;
+        }
+    }
     pub(crate) fn ancestors(&self, id: NodeId) -> Ancestors<'_> {
         Ancestors {
             dom: self,

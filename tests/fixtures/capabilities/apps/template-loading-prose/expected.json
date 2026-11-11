@@ -1,0 +1,5 @@
+{
+  "title": "Opening hours",
+  "must_contain": ["dock closed today."],
+  "must_not_contain": ["Confirm your booking request", "confirmation message"]
+}

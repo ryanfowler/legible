@@ -1,0 +1,9 @@
+{
+  "title": "Harbour lighthouse history",
+  "word_count_min": 40,
+  "must_occur_once": [
+    "first lit its lamp in 1868",
+    "the last keeper moved to the town museum"
+  ],
+  "must_not_contain": ["JavaScript is disabled", "Please enable JavaScript", "pixel.gif"]
+}

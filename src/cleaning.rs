@@ -1,5 +1,6 @@
 //! DOM preparation and content cleanup.
 #![allow(clippy::collapsible_if)]
+use crate::app_shell::SourceFallbacks;
 use crate::constants::{
     PRESENTATIONAL_ATTRIBUTES, has_image_extension, has_image_src, has_image_srcset,
     is_deprecated_size_attribute_elem, parse_b64_data_url,
@@ -195,18 +196,25 @@ pub fn prep_document(dom: &mut Dom) {
 }
 
 pub(crate) fn prep_document_with_body(dom: &mut Dom, body: Option<NodeId>) {
-    // Preserve the required preparation order. Remove inactive subtrees,
-    // normalize BR runs, and only then rename deprecated font elements.
-    let mut ids: Vec<_> = dom
-        .descendants(dom.root())
-        .filter(|&id| {
-            matches!(dom.tag(id), Some(Tag::Noscript | Tag::Style))
-                || dom.tag(id) == Some(Tag::Script)
-                    && !dom
-                        .attr(id, AttrName::Type)
-                        .is_some_and(crate::dom::is_math_script_type)
-        })
-        .collect();
+    // Preserve the required preparation order. Reveal source-present
+    // application content, remove inactive subtrees, normalize BR runs, and
+    // only then rename deprecated font elements.
+    fn is_inactive(dom: &Dom, id: NodeId) -> bool {
+        matches!(dom.tag(id), Some(Tag::Noscript | Tag::Style))
+            || dom.tag(id) == Some(Tag::Script)
+                && !dom
+                    .attr(id, AttrName::Type)
+                    .is_some_and(crate::dom::is_math_script_type)
+    }
+    let mut fallbacks = SourceFallbacks::default();
+    let mut ids = Vec::new();
+    for id in dom.descendants(dom.root()) {
+        fallbacks.observe(dom, id);
+        if is_inactive(dom, id) {
+            ids.push(id);
+        }
+    }
+    fallbacks.reveal(dom, body, &mut ids, is_inactive);
     for &id in &ids {
         dom.detach(id);
     }

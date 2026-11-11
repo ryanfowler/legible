@@ -102,6 +102,20 @@ impl Dom {
     pub(crate) fn is_comment(&self, id: NodeId) -> bool {
         matches!(self.node(id).data, NodeData::Comment(_))
     }
+    /// Returns the document fragment that holds a template element's parsed
+    /// contents. Ordinary traversal does not enter this fragment.
+    pub(crate) fn template_contents(&self, id: NodeId) -> Option<NodeId> {
+        match &self.node(id).data {
+            NodeData::Element(e) => e.template_contents.get(),
+            _ => None,
+        }
+    }
+    pub(crate) fn comment_text(&self, id: NodeId) -> Option<&str> {
+        match &self.node(id).data {
+            NodeData::Comment(text) => Some(text.as_ref()),
+            _ => None,
+        }
+    }
     #[inline]
     pub(crate) fn tag(&self, id: NodeId) -> Option<Tag> {
         match &self.node(id).data {

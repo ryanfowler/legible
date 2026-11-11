@@ -2443,6 +2443,56 @@ pub fn get_class_weight(dom: &Dom, id: NodeId, weight_classes: bool) -> i32 {
     }
     w
 }
+/// Text statistics for a candidate prose region outside the scored tree,
+/// such as a noscript or template fallback.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProseStats {
+    /// Normalized text length, as in [`NodeStats::text_length`].
+    pub(crate) text_length: usize,
+    pub(crate) link_text_length: usize,
+    /// Text leaves of at least `prose_run_length` characters.
+    pub(crate) prose_runs: usize,
+    pub(crate) headings: usize,
+}
+
+/// Measures the text below `root` without script, style, or template text.
+pub(crate) fn prose_stats(dom: &Dom, root: NodeId, prose_run_length: usize) -> ProseStats {
+    let mut prose = ProseStats::default();
+    let mut link_end = None;
+    let mut next = dom.first_child(root);
+    while let Some(node) = next {
+        let mut enter = true;
+        match dom.tag(node) {
+            Some(Tag::Script | Tag::Style | Tag::Template) => enter = false,
+            Some(Tag::A) if link_end.is_none() => {
+                link_end = Some(dom.next_in_preorder(root, node, false));
+            }
+            Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6) => prose.headings += 1,
+            _ => {}
+        }
+        if let Some(text) = dom.text_node(node) {
+            let length = stats_for_text(text).text_length as usize;
+            prose.text_length += length;
+            if link_end.is_some() {
+                prose.link_text_length += length;
+            }
+            prose.prose_runs += usize::from(length >= prose_run_length);
+        }
+        next = dom.next_in_preorder(root, node, enter);
+        if link_end == Some(next) {
+            link_end = None;
+        }
+    }
+    prose
+}
+
+/// Returns the normalized length of a text leaf without letters, such as
+/// "40%", "3/10", or "…". Returns `None` when the leaf has a letter.
+pub(crate) fn symbolic_text_length(text: &str) -> Option<usize> {
+    let stats = stats_for_text(text);
+    (stats.alphabetic_chars == 0).then_some(stats.text_length as usize)
+}
+
 pub fn has_non_empty_inner_text(dom: &Dom, id: NodeId) -> bool {
     dom.has_non_whitespace_text(id)
 }

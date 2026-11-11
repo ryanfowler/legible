@@ -1,0 +1,10 @@
+{
+  "title": "Certificate rotation runbook",
+  "word_count_min": 30,
+  "must_contain": [
+    "Issue the new certificate from the internal authority",
+    "Roll the certificate to the remaining gateways"
+  ],
+  "must_not_contain": ["Loading runbook", "Open account menu", "track("],
+  "headings_min": 1
+}

@@ -49,6 +49,7 @@ The extraction pipeline flows through these stages:
 | Module | Role |
 |---|---|
 | `extractor.rs` | Public builder, extraction config |
+| `app_shell.rs` | Application-shell recognition: React streaming splices, gated noscript and template reveal, and loading-placeholder wording |
 | `budget.rs` | Public parser and structured-data resource budgets |
 | `encoding.rs` | Character-encoding detection and decoding for `Extractor::extract_bytes` |
 | `page.rs` | `ExtractedPage`, independently owned page parts, and lazy HTML/MD/text serialization |
@@ -100,7 +101,8 @@ These invariants are costly to violate:
 - **Lazy rendering.** `ExtractedPage` owns only the private semantic representation, not a retained DOM. Render HTML, Markdown, and text lazily from that representation. Derive result metrics from cached internal stats; defer that measurement until a text or metric method needs it. The public `extract` function must not eagerly render output.
 - **Iterative traversal** for untrusted HTML depth.
 - **Discard executable script text at parse.** Document parsing keeps text only for JSON-LD and TeX scripts. The text budget still counts discarded script text. Fragment parsing keeps all text.
-- **Preparation order:** collect metadata first. Then reveal noscript images, remove non-math scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage. Keep math source until semantic compilation.
+- **Preparation order:** collect metadata first. Then reveal noscript images, reveal source-present application content, remove non-math scripts and styles, normalise body BR runs, and rename font elements. One linear traversal per stage. Keep math source until semantic compilation.
+- **Reveal application content only with structural proof.** The removal traversal records noscript, template, and React streaming nodes for `app_shell.rs`. Splice a hidden `S:` segment only into the placeholder template with the same ID. Complete a `B:` boundary, and remove its fallback, only when the segment and all nested placeholders resolve. Reveal at most one noscript or template, and only when the fallback is substantial prose and the visible body is a shell: apart from loading placeholders, textless progress indicators, individual controls, and page-level header, nav, and footer landmarks, it has no visible text and no visible media. Media counts anywhere, including inside a set-aside control or indicator. The shell gate and the loading-only result check share `app_shell::ChromeWalk` for this classification. A shell must also show a progress indicator, show a placeholder with a control, or contain a mount node that holds no other text. An empty or image-only page without this evidence is not a shell. A populated mount node or busy region is a normal page. A loading-only result returns `Error::NoContent` only with a progressive placeholder ("Loading…") or a source progress indicator, and never when the source page has an h1 or h2 heading. `scoring.rs::prose_stats` measures the fallback text. Measure the visible body only when such a fallback exists, and stop when the text is too long for a shell.
 - **Non-destructive discovery.** Candidate discovery and scoring must not mutate the source DOM. Defer candidate removals until scoring is complete.
 - **Do not clone the DOM for scoring.** Use `ScoringView` for scoring-only structure. Apply retained block projections only to the selected fragment.
 - **Copy before cleanup.** Copy the selected region into a compact fragment. Run content cleanup only on that fragment.

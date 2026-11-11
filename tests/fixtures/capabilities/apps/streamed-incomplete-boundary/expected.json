@@ -1,0 +1,7 @@
+{
+  "title": "Tidal pool survey",
+  "word_count_min": 30,
+  "must_occur_once": ["The north pools held the most anemones"],
+  "must_contain": ["The next survey starts at the spring tide"],
+  "must_not_contain": ["Incomplete streamed segment text"]
+}

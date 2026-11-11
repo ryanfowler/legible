@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head><title>Certificate rotation runbook</title></head>
+  <body>
+    <div id="app">
+      <p>Loading runbook</p>
+      <button>Open account menu</button>
+    </div>
+    <template id="runbook">
+      <main>
+        <h1>Certificate rotation runbook</h1>
+        <p>The server sends the complete runbook in this template so the client can render it later.</p>
+        <h2>Steps</h2>
+        <ol>
+          <li>Issue the new certificate from the internal authority.</li>
+          <li>Deploy the certificate to one gateway and watch the error rate.</li>
+          <li>Roll the certificate to the remaining gateways in small groups.</li>
+        </ol>
+      </main>
+      <script>track("runbook")</script>
+    </template>
+  </body>
+</html>
