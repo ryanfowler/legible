@@ -565,6 +565,7 @@ name = "legible"
 version = "0.5.1"
 dependencies = [
  "caseless",
+ "encoding_rs",
  "html5ever",
  "memchr",
  "regex",
@@ -579,7 +580,6 @@ dependencies = [
 name = "legible-cli"
 version = "0.5.1"
 dependencies = [
- "encoding_rs",
  "legible",
  "reqwest",
  "serde_json",

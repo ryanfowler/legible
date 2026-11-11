@@ -64,6 +64,32 @@ if let Some(title) = &page.metadata().title {
 The optional URL must be absolute. Legible uses it as the base URL for relative
 links and media URLs. Relative URLs stay relative when you pass `None`.
 
+## Extract bytes
+
+Use `Extractor::extract_bytes` when you have HTML bytes and do not know their
+character encoding, such as an HTTP response body. Pass the complete
+`Content-Type` header value when you have one.
+
+```rust
+use legible::{Extractor, ParseBudget};
+
+let extractor = Extractor::builder()
+    .parse_budget(ParseBudget::untrusted())
+    .build();
+let body = b"<main><p>Caf\xe9 menus change every week in this town.</p></main>";
+let page = extractor.extract_bytes(
+    body,
+    Some("https://example.com/menus"),
+    Some("text/html; charset=windows-1252"),
+)?;
+assert!(page.text().contains("Café"));
+# Ok::<(), legible::Error>(())
+```
+
+Legible selects the encoding in this order: a byte order mark, the
+`Content-Type` charset, valid UTF-8, a `meta` charset near the start of the
+document, and then Windows-1252. Valid UTF-8 is not copied.
+
 ## Configure extraction
 
 Use one `Extractor` for pages that share a configuration.
