@@ -11,6 +11,11 @@ cargo-fuzz = true
 default = ["fuzzing"]
 fuzzing = []
 
+# A target includes library source files that have optional serde attributes.
+# The fuzz crate has no serde feature, so declare the cfg value as expected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("serde"))'] }
+
 [dependencies]
 html5ever = "0.40"
 legible = { path = "..", features = ["fuzzing"] }

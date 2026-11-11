@@ -9,6 +9,8 @@ use crate::page::ExtractedPage;
 /// A Rust-native content root selector.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ContentHint {
     /// Matches one element by its exact `id` value.
     Id(String),
@@ -21,6 +23,8 @@ pub enum ContentHint {
 /// An HTML tag that can identify a content root.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ContentTag {
     /// The `article` element.
     Article,

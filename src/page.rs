@@ -319,6 +319,7 @@ impl ExtractedContent {
 /// source HTML.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContentMetrics {
     /// Number of whitespace-separated words.
     pub word_count: usize,

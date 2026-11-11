@@ -3,6 +3,8 @@
 /// The extraction strategy used for one attempt.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ExtractionStrategyInfo {
     /// The default focused extraction.
     Normal,
@@ -23,6 +25,8 @@ pub enum ExtractionStrategyInfo {
 /// The reason for the selected content boundary.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum RootSelectionReasonInfo {
     /// The root had the highest candidate rank.
     Ranked,
@@ -45,6 +49,8 @@ pub enum RootSelectionReasonInfo {
 /// One source of evidence for a selected root.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum CandidateSourceInfo {
     /// A semantic element, role, ID, or class identified the root.
     Semantic,
@@ -61,6 +67,7 @@ pub enum CandidateSourceInfo {
 /// A stable description of a selected root.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RootInfo {
     /// The lowercase HTML tag name, when available.
     pub tag: Option<String>,
@@ -77,6 +84,7 @@ pub struct RootInfo {
 /// Content measurements for a source or result region.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContentMetricsInfo {
     /// Number of words in normalized text.
     pub word_count: usize,
@@ -113,6 +121,7 @@ pub struct ContentMetricsInfo {
 /// Source-relative quality measurements for one result.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct QualityInfo {
     /// Fraction of useful source content retained in the result.
     pub coverage: f64,
@@ -127,6 +136,8 @@ pub struct QualityInfo {
 /// A semantic structure category used for source-to-result coverage.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum SemanticCoverageCategory {
     /// Preformatted source code blocks.
     CodeBlocks,
@@ -147,6 +158,7 @@ pub enum SemanticCoverageCategory {
 /// Source-to-result coverage for one semantic structure category.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SemanticCategoryCoverageInfo {
     /// The semantic structure category.
     pub category: SemanticCoverageCategory,
@@ -161,6 +173,7 @@ pub struct SemanticCategoryCoverageInfo {
 /// Semantic coverage measured across eligible structures in one candidate.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SemanticCoverageInfo {
     /// The mean bounded coverage across the reported categories.
     pub score: f64,
@@ -171,6 +184,8 @@ pub struct SemanticCoverageInfo {
 /// The reason that an extraction attempt did not win.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum AttemptRejectionReason {
     /// The selected root was document chrome.
     DocumentChrome,
@@ -197,6 +212,8 @@ pub enum AttemptRejectionReason {
 /// A positive exception that allowed an automatic attempt to be accepted.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum AcceptanceExceptionInfo {
     /// A complete, safe semantic root met the dedicated acceptance floor.
     TrustedSemanticRoot,
@@ -205,6 +222,8 @@ pub enum AcceptanceExceptionInfo {
 /// A major cleanup stage that removed retained content elements.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum CleanupActionKind {
     /// Decorative or placeholder media was removed.
     DecorativeMedia,
@@ -219,6 +238,7 @@ pub enum CleanupActionKind {
 /// The number of elements removed by one major cleanup stage.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CleanupActionInfo {
     /// Cleanup stage that removed elements.
     pub kind: CleanupActionKind,
@@ -229,6 +249,7 @@ pub struct CleanupActionInfo {
 /// Counts of canonical semantic structures in one extraction result.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NormalizationCountsInfo {
     /// Number of code blocks produced by normalization.
     pub code_blocks: usize,
@@ -249,6 +270,7 @@ pub struct NormalizationCountsInfo {
 /// Retained-representation measurements for one extraction attempt.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RepresentationMetricsInfo {
     /// Number of nodes in the parsed source DOM before preparation.
     pub source_dom_nodes: usize,
@@ -266,6 +288,7 @@ pub struct RepresentationMetricsInfo {
 /// Diagnostic data for one extraction attempt.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExtractionAttempt {
     /// Strategy used for this attempt.
     pub strategy: ExtractionStrategyInfo,
@@ -298,6 +321,7 @@ pub struct ExtractionAttempt {
 /// Structured information about the extraction decision.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExtractionDiagnostics {
     /// Strategy that produced the final result.
     pub selected_strategy: ExtractionStrategyInfo,

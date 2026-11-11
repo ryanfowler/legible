@@ -24,6 +24,7 @@ use url::Url;
 /// Missing values are `None` for optional fields and empty for list fields.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Metadata {
     /// Page title.
     pub title: Option<String>,
@@ -51,7 +52,9 @@ pub struct Metadata {
     pub section: Option<String>,
     /// Page tags in source order.
     pub tags: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) has_source_author: bool,
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) title_from_content_heading: bool,
 }
 
@@ -617,6 +620,8 @@ fn is_general_content_type(value: &str) -> bool {
 /// The source of a discovered metadata value.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum MetadataSource {
     /// Schema.org JSON-LD.
     JsonLd,
@@ -640,6 +645,7 @@ pub enum MetadataSource {
 
 /// One discovered metadata value and its source confidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MetadataValue<T> {
     /// The normalized value.
     pub value: T,
@@ -651,6 +657,7 @@ pub struct MetadataValue<T> {
 
 /// Selection details for a metadata field that has one value.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MetadataFieldDiagnostics<T> {
     /// The selected value.
     pub selected: Option<MetadataValue<T>>,
@@ -660,6 +667,7 @@ pub struct MetadataFieldDiagnostics<T> {
 
 /// Selection details for a metadata field that can have many values.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MetadataListFieldDiagnostics<T> {
     /// The selected values in source order.
     pub selected: Vec<MetadataValue<T>>,
@@ -669,6 +677,7 @@ pub struct MetadataListFieldDiagnostics<T> {
 
 /// Optional provenance for all public metadata fields.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MetadataDiagnostics {
     /// Title selection details.
     pub title: MetadataFieldDiagnostics<String>,

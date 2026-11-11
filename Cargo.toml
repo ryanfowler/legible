@@ -11,6 +11,9 @@ keywords = ["markdown", "content", "extraction", "html", "parser"]
 categories = ["parsing", "text-processing", "web-programming"]
 exclude = [".github/", "examples/", "tests/", "fuzz/"]
 
+[package.metadata.docs.rs]
+features = ["serde"]
+
 [lib]
 bench = false
 
@@ -30,6 +33,7 @@ lto = "fat"
 [features]
 default = []
 fuzzing = []
+serde = ["dep:serde"]
 tracing = ["dep:tracing"]
 
 [dependencies]
@@ -37,7 +41,7 @@ caseless = "0.2"
 html5ever = "0.40"
 memchr = "2.8"
 regex = "1.13"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = "1.0"
 smallvec = "1.15"
 tendril = "0.5"
@@ -52,6 +56,7 @@ datatest-stable = "0.3"
 html5ever_compat = { package = "html5ever", version = "0.39" }
 markup5ever_rcdom = "0.39"
 pretty_assertions = "1.4"
+serde = { version = "1.0", features = ["derive"] }
 
 [[test]]
 name = "fixture_tests"
