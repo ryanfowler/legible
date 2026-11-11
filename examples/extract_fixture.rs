@@ -3,36 +3,36 @@ use std::{env, fs, process::ExitCode};
 
 fn error_variant(error: &Error) -> &'static str {
     match error {
-        Error::TooManyElements { .. } => "TooManyElements",
         Error::ResourceLimit { .. } => "ResourceLimit",
         Error::Parse(_) => "Parse",
         Error::NoContent => "NoContent",
         Error::NoBody => "NoBody",
         Error::InvalidUrl(..) => "InvalidUrl",
         Error::ContentRootNotFound => "ContentRootNotFound",
+        _ => "Unknown",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::error_variant;
-    use legible::Error;
+    use legible::Extractor;
 
     #[test]
     fn error_variants_have_stable_names() {
-        let invalid_url = url::Url::parse("not a URL").unwrap_err();
+        let html = "<main><p>Content</p></main>";
         let cases = [
             (
-                Error::TooManyElements {
-                    observed: 12,
-                    limit: 10,
-                },
-                "TooManyElements",
+                Extractor::builder()
+                    .max_elements(1)
+                    .build()
+                    .extract(html, None),
+                "ResourceLimit",
             ),
-            (Error::InvalidUrl(invalid_url), "InvalidUrl"),
+            (legible::extract(html, Some("not a URL")), "InvalidUrl"),
         ];
-        for (error, expected) in cases {
-            assert_eq!(error_variant(&error), expected);
+        for (result, expected) in cases {
+            assert_eq!(error_variant(&result.unwrap_err()), expected);
         }
     }
 }

@@ -70,6 +70,9 @@ impl std::fmt::Display for ResourceLimitKind {
 
 /// Errors from content extraction.
 ///
+/// New variants can be added in a minor release. Include a wildcard arm when
+/// you match this type.
+///
 /// # Example
 ///
 /// ```rust
@@ -82,20 +85,9 @@ impl std::fmt::Display for ResourceLimitKind {
 ///     Err(error) => println!("Extraction error: {error}"),
 /// }
 /// ```
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum Error {
-    /// The document exceeds the configured element limit.
-    ///
-    /// `observed` is the number of HTML elements that Legible found. `limit` is
-    /// the value set by [`ExtractorBuilder::max_elements`](crate::ExtractorBuilder::max_elements).
-    #[error("Aborting parsing document; {observed} elements found (max: {limit})")]
-    TooManyElements {
-        /// Number of HTML elements found.
-        observed: usize,
-        /// Configured maximum number of HTML elements.
-        limit: usize,
-    },
-
     /// The input exceeds a configured parser or structured-data resource limit.
     ///
     /// `resource` identifies the limited resource. `limit` is the configured
@@ -129,7 +121,7 @@ pub enum Error {
     /// The `url` parameter of [`extract()`](crate::extract) or
     /// [`Extractor::extract`](crate::Extractor::extract) caused this error.
     #[error("Invalid URL: {0}")]
-    InvalidUrl(#[from] url::ParseError),
+    InvalidUrl(#[source] InvalidUrlError),
 
     /// The configured exact content root does not match an element.
     #[error("The requested content root was not found")]
@@ -139,13 +131,34 @@ pub enum Error {
 /// A result from content extraction.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The reason that a base URL is invalid.
+///
+/// The type keeps the URL parser private. Its [`Display`](std::fmt::Display)
+/// output describes the problem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidUrlError(url::ParseError);
+
+impl InvalidUrlError {
+    pub(crate) fn new(error: url::ParseError) -> Self {
+        Self(error)
+    }
+}
+
+impl std::fmt::Display for InvalidUrlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for InvalidUrlError {}
+
 impl Error {
     pub(crate) fn from_parse_error(error: ParseError) -> Self {
         match error {
             ParseError::Dom(error) => Self::Parse(error.to_string()),
             ParseError::Limit(limit) => match limit.kind {
-                ParseLimitKind::Elements => Self::TooManyElements {
-                    observed: limit.observed,
+                ParseLimitKind::Elements => Self::ResourceLimit {
+                    resource: ResourceLimitKind::Elements,
                     limit: limit.limit,
                 },
                 ParseLimitKind::Nodes => Self::ResourceLimit {
@@ -180,6 +193,17 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::ResourceLimitKind;
+
+    #[test]
+    fn invalid_url_error_is_the_error_source() {
+        use std::error::Error as _;
+
+        let error = crate::extract("<main><p>Content</p></main>", Some("not a URL")).unwrap_err();
+        let source = error.source().expect("InvalidUrl has a source");
+
+        assert!(source.is::<super::InvalidUrlError>());
+        assert_eq!(error.to_string(), format!("Invalid URL: {source}"));
+    }
 
     #[test]
     fn resource_limit_names_are_stable() {
