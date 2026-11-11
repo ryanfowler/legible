@@ -7,7 +7,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use legible::extract;
+use legible::{Extractor, ParseBudget};
 use serde::Deserialize;
 
 mod ssrf;
@@ -132,7 +132,11 @@ async fn content(Query(query): Query<ContentQuery>) -> impl IntoResponse {
         }
     };
 
-    let extracted = match extract(&html, Some(url)) {
+    // Fetched HTML is untrusted input.
+    let extractor = Extractor::builder()
+        .parse_budget(ParseBudget::untrusted())
+        .build();
+    let extracted = match extractor.extract(&html, Some(url)) {
         Ok(page) => page,
         Err(_) => {
             return (

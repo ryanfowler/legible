@@ -115,69 +115,12 @@ impl Default for Extractor {
 }
 
 impl ExtractorBuilder {
-    /// Sets the maximum number of HTML elements. Use `0` for no limit.
-    pub fn max_elements(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_elements = max;
-        self
-    }
-
     /// Sets all parser and structured-data limits.
+    ///
+    /// The default budget has no limits. Use [`ParseBudget::untrusted`] for
+    /// HTML from untrusted sources.
     pub fn parse_budget(mut self, budget: ParseBudget) -> Self {
         self.config.parse_budget = budget;
-        self
-    }
-
-    /// Sets the maximum input size in bytes. Use `0` for no limit.
-    pub fn max_input_bytes(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_input_bytes = max;
-        self
-    }
-
-    /// Sets the maximum number of allocated DOM nodes. Use `0` for no limit.
-    pub fn max_nodes(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_nodes = max;
-        self
-    }
-
-    /// Sets the maximum number of attributes across the document. Use `0` for no limit.
-    pub fn max_total_attributes(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_total_attributes = max;
-        self
-    }
-
-    /// Sets the maximum number of attributes on one element. Use `0` for no limit.
-    pub fn max_attributes_per_element(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_attributes_per_element = max;
-        self
-    }
-
-    /// Sets the maximum number of text bytes in the DOM. Use `0` for no limit.
-    pub fn max_text_bytes(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_text_bytes = max;
-        self
-    }
-
-    /// Sets the maximum element nesting depth. Use `0` for no limit.
-    pub fn max_depth(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_depth = max;
-        self
-    }
-
-    /// Sets the maximum total JSON-LD script size in bytes. Use `0` for no limit.
-    pub fn max_json_ld_bytes(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_json_ld_bytes = max;
-        self
-    }
-
-    /// Sets the maximum number of typed JSON-LD items. Use `0` for no limit.
-    pub fn max_json_ld_items(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_json_ld_items = max;
-        self
-    }
-
-    /// Sets the maximum JSON-LD nesting depth. Use `0` for the internal safety cap.
-    pub fn max_json_ld_depth(mut self, max: usize) -> Self {
-        self.config.parse_budget.max_json_ld_depth = max;
         self
     }
 
@@ -256,9 +199,39 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_budget_accepts_pages_and_stops_deep_nesting() {
+        let extractor = Extractor::builder()
+            .parse_budget(ParseBudget::untrusted())
+            .build();
+        let page = extractor
+            .extract(
+                "<main><h1>Title</h1><p>Useful page content for this test.</p></main>",
+                None,
+            )
+            .unwrap();
+        assert!(page.markdown().contains("Useful page content"));
+
+        let deep = format!(
+            "<html><body><article><p>Deep content {}text</p></article></body></html>",
+            "<div><span>".repeat(4_096)
+        );
+        assert!(matches!(
+            extractor.extract(&deep, None),
+            Err(Error::ResourceLimit {
+                resource: ResourceLimitKind::ElementDepth,
+                limit: 512
+            })
+        ));
+        assert_eq!(ParseBudget::default().max_depth, 0);
+    }
+
+    #[test]
     fn builder_sets_public_configuration() {
         let extractor = Extractor::builder()
-            .max_elements(123)
+            .parse_budget(ParseBudget {
+                max_elements: 123,
+                ..ParseBudget::default()
+            })
             .structured_data(false)
             .diagnostics(true)
             .build();
@@ -706,7 +679,12 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
 
     #[test]
     fn max_elements_is_enforced() {
-        let extractor = Extractor::builder().max_elements(1).build();
+        let extractor = Extractor::builder()
+            .parse_budget(ParseBudget {
+                max_elements: 1,
+                ..ParseBudget::default()
+            })
+            .build();
         assert!(matches!(
             extractor.extract("<main><p>Content</p></main>", None),
             Err(Error::ResourceLimit {
@@ -720,32 +698,62 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
     fn parser_budgets_fail_before_extraction_without_panicking() {
         let cases = [
             (
-                Extractor::builder().max_input_bytes(4).build(),
+                Extractor::builder()
+                    .parse_budget(ParseBudget {
+                        max_input_bytes: 4,
+                        ..ParseBudget::default()
+                    })
+                    .build(),
                 "<p>content</p>",
                 ResourceLimitKind::InputBytes,
             ),
             (
-                Extractor::builder().max_nodes(1).build(),
+                Extractor::builder()
+                    .parse_budget(ParseBudget {
+                        max_nodes: 1,
+                        ..ParseBudget::default()
+                    })
+                    .build(),
                 "<p>content</p>",
                 ResourceLimitKind::DomNodes,
             ),
             (
-                Extractor::builder().max_total_attributes(1).build(),
+                Extractor::builder()
+                    .parse_budget(ParseBudget {
+                        max_total_attributes: 1,
+                        ..ParseBudget::default()
+                    })
+                    .build(),
                 "<p id='a' class='b'>content</p>",
                 ResourceLimitKind::TotalAttributes,
             ),
             (
-                Extractor::builder().max_attributes_per_element(1).build(),
+                Extractor::builder()
+                    .parse_budget(ParseBudget {
+                        max_attributes_per_element: 1,
+                        ..ParseBudget::default()
+                    })
+                    .build(),
                 "<p id='a' class='b'>content</p>",
                 ResourceLimitKind::AttributesPerElement,
             ),
             (
-                Extractor::builder().max_text_bytes(2).build(),
+                Extractor::builder()
+                    .parse_budget(ParseBudget {
+                        max_text_bytes: 2,
+                        ..ParseBudget::default()
+                    })
+                    .build(),
                 "<p>content</p>",
                 ResourceLimitKind::TextBytes,
             ),
             (
-                Extractor::builder().max_depth(1).build(),
+                Extractor::builder()
+                    .parse_budget(ParseBudget {
+                        max_depth: 1,
+                        ..ParseBudget::default()
+                    })
+                    .build(),
                 "<div><div>content</div></div>",
                 ResourceLimitKind::ElementDepth,
             ),
@@ -771,7 +779,10 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
 
         assert!(matches!(
             Extractor::builder()
-                .max_json_ld_bytes(8)
+                .parse_budget(ParseBudget {
+                    max_json_ld_bytes: 8,
+                    ..ParseBudget::default()
+                })
                 .build()
                 .extract(html, None),
             Err(Error::ResourceLimit {
@@ -781,7 +792,10 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         ));
         assert!(matches!(
             Extractor::builder()
-                .max_json_ld_items(1)
+                .parse_budget(ParseBudget {
+                    max_json_ld_items: 1,
+                    ..ParseBudget::default()
+                })
                 .build()
                 .extract(html, None),
             Err(Error::ResourceLimit {
@@ -795,7 +809,10 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
             <main><p>Useful page content.</p></main>"#;
         assert!(matches!(
             Extractor::builder()
-                .max_json_ld_bytes(30)
+                .parse_budget(ParseBudget {
+                    max_json_ld_bytes: 30,
+                    ..ParseBudget::default()
+                })
                 .build()
                 .extract(cumulative, None),
             Err(Error::ResourceLimit {
@@ -811,7 +828,10 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         );
         assert!(matches!(
             Extractor::builder()
-                .max_json_ld_depth(2)
+                .parse_budget(ParseBudget {
+                    max_json_ld_depth: 2,
+                    ..ParseBudget::default()
+                })
                 .build()
                 .extract(&deep, None),
             Err(Error::ResourceLimit {
@@ -824,13 +844,19 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
     #[test]
     fn parser_budget_survives_repair_callbacks_after_poisoning() {
         let error = Extractor::builder()
-            .max_nodes(4)
+            .parse_budget(ParseBudget {
+                max_nodes: 4,
+                ..ParseBudget::default()
+            })
             .build()
             .extract("<table><tr><td><p>content</p></td></tr></table>", None);
         assert!(matches!(error, Err(Error::ResourceLimit { .. })));
 
         let error = Extractor::builder()
-            .max_nodes(1)
+            .parse_budget(ParseBudget {
+                max_nodes: 1,
+                ..ParseBudget::default()
+            })
             .build()
             .extract("<div></div>", None);
         assert!(matches!(error, Err(Error::ResourceLimit { .. })));
@@ -838,10 +864,16 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
 
     #[test]
     fn template_contents_obey_element_depth_budget() {
-        let error = Extractor::builder().max_depth(1).build().extract(
-            "<template><div>content</div></template><main><p>page</p></main>",
-            None,
-        );
+        let error = Extractor::builder()
+            .parse_budget(ParseBudget {
+                max_depth: 1,
+                ..ParseBudget::default()
+            })
+            .build()
+            .extract(
+                "<template><div>content</div></template><main><p>page</p></main>",
+                None,
+            );
         assert!(matches!(
             error,
             Err(Error::ResourceLimit {
@@ -868,7 +900,10 @@ multiline</code></div><table role="presentation" class="highlighttable"><tr><td 
         ));
         assert!(matches!(
             Extractor::builder()
-                .max_json_ld_depth(1_000)
+                .parse_budget(ParseBudget {
+                    max_json_ld_depth: 1_000,
+                    ..ParseBudget::default()
+                })
                 .build()
                 .extract(&deep, None),
             Err(Error::ResourceLimit {

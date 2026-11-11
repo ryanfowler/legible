@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 
 use encoding_rs::{Encoding, WINDOWS_1252};
-use legible::extract;
+use legible::{Extractor, ParseBudget};
 use reqwest::blocking::Client;
 use reqwest::header::HeaderValue;
 use terminal_size::{Width, terminal_size};
@@ -46,7 +46,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let response_content_length = response.content_length();
     let body = read_body(response, response_content_length)?;
     let html = decode_html(&body, charset.as_deref());
-    let page = extract(&html, Some(final_url.as_str()))?;
+    // Network HTML is untrusted input.
+    let page = Extractor::builder()
+        .parse_budget(ParseBudget::untrusted())
+        .build()
+        .extract(&html, Some(final_url.as_str()))?;
     let width = terminal_width()
         .unwrap_or(MAX_LINE_WIDTH)
         .min(MAX_LINE_WIDTH);
@@ -370,6 +374,7 @@ fn yaml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use legible::extract;
 
     #[test]
     fn decodes_windows_1252() {
