@@ -24,6 +24,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalized_text_keeps_punctuation_after_a_space() {
+        // The word-at-a-time space test once borrowed into the next byte and
+        // marked `!` as whitespace when a space came just before it.
+        let dom = Dom::parse_document(
+            "<p>Hello ! This sentence is long enough for the word scanner to run !</p>",
+        )
+        .unwrap();
+        let paragraph = dom.first_descendant_by_tag(dom.root(), Tag::P).unwrap();
+        let mut text = String::new();
+        dom.append_normalized_text(paragraph, &mut text);
+
+        assert_eq!(
+            text,
+            "Hello ! This sentence is long enough for the word scanner to run !"
+        );
+    }
+
+    #[test]
     fn parses_html_and_preserves_attributes() {
         let mut dom = Dom::parse_document(
             "<!doctype html><html><body><p title='a &amp; b'>Hello <b>world</b></p></body></html>",
