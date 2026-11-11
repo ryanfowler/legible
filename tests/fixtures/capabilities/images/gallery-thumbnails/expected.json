@@ -1,0 +1,4 @@
+{
+  "must_contain": ["wall/gap.jpg", "The gap after the loose stones came out"],
+  "must_not_contain": ["thumb-1.jpg", "thumb-2.jpg", "thumb-3.jpg"]
+}

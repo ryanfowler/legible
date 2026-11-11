@@ -1,0 +1,4 @@
+{
+  "must_contain": ["pools/anemone.jpg", "pools/crab.jpg", "A green anemone opens", "A shore crab waits"],
+  "images_min": 2
+}
