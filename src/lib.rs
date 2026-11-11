@@ -56,6 +56,11 @@
 //! scripts, event handlers, arbitrary attributes, or unsupported URI schemes.
 //! Markdown output contains no raw HTML.
 
+// Compile and run the README examples as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod budget;
 mod candidate;
 mod cleaning;
@@ -93,7 +98,9 @@ pub use metadata::{
     Metadata, MetadataDiagnostics, MetadataFieldDiagnostics, MetadataListFieldDiagnostics,
     MetadataSource, MetadataValue,
 };
-pub use page::{ExtractedContent, ExtractedPage, ExtractedPageParts, HtmlBuilder, MarkdownBuilder};
+pub use page::{
+    ContentMetrics, ExtractedContent, ExtractedPage, ExtractedPageParts, MarkdownBuilder,
+};
 
 /// Extracts relevant content and metadata from an HTML document.
 ///

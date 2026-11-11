@@ -208,11 +208,11 @@ fn run_capability(source_path: &Path) -> datatest_stable::Result<()> {
         .into());
     }
     if let Some(minimum) = expected.word_count_min
-        && page.word_count() < minimum
+        && page.content().metrics().word_count < minimum
     {
         return Err(format!(
             "expected at least {minimum} words, got {}",
-            page.word_count()
+            page.content().metrics().word_count
         )
         .into());
     }

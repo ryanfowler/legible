@@ -60,9 +60,10 @@ fuzz_target!(|data: &[u8]| {
     let text = page.text();
     let html = page.html();
     assert!(page.validate_document());
-    assert_eq!(page.text_length(), text.chars().count());
-    assert!(page.word_count() <= page.text_length());
-    assert_eq!(page.word_count() == 0, text.is_empty());
+    let metrics = page.content().metrics();
+    assert_eq!(metrics.text_length, text.chars().count());
+    assert!(metrics.word_count <= metrics.text_length);
+    assert_eq!(metrics.word_count == 0, text.is_empty());
     let _ = markdown.len();
     reparse_serialized(&html);
     validate_serialized_dom(&html);
