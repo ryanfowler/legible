@@ -402,8 +402,8 @@ fn job_salary_value(value: &Value) -> Option<String> {
         })
     };
     let formatted = if salary_value.is_object() {
-        let min = salary_value.get("minValue").and_then(&format_number);
-        let max = salary_value.get("maxValue").and_then(&format_number);
+        let min = salary_value.get("minValue").and_then(format_number);
+        let max = salary_value.get("maxValue").and_then(format_number);
         match (min, max) {
             (Some(min), Some(max)) => Some(format_job_salary(currency, &min, &max, unit)),
             (Some(min), None) => Some(format_job_salary(currency, &min, "", unit)),
