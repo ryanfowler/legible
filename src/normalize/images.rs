@@ -824,10 +824,8 @@ fn source_has_responsive_or_lazy_image(dom: &Dom, node: NodeId) -> bool {
 
 fn is_svg_description_element(dom: &Dom, node: NodeId) -> bool {
     dom.qual_name(node).is_some_and(|name| {
-        matches!(
-            name.local.as_str().to_ascii_lowercase().as_str(),
-            "title" | "desc"
-        )
+        let local = name.local.as_str();
+        local.eq_ignore_ascii_case("title") || local.eq_ignore_ascii_case("desc")
     })
 }
 

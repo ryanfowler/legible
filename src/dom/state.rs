@@ -162,6 +162,10 @@ struct ScoreEntry {
     flags: ScoreFlags,
 }
 
+/// Tendril stores text of this length or less inline, without a shared
+/// buffer.
+const MAX_INLINE_TEXT_LEN: usize = 8;
+
 #[derive(Debug, Clone, Copy, Default)]
 // Six u32 counters plus a u16 flag word, followed by the epoch, keep this
 // dense text-stat entry at 32 bytes. Score entries are 16 bytes and table
@@ -196,6 +200,18 @@ impl Default for LinkLengthCache {
     }
 }
 
+/// Text statistics that a fragment copy carries from a source text node.
+///
+/// The seed keeps a reference to the shared text buffer. A shared buffer
+/// does not change, so a node whose text has the same buffer address and
+/// length has the same text. Replaced text has a different buffer, so a stale
+/// seed never matches it.
+#[derive(Debug, Clone)]
+struct TextStatsSeed {
+    text: tendril::StrTendril,
+    stats: NodeStats,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NodeStateStore {
     // Score state is grown only for nodes that participate in scoring. Text
@@ -212,6 +228,7 @@ pub(crate) struct NodeStateStore {
     stats_epoch: u32,
     source_stats_epoch: u32,
     link_lengths: Option<LinkLengthCache>,
+    text_seeds: Vec<Option<TextStatsSeed>>,
 }
 
 /// Score state that is specific to one scoring policy.
@@ -426,6 +443,43 @@ impl NodeStateStore {
         }
     }
 
+    /// Removes all text statistics seeds. `clear` and `clear_stats` keep
+    /// seeds, because a seed matches only the unchanged text that it
+    /// describes.
+    pub(crate) fn clear_text_seeds(&mut self) {
+        self.text_seeds.clear();
+    }
+
+    /// Records the known statistics of the text in `text` for `id`.
+    /// Inline text has no shared buffer to identify it, so it gets no seed.
+    pub(crate) fn seed_text_stats(
+        &mut self,
+        id: super::NodeId,
+        text: &tendril::StrTendril,
+        stats: NodeStats,
+    ) {
+        if text.len() <= MAX_INLINE_TEXT_LEN {
+            return;
+        }
+        if id.index() >= self.text_seeds.len() {
+            self.text_seeds.resize(id.index() + 1, None);
+        }
+        self.text_seeds[id.index()] = Some(TextStatsSeed {
+            text: text.clone(),
+            stats,
+        });
+    }
+
+    /// Returns the seeded statistics for `text` of node `id`, if the node
+    /// still has the seeded text buffer.
+    pub(crate) fn seeded_text_stats(&self, id: super::NodeId, text: &str) -> Option<NodeStats> {
+        self.text_seeds
+            .get(id.index())?
+            .as_ref()
+            .filter(|seed| seed.text.len() == text.len() && seed.text.as_ptr() == text.as_ptr())
+            .map(|seed| seed.stats)
+    }
+
     pub(crate) fn get_stats(&self, id: super::NodeId) -> Option<&NodeStats> {
         self.stats
             .get(id.index())
@@ -612,6 +666,7 @@ impl Default for NodeStateStore {
             stats_epoch: 1,
             source_stats_epoch: 1,
             link_lengths: None,
+            text_seeds: Vec::new(),
         }
     }
 }
@@ -619,6 +674,75 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tendril::StrTendril;
+
+    /// Statistics that no scan of the test text can produce, so a test can
+    /// tell a seeded value from a computed value.
+    fn sentinel_stats() -> NodeStats {
+        NodeStats {
+            text_length: 999,
+            word_count: 777,
+            ..NodeStats::default()
+        }
+    }
+
+    fn seeded_length(store: &NodeStateStore, id: super::super::NodeId, text: &str) -> Option<u32> {
+        store
+            .seeded_text_stats(id, text)
+            .map(|stats| stats.text_length)
+    }
+
+    #[test]
+    fn copy_on_write_edit_invalidates_text_seed() {
+        let id = super::super::NodeId(3);
+        let mut text = StrTendril::from("shared text buffer");
+        let mut store = NodeStateStore::new();
+        store.seed_text_stats(id, &text, sentinel_stats());
+        assert_eq!(seeded_length(&store, id, &text), Some(999));
+
+        // The seed shares the buffer, so this edit copies it. The edited
+        // text has the original length but a new buffer.
+        text.pop_back(1);
+        assert_eq!(seeded_length(&store, id, &text), None);
+        text.push_char('X');
+        assert_eq!(text.len(), "shared text buffer".len());
+        assert_eq!(&*text, "shared text buffeX");
+        assert_eq!(seeded_length(&store, id, &text), None);
+    }
+
+    #[test]
+    fn text_seed_survives_clear_only_with_the_same_buffer() {
+        let id = super::super::NodeId(1);
+        let text = StrTendril::from("unchanged source text");
+        let mut store = NodeStateStore::new();
+        store.seed_text_stats(id, &text, sentinel_stats());
+
+        store.clear();
+        store.clear_stats();
+        assert_eq!(seeded_length(&store, id, &text), Some(999));
+
+        // Equal content in a different buffer is not the seeded text.
+        let replacement = StrTendril::from("unchanged source text");
+        assert_eq!(&*replacement, &*text);
+        assert_eq!(seeded_length(&store, id, &replacement), None);
+
+        store.clear_text_seeds();
+        assert_eq!(seeded_length(&store, id, &text), None);
+    }
+
+    #[test]
+    fn inline_text_is_never_seeded() {
+        let mut store = NodeStateStore::new();
+        let inline = StrTendril::from("12345678");
+        let shared = StrTendril::from("123456789");
+        let (inline_id, shared_id) = (super::super::NodeId(0), super::super::NodeId(1));
+        store.seed_text_stats(inline_id, &inline, sentinel_stats());
+        store.seed_text_stats(shared_id, &shared, sentinel_stats());
+
+        assert!(store.text_seeds[inline_id.index()].is_none());
+        assert_eq!(seeded_length(&store, inline_id, &inline), None);
+        assert_eq!(seeded_length(&store, shared_id, &shared), Some(999));
+    }
 
     #[test]
     fn state_layout_is_split_and_compact() {

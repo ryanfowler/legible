@@ -32,6 +32,19 @@ pub(crate) fn has_any_token(value: &str, expected: &[&str]) -> bool {
     }
 }
 
+/// True when any run of ASCII letters and digits in `value` equals any entry
+/// in `expected` (ASCII case-insensitive). Class and ID names such as
+/// `article-body_main` have the parts `article`, `body`, and `main`.
+pub(crate) fn has_any_name_part(value: &str, expected: &[&str]) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| {
+            expected
+                .iter()
+                .any(|candidate| part.eq_ignore_ascii_case(candidate))
+        })
+}
+
 /// True when any token contains `needle` (ASCII case-insensitive).
 #[inline]
 pub(crate) fn any_token_contains(value: &str, needle: &str) -> bool {

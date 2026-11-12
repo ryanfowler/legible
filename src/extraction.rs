@@ -38,7 +38,7 @@ use crate::quality::{
 };
 use crate::scoring::*;
 use crate::specialized::{self, DocumentContext};
-use crate::tokens::{any_token_contains, has_any_token, has_token};
+use crate::tokens::{any_token_contains, has_any_name_part, has_any_token, has_token};
 use regex::Regex;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -1593,6 +1593,7 @@ impl<'a> ContentExtractor<'a> {
             // Copy only the selected source roots. The scoring view remains
             // available for later strategies, so a rejected attempt does not
             // require another complete DOM clone.
+            attempt_scratch.node_data.clear_text_seeds();
             let fragment = {
                 analysis
                     .view
@@ -1600,6 +1601,7 @@ impl<'a> ContentExtractor<'a> {
                         working_dom,
                         &source_siblings,
                         &analysis.excluded_mask,
+                        Some((&prepared_source, &mut attempt_scratch.node_data)),
                     )
                     .map_err(|_| Error::NoContent)?
             };
@@ -1780,6 +1782,7 @@ impl<'a> ContentExtractor<'a> {
                         result_root,
                         stream,
                         Some(&source_evidence),
+                        &mut runner.scratch.node_data,
                     )
                 })
                 .ok_or(Error::NoContent)?;
@@ -2793,6 +2796,7 @@ impl<'a> ContentExtractor<'a> {
                     result_root,
                     stream,
                     Some(&source_evidence),
+                    &mut runner.scratch.node_data,
                 )
             })
             .ok_or(Error::NoContent)?;
@@ -3963,14 +3967,8 @@ impl<'a> ContentExtractor<'a> {
                     && [AttrName::Class, AttrName::Id]
                         .into_iter()
                         .filter_map(|attribute| dom.attr(x, attribute))
-                        .flat_map(|value| {
-                            value.split(|character: char| !character.is_ascii_alphanumeric())
-                        })
-                        .any(|token| {
-                            matches!(
-                                token.to_ascii_lowercase().as_str(),
-                                "subtitle" | "dek" | "standfirst" | "summary"
-                            )
+                        .any(|value| {
+                            has_any_name_part(value, &["subtitle", "dek", "standfirst", "summary"])
                         })
                 {
                     let stats = get_or_compute_stats(dom, x, facts);
@@ -4791,11 +4789,17 @@ fn is_linked_site_brand_heading(
                 .into_iter()
                 .find_map(|attribute| dom.attr(node, attribute))
         })
-        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
-        .any(|token| {
-            matches!(
-                token.to_ascii_lowercase().as_str(),
-                "brand" | "branding" | "logo" | "masthead" | "wordmark" | "sitetitle"
+        .any(|value| {
+            has_any_name_part(
+                value,
+                &[
+                    "brand",
+                    "branding",
+                    "logo",
+                    "masthead",
+                    "wordmark",
+                    "sitetitle",
+                ],
             )
         });
     if in_document_chrome.unwrap_or_else(|| {
@@ -4854,17 +4858,18 @@ fn has_primary_content_marker(dom: &Dom, node: NodeId) -> bool {
     ]
     .into_iter()
     .flatten()
-    .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
-    .any(|token| {
-        matches!(
-            token.to_ascii_lowercase().as_str(),
-            "articlecontent"
-                | "articlebody"
-                | "entrycontent"
-                | "econtent"
-                | "maincontent"
-                | "postcontent"
-                | "postbody"
+    .any(|value| {
+        has_any_name_part(
+            value,
+            &[
+                "articlecontent",
+                "articlebody",
+                "entrycontent",
+                "econtent",
+                "maincontent",
+                "postcontent",
+                "postbody",
+            ],
         )
     })
 }
