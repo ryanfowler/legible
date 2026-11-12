@@ -3,6 +3,7 @@
   "fixtures": {
     "access-barrier-main": {
       "reliability_pass": true,
+      "duplicate_paragraphs": null,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -11,6 +12,7 @@
     },
     "app-access-barrier": {
       "reliability_pass": true,
+      "duplicate_paragraphs": null,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -19,6 +21,7 @@
     },
     "app-accessibility-duplicate": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -27,6 +30,7 @@
     },
     "app-accordion-content": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.75,
       "noise_score": 1,
       "structure_score": 0.5,
@@ -35,6 +39,7 @@
     },
     "app-empty-shell": {
       "reliability_pass": true,
+      "duplicate_paragraphs": null,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -43,6 +48,7 @@
     },
     "app-hidden-complete-content": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -51,6 +57,7 @@
     },
     "app-hidden-junk-negative": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": 1,
@@ -59,6 +66,7 @@
     },
     "app-javascript-shell": {
       "reliability_pass": true,
+      "duplicate_paragraphs": null,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -67,6 +75,7 @@
     },
     "app-jsonld-region": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": 0,
@@ -75,6 +84,7 @@
     },
     "app-loading-shell": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": null,
@@ -83,6 +93,7 @@
     },
     "app-navigation-tree": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": 0,
@@ -91,6 +102,7 @@
     },
     "app-noscript-adjacent": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": null,
@@ -99,6 +111,7 @@
     },
     "app-streamed-fragments": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": 1,
@@ -107,6 +120,7 @@
     },
     "app-tab-panels": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -115,6 +129,7 @@
     },
     "app-template-content": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": 0.5,
@@ -123,6 +138,7 @@
     },
     "architecture-components": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -131,6 +147,7 @@
     },
     "article-body-semantic-root": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -139,6 +156,7 @@
     },
     "article-body-token-boundary": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -147,6 +165,7 @@
     },
     "article-correction-note": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -155,6 +174,7 @@
     },
     "article-fact-box": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -163,6 +183,7 @@
     },
     "article-hero-caption": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -171,6 +192,7 @@
     },
     "article-related-stories-footer": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -179,6 +201,7 @@
     },
     "article-resilient-lead": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -187,6 +210,7 @@
     },
     "article-results-table": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -195,6 +219,7 @@
     },
     "article-sponsored-insert": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -203,6 +228,7 @@
     },
     "bilingual-article": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -211,6 +237,7 @@
     },
     "blog-newsletter-footer": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -219,6 +246,7 @@
     },
     "blog-series-navigation": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -227,6 +255,7 @@
     },
     "breaking-news-timeline": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -235,6 +264,7 @@
     },
     "cli-command-reference": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -243,6 +273,7 @@
     },
     "code-heavy-line-numbers": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -251,6 +282,7 @@
     },
     "command-subcommands-index": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -259,6 +291,7 @@
     },
     "concepts-event-ordering": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -267,6 +300,7 @@
     },
     "configuration-option-table": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -275,6 +309,7 @@
     },
     "database-migration-guide": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -283,6 +318,7 @@
     },
     "discussion-code-reply": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -291,6 +327,7 @@
     },
     "discussion-collapsed-content": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.3333333333333333,
       "noise_score": 1,
       "structure_score": 0,
@@ -299,6 +336,7 @@
     },
     "discussion-deleted-parent": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -307,6 +345,7 @@
     },
     "discussion-flat-comments": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -315,6 +354,7 @@
     },
     "discussion-link-heavy": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.8,
       "noise_score": 1,
       "structure_score": 0.5,
@@ -323,6 +363,7 @@
     },
     "discussion-list-reply": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -331,6 +372,7 @@
     },
     "discussion-moderator-notice": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -339,6 +381,7 @@
     },
     "discussion-one-level-replies": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -347,6 +390,7 @@
     },
     "discussion-only": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -355,6 +399,7 @@
     },
     "discussion-pagination": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 0.75,
       "structure_score": 1,
@@ -363,6 +408,7 @@
     },
     "discussion-primary-post": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.6666666666666666,
       "noise_score": 1,
       "structure_score": 0.5,
@@ -371,6 +417,7 @@
     },
     "discussion-quote-reply": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -379,6 +426,7 @@
     },
     "discussion-short-quality": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -387,6 +435,7 @@
     },
     "discussion-sponsored-card": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -395,6 +444,7 @@
     },
     "discussion-three-level-thread": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -403,6 +453,7 @@
     },
     "docs-callout-types": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -411,6 +462,7 @@
     },
     "docs-copy-buttons": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -419,6 +471,7 @@
     },
     "docs-definition-list": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -427,6 +480,7 @@
     },
     "docs-inline-warning": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -435,6 +489,7 @@
     },
     "docs-large-navigation": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -443,6 +498,7 @@
     },
     "docs-pagination-content": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -451,6 +507,7 @@
     },
     "docs-search-no-results": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -459,6 +516,7 @@
     },
     "docs-table-of-contents": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -467,6 +525,7 @@
     },
     "docs-version-selector": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -475,6 +534,7 @@
     },
     "documentation-index": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -483,6 +543,7 @@
     },
     "empty-application-shell": {
       "reliability_pass": true,
+      "duplicate_paragraphs": null,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -491,6 +552,7 @@
     },
     "environment-variable-reference": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -499,6 +561,7 @@
     },
     "error-code-reference": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -507,6 +570,7 @@
     },
     "essay-footnotes": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -515,6 +579,7 @@
     },
     "essay-pullquote": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -523,6 +588,7 @@
     },
     "essay-sidenote": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -531,6 +597,7 @@
     },
     "food-blog-narrative": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -539,6 +606,7 @@
     },
     "go-package-guide": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -547,6 +615,7 @@
     },
     "http-api-endpoint": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -555,6 +624,7 @@
     },
     "independent-product-review": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -563,6 +633,7 @@
     },
     "installation-platform-tabs": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -571,6 +642,7 @@
     },
     "interview-transcript": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -579,6 +651,7 @@
     },
     "javascript-stream-tutorial": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -587,6 +660,7 @@
     },
     "legacy-table-doc": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -595,6 +669,7 @@
     },
     "link-index": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -603,6 +678,7 @@
     },
     "live-report-updates": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -611,6 +687,7 @@
     },
     "local-news-sidebar": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -619,6 +696,7 @@
     },
     "main-with-article-peers": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": null,
       "structure_score": 1,
@@ -627,6 +705,7 @@
     },
     "media-avatar-title-conflict": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -635,6 +714,7 @@
     },
     "media-caption-evidence": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -643,6 +723,7 @@
     },
     "media-comment-avatars": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -651,6 +732,7 @@
     },
     "media-embed-fallback": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -659,6 +741,7 @@
     },
     "media-figure-peripheral-card": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -667,6 +750,7 @@
     },
     "media-hero-before-root": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -675,6 +759,7 @@
     },
     "media-hero-siblings-before": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -683,6 +768,7 @@
     },
     "media-lazy-attributes": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -691,6 +777,7 @@
     },
     "media-lightbox-image": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -699,6 +786,7 @@
     },
     "media-logo-favicon-tracker": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -707,6 +795,7 @@
     },
     "media-picture-hero": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -715,6 +804,7 @@
     },
     "media-related-thumbnails": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -723,6 +813,7 @@
     },
     "media-responsive-duplicates": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -731,6 +822,7 @@
     },
     "media-small-diagram": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -739,6 +831,7 @@
     },
     "media-srcset-weak-src": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -747,6 +840,7 @@
     },
     "media-svg-chart-icon": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 0.5,
       "noise_score": 1,
       "structure_score": 0.5,
@@ -755,6 +849,7 @@
     },
     "metadata-avatar-alt-author": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -763,6 +858,7 @@
     },
     "metadata-byline-mixed": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -771,6 +867,7 @@
     },
     "metadata-canonical-conflict": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -779,6 +876,7 @@
     },
     "metadata-hidden-visible-h1": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -787,6 +885,7 @@
     },
     "metadata-image-conflict": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -795,6 +894,7 @@
     },
     "metadata-jsonld-stale-title": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -803,6 +903,7 @@
     },
     "metadata-language-conflict": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": null,
       "structure_score": null,
@@ -811,6 +912,7 @@
     },
     "metadata-multiple-authors": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -819,6 +921,7 @@
     },
     "metadata-multiple-h1": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -827,6 +930,7 @@
     },
     "metadata-nested-itemprop-author": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -835,6 +939,7 @@
     },
     "metadata-og-h1-conflict": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -843,6 +948,7 @@
     },
     "metadata-organization-person": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -851,6 +957,7 @@
     },
     "metadata-placeholder-tags": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -859,6 +966,7 @@
     },
     "metadata-published-modified": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -867,6 +975,7 @@
     },
     "metadata-section-byline": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -875,6 +984,7 @@
     },
     "metadata-site-name-heading": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": null,
       "structure_score": null,
@@ -883,6 +993,7 @@
     },
     "metadata-title-site-only": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -891,6 +1002,7 @@
     },
     "metadata-title-site-suffix": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -899,6 +1011,7 @@
     },
     "metadata-twitter-og-conflict": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -907,6 +1020,7 @@
     },
     "metadata-visible-written-date": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -915,6 +1029,7 @@
     },
     "multi-author-investigation": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -923,6 +1038,7 @@
     },
     "news-analysis-inline-promo": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -931,6 +1047,7 @@
     },
     "news-article": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -939,6 +1056,7 @@
     },
     "opinion-counterargument": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -947,6 +1065,7 @@
     },
     "paywall-access-shell": {
       "reliability_pass": true,
+      "duplicate_paragraphs": null,
       "required_content_score": null,
       "noise_score": null,
       "structure_score": null,
@@ -955,6 +1074,7 @@
     },
     "personal-essay-chapters": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -963,6 +1083,7 @@
     },
     "photo-essay-captions": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -971,6 +1092,7 @@
     },
     "release-notes-document": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -979,6 +1101,7 @@
     },
     "responsive-duplicate-copies": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -987,6 +1110,7 @@
     },
     "rust-api-reference": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -995,6 +1119,7 @@
     },
     "semantic-code-table-article": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -1003,6 +1128,7 @@
     },
     "semantic-code-table-peer-articles": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -1011,6 +1137,7 @@
     },
     "semantic-main-with-chrome": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -1019,6 +1146,7 @@
     },
     "semantic-root-valid-with-heavy-shell": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": null,
@@ -1027,6 +1155,7 @@
     },
     "social-thread-media-links": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 0.6666666666666666,
       "structure_score": 1,
@@ -1035,6 +1164,7 @@
     },
     "support-faq-accordions": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -1043,6 +1173,7 @@
     },
     "tabbed-code-source": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -1051,6 +1182,7 @@
     },
     "technical-doc": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -1059,6 +1191,7 @@
     },
     "travel-blog-itinerary": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,
@@ -1067,6 +1200,7 @@
     },
     "troubleshooting-decision-tree": {
       "reliability_pass": true,
+      "duplicate_paragraphs": 0,
       "required_content_score": 1,
       "noise_score": 1,
       "structure_score": 1,

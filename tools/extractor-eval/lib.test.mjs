@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   aggregateReport,
   compareWithBaseline,
+  duplicateParagraphs,
   comparisonResult,
   discoverFixtures,
   formatMarkdownSummary,
@@ -99,6 +100,7 @@ $x + y$`;
     images: 1,
     image_sources: ["image.png"],
     code_blocks: 1,
+    duplicate_paragraphs: 0,
     tables: 1,
     figures: 0,
     lists: 1,
@@ -564,5 +566,75 @@ test("reports baseline regressions and improvements per score", () => {
   assert.deepEqual(
     comparison.improvements.map((item) => `${item.fixture}:${item.score}`),
     ["fixed:reliability", "fixed:noise_score"],
+  );
+});
+
+test("counts repeated prose blocks but not short repeated labels", () => {
+  const paragraph =
+    "The harbour opened at dawn and the first ferry left on time.";
+  assert.equal(duplicateParagraphs(`${paragraph}\n\nReply\n\nReply`), 0);
+  assert.equal(
+    duplicateParagraphs(`![${paragraph}](a.png)\n\n${paragraph}`),
+    0,
+  );
+  const escaped =
+    "![Diagram \\[overview\\] of the harbour ferry schedule](a.png)";
+  assert.equal(duplicateParagraphs(`${escaped}\n\n${escaped}`), 0);
+  const command =
+    "cargo run --release --example extract_fixture -- --json page.html";
+  assert.equal(
+    duplicateParagraphs(
+      `\`\`\`sh\n${command}\n\`\`\`\n\n\`\`\`sh\n${command}\n\`\`\``,
+    ),
+    0,
+  );
+  assert.equal(duplicateParagraphs(`> ${paragraph}\n>\n> ${paragraph}`), 1);
+  const nested = `- Step one\n\n    \`\`\`sh\n    ${command}\n    \`\`\``;
+  assert.equal(duplicateParagraphs(`${nested}\n\nFirst note.\n\n${nested}`), 0);
+  assert.equal(
+    duplicateParagraphs(
+      `Render the image with the syntax \`![alpha](a.png)\` in the guide.\n\n` +
+        `Render the image with the syntax \`![beta](b.png)\` in the guide.`,
+    ),
+    0,
+  );
+  assert.equal(
+    duplicateParagraphs(
+      `\`\`\`\n\`\`\`not-a-close\n${command}\n\`\`\`\n\n\`\`\`\n${command}\n\`\`\``,
+    ),
+    0,
+  );
+  assert.equal(
+    duplicateParagraphs(`${paragraph}\n\nOther text\n\n${paragraph}`),
+    1,
+  );
+  assert.equal(
+    duplicateParagraphs(
+      `[${paragraph}](https://a.example)\n\n**${paragraph}**\n\n${paragraph}`,
+    ),
+    2,
+  );
+});
+
+test("treats more duplicate paragraphs than the baseline as a regression", () => {
+  const baseline = legibleBaseline([
+    baselineResult("steady", { success: true, duplicate_paragraphs: 0 }),
+    baselineResult("cleaner", { success: true, duplicate_paragraphs: 2 }),
+  ]);
+  assert.equal(baseline.fixtures.steady.duplicate_paragraphs, 0);
+  const comparison = compareWithBaseline(
+    [
+      baselineResult("steady", { success: true, duplicate_paragraphs: 1 }),
+      baselineResult("cleaner", { success: true, duplicate_paragraphs: 0 }),
+    ],
+    baseline,
+  );
+  assert.deepEqual(
+    comparison.regressions.map((item) => `${item.fixture}:${item.score}`),
+    ["steady:duplicate_paragraphs"],
+  );
+  assert.deepEqual(
+    comparison.improvements.map((item) => `${item.fixture}:${item.score}`),
+    ["cleaner:duplicate_paragraphs"],
   );
 });

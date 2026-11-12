@@ -198,7 +198,7 @@ let markdown = page.markdown();
 
 ## Fuzzing
 
-Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`. CI runs each target for 60 seconds. Add each fixed fuzz case as a regression test.
+Cargo-fuzz targets are in `fuzz/fuzz_targets/`. They cover public extraction, extractor and renderer options with determinism checks, DOM mutation and serialization, Markdown and text rendering, JSON-LD metadata, URL rewriting, and deeply nested malformed HTML. Run them with `cargo +nightly fuzz run <target>`. CI runs each target for 60 seconds. Add each fixed fuzz case as a regression test.
 
 The internal `fuzzing` feature exposes semantic document validation only to fuzz targets. Standalone DOM fuzz targets validate their own DOM values. Do not use this feature in normal applications.
 

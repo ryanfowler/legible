@@ -72,3 +72,10 @@ path = "fuzz_targets/semantic_normalization.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "extractor_options"
+path = "fuzz_targets/extractor_options.rs"
+test = false
+doc = false
+bench = false
