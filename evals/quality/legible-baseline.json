@@ -356,7 +356,7 @@
     "discussion-pagination": {
       "reliability_pass": true,
       "required_content_score": 1,
-      "noise_score": 0,
+      "noise_score": 0.75,
       "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null
@@ -388,7 +388,7 @@
     "discussion-sponsored-card": {
       "reliability_pass": true,
       "required_content_score": 1,
-      "noise_score": 0,
+      "noise_score": 1,
       "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null
@@ -556,7 +556,7 @@
     "independent-product-review": {
       "reliability_pass": true,
       "required_content_score": 1,
-      "noise_score": 0,
+      "noise_score": 1,
       "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null

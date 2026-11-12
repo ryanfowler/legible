@@ -1,0 +1,8 @@
+{
+  "must_contain": [
+    "Cache location",
+    "This is page 2 of 8 in the build guide",
+    "Installing the build tool",
+    "Sharing a remote cache"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "must_contain": [
+    "Links on this page are affiliate links",
+    "boiled one litre of water",
+    "A small screen helped",
+    "Read our full test notes"
+  ],
+  "must_not_contain": ["Buy now with our partner code"]
+}

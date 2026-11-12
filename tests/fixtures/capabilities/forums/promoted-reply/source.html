@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+  <head><title>Slow migration on large tables</title></head>
+  <body>
+    <main>
+      <h1>Slow migration on large tables</h1>
+      <p>The migration that adds an index locks the orders table for minutes.</p>
+      <ol>
+        <li>
+          <article>
+            <strong>Iris</strong>
+            <p>Iris built the index concurrently and the lock disappeared.</p>
+          </article>
+        </li>
+        <li class="promoted">
+          <article>
+            <strong>Promoted</strong>
+            <p>Managed databases that scale for you.</p>
+            <a href="https://ads.example/db" rel="sponsored">Start a trial</a>
+          </article>
+        </li>
+        <li>
+          <article>
+            <strong>Tomas</strong>
+            <p>Tomas split the backfill into batches of ten thousand rows.</p>
+          </article>
+        </li>
+        <li>
+          <article>
+            <strong>Sponsored by CloudRow</strong>
+            <p>Zero-downtime schema tools.</p>
+            <a href="https://ads.example/cloudrow">Try CloudRow</a>
+          </article>
+        </li>
+      </ol>
+      <nav class="thread-pagination" aria-label="Pagination">
+        <a href="?p=1">1</a><a href="?p=2">2</a><a href="?p=2">Next</a>
+      </nav>
+    </main>
+  </body>
+</html>

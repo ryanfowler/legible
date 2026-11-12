@@ -1,0 +1,9 @@
+{
+  "must_contain": [
+    "Probe A gave stable readings in clay after calibration",
+    "Probe B needed a new battery",
+    "Probe C read too dry",
+    "Probe A is the best choice",
+    "Check price: $29.99"
+  ]
+}

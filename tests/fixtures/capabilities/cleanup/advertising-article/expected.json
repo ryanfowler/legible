@@ -1,0 +1,11 @@
+{
+  "must_contain": [
+    "Sponsored by Acme Press",
+    "This article contains affiliate links",
+    "A sponsored post is paid content",
+    "disclosure label to the top of each post",
+    "a public guide about clear labels",
+    "Ad labels must be large enough to read",
+    "Acme Guides"
+  ]
+}
