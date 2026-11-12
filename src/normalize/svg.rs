@@ -544,13 +544,22 @@ fn is_math_rendering(dom: &Dom, svg: NodeId) -> bool {
             || dom.attr(node, AttrName::DataMath).is_some()
             || dom
                 .qual_name(node)
-                .is_some_and(|name| name.local.as_str().to_ascii_lowercase().starts_with("mjx"))
+                .is_some_and(|name| starts_with_mjx(name.local.as_str()))
             || dom.attr(node, AttrName::Class).is_some_and(|classes| {
-                classes.split_ascii_whitespace().any(|class| {
-                    has_token(class, "mathjax") || class.to_ascii_lowercase().starts_with("mjx")
-                })
+                classes
+                    .split_ascii_whitespace()
+                    .any(|class| has_token(class, "mathjax") || starts_with_mjx(class))
             })
     })
+}
+
+/// True when `value` starts with the MathJax `mjx` prefix (ASCII
+/// case-insensitive).
+fn starts_with_mjx(value: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"mjx"))
 }
 
 fn is_svg_element(dom: &Dom, node: NodeId, local: &str) -> bool {

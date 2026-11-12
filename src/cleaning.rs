@@ -4249,18 +4249,36 @@ fn remove_explicit_peripheral_sections(
     store: &mut crate::dom::NodeStateStore,
     has_responsive_pair: bool,
 ) -> bool {
+    // Visit the snapshot in reverse preorder. At each node, the stack holds
+    // the strongest heading signal of each later subtree that no visited
+    // ancestor has absorbed yet. Entries deeper than the node are its
+    // children. This gives `related_heading_signal_in` for every visited node
+    // in one linear pass.
+    let mut subtree_signals = SmallVec::<[(u32, RelatedHeadingSignal); 16]>::new();
     let terminal_related = snapshot
         .iter()
         .enumerate()
         .rev()
-        .find_map(|(index, &(node, _))| {
-            let name = node_name(dom, node);
-            let strong_heading =
-                related_heading_signal_in(dom, node) == RelatedHeadingSignal::Strong;
-            let explicit_name = name.contains("related")
-                && contains_any(&name, &["articles", "cards", "grid", "stories"]);
+        .find_map(|(index, &(node, depth))| {
+            let mut descendant_signal = RelatedHeadingSignal::None;
+            while let Some(&(child_depth, signal)) = subtree_signals.last()
+                && child_depth > depth
+            {
+                descendant_signal = descendant_signal.max(signal);
+                subtree_signals.pop();
+            }
+            subtree_signals.push((
+                depth,
+                descendant_signal.max(related_heading_signal(dom, node)),
+            ));
+            let strong_heading = descendant_signal == RelatedHeadingSignal::Strong;
+            let explicit_name = || {
+                let name = node_name(dom, node);
+                name.contains("related")
+                    && contains_any(&name, &["articles", "cards", "grid", "stories"])
+            };
             (strong_heading
-                && (explicit_name || has_repeated_link_cards(dom, node))
+                && (explicit_name() || has_repeated_link_cards(dom, node))
                 && link_counts[node.index()] >= 3
                 && near_content_end(dom, node, root, store))
             .then_some((index, node))

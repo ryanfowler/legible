@@ -28,16 +28,7 @@ impl CalloutAnalysis {
         }
         let mut values = SparseNodeValues::with_capacity(candidates.len());
         let labels = bounded_subtree_text(dom, nodes);
-        let bounded_text_bytes = labels
-            .capacity()
-            .saturating_mul(std::mem::size_of::<Option<Box<str>>>())
-            .saturating_add(
-                labels
-                    .iter()
-                    .filter_map(Option::as_ref)
-                    .map(|value| value.len())
-                    .sum::<usize>(),
-            );
+        let bounded_text_bytes = labels.allocated_bytes();
         for &node in candidates {
             let (structural, candidate_kind) = callout_evidence(dom, node);
             let Some(kind) = candidate_kind else {
@@ -45,7 +36,7 @@ impl CalloutAnalysis {
             };
             let title_node = dom.element_children(node).next();
             let explicit_name = title_node.is_some_and(|child| explicitly_named(dom, child));
-            let title_text = title_node.and_then(|child| labels[child.index()].as_deref());
+            let title_text = title_node.and_then(|child| labels.get(child));
             let label = title_text
                 .map(|text| text.trim().trim_end_matches(':'))
                 .filter(|text| explicit_name || text.len() <= 16);
@@ -126,11 +117,11 @@ fn callout_evidence(dom: &Dom, node: NodeId) -> (bool, Option<&'static str>) {
         .filter_map(|name| dom.attr(node, name))
         .flat_map(str::split_whitespace)
     {
-        let token = token
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
-            .to_ascii_lowercase();
-        structural |= matches!(token.as_str(), "admonition" | "callout" | "alert");
-        if let Some(value) = canonical_kind(&token) {
+        let token = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        structural |= ["admonition", "callout", "alert"]
+            .iter()
+            .any(|name| token.eq_ignore_ascii_case(name));
+        if let Some(value) = canonical_kind(token) {
             kind = Some(value);
         }
     }
@@ -138,20 +129,19 @@ fn callout_evidence(dom: &Dom, node: NodeId) -> (bool, Option<&'static str>) {
 }
 
 fn canonical_kind(value: &str) -> Option<&'static str> {
-    match value
-        .trim()
-        .trim_end_matches(':')
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "note" => Some("note"),
-        "warning" => Some("warning"),
-        "tip" => Some("tip"),
-        "important" => Some("important"),
-        "caution" => Some("caution"),
-        "info" | "information" => Some("info"),
-        _ => None,
-    }
+    let value = value.trim().trim_end_matches(':');
+    [
+        ("note", "note"),
+        ("warning", "warning"),
+        ("tip", "tip"),
+        ("important", "important"),
+        ("caution", "caution"),
+        ("info", "info"),
+        ("information", "info"),
+    ]
+    .into_iter()
+    .find(|(name, _)| value.eq_ignore_ascii_case(name))
+    .map(|(_, kind)| kind)
 }
 
 fn explicitly_named(dom: &Dom, node: NodeId) -> bool {
@@ -160,10 +150,9 @@ fn explicitly_named(dom: &Dom, node: NodeId) -> bool {
         .filter_map(|name| dom.attr(node, name))
         .flat_map(str::split_whitespace)
         .any(|token| {
-            matches!(
-                token.to_ascii_lowercase().as_str(),
-                "title" | "admonition-title" | "callout-title" | "label"
-            )
+            ["title", "admonition-title", "callout-title", "label"]
+                .iter()
+                .any(|name| token.eq_ignore_ascii_case(name))
         })
 }
 
@@ -175,17 +164,43 @@ fn title_case(kind: &str) -> String {
     title
 }
 
+/// Bounded normalized text prefixes for subtrees, stored in one text buffer.
+struct BoundedLabels {
+    text: String,
+    /// Byte range in `text` for each node. An empty range means no label.
+    ranges: Vec<(usize, usize)>,
+}
+
+impl BoundedLabels {
+    fn get(&self, node: NodeId) -> Option<&str> {
+        let &(start, end) = self.ranges.get(node.index())?;
+        (end > start).then(|| &self.text[start..end])
+    }
+
+    fn allocated_bytes(&self) -> usize {
+        self.text.capacity().saturating_add(
+            self.ranges
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(usize, usize)>()),
+        )
+    }
+}
+
 /// Computes bounded normalized text prefixes for every subtree in one pass.
-fn bounded_subtree_text(dom: &Dom, nodes: &[NodeId]) -> Vec<Option<Box<str>>> {
+fn bounded_subtree_text(dom: &Dom, nodes: &[NodeId]) -> BoundedLabels {
     const LIMIT: usize = 32;
-    let mut values = (0..dom.len()).map(|_| None).collect::<Vec<_>>();
+    let mut labels = BoundedLabels {
+        text: String::new(),
+        ranges: vec![(0, 0); dom.len()],
+    };
+    let mut value = String::new();
     for &node in nodes.iter().rev() {
-        let mut value = String::new();
+        value.clear();
         if let Some(text) = dom.text_node(node) {
             append_normalized(&mut value, text, LIMIT);
         } else {
             for child in dom.children(node) {
-                let Some(text) = values[child.index()].as_deref() else {
+                let Some(text) = labels.get(child) else {
                     continue;
                 };
                 append_normalized(&mut value, text, LIMIT);
@@ -195,10 +210,12 @@ fn bounded_subtree_text(dom: &Dom, nodes: &[NodeId]) -> Vec<Option<Box<str>>> {
             }
         }
         if !value.is_empty() {
-            values[node.index()] = Some(value.into());
+            let start = labels.text.len();
+            labels.text.push_str(&value);
+            labels.ranges[node.index()] = (start, labels.text.len());
         }
     }
-    values
+    labels
 }
 
 fn append_normalized(output: &mut String, input: &str, limit: usize) {

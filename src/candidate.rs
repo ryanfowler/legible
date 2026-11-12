@@ -4,7 +4,7 @@ use crate::constants::split_word_tokens;
 use crate::dom::{AttrName, Dom, NodeId, NodeStateStore, Tag};
 use crate::prepared::{SourceAnalysis, SourceFlags};
 use crate::scoring::has_static_hidden_marker;
-use crate::tokens::{has_any_token, has_token};
+use crate::tokens::{has_any_name_part, has_any_token, has_token};
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -995,33 +995,7 @@ pub(crate) fn select_content_root<'a>(
 }
 
 fn is_document_utility_root(dom: &Dom, node: NodeId) -> bool {
-    let named_utility = std::iter::once(node)
-        .chain(dom.ancestors(node))
-        .any(|ancestor| {
-            [AttrName::Class, AttrName::Id]
-                .into_iter()
-                .filter_map(|attribute| dom.attr(ancestor, attribute))
-                .any(|value| {
-                    let value = value.to_ascii_lowercase();
-                    [
-                        "bibliograph",
-                        "citation",
-                        "extra-services",
-                        "extraservices",
-                        "labstabs",
-                        "recommender",
-                        "ref-list",
-                        "reflist",
-                        "reference-list",
-                        "recent-changes",
-                        "recentchanges",
-                        "revision-history",
-                        "revisionhistory",
-                    ]
-                    .iter()
-                    .any(|needle| value.contains(needle))
-                })
-        });
+    let named_utility = crate::scoring::has_utility_name_scope(dom, node);
     let reference_heading = std::iter::once(node)
         .chain(dom.ancestors(node).take(8))
         .any(|section| {
@@ -1077,13 +1051,7 @@ fn is_heading_like(dom: &Dom, node: NodeId) -> bool {
     [AttrName::Class, AttrName::Id]
         .into_iter()
         .filter_map(|attribute| dom.attr(node, attribute))
-        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
-        .any(|token| {
-            matches!(
-                token.to_ascii_lowercase().as_str(),
-                "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-            )
-        })
+        .any(|value| has_any_name_part(value, &["h1", "h2", "h3", "h4", "h5", "h6"]))
 }
 
 fn competitive_score(score: f64, top_score: f64) -> bool {

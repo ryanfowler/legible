@@ -17,6 +17,7 @@ use crate::scoring::{
 };
 #[cfg(test)]
 use crate::scoring::{has_hidden_utility_class_for_discovery, has_static_hidden_marker};
+use crate::tokens::has_any_name_part;
 #[cfg(test)]
 use crate::tokens::has_any_token;
 use std::collections::{HashMap, HashSet};
@@ -522,12 +523,14 @@ impl CleanedFragmentAnalysis {
         root: NodeId,
         retained_stream: crate::document::RetainedStream,
         source_evidence: Option<&crate::document::SourceEvidence>,
+        store: &mut NodeStateStore,
     ) -> Self {
         let mut ordinary = crate::document::OrdinarySourceProfiler::new();
-        let mut store = NodeStateStore::new();
+        // Clear the cached state but keep text seeds from the fragment copy.
+        store.clear();
         store.enable_link_lengths();
-        let root_stats = get_or_compute_stats(dom, root, &mut store);
-        let link_density = get_link_density_cached(dom, root, root_stats.text_length, &mut store);
+        let root_stats = get_or_compute_stats(dom, root, store);
+        let link_density = get_link_density_cached(dom, root, root_stats.text_length, store);
         let mut metrics = ContentMetrics::from_text_stats(
             root_stats,
             link_density,
@@ -541,9 +544,9 @@ impl CleanedFragmentAnalysis {
             let node = entry.node;
             metrics.count_structure(Self::source_structure(dom, node));
             if dom.tag(node) == Some(Tag::A) {
-                metrics.link_text_chars = metrics.link_text_chars.saturating_add(
-                    get_or_compute_stats(dom, node, &mut store).text_length as usize,
-                );
+                metrics.link_text_chars = metrics
+                    .link_text_chars
+                    .saturating_add(get_or_compute_stats(dom, node, store).text_length as usize);
             }
             semantic_evidence |=
                 crate::document::semantic_source_evidence(dom, node, source_evidence);
@@ -978,15 +981,7 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
                 [AttrName::Class, AttrName::Id]
                     .into_iter()
                     .filter_map(|name| dom.attr(entry.node, name))
-                    .flat_map(|value| {
-                        value.split(|character: char| !character.is_ascii_alphanumeric())
-                    })
-                    .any(|token| {
-                        matches!(
-                            token.to_ascii_lowercase().as_str(),
-                            "paywall" | "barrier" | "gate" | "subscribe"
-                        )
-                    })
+                    .any(is_barrier_name)
             })
         })
         .unwrap_or_else(|| {
@@ -996,17 +991,26 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
                     [AttrName::Class, AttrName::Id]
                         .into_iter()
                         .filter_map(|name| dom.attr(node, name))
-                        .flat_map(|value| {
-                            value.split(|character: char| !character.is_ascii_alphanumeric())
-                        })
-                        .any(|token| {
-                            matches!(
-                                token.to_ascii_lowercase().as_str(),
-                                "paywall" | "barrier" | "gate" | "subscribe"
-                            )
-                        })
+                        .any(is_barrier_name)
                 })
         });
+    let automated = text.contains("automated traffic")
+        || text.contains("identified as automated")
+        || text.contains("bot detection")
+        || text.contains("trafic a ete identifie comme automatise")
+        || text.contains("activite de bot")
+        || text.contains("trafic automatise");
+    // Every rule below needs a heading gate, a structural gate, automated
+    // traffic text, or unusual-activity text. Most pages have none of these
+    // signals, so stop before the remaining phrase scans.
+    if !heading_gate
+        && !exact_gate_heading
+        && !structural_gate
+        && !automated
+        && !text.contains("unusual activity")
+    {
+        return false;
+    }
     let action = [
         "sign in to continue",
         "log in to continue",
@@ -1026,12 +1030,6 @@ fn is_access_barrier_impl(dom: &Dom, root: NodeId, source: Option<&SourceAnalysi
     .iter()
     .filter(|phrase| text.contains(**phrase))
     .count();
-    let automated = text.contains("automated traffic")
-        || text.contains("identified as automated")
-        || text.contains("bot detection")
-        || text.contains("trafic a ete identifie comme automatise")
-        || text.contains("activite de bot")
-        || text.contains("trafic automatise");
     let request_identifier = text.contains("request id")
         || text.contains("client ip")
         || text.contains("incident id")
@@ -1265,6 +1263,10 @@ pub(crate) fn is_incoherent_short_result(metrics: ContentMetrics) -> bool {
     (!has_lexical_text || unlabeled_values) && !metrics.contextual_structure
 }
 
+fn is_barrier_name(value: &str) -> bool {
+    has_any_name_part(value, &["paywall", "barrier", "gate", "subscribe"])
+}
+
 fn denial_permission_text(text: &str) -> bool {
     [
         "permission to access",
@@ -1456,8 +1458,14 @@ mod tests {
             expected.structured_block_count += 1;
             expected.contextual_structure = true;
         }
-        let actual =
-            CleanedFragmentAnalysis::from_retained_stream(&dom, root, stream, None).metrics;
+        let actual = CleanedFragmentAnalysis::from_retained_stream(
+            &dom,
+            root,
+            stream,
+            None,
+            &mut NodeStateStore::new(),
+        )
+        .metrics;
 
         assert_eq!(actual.word_count, expected.word_count);
         assert_eq!(actual.text_chars, expected.text_chars);

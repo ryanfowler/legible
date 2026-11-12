@@ -6,9 +6,8 @@ use crate::dom::{
     ScoreStore, Tag,
 };
 use crate::prepared::{SourceAnalysis, SourceEntry};
-use crate::tokens::{contains_any, has_any_token, has_token};
+use crate::tokens::{has_any_token, has_token};
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use tendril::StrTendril;
 
 pub(crate) const TOP_CANDIDATES: usize = 5;
@@ -490,11 +489,16 @@ impl ScoringView {
     /// Copies selected roots while applying the immutable scoring projection.
     /// The source DOM remains unchanged and no fragment scoring discovery is
     /// needed after this operation.
+    ///
+    /// If `text_stats` has the source analysis and the fragment state store,
+    /// the store gets the source statistics of each copied text node. Fragment
+    /// cleanup then does not scan unchanged text again.
     pub(crate) fn copy_projected_subtrees_as_fragment_excluding(
         &self,
         source: &Dom,
         source_roots: &[NodeId],
         excluded: &[bool],
+        mut text_stats: Option<(&SourceAnalysis, &mut NodeStateStore)>,
     ) -> Result<Dom, DomError> {
         #[cfg(test)]
         Dom::record_fragment_copy_for_test();
@@ -550,10 +554,17 @@ impl ScoringView {
                         }
                     }
 
-                    let data =
-                        projected_node_data(source, source_id, self.text_replacement(source_id));
+                    let replacement = self.text_replacement(source_id);
+                    let data = projected_node_data(source, source_id, replacement);
                     let destination = fragment.create(data)?;
                     fragment.append_child(parent, destination);
+                    if replacement.is_none()
+                        && let Some((analysis, store)) = text_stats.as_mut()
+                        && let NodeData::Text(text) = &source.node(source_id).data
+                        && let Some(stats) = analysis.text_stats(source_id)
+                    {
+                        store.seed_text_stats(destination, text, stats);
+                    }
                     if let Some(tag) = self.effective_tag(source, source_id) {
                         let physical_tag = if tag == Tag::Div
                             && matches!(self.div_projection(source_id), DivProjection::RenameP)
@@ -1460,6 +1471,21 @@ fn get_or_compute_stats_excluding_impl(
     }
 }
 
+/// Returns the statistics of one text node. Use the source analysis or a
+/// fragment-copy seed when one describes this text. Scan the text otherwise.
+#[inline(always)]
+fn text_node_stats(
+    source: Option<&SourceAnalysis>,
+    store: &NodeStateStore,
+    node: NodeId,
+    text: &str,
+) -> NodeStats {
+    source
+        .and_then(|source| source.text_stats(node))
+        .or_else(|| store.seeded_text_stats(node, text))
+        .unwrap_or_else(|| stats_for_text(text))
+}
+
 /// Computes subtree statistics. The const parameter lets the common
 /// unfiltered scoring path compile without exclusion-mask branches in its
 /// inner traversal while keeping the filtered implementation shared.
@@ -1486,9 +1512,7 @@ fn get_or_compute_stats_impl<const UNFILTERED: bool>(
     // leaf, such as p > span > text. Avoid a stack frame for every wrapper.
     let mut chain = SmallVec::<[NodeId; 8]>::new();
     if let Some(text) = dom.text_node(id) {
-        let stats = source
-            .and_then(|source| source.text_stats(id))
-            .unwrap_or_else(|| stats_for_text(text));
+        let stats = text_node_stats(source, store, id, text);
         if source_cache {
             store.set_source_stats(id, stats);
         } else {
@@ -1526,8 +1550,10 @@ fn get_or_compute_stats_impl<const UNFILTERED: bool>(
                     store.get_stats(child).copied()
                 }
             })
-            .or_else(|| child.and_then(|child| source.and_then(|source| source.text_stats(child))))
-            .unwrap_or_else(|| stats_for_text(text));
+            .unwrap_or_else(|| match child {
+                Some(child) => text_node_stats(source, store, child, text),
+                None => stats_for_text(text),
+            });
         let cache_links = store.link_lengths_enabled() && !source_cache;
         for &node in chain.iter().rev() {
             if cache_links {
@@ -1561,14 +1587,17 @@ fn get_or_compute_stats_impl<const UNFILTERED: bool>(
 
     impl StatsFrame {
         #[inline(always)]
-        fn new(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> Self {
+        fn new(
+            dom: &Dom,
+            source: Option<&SourceAnalysis>,
+            store: &NodeStateStore,
+            node: NodeId,
+        ) -> Self {
             Self {
                 node,
                 next_child: dom.first_child(node),
                 stats: match dom.text_node(node) {
-                    Some(text) => source
-                        .and_then(|source| source.text_stats(node))
-                        .unwrap_or_else(|| stats_for_text(text)),
+                    Some(text) => text_node_stats(source, store, node, text),
                     None => NodeStats::default(),
                 },
                 link_length: 0.0,
@@ -1578,7 +1607,7 @@ fn get_or_compute_stats_impl<const UNFILTERED: bool>(
 
     let cache_links = store.link_lengths_enabled() && !source_cache;
     let mut stack = SmallVec::<[StatsFrame; 16]>::new();
-    stack.push(StatsFrame::new(dom, source, id));
+    stack.push(StatsFrame::new(dom, source, store, id));
     while let Some(frame) = stack.last_mut() {
         if let Some(child) = frame.next_child {
             frame.next_child = dom.next_sibling(child);
@@ -1596,7 +1625,7 @@ fn get_or_compute_stats_impl<const UNFILTERED: bool>(
                     frame.link_length += store.link_length(child);
                 }
             } else {
-                stack.push(StatsFrame::new(dom, source, child));
+                stack.push(StatsFrame::new(dom, source, store, child));
             }
             continue;
         }
@@ -1646,6 +1675,8 @@ fn get_or_compute_stats_impl<const UNFILTERED: bool>(
 pub(crate) struct CandidateFeatureIndex {
     counts: Vec<StructuralCounts>,
     candidate_nodes: Vec<NodeId>,
+    /// True for each candidate whose node or ancestor has a utility name.
+    utility_names: Vec<bool>,
     has_links: bool,
 }
 
@@ -1795,6 +1826,7 @@ impl CandidateFeatureIndex {
         }
         Self {
             counts,
+            utility_names: utility_name_scopes(dom, &candidate_nodes),
             candidate_nodes,
             has_links,
         }
@@ -1857,8 +1889,12 @@ impl CandidateFeatureIndex {
         } else {
             (0.0, 0.0)
         };
-        let utility_name_score = if weight_classes {
-            utility_name_signal(dom, candidate.node)
+        let utility_name_score = if weight_classes
+            && match self.candidate_nodes.get(candidate_index) {
+                Some(&node) if node == candidate.node => self.utility_names[candidate_index],
+                _ => has_utility_name_scope(dom, candidate.node),
+            } {
+            1.0
         } else {
             0.0
         };
@@ -1974,44 +2010,94 @@ impl CandidateFeatures {
     }
 }
 
-fn utility_name_signal(dom: &Dom, node: NodeId) -> f64 {
-    if std::iter::once(node)
+/// True when the node or an ancestor has a utility name, such as a
+/// bibliography or revision history.
+pub(crate) fn has_utility_name_scope(dom: &Dom, node: NodeId) -> bool {
+    std::iter::once(node)
         .chain(dom.ancestors(node))
-        .any(|ancestor| {
-            [AttrName::Class, AttrName::Id]
-                .into_iter()
-                .filter_map(|attribute| dom.attr(ancestor, attribute))
-                .any(|value| {
-                    let value = if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
-                        Cow::Owned(value.to_ascii_lowercase())
-                    } else {
-                        Cow::Borrowed(value)
-                    };
-                    contains_any(
-                        &value,
-                        &[
-                            "bibliograph",
-                            "citation",
-                            "extra-services",
-                            "extraservices",
-                            "labstabs",
-                            "recommender",
-                            "ref-list",
-                            "reflist",
-                            "reference-list",
-                            "recent-changes",
-                            "recentchanges",
-                            "revision-history",
-                            "revisionhistory",
-                        ],
-                    )
-                })
+        .any(|ancestor| has_utility_name(dom, ancestor))
+}
+
+/// Applies `has_utility_name_scope` to each node. Candidates share most of
+/// their ancestors, so remember the result for each visited ancestor and
+/// check each class and ID once.
+fn utility_name_scopes(dom: &Dom, nodes: &[NodeId]) -> Vec<bool> {
+    const UNKNOWN: u8 = 0;
+    const OUTSIDE: u8 = 1;
+    const INSIDE: u8 = 2;
+    let mut scopes = vec![UNKNOWN; dom.len()];
+    let mut chain = Vec::new();
+    nodes
+        .iter()
+        .map(|&node| {
+            chain.clear();
+            let mut current = Some(node);
+            let inside = loop {
+                let Some(ancestor) = current else {
+                    break false;
+                };
+                match scopes[ancestor.index()] {
+                    INSIDE => break true,
+                    OUTSIDE => break false,
+                    _ => {}
+                }
+                chain.push(ancestor);
+                if has_utility_name(dom, ancestor) {
+                    break true;
+                }
+                current = dom.parent(ancestor);
+            };
+            let scope = if inside { INSIDE } else { OUTSIDE };
+            for &visited in &chain {
+                scopes[visited.index()] = scope;
+            }
+            inside
         })
-    {
-        1.0
-    } else {
-        0.0
+        .collect()
+}
+
+/// True when the class or ID of `node` names a utility region, such as a
+/// bibliography or revision history.
+fn has_utility_name(dom: &Dom, node: NodeId) -> bool {
+    [AttrName::Class, AttrName::Id]
+        .into_iter()
+        .filter_map(|attribute| dom.attr(node, attribute))
+        .any(contains_utility_name)
+}
+
+/// True when `value` contains a utility name (ASCII case-insensitive). The
+/// scan does not allocate and checks names only at bytes that can start one.
+fn contains_utility_name(value: &str) -> bool {
+    const NAMES: [&[u8]; 13] = [
+        b"bibliograph",
+        b"citation",
+        b"extra-services",
+        b"extraservices",
+        b"labstabs",
+        b"recommender",
+        b"ref-list",
+        b"reflist",
+        b"reference-list",
+        b"recent-changes",
+        b"recentchanges",
+        b"revision-history",
+        b"revisionhistory",
+    ];
+    const SHORTEST: usize = 7;
+    let bytes = value.as_bytes();
+    if bytes.len() < SHORTEST {
+        return false;
     }
+    (0..=bytes.len() - SHORTEST).any(|start| {
+        matches!(
+            bytes[start].to_ascii_lowercase(),
+            b'b' | b'c' | b'e' | b'l' | b'r'
+        ) && NAMES.iter().any(|name| {
+            bytes[start..]
+                .get(..name.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(name))
+        })
+    })
 }
 
 fn name_signals(dom: &Dom, source: Option<&SourceAnalysis>, node: NodeId) -> (f64, f64) {
@@ -3132,6 +3218,121 @@ mod tests {
     use crate::dom::{AttrName, Dom, NodeStateStore, ScoreStore, Tag};
     use crate::prepared::SourceAnalysis;
 
+    /// Copies the `main` element of `html` into a fragment. When `store` is
+    /// present, the copy seeds it with source text statistics. Returns the
+    /// fragment and its first text node.
+    fn copy_main_text(html: &str, store: Option<&mut NodeStateStore>) -> (Dom, crate::dom::NodeId) {
+        let dom = Dom::parse_document(html).unwrap();
+        let source = SourceAnalysis::build(&dom);
+        let candidates = CandidateSet::discover_semantic(&dom);
+        let main = dom.first_descendant_by_tag(dom.root(), Tag::Main).unwrap();
+        let view = ScoringView::build(&dom, &source, &[], &candidates);
+        let fragment = view
+            .copy_projected_subtrees_as_fragment_excluding(
+                &dom,
+                &[main],
+                &[],
+                store.map(|store| (&source, store)),
+            )
+            .unwrap();
+        let text = fragment
+            .descendants(fragment.root())
+            .find(|&node| fragment.text_node(node).is_some())
+            .unwrap();
+        (fragment, text)
+    }
+
+    fn sentinel_stats() -> crate::dom::NodeStats {
+        let mut stats = crate::dom::NodeStats::default();
+        stats.text_length = 999;
+        stats.word_count = 777;
+        stats
+    }
+
+    /// Replaces the seed of `node` with sentinel statistics for its current
+    /// text buffer.
+    fn poison_seed(fragment: &Dom, node: crate::dom::NodeId, store: &mut NodeStateStore) {
+        let crate::dom::NodeData::Text(text) = &fragment.node(node).data else {
+            panic!("expected a text node");
+        };
+        store.seed_text_stats(node, text, sentinel_stats());
+    }
+
+    #[test]
+    fn fragment_copy_carries_source_text_stats() {
+        let mut store = NodeStateStore::new();
+        let (fragment, text) = copy_main_text(
+            "<body><main><p>Hello brave new world, friend.</p></main></body>",
+            Some(&mut store),
+        );
+        let value = fragment.text_node(text).unwrap();
+        let seeded = store.seeded_text_stats(text, value).unwrap();
+        let scanned = stats_for_text(value);
+        assert_eq!(seeded.text_length, scanned.text_length);
+        assert_eq!(seeded.word_count, scanned.word_count);
+        assert_eq!(seeded.comma_count, scanned.comma_count);
+
+        // Text statistics come from the seed, not from a new scan.
+        poison_seed(&fragment, text, &mut store);
+        store.clear_stats();
+        let paragraph = fragment.parent(text).unwrap();
+        assert_eq!(
+            get_or_compute_stats(&fragment, paragraph, &mut store).text_length,
+            999
+        );
+    }
+
+    #[test]
+    fn same_length_text_replacement_is_not_served_from_seed() {
+        let mut store = NodeStateStore::new();
+        let (mut fragment, text) = copy_main_text(
+            "<body><main><p>alpha beta gamma delta</p></main></body>",
+            Some(&mut store),
+        );
+        poison_seed(&fragment, text, &mut store);
+        let replacement = "alphabetagammadelta...";
+        assert_eq!(replacement.len(), fragment.text_node(text).unwrap().len());
+        fragment.set_text(text, replacement);
+
+        store.clear_stats();
+        assert!(
+            store
+                .seeded_text_stats(text, fragment.text_node(text).unwrap())
+                .is_none()
+        );
+        let stats = get_or_compute_stats(&fragment, text, &mut store);
+        let expected = stats_for_text(replacement);
+        assert_eq!(stats.text_length, expected.text_length);
+        assert_eq!(stats.word_count, expected.word_count);
+    }
+
+    #[test]
+    fn reused_fragment_node_ids_do_not_read_previous_attempt_seeds() {
+        let mut store = NodeStateStore::new();
+        let (first, first_text) = copy_main_text(
+            "<body><main><p>one two three four five six</p></main></body>",
+            Some(&mut store),
+        );
+        poison_seed(&first, first_text, &mut store);
+
+        // A retry builds a new fragment with the same node IDs. Keep the old
+        // seeds to show that buffer identity alone rejects them.
+        let (second, second_text) = copy_main_text(
+            "<body><main><p>onetwothreefourfivesixABCDE</p></main></body>",
+            None,
+        );
+        assert_eq!(second_text, first_text);
+        let value = second.text_node(second_text).unwrap();
+        assert_eq!(value.len(), first.text_node(first_text).unwrap().len());
+        assert!(store.seeded_text_stats(second_text, value).is_none());
+
+        store.clear();
+        let stats = get_or_compute_stats(&second, second_text, &mut store);
+        let expected = stats_for_text(value);
+        assert_eq!(stats.text_length, expected.text_length);
+        assert_eq!(stats.word_count, expected.word_count);
+    }
+
     #[test]
     fn static_visibility_handles_inline_css_declarations() {
         let dom = Dom::parse_fragment(
@@ -3697,7 +3898,7 @@ mod tests {
             .find(|&node| dom.attr(node, AttrName::Id) == Some("content"))
             .unwrap();
         let fragment = view
-            .copy_projected_subtrees_as_fragment_excluding(&dom, &[content], &[])
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[content], &[], None)
             .unwrap();
         let projected_content = fragment
             .first_descendant_by_tag(fragment.root(), Tag::Div)
@@ -3740,6 +3941,7 @@ mod tests {
                 &dom,
                 &[dom.body().unwrap()],
                 &excluded_mask,
+                None,
             )
             .unwrap();
         let body = fragment.first_child(fragment.root()).unwrap();
@@ -3763,7 +3965,7 @@ mod tests {
             root_excluded[node.index()] = true;
         }
         let retained_root = view
-            .copy_projected_subtrees_as_fragment_excluding(&dom, &[wrapped], &root_excluded)
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[wrapped], &root_excluded, None)
             .unwrap();
         assert_eq!(retained_root.children(retained_root.root()).count(), 1);
     }
@@ -3806,7 +4008,7 @@ mod tests {
             .find(|&node| dom.attr(node, AttrName::Id) == Some("wrapper"))
             .unwrap();
         let list_fragment = view
-            .copy_projected_subtrees_as_fragment_excluding(&dom, &[list], &excluded)
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[list], &excluded, None)
             .unwrap();
         let list_copy = list_fragment.first_child(list_fragment.root()).unwrap();
         assert_eq!(list_fragment.tag(list_copy), Some(Tag::Ul));
@@ -3815,7 +4017,7 @@ mod tests {
         assert!(!list_fragment.text(list_copy).contains("2. Hidden"));
 
         let wrapper_fragment = view
-            .copy_projected_subtrees_as_fragment_excluding(&dom, &[wrapper], &excluded)
+            .copy_projected_subtrees_as_fragment_excluding(&dom, &[wrapper], &excluded, None)
             .unwrap();
         let paragraph = wrapper_fragment
             .first_child(wrapper_fragment.root())
