@@ -1,0 +1,8 @@
+{
+  "must_contain": [
+    "Probe A gave stable readings",
+    "Probe B needed a new battery",
+    "capacitive probe with a replaceable battery"
+  ],
+  "must_not_contain": ["GardenCloud", "Seed packs", "Shop the catalog"]
+}

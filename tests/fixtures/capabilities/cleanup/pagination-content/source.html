@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head><title>Configuring the build cache</title></head>
+  <body>
+    <main>
+      <article>
+        <h1>Configuring the build cache</h1>
+        <nav aria-label="Table of contents">
+          <ol>
+            <li><a href="#location">Cache location</a></li>
+            <li><a href="#limits">Size limits</a></li>
+            <li><a href="#cleanup">Cleanup</a></li>
+          </ol>
+        </nav>
+        <h2 id="location">Cache location</h2>
+        <p>
+          The build tool writes the cache to the project directory by default.
+          Set the cache path option to move the cache to a faster disk. This is
+          page 2 of 8 in the build guide.
+        </p>
+        <h2 id="limits">Size limits</h2>
+        <p>
+          The cache grows until it reaches the size limit. The tool then removes
+          the oldest entries first, so recent builds stay fast.
+        </p>
+        <h2 id="cleanup">Cleanup</h2>
+        <p>
+          Run the clean command to remove every cache entry. Do this after you
+          change the compiler version.
+        </p>
+        <nav class="series">
+          <a href="/guide/install" rel="prev">Previous: Installing the build tool</a>
+          <a href="/guide/remote" rel="next">Next: Sharing a remote cache</a>
+        </nav>
+      </article>
+    </main>
+  </body>
+</html>

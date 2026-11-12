@@ -1,0 +1,7 @@
+{
+  "must_contain": [
+    "Push the probe into the root zone",
+    "Can this sensor measure frozen soil",
+    "ice causes a false dry reading"
+  ]
+}

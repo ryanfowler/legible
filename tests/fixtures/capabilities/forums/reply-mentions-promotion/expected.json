@@ -1,0 +1,7 @@
+{
+  "must_contain": [
+    "Sam was promoted to maintainer",
+    "sponsored by my employer",
+    "I can help with the release notes"
+  ]
+}

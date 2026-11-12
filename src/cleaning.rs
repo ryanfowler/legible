@@ -19,6 +19,8 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+mod units;
+
 /// Reusable traversal and scratch storage for one selected fragment.
 ///
 /// A snapshot is valid only for the current mutation epoch and root. Cleanup
@@ -1465,6 +1467,14 @@ pub(crate) fn heuristic_cleanup_in_workspace(
         workspace.ensure_snapshot(dom, root);
         let snapshot = workspace.elements_with_depth();
         remove_direct_peripheral_siblings(dom, root, snapshot, link_counts, store, evidence)
+    };
+    if changed {
+        workspace.invalidate();
+    }
+    let changed = {
+        workspace.ensure_snapshot(dom, root);
+        let snapshot = workspace.elements_with_depth();
+        units::remove_peripheral_units(dom, root, snapshot, store, evidence)
     };
     if changed {
         workspace.invalidate();

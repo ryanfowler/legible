@@ -1,0 +1,8 @@
+{
+  "must_contain": [
+    "added two temporary markers",
+    "runs to page 4 of 9 in the printed edition",
+    "return after the spring flood"
+  ],
+  "must_not_contain": ["Page 3 of 9", "Next page", "Previous page", "?page=9"]
+}
