@@ -19,6 +19,33 @@ mod tests {
     use legible::Extractor;
 
     #[test]
+    fn counts_repeated_paragraphs_from_canonical_html() {
+        let paragraph = "The harbour opened at dawn and the first ferry left on time.";
+        let html = format!(
+            "<p>{paragraph}</p><pre><code>{paragraph}</code></pre>\
+             <p><img alt=\"{paragraph}\" src=\"a.png\"></p><p>Reply</p><p>Reply</p>"
+        );
+        assert_eq!(super::duplicate_paragraphs(&html), 0);
+        let html =
+            format!("<p>{paragraph}</p><blockquote><p><em>{paragraph}</em></p></blockquote>");
+        assert_eq!(super::duplicate_paragraphs(&html), 1);
+
+        let count = |first: &str, second: &str| {
+            super::duplicate_paragraphs(&format!("<p>{first}</p><p>{second}</p>"))
+        };
+        // Inline formatting does not change the text.
+        let emphasized = paragraph.replace("time.", "<em>time</em>.");
+        assert_eq!(count(paragraph, &emphasized), 1);
+        let partial = paragraph.replace("harbour", "har<b>bour</b>");
+        assert_eq!(count(paragraph, &partial), 1);
+        // A hard break separates words.
+        let broken = paragraph.replace("opened at", "opened<br>at");
+        assert_eq!(count(paragraph, &broken), 1);
+        let joined = paragraph.replace("opened at", "openedat");
+        assert_eq!(count(&broken, &joined), 0);
+    }
+
+    #[test]
     fn error_variants_have_stable_names() {
         let html = "<main><p>Content</p></main>";
         let cases = [
@@ -38,6 +65,60 @@ mod tests {
             assert_eq!(error_variant(&result.unwrap_err()), expected);
         }
     }
+}
+
+/// Shortest normalized paragraph, in characters, that the duplicate count
+/// compares. The quality evaluator uses the same value for Markdown.
+const DUPLICATE_PARAGRAPH_MIN_CHARACTERS: usize = 40;
+
+/// Counts `<p>` elements in canonical HTML whose normalized text repeats an
+/// earlier paragraph. Canonical HTML has no attributes on `<p>`, and
+/// paragraphs do not nest, so the structure is exact: code blocks, image alt
+/// text, and Markdown syntax cannot cause a false duplicate.
+fn duplicate_paragraphs(html: &str) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = 0;
+    for (start, _) in html.match_indices("<p>") {
+        let body = &html[start + 3..];
+        let Some(end) = body.find("</p>") else {
+            break;
+        };
+        // Inline tags keep their text adjacent, so `<em>time</em>.` reads as
+        // `time.`. A `<br>` separates words.
+        let mut text = String::new();
+        let mut rest = &body[..end];
+        while let Some(open) = rest.find('<') {
+            text.push_str(&rest[..open]);
+            let Some(close) = rest[open..].find('>') else {
+                rest = "";
+                break;
+            };
+            let tag = &rest[open + 1..open + close];
+            if tag.trim_start_matches('/').starts_with("br") {
+                text.push(' ');
+            }
+            rest = &rest[open + close + 1..];
+        }
+        text.push_str(rest);
+        let text = text
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&");
+        let normalized = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if normalized.chars().count() < DUPLICATE_PARAGRAPH_MIN_CHARACTERS {
+            continue;
+        }
+        if !seen.insert(normalized) {
+            duplicates += 1;
+        }
+    }
+    duplicates
 }
 
 fn main() -> ExitCode {
@@ -132,6 +213,7 @@ fn main() -> ExitCode {
                             "section": &page.metadata().section,
                             "tags": &page.metadata().tags,
                         },
+                        "duplicate_paragraphs": duplicate_paragraphs(&page.html()),
                         "tables": page.html().match_indices("<table").count(),
                         "figures": page.html().match_indices("<figure").count(),
                         "semantic_coverage": semantic_coverage,

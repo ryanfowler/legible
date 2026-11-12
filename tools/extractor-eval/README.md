@@ -64,8 +64,12 @@ node tools/extractor-eval/index.mjs --all --gate legible \
   --baseline evals/quality/legible-baseline.json
 ```
 
-The command fails when a fixture loses reliability or when a recorded score
-decreases. A Legible reliability failure that the baseline already records does
+The command fails when a fixture loses reliability, when a recorded score
+decreases, or when the output has more repeated prose paragraphs than the
+baseline records. A repeated paragraph has at least 40 normalized characters
+and appears again. The `extract_fixture` example counts Legible's canonical HTML
+`<p>` elements, so code blocks and image alt text are not counted. A comparator
+that does not report the count gets an estimate from its Markdown. A Legible reliability failure that the baseline already records does
 not fail the command. New fixtures that are not in the baseline must pass the
 reliability gate.
 

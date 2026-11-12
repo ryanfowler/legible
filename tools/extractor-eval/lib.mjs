@@ -347,6 +347,76 @@ function replyStructure(markdown, markers) {
   return { reply_items: replyItems, reply_depth: replyDepth };
 }
 
+// Shortest normalized block, in characters, that the duplicate check
+// compares. Short repeated blocks such as "Reply" are not duplicate content.
+const DUPLICATE_BLOCK_MIN_CHARACTERS = 40;
+
+// Markdown image syntax, with backslash escapes in the alt text and the
+// destination.
+const MARKDOWN_IMAGE = /!\[(?:\\.|[^\]\\])*\]\((?:\\.|[^)\\])*\)/gu;
+
+// Returns the prose lines of `markdown`. Fenced code is removed, because a
+// repeated command or code example is not duplicate prose. Blockquote
+// markers are removed, so a quote separator line (">") separates blocks.
+// Images are removed, because alt text often repeats a figure caption.
+function proseLines(markdown) {
+  const lines = [];
+  let fence = null;
+  for (const line of markdown.split("\n")) {
+    const unquoted = line.replace(/^(?:\s{0,3}>\s?)+/u, "");
+    if (fence) {
+      // A closing fence uses the same character, is at least as long, and
+      // has only whitespace after it. Nested list code is indented.
+      const close = unquoted.match(/^\s*(`{3,}|~{3,})\s*$/u);
+      if (
+        close &&
+        close[1][0] === fence[0] &&
+        close[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      lines.push("");
+      continue;
+    }
+    const open = unquoted.match(/^\s*(`{3,}|~{3,})/u);
+    if (open) {
+      fence = open[1];
+      lines.push("");
+      continue;
+    }
+    lines.push(removeImagesOutsideCode(unquoted));
+  }
+  return lines;
+}
+
+// Removes image syntax outside inline code spans. Code such as
+// `![alpha](a.png)` is literal text.
+function removeImagesOutsideCode(line) {
+  const parts = line.split(/(`+[^`]*`+)/u);
+  return parts
+    .map((part, index) =>
+      index % 2 === 1 ? part : part.replace(MARKDOWN_IMAGE, ""),
+    )
+    .join("");
+}
+
+// Counts repeated prose blocks. A block is text between blank lines. The
+// count is the number of blocks that repeat an earlier block, so one
+// paragraph that appears twice counts once.
+export function duplicateParagraphs(markdown) {
+  const seen = new Set();
+  let duplicates = 0;
+  for (const block of proseLines(markdown)
+    .join("\n")
+    .split(/\n\s*\n/u)) {
+    const text = normalizeText(markdownVisibleText(block)).trim();
+    if (text.length < DUPLICATE_BLOCK_MIN_CHARACTERS) continue;
+    if (seen.has(text)) duplicates += 1;
+    else seen.add(text);
+  }
+  return duplicates;
+}
+
 export function outputMetrics(markdown, details = {}) {
   const linkScan = scanMarkdownLinks(markdown);
   const structure = markdownStructure(markdown);
@@ -373,6 +443,10 @@ export function outputMetrics(markdown, details = {}) {
     headings_h4: structure.headings_h4,
     headings_h5: structure.headings_h5,
     headings_h6: structure.headings_h6,
+    // Legible reports an exact count from its canonical HTML paragraphs. The
+    // Markdown estimate is a fallback for comparators that do not.
+    duplicate_paragraphs:
+      details.duplicate_paragraphs ?? duplicateParagraphs(markdown),
     junk_phrases: JUNK_PHRASES.filter((phrase) =>
       normalizeText(markdown).includes(phrase),
     ),
@@ -577,6 +651,7 @@ export function scoreExtraction(extraction, fixture) {
     excluded_image_sources_found: imageSourcesFound,
     metadata_mismatches: metadata.mismatches,
     words: metrics.words,
+    duplicate_paragraphs: metrics.duplicate_paragraphs,
     links: metrics.links,
     link_density: metrics.link_density,
     headings: metrics.headings,
@@ -831,6 +906,9 @@ const BASELINE_SCORES = [
 function baselineEntry(score) {
   return {
     reliability_pass: score.reliability_pass,
+    duplicate_paragraphs: score.success
+      ? (score.duplicate_paragraphs ?? 0)
+      : null,
     required_content_score: score.required_content_score ?? null,
     noise_score: score.noise_score ?? null,
     structure_score: score.structure_score ?? null,
@@ -889,6 +967,29 @@ export function compareWithBaseline(results, baseline, tolerance = 1e-9) {
         baseline: 0,
         actual: 1,
       });
+    }
+    // More repeated paragraphs than the baseline is a regression.
+    const duplicatesBefore = expected.duplicate_paragraphs;
+    const duplicatesAfter = actual.duplicate_paragraphs;
+    if (
+      typeof duplicatesBefore === "number" &&
+      typeof duplicatesAfter === "number"
+    ) {
+      if (duplicatesAfter > duplicatesBefore) {
+        regressions.push({
+          fixture: result.fixture,
+          score: "duplicate_paragraphs",
+          baseline: duplicatesBefore,
+          actual: duplicatesAfter,
+        });
+      } else if (duplicatesAfter < duplicatesBefore) {
+        improvements.push({
+          fixture: result.fixture,
+          score: "duplicate_paragraphs",
+          baseline: duplicatesBefore,
+          actual: duplicatesAfter,
+        });
+      }
     }
     for (const name of BASELINE_SCORES) {
       const before = expected[name];

@@ -45,6 +45,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+      - run: cargo test --examples --all-features
       - run: cargo test --manifest-path cli/Cargo.toml --locked
 
   evaluator-tests:
@@ -92,6 +93,7 @@ jobs:
         target:
           - document_parse
           - dom_mutation_serialization
+          - extractor_options
           - json_ld_metadata
           - nested_malformed_html
           - render_markdown_text

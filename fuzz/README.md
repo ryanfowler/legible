@@ -12,6 +12,9 @@ cargo +nightly fuzz run document_parse
 Available targets:
 
 - `document_parse` checks the public `extract` entry point.
+- `extractor_options` checks extraction with arbitrary builder, budget, content
+  hint, charset, and Markdown options. It also checks that the same options give
+  the same output twice.
 - `dom_mutation_serialization` exercises extraction mutations and reparses HTML output.
 - `render_markdown_text` exercises Markdown and normalized text rendering.
 - `json_ld_metadata` exercises valid and malformed JSON-LD metadata.
