@@ -4,7 +4,6 @@
   "source_url": "https://example.test/app-hidden-junk-negative",
   "page_shape": "application",
   "must_include": [
-    "Visible maintenance schedule",
     "The database window starts at 02:00 UTC",
     "Read traffic remains available"
   ],

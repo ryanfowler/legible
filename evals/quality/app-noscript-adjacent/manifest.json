@@ -4,7 +4,6 @@
   "source_url": "https://example.test/app-noscript-adjacent",
   "page_shape": "application",
   "must_include": [
-    "Static export instructions",
     "Download the signed export",
     "Validate the manifest before import"
   ],

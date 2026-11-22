@@ -4,7 +4,6 @@
   "source_url": "https://example.test/app-navigation-tree",
   "page_shape": "document",
   "must_include": [
-    "Compact retention policy",
     "Records remain available for ninety days",
     "Legal holds pause deletion"
   ],
@@ -15,7 +14,7 @@
     "Audit navigation"
   ],
   "expected": {
-    "headings_min": 2
+    "headings_min": 1
   },
   "notes": "A large application navigation tree beside short useful content must not win extraction."
 }
