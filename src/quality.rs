@@ -259,7 +259,7 @@ impl ContentMetrics {
                 && dom
                     .attr(node, AttrName::Class)
                     .is_some_and(|classes| has_any_token(classes, &["modal", "dialog"]));
-            let hidden = dom.attr(node, AttrName::AriaHidden) == Some("true")
+            let hidden = crate::scoring::is_aria_hidden(dom, node)
                 || !relax_static_visibility && (statically_hidden || utility_hidden)
                 || dom
                     .attr(node, AttrName::Role)

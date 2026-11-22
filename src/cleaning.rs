@@ -1141,10 +1141,9 @@ pub(crate) fn hard_cleanup_in_workspace(
                     .attr(node, AttrName::Class)
                     .is_some_and(|classes| has_any_token(classes, &["modal", "dialog"]));
         let math_source = evidence.math(node) || evidence.accessible_math(node);
-        let hidden =
-            dom.attr(node, AttrName::AriaHidden) == Some("true") && !fallback_image && !math_source
-                || !relax_static_visibility && static_visibility && !math_source
-                || modal;
+        let hidden = crate::scoring::is_aria_hidden(dom, node) && !fallback_image && !math_source
+            || !relax_static_visibility && static_visibility && !math_source
+            || modal;
         if relax_static_visibility {
             dom.remove_attr(node, AttrName::Hidden);
             if let Some(classes) = dom.attr(node, AttrName::Class) {
