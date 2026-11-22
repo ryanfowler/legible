@@ -355,9 +355,9 @@
     "discussion-link-heavy": {
       "reliability_pass": true,
       "duplicate_paragraphs": 0,
-      "required_content_score": 0.8,
+      "required_content_score": 1,
       "noise_score": 1,
-      "structure_score": 0.5,
+      "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null
     },

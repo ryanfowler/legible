@@ -894,6 +894,13 @@ pub(crate) fn select_content_root<'a>(
         }
 
         if branches.is_empty()
+            && let Some(boundary) = entry_list_boundary(dom, candidates, selected, body)
+        {
+            selected = boundary;
+            reason = RootSelectionReason::CompleteAncestor;
+        }
+
+        if branches.is_empty()
             && !candidates
                 .get(selected)
                 .is_some_and(|candidate| candidate.has_source(CandidateSource::StructuredData))
@@ -1439,6 +1446,75 @@ fn complete_semantic_boundary(
                 .then_some(root)
         })
         .next()
+}
+
+/// Returns the semantic root around a reply list when ranking selected one
+/// reply. A reply is an `<article>` that leads its list item and starts with a
+/// non-heading element, such as an author label. One reply is never the
+/// complete discussion when the same list holds another reply of the same
+/// shape. The shape is the tag of the first element in the article.
+///
+/// Teaser cards start with a heading or have a different shape, so a feature
+/// article beside them keeps its own boundary. A list without a semantic root
+/// below the body keeps the ranked boundary, because the list alone would drop
+/// its heading and introduction. A list named as comments or replies keeps
+/// the ranked boundary too, because cleanup treats it as a comment region.
+fn entry_list_boundary(
+    dom: &Dom,
+    candidates: &CandidateSet,
+    selected: NodeId,
+    body: NodeId,
+) -> Option<NodeId> {
+    let reply_shape = |item: NodeId| {
+        if dom.tag(item) != Some(Tag::Li) {
+            return None;
+        }
+        let article = dom
+            .element_children(item)
+            .next()
+            .filter(|&entry| dom.tag(entry) == Some(Tag::Article))?;
+        let shape = dom.tag(dom.element_children(article).next()?)?;
+        (!matches!(
+            shape,
+            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
+        ))
+        .then_some((article, shape))
+    };
+    let item = match dom.tag(selected) {
+        Some(Tag::Article) => dom.parent(selected)?,
+        Some(Tag::Li) => selected,
+        _ => return None,
+    };
+    let (article, shape) = reply_shape(item)?;
+    if dom.tag(selected) == Some(Tag::Article) && article != selected {
+        return None;
+    }
+    let list = dom
+        .parent(item)
+        .filter(|&list| matches!(dom.tag(list), Some(Tag::Ol | Tag::Ul)))?;
+    if !dom
+        .element_children(list)
+        .any(|other| other != item && reply_shape(other).is_some_and(|(_, other)| other == shape))
+    {
+        return None;
+    }
+    let boundary = dom
+        .ancestors(list)
+        .take_while(|&ancestor| ancestor != body)
+        .find(|&ancestor| candidates.is_authoritative_semantic(dom, ancestor))?;
+    let comment_named = std::iter::once(list)
+        .chain(
+            dom.ancestors(list)
+                .take_while(|&ancestor| ancestor != boundary),
+        )
+        .any(|node| {
+            [AttrName::Class, AttrName::Id].into_iter().any(|name| {
+                dom.attr(node, name).is_some_and(|value| {
+                    crate::constants::regexps::UNLIKELY_CANDIDATES.is_match(value)
+                })
+            })
+        });
+    (!comment_named).then_some(boundary)
 }
 
 fn is_main_semantic_root(dom: &Dom, node: NodeId) -> bool {
@@ -2495,6 +2571,97 @@ mod tests {
 
         assert!(!candidates.is_semantic(divs[0]));
         assert!(candidates.is_semantic(divs[1]));
+    }
+
+    #[test]
+    fn one_ranked_list_entry_broadens_to_the_entry_list() {
+        let reply = |name: &str, extra: &str| {
+            format!(
+                "<li><article><strong>{name}</strong><p>{name} wrote a reply about the decoder.</p>{extra}</article></li>"
+            )
+        };
+        let links = r#"<ul><li><a href="/spec">Read the wire format specification</a></li><li><a href="/impl">Inspect the reference implementation source</a></li><li><a href="/report">Review the interoperability report</a></li></ul>"#;
+        let html = format!(
+            r#"<body><nav><a href="/jobs">Developer jobs</a></nav><main><h1>Thread</h1><p>The group compares implementations against the same published protocol.</p><ol>{}{}</ol></main><aside>Sponsored SDK</aside></body>"#,
+            reply("Kim", links),
+            reply("Lou", "")
+        );
+        let markdown = crate::extract(&html, None).unwrap().markdown();
+        assert!(markdown.contains("Kim wrote"), "{markdown}");
+        assert!(markdown.contains("Lou wrote"), "{markdown}");
+        assert!(markdown.contains("The group compares"), "{markdown}");
+        assert!(!markdown.contains("Sponsored SDK"), "{markdown}");
+
+        let boundary = |html: &str| {
+            let dom = Dom::parse_document(html).unwrap();
+            let candidates = CandidateSet::discover_semantic(&dom);
+            let article = dom
+                .descendants(dom.root())
+                .find(|&node| dom.tag(node) == Some(Tag::Article))
+                .unwrap();
+            entry_list_boundary(&dom, &candidates, article, dom.body().unwrap())
+                .map(|node| dom.tag(node))
+        };
+        let peer = reply("Lou", "");
+        assert_eq!(
+            boundary(&format!(
+                "<body><main><ol>{}{peer}</ol></main></body>",
+                reply("Kim", "")
+            )),
+            Some(Some(Tag::Main))
+        );
+        // One entry without a peer entry in the same list is the content.
+        assert_eq!(
+            boundary(&format!(
+                "<body><main><ol>{}</ol></main></body>",
+                reply("Kim", links)
+            )),
+            None
+        );
+        // An article that does not lead its list item is not an entry.
+        assert_eq!(
+            boundary(&format!(
+                "<body><main><ol><li><p>Lead</p><article><p>Inner</p></article></li>{peer}</ol></main></body>"
+            )),
+            None
+        );
+        // Heading-led cards are teasers, not replies.
+        let card = |title: &str| {
+            format!("<li><article><h3>{title}</h3><p>{title} summary text.</p></article></li>")
+        };
+        assert_eq!(
+            boundary(&format!(
+                "<body><main><ol>{}{}</ol></main></body>",
+                card("Feature"),
+                card("Teaser")
+            )),
+            None
+        );
+        // A peer with a different entry shape is not a reply of the same list.
+        assert_eq!(
+            boundary(&format!(
+                "<body><main><ol>{}{}</ol></main></body>",
+                reply("Kim", ""),
+                card("Teaser")
+            )),
+            None
+        );
+        // Without a semantic root, the list alone would drop its introduction.
+        assert_eq!(
+            boundary(&format!(
+                "<body><div><h1>Thread</h1><p>Intro.</p><ol>{}{peer}</ol></div></body>",
+                reply("Kim", "")
+            )),
+            None
+        );
+        // Cleanup treats a list named as comments as a comment region.
+        assert_eq!(
+            boundary(&format!(
+                r#"<body><main><ol class="comments">{}{peer}</ol></main></body>"#,
+                reply("Kim", "")
+            )),
+            None
+        );
     }
 
     #[test]
