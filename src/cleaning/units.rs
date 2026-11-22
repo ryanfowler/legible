@@ -327,6 +327,11 @@ fn classify_pagination_text(text: &str) -> Option<PaginationText> {
 /// link marks only that link, so it is not a unit disclosure. A
 /// recommendation card needs a recommendation lead label, a related class or
 /// ID, a terminal position among its siblings, and at least two links.
+///
+/// A card in a reply slot has the shape of the replies beside it (see
+/// [`crate::replies::ReplyEntry`]). A promotion card there with a promotion
+/// class or ID has no sponsor credit exception. A recommendation card there
+/// needs no links, except under a "Related questions" label.
 fn is_disclosed_unit(
     dom: &Dom,
     node: NodeId,
@@ -351,12 +356,13 @@ fn is_disclosed_unit(
     let lead = lines.label();
     // A heading names an authored section, for example "<h2>Sponsored</h2>"
     // above prose about sponsorship. It is not a disclosure line.
+    let promotion_named = ["ad", "ads", "promo", "promoted", "sponsored"]
+        .iter()
+        .any(|token| name_has_token(&name, token));
     let labelled = !lines.first_is_heading
         && lead.is_some_and(|text| match disclosure_label(text) {
             Disclosure::Explicit => true,
-            Disclosure::Ambiguous => ["ad", "ads", "promo", "promoted", "sponsored"]
-                .iter()
-                .any(|token| name_has_token(&name, token)),
+            Disclosure::Ambiguous => promotion_named,
             Disclosure::None => false,
         });
     // A disclosure attribute is on the unit itself. A disclosure line counts
@@ -365,11 +371,25 @@ fn is_disclosed_unit(
     let attributed = has_disclosure_attribute(dom, node);
     let labelled = labelled && (attributed || owns_first_line(dom, node));
     let promotion = labelled || attributed;
+    // A card in a reply slot has the shape of the replies beside it, but its
+    // author label is a disclosure or recommendation label, and its class or
+    // ID names the same purpose. Everything after the label is then promoted
+    // or recommended content, not a sponsor credit or an authored answer. A
+    // heading is an authored title, so it never fills the author slot here.
+    let reply_slot = || {
+        !lines.first_is_heading
+            && crate::replies::ReplyEntry::of(dom, node)
+                .is_some_and(|entry| !entry.is_heading_led() && entry.has_peer(dom, node))
+    };
     let recommendation = !promotion
         && lead.is_some_and(is_recommendation_label)
         && contains_any(&name, &["related", "recommend", "suggest"])
         && is_terminal_sibling(dom, node)
-        && is_link_list(dom, node);
+        && (is_link_list(dom, node)
+            // A related question can hold an authored answer, so it needs
+            // links even in a reply slot.
+            || !lead.is_some_and(|text| text.eq_ignore_ascii_case("related questions"))
+                && reply_slot());
     // Check the sibling structure last. The label checks above are bounded
     // and reject almost every node.
     if !(promotion || recommendation) || !is_repeated_unit(dom, node) {
@@ -380,7 +400,8 @@ fn is_disclosed_unit(
     // above a sponsored article. Only an advertisement slot label is
     // removable without promoted content.
     let advertisement = lead.is_some_and(|text| text.eq_ignore_ascii_case("advertisement"));
-    if promotion && !advertisement && lines.is_credit_only(labelled) {
+    let promoted_reply_slot = labelled && promotion_named && reply_slot();
+    if promotion && !advertisement && lines.is_credit_only(labelled) && !promoted_reply_slot {
         return false;
     }
     !has_substantive_prose(dom, node)
@@ -1442,6 +1463,70 @@ mod tests {
              sensor measure frozen soil? No, ice causes a false dry reading.</p></section></main>"
         ));
         assert!(text.contains("frozen soil"), "{text}");
+    }
+
+    #[test]
+    fn removes_labelled_cards_in_reply_slots() {
+        let reply = |name: &str| {
+            format!("<li><article><strong>{name}</strong><p>{name} checked it.</p></article></li>")
+        };
+        let thread = |card: &str| {
+            run(&format!(
+                "<main>{LEAD}<ol>{}{}{card}</ol></main>",
+                reply("Lena"),
+                reply("Mateo")
+            ))
+        };
+        let slot = |class: &str, label: &str, body: &str| {
+            format!("<li{class}><article><strong>{label}</strong><p>{body}</p></article></li>")
+        };
+        // A disclosure in the author slot of a named card has no sponsor
+        // credit after it.
+        let promoted = " class=\"promoted\"";
+        let text = thread(&slot(promoted, "Promoted post", "Field service software."));
+        assert!(!text.contains("Field service software"), "{text}");
+        // A reply by an author with a disclosure-like name stays.
+        let text = thread(&slot("", "Sponsored", "Thanks, that fixed it."));
+        assert!(text.contains("Thanks, that fixed it"), "{text}");
+        // A heading-led card is an authored section.
+        let text = thread(&format!(
+            "<li{promoted}><article><div><h2>Promoted post</h2></div><p>Field service software.</p></article></li>"
+        ));
+        assert!(text.contains("Field service software"), "{text}");
+        // The same card outside a reply slot keeps its short credit line.
+        let text = thread("<li><strong>Promoted post</strong><p>Field service software.</p></li>");
+        assert!(text.contains("Field service software"), "{text}");
+        // A related card in a reply slot needs no links.
+        let related = " class=\"related-card\"";
+        let text = thread(&slot(
+            related,
+            "Related threads",
+            "Other conversations for you.",
+        ));
+        assert!(!text.contains("Other conversations"), "{text}");
+        // It still needs a related name and a terminal position.
+        let text = thread(&slot("", "Related threads", "Other conversations for you."));
+        assert!(text.contains("Other conversations"), "{text}");
+        let text = run(&format!(
+            "<main>{LEAD}<ol>{}{}{}</ol></main>",
+            reply("Lena"),
+            slot(related, "Related threads", "Other conversations for you."),
+            reply("Mateo")
+        ));
+        assert!(text.contains("Other conversations"), "{text}");
+        // A heading in the author slot is an authored title.
+        let text = thread(&format!(
+            "<li{related}><article><div><h2>Related threads</h2></div><p>Other conversations for you.</p></article></li>"
+        ));
+        assert!(text.contains("Other conversations"), "{text}");
+        // A related question can hold an authored answer.
+        let text = thread(&slot(related, "Related questions", "Set the proxy first."));
+        assert!(text.contains("Set the proxy first"), "{text}");
+        // A card with another shape is not in a reply slot.
+        let text = thread(&format!(
+            "<li{related}><article><p>Related threads</p><p>Other conversations for you.</p></article></li>"
+        ));
+        assert!(text.contains("Other conversations"), "{text}");
     }
 
     #[test]

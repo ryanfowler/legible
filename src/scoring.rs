@@ -2837,50 +2837,11 @@ pub fn has_child_block_element(dom: &Dom, id: NodeId) -> bool {
 }
 
 /// Returns true when `node` has `aria-hidden="true"` and is not a collapsed
-/// discussion branch. Extraction treats such a node as hidden content.
+/// discussion branch (see [`crate::replies::is_collapsed_branch`]).
+/// Extraction treats such a node as hidden content.
 pub(crate) fn is_aria_hidden(dom: &Dom, node: NodeId) -> bool {
-    dom.attr(node, AttrName::AriaHidden) == Some("true") && !is_collapsed_reply_branch(dom, node)
-}
-
-/// Returns true when `node` is a collapsed branch of a discussion: the only
-/// nested list inside a reply item, where each item repeats the reply's
-/// entry shape. An entry is an `<article>` that leads its list item, and its
-/// shape is the tag of its first element, such as an author label. The server sends the replies, and the client hides
-/// them until a reader expands the branch, so `aria-hidden` does not mark them
-/// as clutter. A hidden list beside a visible list in the same item is a
-/// responsive duplicate, so it stays hidden. Navigation submenus do not use
-/// article entries, and teaser cards do not repeat the shape of a reply.
-fn is_collapsed_reply_branch(dom: &Dom, node: NodeId) -> bool {
-    let is_list = |node: NodeId| matches!(dom.tag(node), Some(Tag::Ol | Tag::Ul));
-    // The shape of an entry is the tag of the first element in its article.
-    let entry_shape = |item: NodeId| {
-        let article = dom
-            .element_children(item)
-            .next()
-            .filter(|&entry| dom.tag(entry) == Some(Tag::Article))?;
-        Some(dom.tag(dom.element_children(article).next()?))
-    };
-    if !is_list(node) {
-        return false;
-    }
-    let Some(parent) = dom
-        .parent(node)
-        .filter(|&parent| dom.tag(parent) == Some(Tag::Li))
-    else {
-        return false;
-    };
-    let Some(shape) = entry_shape(parent) else {
-        return false;
-    };
-    if dom
-        .element_children(parent)
-        .any(|child| child != node && is_list(child))
-    {
-        return false;
-    }
-    let mut items = dom.element_children(node).peekable();
-    items.peek().is_some()
-        && items.all(|item| dom.tag(item) == Some(Tag::Li) && entry_shape(item) == Some(shape))
+    dom.attr(node, AttrName::AriaHidden) == Some("true")
+        && !crate::replies::is_collapsed_branch(dom, node)
 }
 
 pub fn is_probably_visible(dom: &Dom, id: NodeId) -> bool {

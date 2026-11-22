@@ -401,7 +401,7 @@
       "reliability_pass": true,
       "duplicate_paragraphs": 0,
       "required_content_score": 1,
-      "noise_score": 0.75,
+      "noise_score": 1,
       "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null
@@ -1157,7 +1157,7 @@
       "reliability_pass": true,
       "duplicate_paragraphs": 0,
       "required_content_score": 1,
-      "noise_score": 0.6666666666666666,
+      "noise_score": 1,
       "structure_score": 1,
       "metadata_score": null,
       "reference_f1": null
