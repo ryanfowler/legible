@@ -6,7 +6,7 @@
 //! These tests compare retained words instead of source wrappers and attributes.
 //! They also verify that output does not grow beyond five times the expected word count.
 
-use html5ever_compat::{parse_document, tendril::TendrilSink};
+use html5ever::{parse_document, tendril::TendrilSink};
 use legible::{Metadata, extract};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde::Deserialize;
@@ -76,23 +76,23 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
         match &node.data {
             NodeData::Element { name, attrs, .. } => {
                 if closing {
-                    nodes.push(CanonicalNode::EndTag(canonical_tag(name.local.as_ref())));
+                    nodes.push(CanonicalNode::EndTag(canonical_tag(name.local.as_str())));
                     continue;
                 }
 
                 let attrs = attrs.borrow();
                 let has_data_srcset = attrs.iter().any(|attribute| {
-                    attribute.name.ns.as_ref().is_empty()
-                        && attribute.name.local.as_ref() == "data-srcset"
+                    attribute.name.ns.as_str().is_empty()
+                        && attribute.name.local.as_str() == "data-srcset"
                 });
                 let has_srcset = attrs.iter().any(|attribute| {
-                    attribute.name.ns.as_ref().is_empty()
-                        && attribute.name.local.as_ref() == "srcset"
+                    attribute.name.ns.as_str().is_empty()
+                        && attribute.name.local.as_str() == "srcset"
                 });
                 let mut attributes: Vec<_> = attrs
                     .iter()
                     .filter(|attribute| {
-                        let local = attribute.name.local.as_ref();
+                        let local = attribute.name.local.as_str();
                         // Official fixtures use different selected-container IDs and
                         // retain unrelated runtime data. Keep page IDs, image data,
                         // and generated data-old-* attributes under comparison.
@@ -101,24 +101,24 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                                 attribute.value.as_ref(),
                                 "readability-page-1" | "legible-content"
                             ))
-                            && (!attribute.name.ns.as_ref().is_empty()
+                            && (!attribute.name.ns.as_str().is_empty()
                                 || !local.starts_with("data-")
                                 || matches!(local, "data-src" | "data-srcset")
                                 || local.starts_with("data-old-"))
                             // Some Mozilla fixtures retain the noscript image src
                             // where this implementation retains data-srcset.
-                            && !(name.local.as_ref() == "img"
+                            && !(name.local.as_str() == "img"
                                 && local == "src"
                                 && (has_data_srcset || has_srcset))
                     })
                     .map(|attribute| {
                         let mut value = attribute.value.to_string();
-                        if attribute.name.local.as_ref() == "id"
+                        if attribute.name.local.as_str() == "id"
                             && matches!(value.as_str(), "readability-page-1" | "legible-content")
                         {
                             value = "content-root".to_owned();
                         }
-                        if attribute.name.local.as_ref() == "src"
+                        if attribute.name.local.as_str() == "src"
                             && value.starts_with("file:///C|/")
                         {
                             value.replace_range(9..10, ":");
@@ -132,7 +132,7 @@ fn append_canonical(root: &Handle, nodes: &mut Vec<CanonicalNode>) {
                     .collect();
                 attributes.sort();
                 nodes.push(CanonicalNode::StartTag(
-                    canonical_tag(name.local.as_ref()),
+                    canonical_tag(name.local.as_str()),
                     attributes,
                 ));
                 stack.push((node.clone(), true));
@@ -177,7 +177,7 @@ fn canonicalize_html(html: &str) -> Vec<CanonicalNode> {
                 .borrow()
                 .iter()
                 .find(|node| {
-                    matches!(&node.data, NodeData::Element { name, .. } if name.local.as_ref() == "body")
+                    matches!(&node.data, NodeData::Element { name, .. } if name.local.as_str() == "body")
                 })
                 .cloned()
         })
