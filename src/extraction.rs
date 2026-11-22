@@ -3372,7 +3372,7 @@ impl<'a> ContentExtractor<'a> {
     }
 
     fn is_static_hidden_marker(&self, node: NodeId) -> bool {
-        self.dom.attr(node, AttrName::AriaHidden) != Some("true")
+        !crate::scoring::is_aria_hidden(&self.dom, node)
             && (!is_probably_visible(&self.dom, node)
                 || has_hidden_utility_class_for_discovery(&self.dom, node))
     }
@@ -6287,6 +6287,70 @@ cargo test</code></pre><p>Run these commands.</p></main></body>"#,
         assert_eq!(page.metadata().title.as_deref(), Some("Article title"));
         assert!(!page.text().contains("Article title"));
         assert!(page.text().contains("complete explanation"));
+    }
+
+    #[test]
+    fn keeps_collapsed_reply_branches_but_drops_other_aria_hidden_lists() {
+        let reply = |name: &str| {
+            format!(
+                "<li><article><strong>{name}</strong><p>{name} described the parser failure with the archived request payload in detail.</p></article></li>"
+            )
+        };
+        let page = |hidden_list: &str| {
+            format!(
+                r#"<html><body><main><h1>Thread</h1><p>The maintainers discuss the parser failure and the corrected sample payload.</p><ol><li><article><strong>Ari</strong><p>Ari explained the collapsed branch and why the default view hides it from readers.</p></article>{hidden_list}</li></ol></main></body></html>"#
+            )
+        };
+        let markdown = |html: String| crate::extract(&html, None).unwrap().markdown();
+
+        let collapsed = markdown(page(&format!(
+            r#"<ol aria-hidden="true">{}{}</ol>"#,
+            reply("Bo"),
+            reply("Cy")
+        )));
+        assert!(collapsed.contains("Bo described"), "{collapsed}");
+        assert!(collapsed.contains("Cy described"), "{collapsed}");
+
+        // A hidden copy beside a visible reply list is a responsive duplicate.
+        let duplicate = markdown(page(&format!(
+            r#"<ol>{}</ol><ol aria-hidden="true">{}</ol>"#,
+            reply("Bo"),
+            reply("Bo")
+        )));
+        assert_eq!(duplicate.matches("Bo described").count(), 1, "{duplicate}");
+
+        // Hidden teaser cards do not repeat the entry shape of the reply.
+        let teasers = markdown(page(
+            r#"<ol aria-hidden="true"><li><article><h3>Hidden teaser card</h3><p>Hidden teaser card text repeats a summary of another article on this page.</p></article></li></ol>"#,
+        ));
+        assert!(!teasers.contains("Hidden teaser card"), "{teasers}");
+
+        // A hidden list whose items are not article entries stays hidden.
+        let menu = markdown(page(
+            r#"<ul aria-hidden="true"><li><a href="/a">Hidden menu entry</a></li></ul>"#,
+        ));
+        assert!(!menu.contains("Hidden menu entry"), "{menu}");
+
+        // One item that is not an article entry hides the whole list.
+        let mixed = markdown(page(&format!(
+            r#"<ol aria-hidden="true">{}<li><p>Hidden mixed entry text</p></li></ol>"#,
+            reply("Bo")
+        )));
+        assert!(!mixed.contains("Bo described"), "{mixed}");
+
+        // A hidden list that is not nested in an entry item stays hidden.
+        let html = format!(
+            r#"<html><body><main><p>The maintainers discuss the parser failure and the corrected sample payload in this thread.</p><ol aria-hidden="true">{}{}</ol></main></body></html>"#,
+            reply("Bo"),
+            reply("Cy")
+        );
+        let detached = crate::extract(&html, None).map(|page| page.markdown());
+        assert!(
+            detached
+                .as_deref()
+                .is_ok_and(|text| !text.contains("Bo described")),
+            "{detached:?}"
+        );
     }
 
     #[test]

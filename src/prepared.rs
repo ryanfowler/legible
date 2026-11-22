@@ -578,7 +578,7 @@ fn has_hidden_ancestor(dom: &Dom, node: NodeId) -> bool {
     dom.ancestors(node).any(|ancestor| {
         !is_probably_visible(dom, ancestor)
             || has_hidden_utility_class(dom, ancestor)
-            || dom.attr(ancestor, AttrName::AriaHidden) == Some("true")
+            || crate::scoring::is_aria_hidden(dom, ancestor)
             || dom.attr(ancestor, AttrName::AriaModal) == Some("true")
             || dom
                 .attr(ancestor, AttrName::Role)
@@ -641,7 +641,7 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     };
     let mut flags = SourceFlags::ELEMENT;
     let utility_hidden = has_hidden_utility_class_for_discovery(dom, node);
-    let static_hidden = dom.attr(node, AttrName::AriaHidden) != Some("true")
+    let static_hidden = !crate::scoring::is_aria_hidden(dom, node)
         && (!is_probably_visible(dom, node) || utility_hidden);
     if static_hidden {
         flags.insert(SourceFlags::STATIC_HIDDEN);
@@ -649,7 +649,7 @@ fn source_signals(dom: &Dom, node: NodeId, tag: Option<Tag>) -> (SourceFlags, i8
     if utility_hidden {
         flags.insert(SourceFlags::UTILITY_HIDDEN);
     }
-    if dom.attr(node, AttrName::AriaHidden) == Some("true") {
+    if crate::scoring::is_aria_hidden(dom, node) {
         flags.insert(SourceFlags::ARIA_HIDDEN);
     }
     let aria_modal = dom.attr(node, AttrName::AriaModal) == Some("true");

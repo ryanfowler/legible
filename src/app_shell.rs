@@ -600,7 +600,7 @@ impl<'a> Iterator for ChromeWalk<'a> {
                     dom.tag(node),
                     Some(Tag::Script | Tag::Style | Tag::Noscript | Tag::Template)
                 ) || has_static_hidden_marker(dom, node)
-                    || dom.attr(node, AttrName::AriaHidden) == Some("true")
+                    || crate::scoring::is_aria_hidden(dom, node)
                     || is_page_chrome(dom, node))
             {
                 self.advance(node, false);

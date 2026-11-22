@@ -2108,7 +2108,7 @@ fn is_blocked_structured_region(dom: &Dom, node: NodeId) -> bool {
         dom.tag(node),
         Some(Tag::Script | Tag::Style | Tag::Template | Tag::Meta | Tag::Link)
     ) || has_static_hidden_marker(dom, node)
-        || dom.attr(node, AttrName::AriaHidden) == Some("true")
+        || crate::scoring::is_aria_hidden(dom, node)
 }
 
 fn is_text_flow_boundary(tag: Option<Tag>) -> bool {

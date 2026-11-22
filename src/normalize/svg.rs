@@ -358,9 +358,9 @@ fn reference_text_is_retained_in_chart(dom: &Dom, svg: NodeId, source: NodeId) -
 
 fn hidden_nodes(dom: &Dom, root: NodeId) -> Vec<bool> {
     let mut hidden = vec![false; dom.len()];
-    hidden[root.index()] = dom.attr(root, AttrName::AriaHidden) == Some("true");
+    hidden[root.index()] = crate::scoring::is_aria_hidden(dom, root);
     for (node, _) in dom.element_descendants_snapshot_with_depth(root) {
-        hidden[node.index()] = dom.attr(node, AttrName::AriaHidden) == Some("true")
+        hidden[node.index()] = crate::scoring::is_aria_hidden(dom, node)
             || dom
                 .parent(node)
                 .is_some_and(|parent| hidden[parent.index()]);
