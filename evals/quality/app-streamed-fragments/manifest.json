@@ -4,7 +4,6 @@
   "source_url": "https://example.test/app-streamed-fragments",
   "page_shape": "application",
   "must_include": [
-    "Streamed deployment guide",
     "Prepare the immutable artifact",
     "Promote the verified release"
   ],

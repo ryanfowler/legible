@@ -4,7 +4,6 @@
   "source_url": "https://example.test/app-loading-shell",
   "page_shape": "application",
   "must_include": [
-    "Static incident summary",
     "The gateway recovered after certificate rotation",
     "No requests were lost"
   ],

@@ -24,6 +24,8 @@ Add `reference.md` only when a complete, manually adjudicated result adds value.
 
 Add `metadata.json` for normalized metadata fields that have an unambiguous value. The runner compares only the fields in that file. It normalizes strings and string arrays before comparison.
 
+An extractor can move a heading that repeats the page title from the content into metadata. Legible does this. Do not put the page title in `must_include`. Put it in `metadata.json` as `title`. Do not count that heading in heading limits. Count only the other headings that the extracted Markdown must keep.
+
 Set `expected_failure` only when extraction must return a structured extraction error. Set `expected_error` to the required public error variant, such as `NoContent`. The runner does not score quality dimensions for a correct expected failure. A wrong error variant, panic, tool invocation error, unexpected failure, unexpected success, or non-deterministic result is a reliability failure.
 
 ## Quality dimensions
