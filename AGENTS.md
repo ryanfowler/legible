@@ -60,7 +60,7 @@ The extraction pipeline flows through these stages:
 | `cleaning.rs` | Pre-extraction preparation and conservative structural and textual relevance cleanup, including redundant indexes, documentation controls, terminal page-maintenance panels, and compact peripheral rails |
 | `cleaning/units.rs` | Removal of small self-contained peripheral units: structural pagination controls, disclosed promotion units, terminal recommendation cards, and standalone purchase calls to action |
 | `normalize.rs` / `normalize/` | Source preparation and relevance cleanup for SVG charts, media, duplicate images, and heading artifacts |
-| `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion |
+| `normalize/svg.rs` | Namespace-aware SVG implementation cleanup and accessible chart conversion. A run of sibling `<text>` elements becomes table rows only when each pair is a label then a number and the pair shares a numeric `x` or `y` coordinate |
 | `document/lists.rs` / `document/tables.rs` | Direct semantic list recognition, table classification, listing conversion, and layout-table flattening |
 | `document/footnotes.rs` / `document/math.rs` / `document/callouts.rs` | Direct semantic footnote, math, and callout recognition for the compiler |
 | `document/facts.rs` | Shared complex-source feature inventory, cleanup-collected semantic gates, sparse source evidence, propagated semantic facts, and cleanup-safe source facts |
