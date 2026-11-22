@@ -141,7 +141,7 @@ These invariants are costly to violate:
 ### Common Pitfalls
 
 - Do not add dependencies on `ego-tree`, `scraper`, or other DOM crates. The custom arena DOM is intentional.
-- Use `as_str()` for HTML name atoms. `as_ref()` can also return bytes. Keep the test-only `html5ever_compat` parser at the version required by `markup5ever_rcdom`.
+- Use `as_str()` for HTML name atoms. `as_ref()` can also return bytes. Keep `html5ever` at the version that `markup5ever_rcdom` uses, because the Readability compatibility tests parse with it.
 - Mutation belongs in `dom/mutation.rs`. External modules must use the public traversal and query APIs.
 - `scoring.rs` owns all text statistics. Do not duplicate text scanning in other modules.
 - Use the `Error` enum from `error.rs` for fallible paths. Do not panic.
