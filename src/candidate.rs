@@ -1449,10 +1449,8 @@ fn complete_semantic_boundary(
 }
 
 /// Returns the semantic root around a reply list when ranking selected one
-/// reply. A reply is an `<article>` that leads its list item and starts with a
-/// non-heading element, such as an author label. One reply is never the
-/// complete discussion when the same list holds another reply of the same
-/// shape. The shape is the tag of the first element in the article.
+/// reply. One reply is never the complete discussion when the same list holds
+/// another reply of the same shape (see [`crate::replies::ReplyEntry`]).
 ///
 /// Teaser cards start with a heading or have a different shape, so a feature
 /// article beside them keeps its own boundary. A list without a semantic root
@@ -1465,39 +1463,18 @@ fn entry_list_boundary(
     selected: NodeId,
     body: NodeId,
 ) -> Option<NodeId> {
-    let reply_shape = |item: NodeId| {
-        if dom.tag(item) != Some(Tag::Li) {
-            return None;
-        }
-        let article = dom
-            .element_children(item)
-            .next()
-            .filter(|&entry| dom.tag(entry) == Some(Tag::Article))?;
-        let shape = dom.tag(dom.element_children(article).next()?)?;
-        (!matches!(
-            shape,
-            Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6
-        ))
-        .then_some((article, shape))
-    };
     let item = match dom.tag(selected) {
         Some(Tag::Article) => dom.parent(selected)?,
-        Some(Tag::Li) => selected,
-        _ => return None,
+        _ => selected,
     };
-    let (article, shape) = reply_shape(item)?;
-    if dom.tag(selected) == Some(Tag::Article) && article != selected {
-        return None;
-    }
-    let list = dom
-        .parent(item)
-        .filter(|&list| matches!(dom.tag(list), Some(Tag::Ol | Tag::Ul)))?;
-    if !dom
-        .element_children(list)
-        .any(|other| other != item && reply_shape(other).is_some_and(|(_, other)| other == shape))
+    let entry = crate::replies::ReplyEntry::of(dom, item)?;
+    if entry.is_heading_led()
+        || dom.tag(selected) == Some(Tag::Article) && entry.article != selected
+        || !entry.has_peer(dom, item)
     {
         return None;
     }
+    let list = dom.parent(item)?;
     let boundary = dom
         .ancestors(list)
         .take_while(|&ancestor| ancestor != body)
