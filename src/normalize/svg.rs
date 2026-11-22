@@ -231,7 +231,19 @@ fn chart_content(
             .filter(|&node| is_svg_element(dom, node, "text"))
             .filter(|&node| !hidden[node.index()])
             .collect();
-        if text_nodes.len() == 2 {
+        // An `aria-labelledby` reference already keeps its text as a label.
+        let referenced = |text: &NodeId| {
+            dom.attr(*text, AttrName::Id)
+                .is_some_and(|id| labelled_content.contains_key(id))
+        };
+        if text_nodes.len() >= 4
+            && text_nodes.len().is_multiple_of(2)
+            && !text_nodes.iter().any(referenced)
+        {
+            for (label, value, sources) in paired_text_rows(dom, &text_nodes) {
+                push_chart_row(&mut content.rows, &mut seen_rows, &label, &value, sources);
+            }
+        } else if text_nodes.len() == 2 {
             let values: SmallVec<[String; 2]> = text_nodes
                 .iter()
                 .filter_map(|&text| normalized_text(dom, text))
@@ -366,6 +378,53 @@ fn hidden_nodes(dom: &Dom, root: NodeId) -> Vec<bool> {
                 .is_some_and(|parent| hidden[parent.index()]);
     }
     hidden
+}
+
+/// Reads label and value rows from sibling `<text>` elements in source
+/// order, such as `Monday`, `840`, `Tuesday`, `860`. Every pair must be a
+/// label followed by its number. A number before a label is an axis tick, a
+/// legend year, or a step number, not a value. Both texts of a pair must have
+/// a numeric `x` or `y` coordinate, and the pair must share one of them, so it
+/// sits in one row or one column. If one pair fails, no row is read.
+fn paired_text_rows(dom: &Dom, texts: &[NodeId]) -> Vec<(String, String, SmallVec<[NodeId; 2]>)> {
+    let mut rows = Vec::with_capacity(texts.len() / 2);
+    for pair in texts.as_chunks::<2>().0 {
+        let (Some(label), Some(value)) =
+            (normalized_text(dom, pair[0]), normalized_text(dom, pair[1]))
+        else {
+            return Vec::new();
+        };
+        if is_chart_number(&label)
+            || !label.chars().any(char::is_alphabetic)
+            || !is_chart_number(&value)
+            || !shares_coordinate(dom, pair[0], pair[1])
+        {
+            return Vec::new();
+        }
+        rows.push((label, value, pair.iter().copied().collect()));
+    }
+    rows
+}
+
+/// True when two SVG texts have the same numeric `x` or `y` coordinate. The
+/// first number of a coordinate list counts, and a unit suffix is ignored.
+fn shares_coordinate(dom: &Dom, first: NodeId, second: NodeId) -> bool {
+    let coordinate = |node: NodeId, name: &str| {
+        let value = dom.attr_by_local_name(node, name)?;
+        let token = value
+            .split(|character: char| character.is_ascii_whitespace() || character == ',')
+            .find(|token| !token.is_empty())?;
+        token
+            .trim_end_matches(|character: char| character.is_ascii_alphabetic() || character == '%')
+            .parse::<f64>()
+            .ok()
+    };
+    ["x", "y"].into_iter().any(|name| {
+        matches!(
+            (coordinate(first, name), coordinate(second, name)),
+            (Some(left), Some(right)) if left == right
+        )
+    })
 }
 
 fn label_and_value<'a>(first: &'a str, second: &'a str) -> Option<(&'a str, &'a str)> {
@@ -618,6 +677,75 @@ mod tests {
                 Some("style" | "animate" | "animateColor")
             )
         }));
+    }
+
+    #[test]
+    fn converts_aligned_text_runs_to_chart_rows() {
+        let markdown = |group: &str| {
+            let mut dom = Dom::parse_fragment(
+                &format!(
+                    r#"<svg role="img"><title>Requests per second</title><g>{group}</g></svg>"#
+                ),
+                Tag::Div,
+            )
+            .unwrap();
+            let root = dom.root();
+            normalize(&mut dom, root);
+            semantic_markdown(&dom, root)
+        };
+        let table = markdown(
+            r#"<text x="10" y="20">Monday</text><text x="120" y="20">840</text>
+               <text x="10" y="40">Tuesday</text><text x="120" y="40">860</text>"#,
+        );
+        assert!(table.contains("| Monday | 840 |"), "{table}");
+        assert!(table.contains("| Tuesday | 860 |"), "{table}");
+        // Vertical bars put a label below its value in one column.
+        let table = markdown(
+            r#"<text x="10" y="90">Mon</text><text x="10" y="20">840</text>
+               <text x="40" y="90">Tue</text><text x="40" y="30">860</text>"#,
+        );
+        assert!(table.contains("| Mon | 840 |"), "{table}");
+
+        // Unit suffixes and coordinate lists still align.
+        let table = markdown(
+            r#"<text x="5px" y="30">Monday</text><text x="150px" y="30px">840</text>
+               <text x="5 9" y="60">Tuesday</text><text x="150" y="60">860</text>"#,
+        );
+        assert!(table.contains("| Monday | 840 |"), "{table}");
+        assert!(table.contains("| Tuesday | 860 |"), "{table}");
+
+        // Pairs without shared coordinates, with a number first (axis ticks,
+        // legend years, step numbers), or without a number are not rows.
+        for group in [
+            "<text>Monday</text><text>840</text><text>Tuesday</text><text>860</text>",
+            "<text>0</text><text>Jan</text><text>10</text><text>Feb</text>",
+            r#"<text x="10" y="10">2023</text><text x="30" y="10">Sales</text>
+               <text x="10" y="30">2024</text><text x="30" y="30">Costs</text>"#,
+            r#"<text x="-8" y="200">0</text><text transform="translate(20,215)">Jan</text>
+               <text x="-8" y="150">10</text><text transform="translate(60,215)">Feb</text>"#,
+            r#"<text x="10" y="20">Monday</text><text x="120" y="40">840</text>
+               <text x="10" y="40">Tuesday</text><text x="120" y="60">860</text>"#,
+            "<text>North</text><text>South</text><text>East</text><text>West</text>",
+        ] {
+            let text = markdown(group);
+            assert!(!text.contains('|'), "{group}: {text}");
+        }
+    }
+
+    #[test]
+    fn labelled_text_runs_are_not_repeated_as_rows() {
+        let mut dom = Dom::parse_fragment(
+            r#"<svg role="img" aria-labelledby="a b c d"><g>
+                <text id="a" x="10" y="20">Monday</text><text id="b" x="120" y="20">840</text>
+                <text id="c" x="10" y="40">Tuesday</text><text id="d" x="120" y="40">860</text>
+            </g></svg>"#,
+            Tag::Div,
+        )
+        .unwrap();
+        let root = dom.root();
+        normalize(&mut dom, root);
+        let markdown = semantic_markdown(&dom, root);
+        assert_eq!(markdown.matches("Monday").count(), 1, "{markdown}");
     }
 
     #[test]
