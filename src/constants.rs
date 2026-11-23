@@ -45,9 +45,6 @@ pub mod regexps {
         Regex::new(r"(?i)//(www\.)?((dailymotion|youtube|youtube-nocookie|player\.vimeo|v\.qq|bilibili|live.bilibili)\.com|(archive|upload\.wikimedia)\.org|player\.twitch\.tv)").unwrap()
     });
 
-    /// Tokenizes text on word boundaries.
-    pub static TOKENIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\W+").unwrap());
-
     /// RegexSet for class weight scoring - combines NEGATIVE (index 0) and POSITIVE (index 1).
     /// Allows single-pass matching instead of 4 separate regex calls.
     pub static CLASS_WEIGHT_SET: LazyLock<RegexSet> = LazyLock::new(|| {
@@ -183,11 +180,62 @@ pub fn normalize_whitespace(s: &str) -> String {
     result
 }
 
-/// Split a string into tokens on non-word characters (not
-/// `[a-zA-Z0-9_]` / Unicode alphanumeric). Non-empty runs are yielded.
-/// Replaces `regexps::TOKENIZE.split(s).filter(|s| !s.is_empty())`.
-pub fn split_word_tokens(s: &str) -> impl Iterator<Item = &str> {
-    regexps::TOKENIZE.split(s).filter(|token| !token.is_empty())
+/// Split a string into runs of word characters.
+///
+/// A word character is a Unicode `\w` character, as the `regex` crate
+/// defines it: an ASCII letter, digit, or underscore, or a Unicode letter,
+/// mark, decimal digit, connector punctuation, or join control. The scanner
+/// gives the same tokens as splitting on `\W+`, without a regex search.
+pub fn split_word_tokens(s: &str) -> WordTokens<'_> {
+    WordTokens { rest: s }
+}
+
+/// Iterator that [`split_word_tokens`] returns.
+pub struct WordTokens<'a> {
+    rest: &'a str,
+}
+
+/// Returns the byte length of the leading run of `text` whose characters
+/// are all word characters (`word` is true) or all non-word characters.
+#[inline]
+fn word_run_len(text: &str, word: bool) -> usize {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii() {
+            if (byte.is_ascii_alphanumeric() || byte == b'_') != word {
+                return index;
+            }
+            index += 1;
+        } else {
+            // `index` is on a character boundary because the loop advances
+            // by whole characters, so `chars().next()` is always `Some`.
+            let character = text[index..].chars().next().unwrap_or_default();
+            if regex_syntax::is_word_character(character) != word {
+                return index;
+            }
+            index += character.len_utf8();
+        }
+    }
+    bytes.len()
+}
+
+impl<'a> Iterator for WordTokens<'a> {
+    type Item = &'a str;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        let start = word_run_len(self.rest, false);
+        let from_token = &self.rest[start..];
+        if from_token.is_empty() {
+            self.rest = "";
+            return None;
+        }
+        let end = word_run_len(from_token, true);
+        self.rest = &from_token[end..];
+        Some(&from_token[..end])
+    }
 }
 
 /// Check if `s` is a Schema.org URL (http or https, with optional trailing `/`).
@@ -600,6 +648,47 @@ mod tests {
     fn test_split_word_tokens_unicode() {
         let v: Vec<&str> = split_word_tokens("cafe\u{0301} 東京").collect();
         assert_eq!(v, vec!["cafe\u{0301}", "東京"]);
+    }
+
+    #[test]
+    fn split_word_tokens_matches_regex_split() {
+        let regex = Regex::new(r"\W+").unwrap();
+        let inputs = [
+            "",
+            " ",
+            "a",
+            "hello, world!",
+            "__init__ x_y",
+            "«Guillemets» — em dash – en dash",
+            "naïve café\u{0301} déjà-vu",
+            "東京 タワー、大阪。",
+            "x² ½ Ⅻ ٣ ३",
+            "zero\u{200d}width\u{200c}joiner",
+            "a\u{203f}b\u{2040}c",
+            "emoji 😀 test👍🏽ok",
+            "\u{00a0}nbsp\u{2003}em\u{3000}ideo",
+            "ﬁ ligature ǅ titlecase",
+        ];
+        for input in inputs {
+            let expected: Vec<&str> = regex.split(input).filter(|s| !s.is_empty()).collect();
+            let actual: Vec<&str> = split_word_tokens(input).collect();
+            assert_eq!(actual, expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn split_word_tokens_matches_regex_for_every_character() {
+        // Each character is its own token or separator. The `!` separators
+        // keep adjacent word characters apart.
+        let text: String = (0..=u32::from(char::MAX))
+            .filter_map(char::from_u32)
+            .flat_map(|character| [character, '!'])
+            .collect();
+        let regex = Regex::new(r"\W+").unwrap();
+        let expected: Vec<&str> = regex.split(&text).filter(|s| !s.is_empty()).collect();
+        let actual: Vec<&str> = split_word_tokens(&text).collect();
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual == expected);
     }
 
     // ---- title separators ----

@@ -581,6 +581,7 @@ dependencies = [
  "html5ever 0.40.1",
  "memchr",
  "regex",
+ "regex-syntax",
  "serde_json",
  "smallvec",
  "tendril 0.5.1",
