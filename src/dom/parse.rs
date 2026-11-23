@@ -371,6 +371,13 @@ fn opts(drop_doctype: bool) -> ParseOpts {
         },
     }
 }
+/// Input bytes that the document parser reads between limit checks. It
+/// bounds the input that html5ever reads after a limit, and it is large
+/// enough that the chunk overhead does not show. The work for that input
+/// still grows with html5ever's open element stack, which only `max_depth`
+/// bounds.
+const PARSE_CHUNK_BYTES: usize = 16 * 1024;
+
 impl Dom {
     pub(crate) fn parse_document(html: &str) -> Result<Self, DomError> {
         Self::parse_document_with_budget(html, &ParseBudget::default()).map_err(|error| match error
@@ -387,11 +394,31 @@ impl Dom {
         html: &str,
         budget: &ParseBudget,
     ) -> Result<Self, ParseError> {
-        parse_document(
+        let mut parser = parse_document(
             DomSink::new(false, node_capacity_hint(html), budget.clone()),
             opts(false),
-        )
-        .one(html)
+        );
+        // html5ever keeps tokenizing after a limit poisons the sink, and its
+        // open element stack can keep growing. On deeply nested input, that
+        // made a rejected document quadratic in its remaining length. Feed
+        // the input in chunks and stop at the first chunk after poisoning.
+        // The tokenizer is incremental, so chunking does not change the tree,
+        // except that html5ever drops a U+FEFF at the start of every chunk. A
+        // later chunk therefore never starts with one.
+        let mut rest = html;
+        while !rest.is_empty() && !parser.tokenizer.sink.sink.is_poisoned() {
+            let mut end = rest.len().min(PARSE_CHUNK_BYTES);
+            while !rest.is_char_boundary(end) {
+                end -= 1;
+            }
+            if rest[end..].starts_with('\u{feff}') {
+                end += '\u{feff}'.len_utf8();
+            }
+            let (chunk, tail) = rest.split_at(end);
+            parser.process(StrTendril::from_slice(chunk));
+            rest = tail;
+        }
+        parser.finish()
     }
     pub(crate) fn parse_fragment(html: &str, context: Tag) -> Result<Self, DomError> {
         let sink = DomSink::new(true, node_capacity_hint(html), ParseBudget::default());
@@ -831,6 +858,66 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    fn tree_shape(dom: &Dom) -> Vec<String> {
+        std::iter::once(dom.root())
+            .chain(dom.descendants(dom.root()))
+            .map(|node| match (dom.qual_name(node), dom.text_node(node)) {
+                (Some(name), _) => format!("<{}>", name.local),
+                (None, Some(text)) => format!("{text:?}"),
+                (None, None) => String::from("."),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chunked_parsing_matches_one_pass_parsing() {
+        // Put a multibyte character, a CRLF pair, a character reference, and
+        // a tag across each chunk boundary.
+        let mut html = String::from("<!doctype html><body><p>");
+        for marker in [
+            "é",
+            "\r\n",
+            "&amp;",
+            "<b>x</b>",
+            "€",
+            "\u{feff}x",
+            "w\u{feff}",
+        ] {
+            let filler = PARSE_CHUNK_BYTES - html.len() % PARSE_CHUNK_BYTES - 1;
+            html.push_str(&"w".repeat(filler));
+            html.push_str(marker);
+        }
+        html.push_str("</p></body>");
+        let chunked = Dom::parse_document(&html).unwrap();
+        let one_pass = parse_document(DomSink::new(false, 16, ParseBudget::default()), opts(false))
+            .one(html.as_str())
+            .unwrap();
+        assert_eq!(tree_shape(&chunked), tree_shape(&one_pass));
+    }
+
+    #[test]
+    fn rejected_deep_documents_stop_parsing_early() {
+        // html5ever's scope checks walk its open element stack, so parsing
+        // all of this input after the depth limit takes minutes.
+        let html = "<dl><dt>t</dt><dd>".repeat(100_000);
+        let started = std::time::Instant::now();
+        let result = parse_with(
+            &html,
+            ParseBudget {
+                max_depth: 512,
+                ..ParseBudget::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ParseError::Limit(ParseLimit {
+                kind: ParseLimitKind::Depth,
+                ..
+            }))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]
