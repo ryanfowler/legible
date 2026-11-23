@@ -1239,6 +1239,14 @@ pub(crate) fn has_visible_inline_text(text: &str) -> bool {
     crate::document::stats::has_visible_inline_text(text)
 }
 
+/// The deepest container level that writes a line prefix. Real documents
+/// rarely nest blockquotes and lists more than a few levels.
+const MAX_RENDERED_PREFIXES: usize = 16;
+
+/// The widest container prefix that a line writes. Ordered-list markers can
+/// be up to 11 columns wide, so the level count alone does not bound it.
+const MAX_RENDERED_PREFIX_WIDTH: usize = 64;
+
 struct Output<'writer> {
     writer: &'writer mut dyn fmt::Write,
     value: String,
@@ -1379,6 +1387,44 @@ impl<'writer> Output<'writer> {
         !self.line_start
     }
 
+    /// Returns the open container prefixes that a new line writes.
+    ///
+    /// Each line repeats the prefix of every open container, so deep or wide
+    /// nesting makes the output grow with prefix width times line count. Only
+    /// the outermost `MAX_RENDERED_PREFIXES` containers, up to
+    /// `MAX_RENDERED_PREFIX_WIDTH` columns, write a prefix. Deeper containers
+    /// continue at that level, which keeps the output linear in the input.
+    fn rendered_prefixes(prefixes: &[Prefix]) -> impl Iterator<Item = (&Prefix, usize)> {
+        prefixes
+            .iter()
+            .take(MAX_RENDERED_PREFIXES)
+            .scan(0_usize, |total, prefix| {
+                let width = match prefix {
+                    Prefix::Quote => 2,
+                    Prefix::Indent(width) | Prefix::ListItem { width, .. } => *width,
+                };
+                *total += width;
+                (*total <= MAX_RENDERED_PREFIX_WIDTH).then_some((prefix, width))
+            })
+    }
+
+    /// Writes the container prefixes of a new line.
+    fn write_prefixes(&mut self) {
+        let mut written = 0;
+        for (prefix, width) in Self::rendered_prefixes(&self.prefixes) {
+            match prefix {
+                Prefix::Quote => self.value.push_str("> "),
+                Prefix::Indent(_) | Prefix::ListItem { .. } => {
+                    self.value.extend(std::iter::repeat_n(' ', width));
+                }
+            }
+            written += width;
+        }
+        if self.max_line_width.is_some() {
+            self.line_width += written;
+        }
+    }
+
     fn wrapping_enabled(&self, allow_wrap: bool) -> bool {
         allow_wrap && self.max_line_width.is_some()
     }
@@ -1388,28 +1434,7 @@ impl<'writer> Output<'writer> {
             return;
         }
         self.flush_pending_newlines();
-        for prefix in &self.prefixes {
-            match prefix {
-                Prefix::Quote => {
-                    self.value.push_str("> ");
-                    if self.max_line_width.is_some() {
-                        self.line_width += 2;
-                    }
-                }
-                Prefix::Indent(width) => {
-                    self.value.extend(std::iter::repeat_n(' ', *width));
-                    if self.max_line_width.is_some() {
-                        self.line_width += width;
-                    }
-                }
-                Prefix::ListItem { width, .. } => {
-                    self.value.extend(std::iter::repeat_n(' ', *width));
-                    if self.max_line_width.is_some() {
-                        self.line_width += width;
-                    }
-                }
-            }
-        }
+        self.write_prefixes();
         self.line_start = false;
         self.trailing_newlines = 0;
     }
@@ -1571,6 +1596,14 @@ impl<'writer> Output<'writer> {
     }
 
     fn wrap_before_width(&mut self, content_width: usize, maximum: usize) {
+        // A new line starts after the container prefixes. When they fill more
+        // than half the line, wrapping would repeat them for very little text.
+        let prefix_width: usize = Self::rendered_prefixes(&self.prefixes)
+            .map(|(_, width)| width)
+            .sum();
+        if prefix_width.saturating_mul(2) > maximum {
+            return;
+        }
         if self
             .line_width
             .saturating_add(1)
@@ -1977,28 +2010,7 @@ impl<'writer> Output<'writer> {
         if self.line_start {
             let prefix_start = self.value.len();
             let prefix_width = self.line_width;
-            for prefix in &self.prefixes {
-                match prefix {
-                    Prefix::Quote => {
-                        self.value.push_str("> ");
-                        if self.max_line_width.is_some() {
-                            self.line_width += 2;
-                        }
-                    }
-                    Prefix::Indent(width) => {
-                        self.value.extend(std::iter::repeat_n(' ', *width));
-                        if self.max_line_width.is_some() {
-                            self.line_width += width;
-                        }
-                    }
-                    Prefix::ListItem { width, .. } => {
-                        self.value.extend(std::iter::repeat_n(' ', *width));
-                        if self.max_line_width.is_some() {
-                            self.line_width += width;
-                        }
-                    }
-                }
-            }
+            self.write_prefixes();
             while self.value.ends_with(' ') {
                 self.value.pop();
                 if self.max_line_width.is_some() {
@@ -2040,8 +2052,13 @@ impl<'writer> Output<'writer> {
     }
 
     fn mark_list_item_content(&mut self) {
-        for prefix in &mut self.prefixes {
+        // Items are marked together, and new items open above marked ones, so
+        // the marked items are always the lowest ones. Stop at the first.
+        for prefix in self.prefixes.iter_mut().rev() {
             if let Prefix::ListItem { has_content, .. } = prefix {
+                if *has_content {
+                    break;
+                }
                 *has_content = true;
             }
         }
@@ -2450,6 +2467,43 @@ mod tests {
             render_markdown(&builder.finish().unwrap(), 0, wrapped(18)),
             "Alpha beta gamma\ndelta epsilon\nzeta.\n"
         );
+    }
+
+    #[test]
+    fn deep_containers_write_at_most_the_capped_prefixes() {
+        let paragraphs = "<p>Some quoted words that repeat.</p>".repeat(20);
+        let html = format!(
+            "<article>{}{paragraphs}{}</article>",
+            "<blockquote>".repeat(40),
+            "</blockquote>".repeat(40)
+        );
+        let markdown = crate::extract(&html, None).unwrap().markdown();
+        let lines: Vec<_> = markdown
+            .lines()
+            .filter(|line| line.contains("quoted"))
+            .collect();
+        assert_eq!(lines.len(), 20);
+        for line in lines {
+            assert_eq!(line.matches('>').count(), MAX_RENDERED_PREFIXES, "{line}");
+        }
+    }
+
+    #[test]
+    fn wide_list_markers_do_not_amplify_wrapped_output() {
+        let words = "w ".repeat(2_000);
+        let html = format!(
+            "<article>{}<p>{words}</p>{}</article>",
+            "<ol start=\"999999999\"><li>".repeat(16),
+            "</li></ol>".repeat(16)
+        );
+        let page = crate::extract(&html, None).unwrap();
+        let markdown = page.markdown_builder().max_line_width(20).render();
+        assert!(
+            markdown
+                .lines()
+                .all(|line| { line.len() - line.trim_start().len() <= MAX_RENDERED_PREFIX_WIDTH })
+        );
+        assert!(markdown.len() < html.len() * 2, "{} bytes", markdown.len());
     }
 
     #[test]
