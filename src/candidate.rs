@@ -6,7 +6,7 @@ use crate::prepared::{SourceAnalysis, SourceFlags};
 use crate::scoring::has_static_hidden_marker;
 use crate::tokens::{has_any_name_part, has_any_token, has_token};
 use smallvec::SmallVec;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[cfg(test)]
@@ -784,13 +784,8 @@ pub(crate) fn select_content_root<'a>(
         reason = RootSelectionReason::CompleteAncestor;
     }
 
-    let hints: Vec<_> = structured_texts
-        .into_iter()
-        .filter_map(StructuredHint::new)
-        .take(MAX_STRUCTURED_HINTS)
-        .collect();
-    if !hints.is_empty() {
-        let selected_agreement = structured_agreement(dom, selected, &hints);
+    if let Some(hints) = StructuredHints::new(structured_texts) {
+        let selected_agreement = hints.agreement(dom, selected);
         if let Some((node, agreement)) = ranked
             .iter()
             .filter(|candidate| {
@@ -798,12 +793,7 @@ pub(crate) fn select_content_root<'a>(
                     && structured_tie_score(candidate.score, first.score)
                     && !is_document_utility_root(dom, candidate.node)
             })
-            .map(|candidate| {
-                (
-                    candidate.node,
-                    structured_agreement(dom, candidate.node, &hints),
-                )
-            })
+            .map(|candidate| (candidate.node, hints.agreement(dom, candidate.node)))
             .max_by(|left, right| left.1.total_cmp(&right.1))
             && agreement >= 0.6
             && agreement > selected_agreement + 0.1
@@ -1923,30 +1913,134 @@ const MAX_STRUCTURED_HINTS: usize = 8;
 const MAX_STRUCTURED_HINT_CHARS: usize = 4_096;
 const MAX_CANDIDATE_MATCH_CHARS: usize = 16_384;
 
-struct StructuredHint {
-    tokens: Vec<String>,
-    token_set: HashSet<String>,
-    text_chars: usize,
+/// Token statistics for schema `articleBody` or `text` values.
+///
+/// All hint tokens share one dictionary, so an agreement check looks up each
+/// candidate token once, whatever the number of hints.
+struct StructuredHints {
+    /// Lowercase tokens of each hint, in text order.
+    tokens: Vec<Vec<String>>,
+    /// Dictionary ID of each distinct token across all hints.
+    ids: HashMap<String, u32>,
+    /// For each hint, the occurrence count and total characters of each
+    /// dictionary token in that hint. The index is the dictionary ID.
+    weights: Vec<Vec<TokenCount>>,
+    /// Token count and token characters of each hint.
+    totals: Vec<TokenCount>,
 }
 
-impl StructuredHint {
-    fn new(text: &str) -> Option<Self> {
-        let prefix = char_prefix(text, MAX_STRUCTURED_HINT_CHARS).to_lowercase();
-        let tokens: Vec<_> = split_word_tokens(&prefix).map(str::to_owned).collect();
-        if tokens.len() < 5 {
+/// Number of token occurrences and their total characters.
+#[derive(Clone, Copy, Default)]
+struct TokenCount {
+    count: u32,
+    chars: u32,
+}
+
+impl StructuredHints {
+    fn new<'a>(texts: impl IntoIterator<Item = &'a str>) -> Option<Self> {
+        let tokens: Vec<Vec<String>> = texts
+            .into_iter()
+            .filter_map(|text| {
+                let prefix = char_prefix(text, MAX_STRUCTURED_HINT_CHARS).to_lowercase();
+                let tokens: Vec<_> = split_word_tokens(&prefix).map(str::to_owned).collect();
+                (tokens.len() >= 5).then_some(tokens)
+            })
+            .take(MAX_STRUCTURED_HINTS)
+            .collect();
+        if tokens.is_empty() {
             return None;
         }
-        let text_chars = tokens
-            .iter()
-            .map(|token| token.chars().count())
-            .sum::<usize>()
-            + tokens.len().saturating_sub(1);
-        let token_set = tokens.iter().cloned().collect();
+        let mut ids = HashMap::new();
+        for token in tokens.iter().flatten() {
+            if !ids.contains_key(token.as_str()) {
+                ids.insert(token.clone(), ids.len() as u32);
+            }
+        }
+        let mut weights = Vec::with_capacity(tokens.len());
+        let mut totals = Vec::with_capacity(tokens.len());
+        for hint in &tokens {
+            let mut hint_weights = vec![TokenCount::default(); ids.len()];
+            let mut total = TokenCount::default();
+            for token in hint {
+                // Lowercasing can expand a character, but a hint has at most
+                // a few times MAX_STRUCTURED_HINT_CHARS characters, so the
+                // counts fit in `u32`.
+                let token_chars = token.chars().count() as u32;
+                let weight = &mut hint_weights[ids[token.as_str()] as usize];
+                weight.count += 1;
+                weight.chars += token_chars;
+                total.count += 1;
+                total.chars += token_chars;
+            }
+            weights.push(hint_weights);
+            totals.push(total);
+        }
         Some(Self {
             tokens,
-            token_set,
-            text_chars,
+            ids,
+            weights,
+            totals,
         })
+    }
+
+    /// Returns the best F1 agreement between the text of `node` and any hint.
+    ///
+    /// Precision is the share of candidate tokens that occur in the hint.
+    /// Coverage is the share of hint characters, including duplicates, whose
+    /// token occurs in the candidate.
+    fn agreement(&self, dom: &Dom, node: NodeId) -> f64 {
+        let mut candidate_text = bounded_normalized_text(dom, node, MAX_CANDIDATE_MATCH_CHARS);
+        if candidate_text.is_ascii() {
+            candidate_text.make_ascii_lowercase();
+        } else {
+            candidate_text = candidate_text.to_lowercase();
+        }
+        let mut candidate_count = 0_usize;
+        let mut known_ids = Vec::new();
+        for token in split_word_tokens(&candidate_text) {
+            candidate_count += 1;
+            if let Some(&id) = self.ids.get(token) {
+                known_ids.push(id);
+            }
+        }
+        if candidate_count == 0 {
+            return 0.0;
+        }
+        let mut seen = vec![false; self.ids.len()];
+        self.weights
+            .iter()
+            .zip(&self.totals)
+            .map(|(weights, total)| {
+                let mut precision_count = 0_usize;
+                let mut matched_count = 0_usize;
+                let mut matched_chars = 0_usize;
+                for &id in &known_ids {
+                    let weight = weights[id as usize];
+                    if weight.count == 0 {
+                        continue;
+                    }
+                    precision_count += 1;
+                    if !std::mem::replace(&mut seen[id as usize], true) {
+                        matched_count += weight.count as usize;
+                        matched_chars += weight.chars as usize;
+                    }
+                }
+                for &id in &known_ids {
+                    seen[id as usize] = false;
+                }
+                let (hint_count, hint_chars) = (total.count as usize, total.chars as usize);
+                let text_chars = hint_chars + hint_count.saturating_sub(1);
+                let unique_count = hint_count - matched_count;
+                let unique_chars = hint_chars - matched_chars + unique_count.saturating_sub(1);
+                let coverage = 1.0 - unique_chars as f64 / text_chars as f64;
+                let precision = precision_count as f64 / candidate_count as f64;
+                if coverage + precision == 0.0 {
+                    0.0
+                } else {
+                    2.0 * coverage * precision / (coverage + precision)
+                }
+            })
+            .fold(0.0, f64::max)
     }
 }
 
@@ -1954,51 +2048,6 @@ fn char_prefix(text: &str, limit: usize) -> &str {
     text.char_indices()
         .nth(limit)
         .map_or(text, |(end, _)| &text[..end])
-}
-
-fn structured_agreement(dom: &Dom, node: NodeId, hints: &[StructuredHint]) -> f64 {
-    let mut candidate_text = bounded_normalized_text(dom, node, MAX_CANDIDATE_MATCH_CHARS);
-    if candidate_text.is_ascii() {
-        candidate_text.make_ascii_lowercase();
-    } else {
-        candidate_text = candidate_text.to_lowercase();
-    }
-    let candidate_tokens: Vec<_> = split_word_tokens(&candidate_text).collect();
-    if candidate_tokens.is_empty() {
-        return 0.0;
-    }
-    hints
-        .iter()
-        .map(|hint| {
-            let mut matched_tokens = HashSet::with_capacity(hint.token_set.len());
-            let precision_count = candidate_tokens
-                .iter()
-                .filter(|token| {
-                    if hint.token_set.contains(**token) {
-                        matched_tokens.insert(**token);
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .count();
-            let (unique_count, unique_chars) = hint
-                .tokens
-                .iter()
-                .filter(|token| !matched_tokens.contains(token.as_str()))
-                .fold((0_usize, 0_usize), |(count, chars), token| {
-                    (count + 1, chars + token.chars().count())
-                });
-            let unique_chars = unique_chars + unique_count.saturating_sub(1);
-            let coverage = 1.0 - unique_chars as f64 / hint.text_chars as f64;
-            let precision = precision_count as f64 / candidate_tokens.len() as f64;
-            if coverage + precision == 0.0 {
-                0.0
-            } else {
-                2.0 * coverage * precision / (coverage + precision)
-            }
-        })
-        .fold(0.0, f64::max)
 }
 
 /// Finds a compact DOM root that agrees with schema `articleBody` or `text`.
@@ -2011,24 +2060,17 @@ pub(crate) fn locate_structured_content<'a>(
     source: &SourceAnalysis,
     texts: impl IntoIterator<Item = &'a str>,
 ) -> Option<NodeId> {
-    let hints: Vec<_> = texts
-        .into_iter()
-        .filter_map(StructuredHint::new)
-        .take(MAX_STRUCTURED_HINTS)
-        .collect();
-    if hints.is_empty() {
-        return None;
-    }
+    let hints = StructuredHints::new(texts)?;
 
     let scan_context = PhraseScanContext::new(dom, source);
     let mut possible = SmallVec::<[NodeId; 32]>::new();
-    for hint in &hints {
-        let phrase_len = hint.tokens.len().min(6);
+    for tokens in &hints.tokens {
+        let phrase_len = tokens.len().min(6);
         if phrase_len < 5 {
             continue;
         }
         for matched_root in
-            visible_phrase_matches(dom, source, &scan_context, &hint.tokens[..phrase_len])
+            visible_phrase_matches(dom, source, &scan_context, &tokens[..phrase_len])
         {
             if is_navigation_region(dom, matched_root) {
                 continue;
@@ -2045,7 +2087,7 @@ pub(crate) fn locate_structured_content<'a>(
         .into_iter()
         .filter(|&node| !is_navigation_region(dom, node))
         .filter_map(|node| {
-            let agreement = structured_agreement(dom, node, &hints);
+            let agreement = hints.agreement(dom, node);
             (agreement >= 0.55).then(|| {
                 (
                     node,
