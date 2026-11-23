@@ -1868,6 +1868,7 @@ pub(crate) fn remove_inline_chrome_controls_in_workspace(
     let snapshot = workspace.elements_with_depth();
     let mut remove = vec![false; dom.len()];
     let mut text = String::new();
+    let mut edges = ContentEdges::new(dom, root);
 
     for &(node, _) in snapshot {
         if node == root || dom.parent(node).is_none() {
@@ -1880,8 +1881,7 @@ pub(crate) fn remove_inline_chrome_controls_in_workspace(
         if is_protected_content(dom, node, evidence) {
             continue;
         }
-        let at_start = near_content_start(dom, node, root, store);
-        if !at_start {
+        if !edges.near_start(dom, node, store) {
             continue;
         }
 
@@ -2107,6 +2107,8 @@ pub(crate) fn remove_global_chrome_in_workspace(
     let mut marker_buffer = String::new();
     let mut parent_content = vec![None; dom.len()];
     let mut substantive_children = vec![None; dom.len()];
+    let mut edges = ContentEdges::new(dom, root);
+    let mut pricing_parents = PricingHeadingParents::new(dom);
     for &(node, depth) in workspace.elements_with_depth() {
         if node == root || dom.parent(node).is_none() {
             continue;
@@ -2178,8 +2180,8 @@ pub(crate) fn remove_global_chrome_in_workspace(
         let links = usize::from(aggregate.link_count);
         let link_density = get_link_density_cached(dom, node, stats.text_length, store);
         let non_link_chars = f64::from(stats.text_length) * (1.0 - link_density);
-        let at_start = near_content_start(dom, node, root, store);
-        let at_end = near_content_end(dom, node, root, store);
+        let at_start = edges.near_start(dom, node, store);
+        let at_end = edges.near_end(dom, node, store);
         if is_explicit_document_utility(name)
             && !is_inside_explicit_article_body(dom, node, root)
             && !is_inside_primary_content_container(dom, node)
@@ -2257,8 +2259,8 @@ pub(crate) fn remove_global_chrome_in_workspace(
             leading_frame_position,
         );
         if (semantic_navigation || named_chrome || repeated || leading_metadata || leading_frame)
-            && (is_global_navigation(dom, node, root, &metrics)
-                || is_global_footer(dom, node, root, &metrics)
+            && (is_global_navigation(dom, node, root, &metrics, &mut pricing_parents)
+                || is_global_footer(dom, node, root, &metrics, &mut pricing_parents)
                 || leading_metadata
                 || leading_frame)
         {
@@ -3388,6 +3390,7 @@ fn is_global_navigation(
     node: NodeId,
     root: NodeId,
     metrics: &ChromeMetrics<'_>,
+    pricing_parents: &mut PricingHeadingParents,
 ) -> bool {
     if !matches!(
         dom.tag(node),
@@ -3402,7 +3405,7 @@ fn is_global_navigation(
         || is_meaningful_article_region(dom, node, metrics)
         || is_content_relative_navigation(dom, node)
         || is_document_toc(dom, node, metrics.name)
-        || is_within_pricing_region(dom, node)
+        || is_within_pricing_region(dom, node, pricing_parents)
         || has_pricing_content(dom, node, metrics.text)
         || metrics.has_meaningful_media
         || has_meaningful_heading(dom, node)
@@ -3472,7 +3475,13 @@ fn is_global_navigation(
     structural && (compact || pagination) && low_prose
 }
 
-fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetrics<'_>) -> bool {
+fn is_global_footer(
+    dom: &Dom,
+    node: NodeId,
+    root: NodeId,
+    metrics: &ChromeMetrics<'_>,
+    pricing_parents: &mut PricingHeadingParents,
+) -> bool {
     if !metrics.at_end
         || !matches!(
             dom.tag(node),
@@ -3481,7 +3490,7 @@ fn is_global_footer(dom: &Dom, node: NodeId, root: NodeId, metrics: &ChromeMetri
         || matches!(dom.tag(node), Some(Tag::Article | Tag::Main))
         || is_inside_explicit_article_body(dom, node, root)
         || is_meaningful_article_region(dom, node, metrics)
-        || is_within_pricing_region(dom, node)
+        || is_within_pricing_region(dom, node, pricing_parents)
         || has_pricing_content(dom, node, metrics.text)
         || metrics.has_meaningful_media
     {
@@ -4048,28 +4057,50 @@ fn has_pricing_content(dom: &Dom, node: NodeId, text: &str) -> bool {
     price_words >= 2 || price_words >= 1 && price_period
 }
 
-fn is_within_pricing_region(dom: &Dom, node: NodeId) -> bool {
+/// Memoized answer to "does this element have a pricing heading as a direct
+/// child?". Each parent's children are scanned at most once, so wide parents
+/// stay linear. The answers are valid only while the DOM does not change.
+struct PricingHeadingParents(Vec<Option<bool>>);
+
+impl PricingHeadingParents {
+    fn new(dom: &Dom) -> Self {
+        Self(vec![None; dom.len()])
+    }
+
+    fn contains(&mut self, dom: &Dom, parent: NodeId) -> bool {
+        *self.0[parent.index()].get_or_insert_with(|| {
+            let mut heading = String::new();
+            dom.element_children(parent).any(|child| {
+                matches!(
+                    dom.tag(child),
+                    Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
+                ) && {
+                    heading.clear();
+                    dom.append_normalized_text_limited(child, &mut heading, 256);
+                    let heading = heading.trim();
+                    equals_any_ascii_case_insensitive(
+                        heading,
+                        &["pricing", "plans", "pricing plans"],
+                    ) || ends_ascii_case_insensitive(heading, " plans")
+                        || contains_ascii_case_insensitive(heading, "pricing")
+                }
+            })
+        })
+    }
+}
+
+fn is_within_pricing_region(
+    dom: &Dom,
+    node: NodeId,
+    pricing_parents: &mut PricingHeadingParents,
+) -> bool {
     std::iter::once(node)
         .chain(dom.ancestors(node))
         .take(8)
         .any(|ancestor| {
             let name = node_name(dom, ancestor);
             contains_any(&name, &["pricing", "price-table", "plan-grid", "plans"])
-                || dom.element_children(ancestor).any(|child| {
-                    matches!(
-                        dom.tag(child),
-                        Some(Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
-                    ) && {
-                        let mut heading = String::new();
-                        dom.append_normalized_text_limited(child, &mut heading, 256);
-                        let heading = heading.trim();
-                        equals_any_ascii_case_insensitive(
-                            heading,
-                            &["pricing", "plans", "pricing plans"],
-                        ) || ends_ascii_case_insensitive(heading, " plans")
-                            || contains_ascii_case_insensitive(heading, "pricing")
-                    }
-                })
+                || pricing_parents.contains(dom, ancestor)
         })
 }
 
@@ -5883,10 +5914,40 @@ fn remove_contextual_boilerplate_in_workspace(
                     Some(Tag::A | Tag::Button | Tag::Input | Tag::Select | Tag::Textarea)
                 )
             });
-        let at_start = near_content_start(dom, node, root, store);
-        let at_end = near_content_end(dom, node, root, store);
+        // Positional checks walk siblings, so run them only for a known label.
+        let reading_time_label = is_reading_time_label(text);
+        let advertisement_label = matches!(
+            text,
+            "advertisement"
+                | "advertisement continues below"
+                | "reg ad"
+                | "sponsored"
+                | "sponsored content"
+        );
+        let action_label = matches!(
+            text,
+            "share"
+                | "share this"
+                | "share this article"
+                | "share this story"
+                | "read more"
+                | "leave a comment"
+        ) && link_or_control;
+        let subscription_label = (text.starts_with("sign up for our newsletter")
+            || text.starts_with("subscribe to our newsletter")
+            || text.starts_with("subscribe for updates"))
+            && link_or_control;
+        let (at_start, at_end) =
+            if reading_time_label || advertisement_label || action_label || subscription_label {
+                (
+                    near_content_start(dom, node, root, store),
+                    near_content_end(dom, node, root, store),
+                )
+            } else {
+                (false, false)
+            };
 
-        let reading_time = is_reading_time_label(text)
+        let reading_time = reading_time_label
             && (at_start
                 || contains_any(
                     &name,
@@ -5898,28 +5959,10 @@ fn remove_contextual_boilerplate_in_workspace(
                         "byline",
                     ],
                 ));
-        let advertisement = matches!(
-            text,
-            "advertisement"
-                | "advertisement continues below"
-                | "reg ad"
-                | "sponsored"
-                | "sponsored content"
-        ) && (at_start || at_end || strong_ad_name(&name));
-        let action = matches!(
-            text,
-            "share"
-                | "share this"
-                | "share this article"
-                | "share this story"
-                | "read more"
-                | "leave a comment"
-        ) && link_or_control
+        let advertisement = advertisement_label && (at_start || at_end || strong_ad_name(&name));
+        let action = action_label
             && (at_end || contains_any(&name, &["share", "action", "button", "toolbar"]));
-        let subscription = (text.starts_with("sign up for our newsletter")
-            || text.starts_with("subscribe to our newsletter")
-            || text.starts_with("subscribe for updates"))
-            && link_or_control
+        let subscription = subscription_label
             && (at_start
                 || at_end
                 || contains_any(&name, &["newsletter", "subscribe", "signup", "sign-up"]));
@@ -6260,6 +6303,135 @@ fn is_revision_history_marker(dom: &Dom, node: NodeId, buffer: &mut String) -> b
     (named_metadata || explicit_metadata)
         && contains_any(text, &["recent changes", "recently updated"])
         && contains_any(text, &["last updated", "created", "today"])
+}
+
+/// Memoized answers to [`near_content_start`] and [`near_content_end`].
+///
+/// The leading (or trailing) text of a node is the text of the earlier (or
+/// later) siblings of the node and of each of its ancestors, up to and
+/// including `root`. Each node inside `root` keeps that sum, capped above the
+/// 100-character limit, so a wide parent costs one sibling step per node
+/// instead of one walk per node. A node outside `root` uses the original walk.
+///
+/// The answers are valid only while the DOM does not change. Make a new value
+/// after a mutation.
+struct ContentEdges {
+    root: NodeId,
+    leading: Vec<u8>,
+    trailing: Vec<u8>,
+}
+
+impl ContentEdges {
+    const LIMIT: u8 = 100;
+    const UNKNOWN: u8 = u8::MAX;
+
+    fn new(dom: &Dom, root: NodeId) -> Self {
+        Self {
+            root,
+            leading: vec![Self::UNKNOWN; dom.len()],
+            trailing: vec![Self::UNKNOWN; dom.len()],
+        }
+    }
+
+    /// Same result as `near_content_start(dom, node, root, store)` for any
+    /// node.
+    fn near_start(
+        &mut self,
+        dom: &Dom,
+        node: NodeId,
+        store: &mut crate::dom::NodeStateStore,
+    ) -> bool {
+        match self.edge_chars(dom, node, store, false) {
+            Some(chars) => chars <= Self::LIMIT,
+            None => near_content_start(dom, node, self.root, store),
+        }
+    }
+
+    /// Same result as `near_content_end(dom, node, root, store)` for any
+    /// node.
+    fn near_end(
+        &mut self,
+        dom: &Dom,
+        node: NodeId,
+        store: &mut crate::dom::NodeStateStore,
+    ) -> bool {
+        match self.edge_chars(dom, node, store, true) {
+            Some(chars) => chars <= Self::LIMIT,
+            None => near_content_end(dom, node, self.root, store),
+        }
+    }
+
+    /// Returns the capped edge text of `node`, or `None` when `node` is
+    /// outside `root`.
+    fn edge_chars(
+        &mut self,
+        dom: &Dom,
+        node: NodeId,
+        store: &mut crate::dom::NodeStateStore,
+        trailing: bool,
+    ) -> Option<u8> {
+        let sibling = |node| {
+            if trailing {
+                dom.next_sibling(node)
+            } else {
+                dom.prev_sibling(node)
+            }
+        };
+        let capped_length = |node, store: &mut crate::dom::NodeStateStore| {
+            let length = get_or_compute_stats(dom, node, store).text_length;
+            u8::try_from(length).map_or(Self::LIMIT + 1, |length| length.min(Self::LIMIT + 1))
+        };
+        let memo = if trailing {
+            &mut self.trailing
+        } else {
+            &mut self.leading
+        };
+        // The siblings of `root` count, but its ancestors do not. Resolve the
+        // root once, so a walk from inside `root` stops there.
+        if memo[self.root.index()] == Self::UNKNOWN {
+            let mut chars = 0_u8;
+            let mut next = sibling(self.root);
+            while let Some(current) = next
+                && chars <= Self::LIMIT
+            {
+                chars = chars
+                    .saturating_add(capped_length(current, store))
+                    .min(Self::LIMIT + 1);
+                next = sibling(current);
+            }
+            memo[self.root.index()] = chars;
+        }
+        // Each step either moves to a sibling, which adds that sibling's
+        // text, or to the parent, which adds nothing. A walk from inside
+        // `root` reaches it only by a parent step. A walk that reaches it by
+        // a sibling step started outside `root`, where the original walk
+        // continues above `root`. Such a walk stores nothing.
+        let mut chain = SmallVec::<[(NodeId, u8); 16]>::new();
+        let mut current = node;
+        let mut chars = loop {
+            let known = memo[current.index()];
+            if known != Self::UNKNOWN {
+                break known;
+            }
+            if let Some(next) = sibling(current) {
+                if next == self.root {
+                    return None;
+                }
+                chain.push((current, capped_length(next, store)));
+                current = next;
+            } else if let Some(parent) = dom.parent(current) {
+                chain.push((current, 0));
+                current = parent;
+            } else {
+                break 0;
+            }
+        };
+        for &(node, added) in chain.iter().rev() {
+            chars = chars.saturating_add(added).min(Self::LIMIT + 1);
+            memo[node.index()] = chars;
+        }
+        Some(chars)
+    }
 }
 
 fn near_content_end(
@@ -7636,5 +7808,76 @@ mod tests {
         clean_styles(&mut dom, root, &mut Vec::new());
         assert_eq!(dom.attr_by_local_name(svg, "width"), Some("10"));
         assert_eq!(dom.attr_by_local_name(path, "fill"), Some("red"));
+    }
+
+    #[test]
+    fn content_edges_match_sibling_walks() {
+        let short = "<span>ab</span>";
+        let empty = "<div></div>".repeat(40);
+        let long = "word ".repeat(30);
+        let html = format!(
+            "<p>{long}</p><div><p>Lead text before the root element.</p>\
+             <section id=\"root\">{empty}<h2>Title</h2>{short}<div>{empty}<p>{long}</p>\
+             <ul><li>{short}</li><li><a href=\"#\">x</a>{empty}</li></ul></div>\
+             {empty}<aside>{short}{short}</aside><p>{long}</p>{empty}<footer>{short}</footer></section>\
+             <p>Tail text after the root element.</p><span>x</span></div><p>{long}</p>"
+        );
+        assert_content_edges_match(&html, true);
+        // Nodes beside a short root: the original walk continues above it.
+        assert_content_edges_match(
+            &format!(
+                "<p>{long}</p><div><section id=\"root\"><p>Body text</p></section>\
+                 <span>x</span></div>"
+            ),
+            false,
+        );
+        assert_content_edges_match(
+            &format!(
+                "<div><span>x</span><section id=\"root\"><p>Body text</p></section></div>\
+                 <p>{long}</p>"
+            ),
+            false,
+        );
+    }
+
+    fn assert_content_edges_match(html: &str, mixed: bool) {
+        let dom = Dom::parse_fragment(html, Tag::Div).unwrap();
+        let root = dom
+            .descendants(dom.root())
+            .find(|&node| dom.attr(node, AttrName::Id) == Some("root"))
+            .unwrap();
+        let nodes: Vec<_> = dom
+            .descendants(dom.root())
+            .filter(|&node| dom.is_element(node))
+            .collect();
+        if mixed {
+            let mut store = NodeStateStore::new();
+            let starts = nodes
+                .iter()
+                .filter(|&&node| near_content_start(&dom, node, root, &mut store))
+                .count();
+            assert!(starts > 0 && starts < nodes.len());
+        }
+        for reverse in [false, true] {
+            let mut store = NodeStateStore::new();
+            let mut edges = ContentEdges::new(&dom, root);
+            let ordered: Vec<_> = if reverse {
+                nodes.iter().rev().copied().collect()
+            } else {
+                nodes.clone()
+            };
+            for node in ordered {
+                assert_eq!(
+                    edges.near_start(&dom, node, &mut store),
+                    near_content_start(&dom, node, root, &mut store),
+                    "start {node:?}"
+                );
+                assert_eq!(
+                    edges.near_end(&dom, node, &mut store),
+                    near_content_end(&dom, node, root, &mut store),
+                    "end {node:?}"
+                );
+            }
+        }
     }
 }

@@ -1631,16 +1631,16 @@ fn has_nearby_explanatory_text_with_context(
     {
         return false;
     }
+    // `media_child` is always the child of `ancestor` that contains the
+    // image. Collect at most five children, so a wide parent stays cheap.
     let mut media_child = image;
     for ancestor in dom.ancestors(image).take(4) {
-        let children: SmallVec<[NodeId; 6]> = dom.element_children(ancestor).collect();
+        let children: SmallVec<[NodeId; 6]> = dom.element_children(ancestor).take(5).collect();
         if children.len() > 4 {
             media_child = ancestor;
             continue;
         }
-        let Some(position) = children.iter().position(|&child| {
-            child == media_child || dom.descendants(child).any(|descendant| descendant == image)
-        }) else {
+        let Some(position) = children.iter().position(|&child| child == media_child) else {
             media_child = ancestor;
             continue;
         };
