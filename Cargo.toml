@@ -49,6 +49,7 @@ smallvec = "1.15"
 tendril = "0.5"
 thiserror = "2.0"
 tracing = { version = "0.1", optional = true }
+unicode-normalization = "0.1"
 url = "2.5"
 
 [dev-dependencies]
