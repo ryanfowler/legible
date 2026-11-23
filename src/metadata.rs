@@ -11,11 +11,13 @@ use crate::scoring::{
     get_inner_text, get_inner_text_owned, get_normalized_inner_text, has_static_hidden_marker,
 };
 use crate::tokens::{contains_ascii_case_insensitive, has_any_token, has_token};
+use caseless::Caseless;
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 /// Metadata discovered in the source page.
@@ -734,12 +736,13 @@ fn complete_scalar(field: &mut MetadataFieldDiagnostics<String>, value: Option<&
 }
 
 fn complete_list(field: &mut MetadataListFieldDiagnostics<String>, values: &[String]) {
+    let mut seen: HashSet<String> = field
+        .selected
+        .iter()
+        .map(|selected| metadata_match_key(&selected.value).into_owned())
+        .collect();
     for value in values {
-        if !field
-            .selected
-            .iter()
-            .any(|selected| metadata_values_equal(&selected.value, value))
-        {
+        if seen.insert(metadata_match_key(value).into_owned()) {
             field.selected.push(inferred_value(value));
         }
     }
@@ -1776,6 +1779,19 @@ fn is_credential_list(part: &str, all_caps: bool) -> bool {
 /// visible byline, names one of its parts.
 fn split_declared_author_lists(candidates: &mut MetadataCandidates) {
     let authors = std::mem::take(&mut candidates.authors);
+    // The orders of the first two authors with each match key. A part is
+    // corroborated by an author with another order.
+    let mut orders_by_key: HashMap<Cow<'_, str>, (usize, Option<usize>)> = HashMap::new();
+    for author in &authors {
+        orders_by_key
+            .entry(metadata_match_key(&author.value))
+            .and_modify(|orders| {
+                if orders.1.is_none() && orders.0 != author.order {
+                    orders.1 = Some(author.order);
+                }
+            })
+            .or_insert((author.order, None));
+    }
     let declared_parts: Vec<SmallVec<[&str; 4]>> = authors
         .iter()
         .map(|candidate| {
@@ -1789,11 +1805,13 @@ fn split_declared_author_lists(candidates: &mut MetadataCandidates) {
                 PersonList::Single => SmallVec::new(),
                 PersonList::People(parts) => parts,
                 PersonList::AmbiguousPair(parts) => {
-                    let corroborated = authors.iter().any(|other| {
-                        other.order != candidate.order
-                            && parts
-                                .iter()
-                                .any(|part| metadata_values_equal(part, &other.value))
+                    let corroborated = parts.iter().any(|part| {
+                        orders_by_key.get(&metadata_match_key(part)).is_some_and(
+                            |&(first, second)| {
+                                first != candidate.order
+                                    || second.is_some_and(|second| second != candidate.order)
+                            },
+                        )
                     });
                     if corroborated {
                         parts.into_iter().collect()
@@ -1804,19 +1822,25 @@ fn split_declared_author_lists(candidates: &mut MetadataCandidates) {
             }
         })
         .collect();
+    // The declared parts of the first author with each match key that has
+    // parts.
+    let mut parts_by_key: HashMap<Cow<'_, str>, usize> = HashMap::new();
+    for (index, (author, parts)) in authors.iter().zip(&declared_parts).enumerate() {
+        if !parts.is_empty() {
+            parts_by_key
+                .entry(metadata_match_key(&author.value))
+                .or_insert(index);
+        }
+    }
     let mut split = Vec::with_capacity(authors.len());
     for (candidate, parts) in authors.iter().zip(&declared_parts) {
         // Another source can repeat the joined list, such as a byline link
         // with the same text. That value is the same evidence, so it splits
         // into the same people instead of remaining as a combined author.
         let parts = if parts.is_empty() {
-            authors
-                .iter()
-                .zip(&declared_parts)
-                .find(|(other, other_parts)| {
-                    !other_parts.is_empty() && metadata_values_equal(&other.value, &candidate.value)
-                })
-                .map_or(parts, |(_, other_parts)| other_parts)
+            parts_by_key
+                .get(&metadata_match_key(&candidate.value))
+                .map_or(parts, |&index| &declared_parts[index])
         } else {
             parts
         };
@@ -3855,7 +3879,7 @@ fn resolve_candidates(
     candidates
         .tags
         .retain(|tag| !names_publisher(&tag.value, site_name.as_deref(), source_host));
-    let selected_title = resolve_best(&candidates.title);
+    let selected_title = FieldResolution::new(&candidates.title).best();
     let mut title = selected_title.map(|candidate| candidate.value.clone());
     if let (Some(title_value), Some(site)) = (&title, &site_name) {
         if title_value.eq_ignore_ascii_case(site) {
@@ -3877,7 +3901,7 @@ fn resolve_candidates(
     let metadata = Metadata {
         title,
         description: resolve_one(&candidates.description),
-        authors: resolve_authors(&candidates.authors),
+        authors: FieldResolution::new(&candidates.authors).authors(),
         site_name,
         canonical_url: resolve_one(&candidates.canonical_url),
         image: resolve_one(&candidates.image),
@@ -3971,9 +3995,11 @@ fn scalar_diagnostics(
     candidates: &[MetadataCandidate],
     selected: Option<&str>,
 ) -> MetadataFieldDiagnostics<String> {
+    let resolution = FieldResolution::new(candidates);
     let selected_candidate = selected.and_then(|value| {
-        resolve_best_matching(candidates, value, &[])
-            .or_else(|| resolve_best(candidates))
+        resolution
+            .best_matching(value, &HashSet::new())
+            .or_else(|| resolution.best())
             .map(|candidate| (candidate, value))
     });
     MetadataFieldDiagnostics {
@@ -3993,13 +4019,15 @@ fn author_list_diagnostics(
     candidates: &[MetadataCandidate],
     selected: &[String],
 ) -> MetadataListFieldDiagnostics<String> {
-    let mut selected_orders = Vec::new();
+    let resolution = FieldResolution::new(candidates);
+    let mut selected_orders = HashSet::new();
     let selected = selected
         .iter()
         .filter_map(|value| {
-            let candidate = resolve_best_exact_matching(candidates, value, &selected_orders)
-                .or_else(|| resolve_best_matching(candidates, value, &selected_orders))?;
-            selected_orders.push(candidate.order);
+            let candidate = resolution
+                .best_exact_matching(value, &selected_orders)
+                .or_else(|| resolution.best_matching(value, &selected_orders))?;
+            selected_orders.insert(candidate.order);
             Some(public_value(candidate, value.clone()))
         })
         .collect();
@@ -4018,12 +4046,13 @@ fn list_diagnostics(
     candidates: &[MetadataCandidate],
     selected: &[String],
 ) -> MetadataListFieldDiagnostics<String> {
-    let mut selected_orders = Vec::new();
+    let resolution = FieldResolution::new(candidates);
+    let mut selected_orders = HashSet::new();
     let selected = selected
         .iter()
         .filter_map(|value| {
-            let candidate = resolve_best_matching(candidates, value, &selected_orders)?;
-            selected_orders.push(candidate.order);
+            let candidate = resolution.best_matching(value, &selected_orders)?;
+            selected_orders.insert(candidate.order);
             Some(public_value(candidate, value.clone()))
         })
         .collect();
@@ -4321,83 +4350,229 @@ fn is_placeholder(value: &str) -> bool {
 }
 
 fn resolve_one(candidates: &[MetadataCandidate]) -> Option<String> {
-    resolve_best(candidates).map(|candidate| candidate.value.clone())
+    FieldResolution::new(candidates)
+        .best()
+        .map(|candidate| candidate.value.clone())
 }
 
-fn resolve_best(candidates: &[MetadataCandidate]) -> Option<&MetadataCandidate> {
-    let mut best: Option<(&MetadataCandidate, u16)> = None;
-    for candidate in candidates {
-        let score = candidate_resolution_score(candidate, candidates);
-        if best.is_none_or(|(current, current_score)| {
-            score > current_score || (score == current_score && candidate.order < current.order)
-        }) {
-            best = Some((candidate, score));
+/// Returns the canonical caseless form of a metadata value. Two values are
+/// equal for [`metadata_values_equal`] exactly when their keys are equal.
+fn metadata_match_key(value: &str) -> Cow<'_, str> {
+    if value.is_ascii() {
+        if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            Cow::Owned(value.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(value)
         }
+    } else {
+        Cow::Owned(value.chars().nfd().default_case_fold().nfd().collect())
     }
-    best.map(|(candidate, _)| candidate)
 }
 
-fn resolve_best_exact_matching<'a>(
+/// Resolution facts for the candidates of one metadata field.
+///
+/// Each candidate's score counts agreeing candidates, so a direct
+/// computation compares every pair. This value groups the candidates by
+/// [`metadata_match_key`] once, so resolution stays linear in the number of
+/// candidates.
+struct FieldResolution<'a> {
     candidates: &'a [MetadataCandidate],
-    value: &str,
-    excluded_orders: &[usize],
-) -> Option<&'a MetadataCandidate> {
-    candidates
-        .iter()
-        .filter(|candidate| candidate.value == value && !excluded_orders.contains(&candidate.order))
-        .max_by(|first, second| {
-            candidate_resolution_score(first, candidates)
-                .cmp(&candidate_resolution_score(second, candidates))
-                .then_with(|| second.order.cmp(&first.order))
-        })
+    /// Group index of each candidate.
+    groups: Vec<usize>,
+    /// Candidate indexes of each group, in slice order.
+    members: Vec<Vec<usize>>,
+    /// Group index by match key.
+    keys: HashMap<Cow<'a, str>, usize>,
+    /// Resolution score of each candidate.
+    scores: Vec<u16>,
 }
 
-fn resolve_best_matching<'a>(
-    candidates: &'a [MetadataCandidate],
-    value: &str,
-    excluded_orders: &[usize],
-) -> Option<&'a MetadataCandidate> {
-    let mut best: Option<(&MetadataCandidate, u16)> = None;
-    for candidate in candidates.iter().filter(|candidate| {
-        metadata_values_equal(&candidate.value, value)
-            && !excluded_orders.contains(&candidate.order)
-    }) {
-        let score = candidate_resolution_score(candidate, candidates);
-        if best.is_none_or(|(current, current_score)| {
-            score > current_score || (score == current_score && candidate.order < current.order)
+impl<'a> FieldResolution<'a> {
+    fn new(candidates: &'a [MetadataCandidate]) -> Self {
+        let mut keys = HashMap::new();
+        let mut members: Vec<Vec<usize>> = Vec::new();
+        let groups = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let next = members.len();
+                let group = *keys
+                    .entry(metadata_match_key(&candidate.value))
+                    .or_insert(next);
+                if group == next {
+                    members.push(Vec::new());
+                }
+                members[group].push(index);
+                group
+            })
+            .collect::<Vec<_>>();
+        let mut counts = vec![AgreementCounts::default(); members.len()];
+        for (candidate, &group) in candidates.iter().zip(&groups) {
+            counts[group].add(candidate);
+        }
+        let scores = candidates
+            .iter()
+            .zip(&groups)
+            .map(|(candidate, &group)| counts[group].score(candidate))
+            .collect::<Vec<_>>();
+        Self {
+            candidates,
+            groups,
+            members,
+            keys,
+            scores,
+        }
+    }
+
+    /// Returns the highest-scoring candidate. A tie goes to the earliest.
+    fn best(&self) -> Option<&'a MetadataCandidate> {
+        self.best_of(0..self.candidates.len())
+    }
+
+    /// Returns the best candidate equal to `value`, except excluded orders.
+    fn best_matching(
+        &self,
+        value: &str,
+        excluded_orders: &HashSet<usize>,
+    ) -> Option<&'a MetadataCandidate> {
+        let group = self.keys.get(&metadata_match_key(value))?;
+        self.best_of(
+            self.members[*group]
+                .iter()
+                .copied()
+                .filter(|&index| !excluded_orders.contains(&self.candidates[index].order)),
+        )
+    }
+
+    /// Returns the best candidate with exactly `value`, except excluded
+    /// orders.
+    fn best_exact_matching(
+        &self,
+        value: &str,
+        excluded_orders: &HashSet<usize>,
+    ) -> Option<&'a MetadataCandidate> {
+        let group = self.keys.get(&metadata_match_key(value))?;
+        self.best_of(self.members[*group].iter().copied().filter(|&index| {
+            let candidate = &self.candidates[index];
+            candidate.value == value && !excluded_orders.contains(&candidate.order)
+        }))
+    }
+
+    fn best_of(&self, indexes: impl Iterator<Item = usize>) -> Option<&'a MetadataCandidate> {
+        let mut best: Option<(&MetadataCandidate, u16)> = None;
+        for index in indexes {
+            let candidate = &self.candidates[index];
+            let score = self.scores[index];
+            if best.is_none_or(|(current, current_score)| {
+                score > current_score || (score == current_score && candidate.order < current.order)
+            }) {
+                best = Some((candidate, score));
+            }
+        }
+        best.map(|(candidate, _)| candidate)
+    }
+
+    /// Returns at most ten distinct authors from the candidates near the
+    /// highest confidence, in candidate order. Each author uses the best
+    /// spelling and score among its equal candidates.
+    fn authors(&self) -> Vec<String> {
+        let Some(maximum) = self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.confidence)
+            .max()
+        else {
+            return Vec::new();
+        };
+        let selected =
+            |index: usize| self.candidates[index].confidence.saturating_add(8) >= maximum;
+        let mut seen = vec![false; self.members.len()];
+        let mut authors = Vec::new();
+        for (index, &group) in self.groups.iter().enumerate() {
+            if !selected(index) || std::mem::replace(&mut seen[group], true) {
+                continue;
+            }
+            let representative = self.members[group]
+                .iter()
+                .copied()
+                .filter(|&other| selected(other))
+                .max_by(|&first, &second| {
+                    let (first_candidate, second_candidate) =
+                        (&self.candidates[first], &self.candidates[second]);
+                    author_spelling_score(&first_candidate.value)
+                        .cmp(&author_spelling_score(&second_candidate.value))
+                        .then_with(|| self.scores[first].cmp(&self.scores[second]))
+                        .then_with(|| second_candidate.order.cmp(&first_candidate.order))
+                })
+                .unwrap_or(index);
+            authors.push(self.candidates[representative].value.clone());
+            if authors.len() == 10 {
+                break;
+            }
+        }
+        authors
+    }
+}
+
+/// Agreement evidence among the candidates with one match key.
+#[derive(Clone, Default)]
+struct AgreementCounts {
+    /// Candidates that are not derived from a heading.
+    independent: u32,
+    /// Independent candidates by source and evidence.
+    by_origin: SmallVec<[(MetadataSource, CandidateEvidence, u32); 4]>,
+    /// Independent candidates by evidence.
+    by_evidence: [u32; 2],
+}
+
+impl AgreementCounts {
+    fn add(&mut self, candidate: &MetadataCandidate) {
+        let Some(evidence) = Self::evidence_index(candidate.evidence) else {
+            return;
+        };
+        self.independent += 1;
+        self.by_evidence[evidence] += 1;
+        match self.by_origin.iter_mut().find(|(source, evidence, _)| {
+            *source == candidate.source && *evidence == candidate.evidence
         }) {
-            best = Some((candidate, score));
+            Some((_, _, count)) => *count += 1,
+            None => self
+                .by_origin
+                .push((candidate.source, candidate.evidence, 1)),
         }
     }
-    best.map(|(candidate, _)| candidate)
-}
 
-fn candidate_resolution_score(
-    candidate: &MetadataCandidate,
-    candidates: &[MetadataCandidate],
-) -> u16 {
-    // A value that the reader sees and a value that the page declares are
-    // independent evidence. Their agreement outweighs one conflicting
-    // declaration with a slightly higher confidence.
-    const VISIBLE_CORROBORATION_BONUS: u16 = 7;
-    if candidate.evidence == CandidateEvidence::DerivedFromHeading {
-        return u16::from(candidate.confidence);
-    }
-    let mut agreements = 0_u16;
-    let mut visible_corroboration = false;
-    for other in candidates {
-        if other.evidence == CandidateEvidence::DerivedFromHeading
-            || (other.source == candidate.source && other.evidence == candidate.evidence)
-            || !metadata_values_equal(&other.value, &candidate.value)
-        {
-            continue;
+    fn evidence_index(evidence: CandidateEvidence) -> Option<usize> {
+        match evidence {
+            CandidateEvidence::Declared => Some(0),
+            CandidateEvidence::Visible => Some(1),
+            CandidateEvidence::DerivedFromHeading => None,
         }
-        agreements += 1;
-        visible_corroboration |= other.evidence != candidate.evidence;
     }
-    u16::from(candidate.confidence)
-        + agreements.min(3) * 5
-        + u16::from(visible_corroboration) * VISIBLE_CORROBORATION_BONUS
+
+    /// Scores a candidate of this group. Each independent candidate from
+    /// another source or with other evidence agrees with it.
+    fn score(&self, candidate: &MetadataCandidate) -> u16 {
+        // A value that the reader sees and a value that the page declares are
+        // independent evidence. Their agreement outweighs one conflicting
+        // declaration with a slightly higher confidence.
+        const VISIBLE_CORROBORATION_BONUS: u16 = 7;
+        let Some(evidence) = Self::evidence_index(candidate.evidence) else {
+            return u16::from(candidate.confidence);
+        };
+        let same_origin = self
+            .by_origin
+            .iter()
+            .find(|(source, evidence, _)| {
+                *source == candidate.source && *evidence == candidate.evidence
+            })
+            .map_or(0, |(_, _, count)| *count);
+        let agreements = self.independent - same_origin;
+        let visible_corroboration = self.independent > self.by_evidence[evidence];
+        u16::from(candidate.confidence)
+            + agreements.min(3) as u16 * 5
+            + u16::from(visible_corroboration) * VISIBLE_CORROBORATION_BONUS
+    }
 }
 
 fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Option<String> {
@@ -4409,61 +4584,15 @@ fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Op
     resolve_one(&filtered)
 }
 
-fn resolve_authors(candidates: &[MetadataCandidate]) -> Vec<String> {
-    let Some(maximum) = candidates
-        .iter()
-        .map(|candidate| candidate.confidence)
-        .max()
-    else {
-        return Vec::new();
-    };
-    let selected: Vec<_> = candidates
-        .iter()
-        .filter(|candidate| candidate.confidence.saturating_add(8) >= maximum)
-        .collect();
-    let mut authors = Vec::new();
-    for candidate in &selected {
-        if authors
-            .iter()
-            .any(|value: &String| metadata_values_equal(value, &candidate.value))
-        {
-            continue;
-        }
-        let representative = selected
-            .iter()
-            .copied()
-            .filter(|other| metadata_values_equal(&other.value, &candidate.value))
-            .max_by(|first, second| {
-                author_spelling_score(&first.value)
-                    .cmp(&author_spelling_score(&second.value))
-                    .then_with(|| {
-                        candidate_resolution_score(first, candidates)
-                            .cmp(&candidate_resolution_score(second, candidates))
-                    })
-                    .then_with(|| second.order.cmp(&first.order))
-            })
-            .unwrap_or(candidate);
-        authors.push(representative.value.clone());
-        if authors.len() == 10 {
-            break;
-        }
-    }
-    authors
-}
-
 fn resolve_many(candidates: &[MetadataCandidate]) -> Vec<String> {
     let mut candidates = candidates.to_vec();
     candidates.sort_by_key(|candidate| candidate.order);
-    let mut values = Vec::new();
-    for candidate in candidates {
-        if !values
-            .iter()
-            .any(|value: &String| metadata_values_equal(value, &candidate.value))
-        {
-            values.push(candidate.value);
-        }
-    }
-    values
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| seen.insert(metadata_match_key(&candidate.value).into_owned()))
+        .map(|candidate| candidate.value)
+        .collect()
 }
 
 fn is_ambiguous_person_placeholder(value: &str) -> bool {
@@ -4474,10 +4603,12 @@ fn author_spelling_score(value: &str) -> u8 {
     u8::from(value.chars().any(char::is_lowercase))
 }
 
+/// Compares metadata values by canonical caseless equality. This is
+/// `metadata_match_key` equality, with a fast path for ASCII case.
 fn metadata_values_equal(first: &str, second: &str) -> bool {
     first.eq_ignore_ascii_case(second)
         || (!first.is_ascii() || !second.is_ascii())
-            && caseless::canonical_caseless_match_str(first, second)
+            && metadata_match_key(first) == metadata_match_key(second)
 }
 
 fn strip_site_affix(title: &str, site: &str) -> Option<String> {
@@ -4747,6 +4878,193 @@ mod tests {
         assert_eq!(result.title.as_deref(), Some("Graph title"));
         assert_eq!(result.site_name.as_deref(), Some("Example"));
         assert_eq!(result.authors, ["Ada", "Grace"]);
+    }
+
+    #[test]
+    fn match_keys_agree_with_metadata_equality() {
+        let values = [
+            "Émilie",
+            "E\u{301}MILIE",
+            "émilie",
+            "Straße",
+            "STRASSE",
+            "strasse",
+            "ΟΣ",
+            "ος",
+            "Ada",
+            "ADA",
+            "ada ",
+            "Grace",
+            "ﬁle",
+            "FILE",
+            "Å",
+            "A\u{30a}",
+            "\u{212b}",
+            "\u{212a}",
+            "K",
+            "k",
+            "ſ",
+            "s",
+            "S",
+            "İ",
+            "i\u{307}",
+            "i",
+            "I",
+            "",
+        ];
+        for first in values {
+            for second in values {
+                assert_eq!(
+                    metadata_match_key(first) == metadata_match_key(second),
+                    first.eq_ignore_ascii_case(second)
+                        || caseless::canonical_caseless_match_str(first, second),
+                    "{first:?} {second:?}"
+                );
+            }
+        }
+    }
+
+    /// The pairwise resolution that `FieldResolution` replaced.
+    fn reference_score(candidate: &MetadataCandidate, candidates: &[MetadataCandidate]) -> u16 {
+        const VISIBLE_CORROBORATION_BONUS: u16 = 7;
+        if candidate.evidence == CandidateEvidence::DerivedFromHeading {
+            return u16::from(candidate.confidence);
+        }
+        let mut agreements = 0_u16;
+        let mut visible_corroboration = false;
+        for other in candidates {
+            if other.evidence == CandidateEvidence::DerivedFromHeading
+                || (other.source == candidate.source && other.evidence == candidate.evidence)
+                || !metadata_values_equal(&other.value, &candidate.value)
+            {
+                continue;
+            }
+            agreements += 1;
+            visible_corroboration |= other.evidence != candidate.evidence;
+        }
+        u16::from(candidate.confidence)
+            + agreements.min(3) * 5
+            + u16::from(visible_corroboration) * VISIBLE_CORROBORATION_BONUS
+    }
+
+    fn reference_best(candidates: &[MetadataCandidate]) -> Option<usize> {
+        let mut best: Option<(&MetadataCandidate, u16)> = None;
+        for candidate in candidates {
+            let score = reference_score(candidate, candidates);
+            if best.is_none_or(|(current, current_score)| {
+                score > current_score || (score == current_score && candidate.order < current.order)
+            }) {
+                best = Some((candidate, score));
+            }
+        }
+        best.map(|(candidate, _)| candidate.order)
+    }
+
+    fn reference_authors(candidates: &[MetadataCandidate]) -> Vec<String> {
+        let Some(maximum) = candidates
+            .iter()
+            .map(|candidate| candidate.confidence)
+            .max()
+        else {
+            return Vec::new();
+        };
+        let selected: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.confidence.saturating_add(8) >= maximum)
+            .collect();
+        let mut authors = Vec::new();
+        for candidate in &selected {
+            if authors
+                .iter()
+                .any(|value: &String| metadata_values_equal(value, &candidate.value))
+            {
+                continue;
+            }
+            let representative = selected
+                .iter()
+                .copied()
+                .filter(|other| metadata_values_equal(&other.value, &candidate.value))
+                .max_by(|first, second| {
+                    author_spelling_score(&first.value)
+                        .cmp(&author_spelling_score(&second.value))
+                        .then_with(|| {
+                            reference_score(first, candidates)
+                                .cmp(&reference_score(second, candidates))
+                        })
+                        .then_with(|| second.order.cmp(&first.order))
+                })
+                .unwrap_or(candidate);
+            authors.push(representative.value.clone());
+            if authors.len() == 10 {
+                break;
+            }
+        }
+        authors
+    }
+
+    #[test]
+    fn field_resolution_matches_pairwise_resolution() {
+        const VALUES: [&str; 8] = [
+            "Ada",
+            "ADA",
+            "ada",
+            "Émilie",
+            "E\u{301}milie",
+            "Grace",
+            "grace",
+            "Bob",
+        ];
+        const SOURCES: [MetadataSource; 3] = [
+            MetadataSource::JsonLd,
+            MetadataSource::HtmlMeta,
+            MetadataSource::HtmlElement,
+        ];
+        const EVIDENCE: [CandidateEvidence; 3] = [
+            CandidateEvidence::Declared,
+            CandidateEvidence::Visible,
+            CandidateEvidence::DerivedFromHeading,
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        for _ in 0..2_000 {
+            let count = next(24);
+            let candidates: Vec<_> = (0..count)
+                .map(|index| MetadataCandidate {
+                    value: VALUES[next(VALUES.len())].to_owned(),
+                    source: SOURCES[next(SOURCES.len())],
+                    confidence: 80 + next(20) as u8,
+                    // Orders are unique but not in slice order.
+                    order: (index * 7) % 24 + next(2) * 24,
+                    evidence: EVIDENCE[next(EVIDENCE.len())],
+                })
+                .collect();
+            let resolution = FieldResolution::new(&candidates);
+            assert_eq!(
+                resolution.best().map(|candidate| candidate.order),
+                reference_best(&candidates)
+            );
+            assert_eq!(resolution.authors(), reference_authors(&candidates));
+            for value in VALUES {
+                let reference = candidates
+                    .iter()
+                    .filter(|candidate| metadata_values_equal(&candidate.value, value))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                // Scores only count equal values, so scoring the matching
+                // subset gives the same scores as scoring every candidate.
+                assert_eq!(
+                    resolution
+                        .best_matching(value, &HashSet::new())
+                        .map(|candidate| candidate.order),
+                    reference_best(&reference)
+                );
+            }
+        }
     }
 
     #[test]

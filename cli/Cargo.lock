@@ -574,6 +574,7 @@ dependencies = [
  "smallvec",
  "tendril",
  "thiserror",
+ "unicode-normalization",
  "url",
 ]
 
