@@ -4,10 +4,14 @@ use super::{AttrName, Attribute, Dom, DomError, ElementData, NodeData, NodeId, N
 use crate::budget::ParseBudget;
 use html5ever::tokenizer::TokenizerOpts;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
-use html5ever::{Attribute as HtmlAttribute, ParseOpts, QualName, parse_document, parse_fragment};
+use html5ever::{
+    Attribute as HtmlAttribute, LocalName, Namespace, ParseOpts, QualName, parse_document,
+    parse_fragment,
+};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use tendril::{StrTendril, TendrilSink};
 
 #[derive(Debug, Clone)]
@@ -61,6 +65,44 @@ struct DomSink {
     text_bytes: Cell<usize>,
     depths: RefCell<Vec<u32>>,
     document: bool,
+    // Names of the elements that html5ever creates after poisoning. See
+    // `inert_element`.
+    inert_names: RefCell<InertNames>,
+}
+
+/// Real nodes use IDs below this value, and inert element handles use IDs
+/// from this value up. `reserve_node` stops the arena at this size.
+const INERT_ELEMENT_BASE: u32 = 1 << 31;
+
+/// Names of the inert elements, by handle. Each element stores a 4-byte index
+/// into a table of distinct names, so the memory after poisoning stays small.
+#[derive(Default)]
+struct InertNames {
+    elements: Vec<u32>,
+    names: Vec<(Namespace, LocalName)>,
+    index: HashMap<(Namespace, LocalName), u32>,
+}
+
+impl InertNames {
+    fn push(&mut self, name: &QualName) -> NodeId {
+        let key = (name.ns.clone(), name.local.clone());
+        let next = self.names.len() as u32;
+        let name_index = *self.index.entry(key.clone()).or_insert(next);
+        if name_index == next {
+            self.names.push(key);
+        }
+        // `INERT_ELEMENT_BASE` more elements than the input can hold would be
+        // needed to reach `u32::MAX`. Saturation keeps the handle in range.
+        let offset = u32::try_from(self.elements.len()).unwrap_or(u32::MAX);
+        self.elements.push(name_index);
+        NodeId(INERT_ELEMENT_BASE.saturating_add(offset))
+    }
+
+    fn get(&self, id: NodeId) -> Option<&(Namespace, LocalName)> {
+        let offset = id.0.checked_sub(INERT_ELEMENT_BASE)? as usize;
+        let name_index = *self.elements.get(offset)?;
+        self.names.get(name_index as usize)
+    }
 }
 
 /// True for a script type whose text is TeX source.
@@ -126,6 +168,7 @@ impl DomSink {
             text_bytes: Cell::new(0),
             depths: RefCell::new(depths),
             document: !fragment,
+            inert_names: RefCell::new(InertNames::default()),
         }
     }
 
@@ -158,10 +201,17 @@ impl DomSink {
         if self.is_poisoned() {
             return false;
         }
+        let observed = self.dom.borrow().len().saturating_add(1);
+        // Keep real IDs below the inert element handles.
+        if observed > INERT_ELEMENT_BASE as usize {
+            self.poison(ParseError::Dom(DomError(
+                "DOM exceeds NodeId capacity".into(),
+            )));
+            return false;
+        }
         if self.budget.max_nodes == 0 {
             return true;
         }
-        let observed = self.dom.borrow().len().saturating_add(1);
         self.limit(ParseLimitKind::Nodes, observed, self.budget.max_nodes)
     }
 
@@ -170,6 +220,12 @@ impl DomSink {
         if !self.reserve_node() {
             return None;
         }
+        self.create_reserved_node(data)
+    }
+
+    /// Creates a node after `reserve_node` accepted it.
+    #[inline]
+    fn create_reserved_node(&self, data: NodeData) -> Option<NodeId> {
         let result = self.dom.borrow_mut().create(data);
         match result {
             Ok(id) => {
@@ -187,6 +243,17 @@ impl DomSink {
 
     fn inert_handle(&self) -> NodeId {
         self.dom.borrow().root()
+    }
+
+    /// Returns a handle for an element that the DOM does not store.
+    ///
+    /// html5ever keeps tokenizing after the sink is poisoned, and its tree
+    /// construction compares element handles and names. Each inert element
+    /// therefore gets a distinct ID and keeps its name, so html5ever's open
+    /// element stack stays consistent. A shared handle made the stack empty
+    /// and html5ever panicked.
+    fn inert_element(&self, name: &QualName) -> NodeId {
+        self.inert_names.borrow_mut().push(name)
     }
 
     #[inline]
@@ -382,6 +449,14 @@ impl TreeSink for DomSink {
     }
     fn elem_name<'a>(&'a self, target: &'a NodeId) -> OwnedElemName {
         let dom = self.dom.borrow();
+        if target.0 >= INERT_ELEMENT_BASE {
+            if let Some((ns, local)) = self.inert_names.borrow().get(*target) {
+                return OwnedElemName {
+                    ns: ns.clone(),
+                    local: local.clone(),
+                };
+            }
+        }
         if let Some(name) = dom.qual_name(*target) {
             return OwnedElemName {
                 ns: name.ns.clone(),
@@ -401,7 +476,7 @@ impl TreeSink for DomSink {
         flags: ElementFlags,
     ) -> NodeId {
         if self.is_poisoned() || !self.check_attributes(0, attrs.len()) {
-            return self.inert_handle();
+            return self.inert_element(&name);
         }
         if self.budget.max_elements != 0 {
             if !self.limit(
@@ -409,11 +484,15 @@ impl TreeSink for DomSink {
                 self.elements.get().saturating_add(1),
                 self.budget.max_elements,
             ) {
-                return self.inert_handle();
+                return self.inert_element(&name);
             }
         }
+        if !self.reserve_node() {
+            return self.inert_element(&name);
+        }
         let tag = Tag::from_qual_name(&name);
-        let Some(id) = self.create_node(NodeData::Element(ElementData {
+        // `reserve_node` accepted the node, so the arena has room for it.
+        let Some(id) = self.create_reserved_node(NodeData::Element(ElementData {
             name,
             tag,
             attrs: attrs.into_iter().map(Attribute::from).collect(),
@@ -427,7 +506,8 @@ impl TreeSink for DomSink {
         }
         if flags.template {
             let Some(f) = self.create_node(NodeData::Fragment) else {
-                return self.inert_handle();
+                let name = self.dom.borrow().qual_name(id).cloned();
+                return name.map_or_else(|| self.inert_handle(), |name| self.inert_element(&name));
             };
             let mut dom = self.dom.borrow_mut();
             if let NodeData::Element(e) = &mut dom.node_mut(id).data {
@@ -498,6 +578,9 @@ impl TreeSink for DomSink {
         prev: &NodeId,
         child: NodeOrText<NodeId>,
     ) {
+        if self.is_poisoned() {
+            return;
+        }
         if self.dom.borrow().parent(*element).is_some() {
             self.append_before_sibling(element, child)
         } else {
@@ -709,6 +792,153 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    fn parse_with(html: &str, budget: ParseBudget) -> Result<Dom, ParseError> {
+        Dom::parse_document_with_budget(html, &budget)
+    }
+
+    #[test]
+    fn limits_inside_open_paragraphs_do_not_panic() {
+        // html5ever keeps building after a limit. With one shared handle for
+        // every later element, its open element stack became empty.
+        let result = parse_with(
+            &"<div><p>w</p>".repeat(4),
+            ParseBudget {
+                max_depth: 4,
+                ..ParseBudget::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ParseError::Limit(ParseLimit {
+                kind: ParseLimitKind::Depth,
+                ..
+            }))
+        ));
+        let result = parse_with(
+            "</table><hr></pre><source><legend></head></tr><ul>text <source></p>\
+             <a href=x><p></tr><ul><fieldset><select><listing>",
+            ParseBudget {
+                max_elements: 2,
+                ..ParseBudget::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ParseError::Limit(ParseLimit {
+                kind: ParseLimitKind::Elements,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn inert_elements_have_distinct_handles_and_shared_names() {
+        let mut names = InertNames::default();
+        let div = QualName::new(None, html5ever::ns!(html), "div".into());
+        let p = QualName::new(None, html5ever::ns!(html), "p".into());
+        let handles = [names.push(&div), names.push(&p), names.push(&div)];
+        assert!(handles.iter().all(|handle| handle.0 >= INERT_ELEMENT_BASE));
+        assert!(handles[0] != handles[1] && handles[1] != handles[2] && handles[0] != handles[2]);
+        assert_eq!(names.names.len(), 2);
+        assert_eq!(
+            names.get(handles[2]).map(|name| name.1.as_ref()),
+            Some("div")
+        );
+        assert_eq!(names.get(handles[1]).map(|name| name.1.as_ref()), Some("p"));
+        assert!(names.get(NodeId(0)).is_none());
+    }
+
+    #[test]
+    fn small_limits_survive_random_markup() {
+        const TOKENS: &[&str] = &[
+            "<div>",
+            "</div>",
+            "<p>",
+            "</p>",
+            "<table>",
+            "</table>",
+            "<tr>",
+            "</tr>",
+            "<td>",
+            "</td>",
+            "<caption>",
+            "<a href=x>",
+            "</a>",
+            "<b>",
+            "</b>",
+            "<i>",
+            "<nobr>",
+            "<template>",
+            "</template>",
+            "<svg>",
+            "</svg>",
+            "<math>",
+            "<mi>",
+            "<foreignObject>",
+            "<select>",
+            "<option>",
+            "<li>",
+            "<ul>",
+            "<dl>",
+            "<dd>",
+            "<form>",
+            "</form>",
+            "<button>",
+            "<h1>",
+            "</h1>",
+            "<script>x</script>",
+            "<textarea>",
+            "<frameset>",
+            "<frame>",
+            "<body x=1>",
+            "<html y=2>",
+            "<head>",
+            "</head>",
+            "text ",
+            "<br>",
+            "</br>",
+            "<img src=a>",
+            "<pre>",
+            "<plaintext>",
+            "<ruby>",
+            "<rt>",
+            "<section>",
+            "<font>",
+            "</font>",
+            "<!-- c -->",
+            "<p id=a class=b data-x=1>",
+            "<isindex>",
+            "<keygen>",
+            "<details>",
+            "<summary>",
+            "<fieldset>",
+            "<legend>",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..1_500 {
+            let html: String = (0..=next() % 60)
+                .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
+                .collect();
+            let limit = (next() % 12 + 1) as usize;
+            let mut budget = ParseBudget::default();
+            match next() % 6 {
+                0 => budget.max_depth = limit,
+                1 => budget.max_elements = limit * 2,
+                2 => budget.max_nodes = limit * 3,
+                3 => budget.max_total_attributes = limit,
+                4 => budget.max_attributes_per_element = limit / 4,
+                _ => budget.max_text_bytes = limit * 4,
+            }
+            let _ = parse_with(&html, budget);
+        }
     }
 
     #[test]

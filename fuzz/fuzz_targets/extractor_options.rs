@@ -43,13 +43,22 @@ fuzz_target!(|data: &[u8]| {
     if budget & 1 != 0 {
         builder = builder.parse_budget(ParseBudget::untrusted());
     } else if budget & 2 != 0 {
-        // Small limits exercise the resource-limit paths.
-        builder = builder.parse_budget(ParseBudget {
-            max_nodes: usize::from(budget) * 8,
-            max_depth: usize::from(budget >> 2),
-            max_json_ld_items: usize::from(budget >> 4),
-            ..ParseBudget::default()
-        });
+        // A small limit of one kind exercises each parser limit, the JSON-LD
+        // item limit, and the input size limit. The parser must stay
+        // consistent after a limit stops tree construction.
+        let limit = usize::from(budget >> 5) + 1;
+        let mut small = ParseBudget::default();
+        match (budget >> 2) & 7 {
+            0 => small.max_nodes = limit * 8,
+            1 => small.max_depth = limit,
+            2 => small.max_elements = limit * 2,
+            3 => small.max_total_attributes = limit,
+            4 => small.max_attributes_per_element = limit.div_ceil(2),
+            5 => small.max_text_bytes = limit * 16,
+            6 => small.max_json_ld_items = limit,
+            _ => small.max_input_bytes = limit * 64,
+        }
+        builder = builder.parse_budget(small);
     }
     let extractor = builder.build();
 
