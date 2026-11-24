@@ -3032,6 +3032,67 @@ fn is_dateline_candidate(dom: &Dom, node: NodeId) -> bool {
     ) && !is_author_container(dom, node)
 }
 
+/// The words of `normalize_whitespace(text).split_ascii_whitespace()`,
+/// without a normalized copy. `normalize_whitespace` replaces a run of two or
+/// more whitespace characters with a space and keeps a single whitespace
+/// character. A separator is therefore such a run or a single ASCII
+/// whitespace character. A single other whitespace character, such as a
+/// no-break space, stays inside its word.
+struct NormalizedWords<'a> {
+    rest: &'a str,
+}
+
+impl<'a> NormalizedWords<'a> {
+    /// Returns the byte length of the separator at the start of `rest`, or
+    /// zero.
+    fn separator_len(&self) -> usize {
+        let mut characters = self.rest.char_indices();
+        let Some((_, first)) = characters.next() else {
+            return 0;
+        };
+        if !first.is_whitespace() {
+            return 0;
+        }
+        let end = characters
+            .find(|(_, character)| !character.is_whitespace())
+            .map_or(self.rest.len(), |(index, _)| index);
+        let single = end == first.len_utf8();
+        if single && !first.is_ascii_whitespace() {
+            0
+        } else {
+            end
+        }
+    }
+}
+
+impl<'a> Iterator for NormalizedWords<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        loop {
+            let separator = self.separator_len();
+            if separator == 0 {
+                break;
+            }
+            self.rest = &self.rest[separator..];
+        }
+        if self.rest.is_empty() {
+            return None;
+        }
+        let word = self.rest;
+        let mut end = 0;
+        while end < word.len() {
+            self.rest = &word[end..];
+            if self.separator_len() > 0 {
+                break;
+            }
+            end += self.rest.chars().next().map_or(1, char::len_utf8);
+        }
+        self.rest = &word[end..];
+        Some(&word[..end])
+    }
+}
+
 fn written_date(text: &str) -> Option<(usize, String)> {
     const MONTHS: [&str; 12] = [
         "January",
@@ -3050,9 +3111,13 @@ fn written_date(text: &str) -> Option<(usize, String)> {
     let mut earliest = None;
     for month in MONTHS {
         for (start, _) in text.match_indices(month) {
-            let value = normalize_whitespace(&text[start..]);
-            let mut parts = value.split_ascii_whitespace();
-            if parts.next() != Some(month) {
+            // The same tokens as `normalize_whitespace(&text[start..])` split
+            // on ASCII whitespace, read lazily so each match reads only its
+            // own date.
+            let mut parts = NormalizedWords {
+                rest: &text[start + month.len()..],
+            };
+            if !parts.rest.is_empty() && parts.separator_len() == 0 {
                 continue;
             }
             let Some(day) = parts.next().map(|value| value.trim_end_matches(',')) else {
@@ -3273,12 +3338,11 @@ fn combined_written_date_value(value: &str) -> Option<(usize, String)> {
     let mut earliest = None;
     for (abbreviation, month) in MONTHS {
         for (start, _) in value.match_indices(abbreviation) {
-            let normalized = normalize_whitespace(&value[start..]);
-            let mut parts = normalized.split_ascii_whitespace();
-            if !parts
-                .next()
-                .is_some_and(|part| part.trim_end_matches('.') == abbreviation)
-            {
+            // The first word must be the abbreviation with optional periods.
+            let mut parts = NormalizedWords {
+                rest: value[start + abbreviation.len()..].trim_start_matches('.'),
+            };
+            if !parts.rest.is_empty() && parts.separator_len() == 0 {
                 continue;
             }
             let Some(day) = parts.next().map(|part| part.trim_end_matches(',')) else {
@@ -3876,10 +3940,10 @@ fn resolve_candidates(
         )
     });
     let site_name = resolve_one(&candidates.site_name);
-    let source_host = source_url.and_then(Url::host_str);
+    let publisher = PublisherNames::new(site_name.as_deref(), source_url.and_then(Url::host_str));
     candidates
         .tags
-        .retain(|tag| !names_publisher(&tag.value, site_name.as_deref(), source_host));
+        .retain(|tag| !publisher.named_by(&tag.value));
     let selected_title = FieldResolution::new(&candidates.title).best();
     let mut title = selected_title.map(|candidate| candidate.value.clone());
     if let (Some(title_value), Some(site)) = (&title, &site_name) {
@@ -3944,16 +4008,33 @@ fn resolve_candidates(
     (metadata, diagnostics)
 }
 
-/// Returns whether a tag only names the publication. Keyword lists often
+/// Recognizes tags that only name the publication. Keyword lists often
 /// repeat the site name, such as `Example News` on `example.com`. Such a value
 /// does not describe the page topic. A tag names the publication when its
 /// letters and digits equal the resolved site name. A tag that adds one
 /// generic publication word, such as `News`, also matches the site name or
 /// the first label of the source host. A bare host label such as `Python` on
 /// `python.org` stays because it can name the topic. Site-name candidates that
-/// lost resolution are not publication names.
-fn names_publisher(tag: &str, site_name: Option<&str>, source_host: Option<&str>) -> bool {
+/// lost resolution are not publication names. The site name and host label
+/// are compacted once for all tags.
+struct PublisherNames {
+    site_name: Option<String>,
+    host_label: Option<String>,
+}
+
+impl PublisherNames {
     const PUBLICATION_WORDS: [&str; 6] = ["blog", "daily", "magazine", "media", "news", "online"];
+
+    fn new(site_name: Option<&str>, source_host: Option<&str>) -> Self {
+        Self {
+            site_name: site_name.map(Self::compact).filter(|name| !name.is_empty()),
+            host_label: source_host
+                .map(|host| host.strip_prefix("www.").unwrap_or(host))
+                .and_then(|host| host.split_once('.'))
+                .map(|(label, _)| Self::compact(label)),
+        }
+    }
+
     fn compact(value: &str) -> String {
         value
             .chars()
@@ -3961,28 +4042,26 @@ fn names_publisher(tag: &str, site_name: Option<&str>, source_host: Option<&str>
             .flat_map(char::to_lowercase)
             .collect()
     }
-    let tag_name = compact(tag);
-    if tag_name.is_empty() {
-        return false;
+
+    fn named_by(&self, tag: &str) -> bool {
+        let tag_name = Self::compact(tag);
+        if tag_name.is_empty() {
+            return false;
+        }
+        let tag_base = tag
+            .rsplit_once(char::is_whitespace)
+            .filter(|(_, last)| {
+                Self::PUBLICATION_WORDS
+                    .iter()
+                    .any(|word| last.eq_ignore_ascii_case(word))
+            })
+            .map(|(base, _)| Self::compact(base))
+            .filter(|base| !base.is_empty());
+        self.site_name.as_ref() == Some(&tag_name)
+            || tag_base.as_ref().is_some_and(|base| {
+                self.site_name.as_ref() == Some(base) || self.host_label.as_ref() == Some(base)
+            })
     }
-    let site_name = site_name.map(compact).filter(|name| !name.is_empty());
-    let tag_base = tag
-        .rsplit_once(char::is_whitespace)
-        .filter(|(_, last)| {
-            PUBLICATION_WORDS
-                .iter()
-                .any(|word| last.eq_ignore_ascii_case(word))
-        })
-        .map(|(base, _)| compact(base))
-        .filter(|base| !base.is_empty());
-    let host_label = source_host
-        .map(|host| host.strip_prefix("www.").unwrap_or(host))
-        .and_then(|host| host.split_once('.'))
-        .map(|(label, _)| compact(label));
-    site_name.as_ref() == Some(&tag_name)
-        || tag_base.as_ref().is_some_and(|base| {
-            site_name.as_ref() == Some(base) || host_label.as_ref() == Some(base)
-        })
 }
 
 fn public_value(candidate: &MetadataCandidate, value: String) -> MetadataValue<String> {
@@ -4280,11 +4359,25 @@ fn person_name_segment(value: &str) -> &str {
 
 fn clock_time_boundary(value: &str) -> Option<usize> {
     for (colon, _) in value.match_indices(':') {
-        let start = value[..colon]
-            .char_indices()
+        // The hour runs from the previous whitespace to the colon. `u8`
+        // parsing accepts only digits with an optional leading `+`, so read
+        // back over that shape only and reject anything else.
+        let digits = value[..colon]
+            .bytes()
             .rev()
-            .find(|(_, character)| character.is_whitespace())
-            .map_or(0, |(index, character)| index + character.len_utf8());
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let mut start = colon - digits;
+        if value[..start].ends_with('+') {
+            start -= 1;
+        }
+        if value[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| !character.is_whitespace())
+        {
+            continue;
+        }
         let end = value[colon + 1..]
             .find(|character: char| !character.is_ascii_digit())
             .map_or(value.len(), |index| colon + 1 + index);
@@ -4653,8 +4746,14 @@ pub fn unescape_html_entities<'a>(value: &'a str) -> Cow<'a, str> {
     if value.is_empty() || !value.contains('&') {
         return Cow::Borrowed(value);
     }
+    // The longest named reference, with its semicolon, has 32 bytes.
+    const MAX_ENTITY_NAME_BYTES: usize = 32;
     let mut output = String::with_capacity(value.len());
     let mut index = 0;
+    // The absolute position of the first semicolon at or after `index`.
+    // Searching again only after `index` passes it keeps a long run of `&`
+    // characters without a semicolon linear.
+    let mut next_semicolon: Option<Option<usize>> = None;
     while index < value.len() {
         let rest = &value[index..];
         let Some(ampersand) = rest.find('&') else {
@@ -4663,7 +4762,11 @@ pub fn unescape_html_entities<'a>(value: &'a str) -> Cow<'a, str> {
         };
         output.push_str(&rest[..ampersand]);
         index += ampersand;
-        if let Some(semicolon) = value[index..].find(';') {
+        if next_semicolon.is_none_or(|position| position.is_some_and(|position| position < index)) {
+            next_semicolon = Some(value[index..].find(';').map(|offset| index + offset));
+        }
+        if let Some(Some(semicolon_position)) = next_semicolon {
+            let semicolon = semicolon_position - index;
             let entity = &value[index + 1..index + semicolon];
             if let Some(character) = parse_numeric(entity) {
                 output.push(character);
@@ -4671,7 +4774,10 @@ pub fn unescape_html_entities<'a>(value: &'a str) -> Cow<'a, str> {
                 continue;
             }
             let name = &value[index + 1..index + semicolon + 1];
-            if let Some(&(first, second)) = html5ever::data::NAMED_ENTITIES.get(name) {
+            if let Some(&(first, second)) = (name.len() <= MAX_ENTITY_NAME_BYTES)
+                .then(|| html5ever::data::NAMED_ENTITIES.get(name))
+                .flatten()
+            {
                 if let Some(character) = char::from_u32(first) {
                     output.push(character);
                 }
@@ -4904,6 +5010,298 @@ mod tests {
         assert_eq!(result.title.as_deref(), Some("Graph title"));
         assert_eq!(result.site_name.as_deref(), Some("Example"));
         assert_eq!(result.authors, ["Ada", "Grace"]);
+    }
+
+    // Copies of the scanners that the linear versions replaced.
+    fn reference_unescape<'a>(value: &'a str) -> Cow<'a, str> {
+        if value.is_empty() || !value.contains('&') {
+            return Cow::Borrowed(value);
+        }
+        let mut output = String::with_capacity(value.len());
+        let mut index = 0;
+        while index < value.len() {
+            let rest = &value[index..];
+            let Some(ampersand) = rest.find('&') else {
+                output.push_str(rest);
+                break;
+            };
+            output.push_str(&rest[..ampersand]);
+            index += ampersand;
+            if let Some(semicolon) = value[index..].find(';') {
+                let entity = &value[index + 1..index + semicolon];
+                if let Some(character) = parse_numeric(entity) {
+                    output.push(character);
+                    index += semicolon + 1;
+                    continue;
+                }
+                let name = &value[index + 1..index + semicolon + 1];
+                if let Some(&(first, second)) = html5ever::data::NAMED_ENTITIES.get(name) {
+                    if let Some(character) = char::from_u32(first) {
+                        output.push(character);
+                    }
+                    if second != 0
+                        && let Some(character) = char::from_u32(second)
+                    {
+                        output.push(character);
+                    }
+                    index += semicolon + 1;
+                    continue;
+                }
+            }
+            output.push('&');
+            index += 1;
+        }
+        Cow::Owned(output)
+    }
+
+    fn reference_clock_time_boundary(value: &str) -> Option<usize> {
+        for (colon, _) in value.match_indices(':') {
+            let start = value[..colon]
+                .char_indices()
+                .rev()
+                .find(|(_, character)| character.is_whitespace())
+                .map_or(0, |(index, character)| index + character.len_utf8());
+            let end = value[colon + 1..]
+                .find(|character: char| !character.is_ascii_digit())
+                .map_or(value.len(), |index| colon + 1 + index);
+            let hour = &value[start..colon];
+            let minute = &value[colon + 1..end];
+            if hour.parse::<u8>().is_ok_and(|hour| hour <= 23)
+                && minute.parse::<u8>().is_ok_and(|minute| minute <= 59)
+            {
+                return Some(start);
+            }
+        }
+        None
+    }
+
+    fn reference_written_date(text: &str) -> Option<(usize, String)> {
+        const MONTHS: [&str; 12] = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ];
+        let mut earliest = None;
+        for month in MONTHS {
+            for (start, _) in text.match_indices(month) {
+                let value = normalize_whitespace(&text[start..]);
+                let mut parts = value.split_ascii_whitespace();
+                if parts.next() != Some(month) {
+                    continue;
+                }
+                let Some(day) = parts.next().map(|value| value.trim_end_matches(',')) else {
+                    continue;
+                };
+                let Some(year) = parts.next().map(|value| {
+                    value.trim_end_matches(|character: char| !character.is_ascii_digit())
+                }) else {
+                    continue;
+                };
+                if day.parse::<u8>().is_ok_and(|day| (1..=31).contains(&day))
+                    && year.len() == 4
+                    && year.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    let date = format!("{month} {day}, {year}");
+                    if earliest
+                        .as_ref()
+                        .is_none_or(|(current, _): &(usize, String)| start < *current)
+                    {
+                        earliest = Some((start, date));
+                    }
+                }
+            }
+        }
+        earliest
+    }
+
+    fn reference_names_publisher(
+        tag: &str,
+        site_name: Option<&str>,
+        source_host: Option<&str>,
+    ) -> bool {
+        const PUBLICATION_WORDS: [&str; 6] =
+            ["blog", "daily", "magazine", "media", "news", "online"];
+        fn compact(value: &str) -> String {
+            value
+                .chars()
+                .filter(|character| character.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
+        }
+        let tag_name = compact(tag);
+        if tag_name.is_empty() {
+            return false;
+        }
+        let site_name = site_name.map(compact).filter(|name| !name.is_empty());
+        let tag_base = tag
+            .rsplit_once(char::is_whitespace)
+            .filter(|(_, last)| {
+                PUBLICATION_WORDS
+                    .iter()
+                    .any(|word| last.eq_ignore_ascii_case(word))
+            })
+            .map(|(base, _)| compact(base))
+            .filter(|base| !base.is_empty());
+        let host_label = source_host
+            .map(|host| host.strip_prefix("www.").unwrap_or(host))
+            .and_then(|host| host.split_once('.'))
+            .map(|(label, _)| compact(label));
+        site_name.as_ref() == Some(&tag_name)
+            || tag_base.as_ref().is_some_and(|base| {
+                site_name.as_ref() == Some(base) || host_label.as_ref() == Some(base)
+            })
+    }
+
+    fn reference_combined_written_date_value(value: &str) -> Option<(usize, String)> {
+        if let Some(date) = reference_written_date(value) {
+            return Some(date);
+        }
+        const MONTHS: [(&str, &str); 11] = [
+            ("Jan", "January"),
+            ("Feb", "February"),
+            ("Mar", "March"),
+            ("Apr", "April"),
+            ("Jun", "June"),
+            ("Jul", "July"),
+            ("Aug", "August"),
+            ("Sep", "September"),
+            ("Oct", "October"),
+            ("Nov", "November"),
+            ("Dec", "December"),
+        ];
+        let mut earliest = None;
+        for (abbreviation, month) in MONTHS {
+            for (start, _) in value.match_indices(abbreviation) {
+                let normalized = normalize_whitespace(&value[start..]);
+                let mut parts = normalized.split_ascii_whitespace();
+                if !parts
+                    .next()
+                    .is_some_and(|part| part.trim_end_matches('.') == abbreviation)
+                {
+                    continue;
+                }
+                let Some(day) = parts.next().map(|part| part.trim_end_matches(',')) else {
+                    continue;
+                };
+                let Some(year) = parts.next().map(|part| {
+                    part.trim_end_matches(|character: char| !character.is_ascii_digit())
+                }) else {
+                    continue;
+                };
+                if day.parse::<u8>().is_ok_and(|day| (1..=31).contains(&day))
+                    && year.len() == 4
+                    && year.bytes().all(|byte| byte.is_ascii_digit())
+                    && earliest
+                        .as_ref()
+                        .is_none_or(|(current, _): &(usize, String)| start < *current)
+                {
+                    earliest = Some((start, format!("{month} {day}, {year}")));
+                }
+            }
+        }
+        earliest
+    }
+
+    #[test]
+    fn linear_metadata_scanners_match_the_previous_scanners() {
+        const PIECES: [&str; 34] = [
+            "\u{c}",
+            "\u{85}",
+            "\u{2028}",
+            "\u{3000}",
+            "\r",
+            "\n",
+            "Jan",
+            "Sep.",
+            ".",
+            "Jan.",
+            "&",
+            "amp;",
+            "&amp;",
+            ";",
+            "&#38;",
+            "&#x26;",
+            "&notit;",
+            "&not",
+            "a",
+            "January",
+            "May",
+            " ",
+            "  ",
+            "\u{a0}",
+            "\u{a0}\u{a0}",
+            "\t",
+            "\u{b}",
+            "5,",
+            "31",
+            "2024",
+            "2024.",
+            ":",
+            "+",
+            "0",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let publisher_sites = [None, Some("Example News"), Some("Ex Ample")];
+        let hosts = [
+            None,
+            Some("www.example.com"),
+            Some("example.org"),
+            Some("localhost"),
+        ];
+        for _ in 0..20_000 {
+            let text: String = (0..next(12)).map(|_| PIECES[next(PIECES.len())]).collect();
+            assert_eq!(
+                unescape_html_entities(&text),
+                reference_unescape(&text),
+                "{text:?}"
+            );
+            assert_eq!(
+                clock_time_boundary(&text),
+                reference_clock_time_boundary(&text),
+                "{text:?}"
+            );
+            assert_eq!(
+                written_date(&text),
+                reference_written_date(&text),
+                "{text:?}"
+            );
+            assert_eq!(
+                combined_written_date_value(&text),
+                reference_combined_written_date_value(&text),
+                "{text:?}"
+            );
+            let site = publisher_sites[next(publisher_sites.len())];
+            let host = hosts[next(hosts.len())];
+            assert_eq!(
+                PublisherNames::new(site, host).named_by(&text),
+                reference_names_publisher(&text, site, host),
+                "{text:?}"
+            );
+        }
+        for text in ["Example News", "example", "Ex Ample blog", "Example daily"] {
+            for site in publisher_sites {
+                assert_eq!(
+                    PublisherNames::new(site, Some("www.example.com")).named_by(text),
+                    reference_names_publisher(text, site, Some("www.example.com")),
+                    "{text:?} {site:?}"
+                );
+            }
+        }
     }
 
     /// Canonical caseless equality, computed directly by `caseless`.
