@@ -2298,10 +2298,11 @@ fn collect_title_candidates(
         })
         .collect();
     if !document_title.is_empty() {
+        let title_matcher = ValueMatcher::new(document_title);
         let matches_heading = |expected: HeadingPlacement| {
-            headings.iter().any(|(text, _, placement)| {
-                *placement == expected && metadata_values_equal(text, document_title)
-            })
+            headings
+                .iter()
+                .any(|(text, _, placement)| *placement == expected && title_matcher.matches(text))
         };
         let names_page_chrome = matches_heading(HeadingPlacement::PageChrome)
             && !matches_heading(HeadingPlacement::Content)
@@ -2346,12 +2347,12 @@ fn declared_title_names(dom: &Dom, title: &str) -> bool {
         return false;
     };
     let declared = normalize_whitespace(get_inner_text_owned(dom, element).trim());
-    let title = title.trim();
-    metadata_values_equal(&declared, title)
+    let title = ValueMatcher::new(title.trim());
+    title.matches(&declared)
         || SEPARATORS.iter().any(|separator| {
             declared
                 .split(separator)
-                .any(|segment| metadata_values_equal(segment.trim(), title))
+                .any(|segment| title.matches(segment.trim()))
         })
 }
 
@@ -3891,10 +3892,11 @@ fn resolve_candidates(
         }
     }
     let title_from_content_heading = title.as_deref().is_some_and(|title| {
+        let title = ValueMatcher::new(title);
         candidates.title.iter().any(|candidate| {
             candidate.source == MetadataSource::HtmlElement
                 && candidate.confidence >= 90
-                && metadata_values_equal(&candidate.value, title)
+                && title.matches(&candidate.value)
         })
     });
 
@@ -4355,8 +4357,9 @@ fn resolve_one(candidates: &[MetadataCandidate]) -> Option<String> {
         .map(|candidate| candidate.value.clone())
 }
 
-/// Returns the canonical caseless form of a metadata value. Two values are
-/// equal for [`metadata_values_equal`] exactly when their keys are equal.
+/// Returns the canonical caseless form of a metadata value. Metadata values
+/// are equal when their keys are equal: ASCII case and Unicode canonical
+/// caseless differences do not count.
 fn metadata_match_key(value: &str) -> Cow<'_, str> {
     if value.is_ascii() {
         if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
@@ -4366,6 +4369,36 @@ fn metadata_match_key(value: &str) -> Cow<'_, str> {
         }
     } else {
         Cow::Owned(value.chars().nfd().default_case_fold().nfd().collect())
+    }
+}
+
+/// One value prepared for many metadata equality checks.
+///
+/// The ASCII check and the match key of the value are computed once, so a
+/// comparison costs time in the other value only. A long value, such as a
+/// declared title, compared with many short values stays linear.
+struct ValueMatcher<'a> {
+    value: &'a str,
+    ascii: bool,
+    key: Cow<'a, str>,
+}
+
+impl<'a> ValueMatcher<'a> {
+    fn new(value: &'a str) -> Self {
+        Self {
+            value,
+            ascii: value.is_ascii(),
+            key: metadata_match_key(value),
+        }
+    }
+
+    /// Returns whether the match keys of the two values are equal.
+    fn matches(&self, other: &str) -> bool {
+        if self.ascii && other.is_ascii() {
+            self.value.eq_ignore_ascii_case(other)
+        } else {
+            metadata_match_key(other) == self.key
+        }
     }
 }
 
@@ -4576,9 +4609,10 @@ impl AgreementCounts {
 }
 
 fn resolve_one_excluding(candidates: &[MetadataCandidate], excluded: &str) -> Option<String> {
+    let excluded = ValueMatcher::new(excluded);
     let filtered: Vec<_> = candidates
         .iter()
-        .filter(|candidate| !metadata_values_equal(&candidate.value, excluded))
+        .filter(|candidate| !excluded.matches(&candidate.value))
         .cloned()
         .collect();
     resolve_one(&filtered)
@@ -4601,14 +4635,6 @@ fn is_ambiguous_person_placeholder(value: &str) -> bool {
 
 fn author_spelling_score(value: &str) -> u8 {
     u8::from(value.chars().any(char::is_lowercase))
-}
-
-/// Compares metadata values by canonical caseless equality. This is
-/// `metadata_match_key` equality, with a fast path for ASCII case.
-fn metadata_values_equal(first: &str, second: &str) -> bool {
-    first.eq_ignore_ascii_case(second)
-        || (!first.is_ascii() || !second.is_ascii())
-            && metadata_match_key(first) == metadata_match_key(second)
 }
 
 fn strip_site_affix(title: &str, site: &str) -> Option<String> {
@@ -4880,6 +4906,11 @@ mod tests {
         assert_eq!(result.authors, ["Ada", "Grace"]);
     }
 
+    /// Canonical caseless equality, computed directly by `caseless`.
+    fn metadata_values_equal(first: &str, second: &str) -> bool {
+        first.eq_ignore_ascii_case(second) || caseless::canonical_caseless_match_str(first, second)
+    }
+
     #[test]
     fn match_keys_agree_with_metadata_equality() {
         let values = [
@@ -4916,8 +4947,33 @@ mod tests {
             for second in values {
                 assert_eq!(
                     metadata_match_key(first) == metadata_match_key(second),
-                    first.eq_ignore_ascii_case(second)
-                        || caseless::canonical_caseless_match_str(first, second),
+                    metadata_values_equal(first, second),
+                    "{first:?} {second:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn value_matcher_agrees_with_metadata_equality() {
+        let values = [
+            "Ada",
+            "ADA",
+            "Ada ",
+            "Émilie",
+            "E\u{301}MILIE",
+            "Straße",
+            "STRASSE",
+            "\u{212a}",
+            "k",
+            "",
+        ];
+        for first in values {
+            let matcher = ValueMatcher::new(first);
+            for second in values {
+                assert_eq!(
+                    matcher.matches(second),
+                    metadata_values_equal(first, second),
                     "{first:?} {second:?}"
                 );
             }
